@@ -155,8 +155,18 @@ AI 会实时显示分析进度：
 | `/analyze` | 分析当前选中区域 |
 | `/anr` | 快速检测 ANR |
 | `/jank` | 快速检测掉帧 |
+| `/slow` | 检测慢函数 (>16ms) |
+| `/memory` | 分析内存使用 |
+| `/export [csv|json]` | 导出查询结果 |
 | `/clear` | 清除对话历史 |
 | `/settings` | 打开设置 |
+
+### 导出功能
+
+分析结果支持导出为 CSV 或 JSON 格式：
+- 点击结果表格上的 📄 CSV 或 📋 JSON 按钮
+- 使用 `/export csv` 或 `/export json` 导出整个会话
+- 导出的文件包含完整的查询结果和元数据
 
 ### 示例 Trace 文件
 
