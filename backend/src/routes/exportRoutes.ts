@@ -1,0 +1,87 @@
+/**
+ * Export Routes
+ * Handle result export requests
+ */
+
+import { Router } from 'express';
+import { ResultExportService } from '../services/resultExportService';
+
+const router = Router();
+
+/**
+ * POST /api/export/result
+ * Export a single SQL query result
+ */
+router.post('/result', async (req, res) => {
+  try {
+    const { result, format = 'json', options = {} } = req.body;
+
+    if (!result || !result.columns || !result.rows) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid result data. Must include columns and rows.',
+      });
+    }
+
+    const exportService = ResultExportService.getInstance();
+    const exportResult = exportService.exportResult(result, { format, ...options });
+
+    res.setHeader('Content-Type', exportResult.mimeType);
+    res.setHeader('Content-Disposition', `attachment; filename="${exportResult.filename}"`);
+    res.send(exportResult.data);
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message || 'An unknown error occurred' });
+  }
+});
+
+/**
+ * POST /api/export/session
+ * Export all results from a session
+ */
+router.post('/session', async (req, res) => {
+  try {
+    const { results, format = 'json', options = {} } = req.body;
+
+    if (!Array.isArray(results)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid results data. Must be an array.',
+      });
+    }
+
+    const exportService = ResultExportService.getInstance();
+    const exportResult = exportService.exportSession(results, { format, ...options });
+
+    res.setHeader('Content-Type', exportResult.mimeType);
+    res.setHeader('Content-Disposition', `attachment; filename="${exportResult.filename}"`);
+    res.send(exportResult.data);
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message || 'An unknown error occurred' });
+  }
+});
+
+/**
+ * GET /api/export/formats
+ * Get available export formats
+ */
+router.get('/formats', (req, res) => {
+  res.json({
+    success: true,
+    formats: [
+      { name: 'json', mimeType: 'application/json', description: 'JSON format with metadata' },
+      { name: 'csv', mimeType: 'text/csv', description: 'CSV format (RFC 4180)' },
+    ],
+    options: {
+      json: {
+        prettyPrint: { type: 'boolean', default: true, description: 'Pretty print JSON output' },
+      },
+      csv: {
+        includeHeaders: { type: 'boolean', default: true, description: 'Include column headers' },
+        delimiter: { type: 'string', default: ',', description: 'Field delimiter' },
+        nullValue: { type: 'string', default: 'NULL', description: 'Representation of null values' },
+      },
+    },
+  });
+});
+
+export default router;
