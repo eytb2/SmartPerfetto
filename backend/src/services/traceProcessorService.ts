@@ -169,6 +169,7 @@ export class TraceProcessorService extends EventEmitter {
       this.emit('trace-processed', trace);
       this.emit('trace-status-changed', trace);
     } catch (error: any) {
+      console.error(`[TraceProcessorService] Failed to process trace ${traceId}:`, error.message);
       trace.status = 'error';
       trace.error = error.message;
       this.emit('trace-status-changed', trace);
@@ -252,6 +253,135 @@ export class TraceProcessorService extends EventEmitter {
   }
 
   /**
+   * Get the HTTP port of the trace processor for a given trace
+   * This port can be used by the frontend to connect via HTTP RPC mode
+   * Only returns port if the processor is actually ready
+   */
+  public getProcessorPort(traceId: string): number | undefined {
+    const processor = this.processors.get(traceId) as WorkingTraceProcessor | undefined;
+    // Only return port if processor is ready
+    return (processor?.status === 'ready') ? processor.httpPort : undefined;
+  }
+
+  /**
+   * Get trace info with processor port for frontend
+   */
+  public getTraceWithPort(traceId: string): (TraceInfo & { port?: number; processor?: { status: string } }) | undefined {
+    const trace = this.traces.get(traceId);
+    if (!trace) return undefined;
+
+    const processor = this.processors.get(traceId) as WorkingTraceProcessor | undefined;
+    // Only return port if processor is actually ready (not in error state)
+    const port = (processor?.status === 'ready') ? processor.httpPort : undefined;
+    return {
+      ...trace,
+      port,
+      processor: processor ? { status: processor.status } : undefined,
+    };
+  }
+
+  /**
+   * Register an external RPC connection (frontend already connected to trace_processor)
+   * This allows AI analysis to work with traces loaded via external HTTP RPC
+   * @param traceId - A generated trace ID for this external connection
+   * @param port - The port number where trace_processor is running
+   * @param traceName - Display name for the trace
+   */
+  public async registerExternalRpc(traceId: string, port: number, traceName: string): Promise<void> {
+    console.log(`[TraceProcessorService] Registering external RPC: ${traceId} on port ${port}`);
+
+    // Create a trace info entry for this external connection
+    const traceInfo: TraceInfo = {
+      id: traceId,
+      filename: traceName,
+      size: 0, // Unknown size for external traces
+      uploadTime: new Date(),
+      status: 'ready', // Assume it's ready since frontend is already connected
+    };
+
+    this.traces.set(traceId, traceInfo);
+
+    // Create a proxy processor that uses the existing HTTP RPC connection
+    const processor = await TraceProcessorFactory.createFromExternalRpc(traceId, port);
+    this.processors.set(traceId, processor);
+
+    console.log(`[TraceProcessorService] External RPC registered successfully: ${traceId}`);
+    this.emit('trace-processed', traceInfo);
+  }
+
+  /**
+   * Load trace from disk if it exists but is not in memory
+   * This is useful after server restart when traces are on disk but not loaded
+   */
+  public async loadTraceFromDisk(traceId: string): Promise<TraceInfo | undefined> {
+    // Already in memory
+    if (this.traces.has(traceId)) {
+      return this.traces.get(traceId);
+    }
+
+    // Check if metadata file exists
+    const metadataPath = path.join(this.uploadDir, `${traceId}.json`);
+    const tracePath = this.getTraceFilePath(traceId);
+
+    if (!fs.existsSync(tracePath)) {
+      console.log(`[TraceProcessorService] Trace file not found: ${tracePath}`);
+      return undefined;
+    }
+
+    try {
+      let traceInfo: TraceInfo;
+
+      // Try to load metadata from JSON file
+      if (fs.existsSync(metadataPath)) {
+        const metadataRaw = fs.readFileSync(metadataPath, 'utf8');
+        const metadata = JSON.parse(metadataRaw);
+        traceInfo = {
+          id: traceId,
+          filename: metadata.filename || `${traceId}.trace`,
+          size: metadata.size || fs.statSync(tracePath).size,
+          uploadTime: new Date(metadata.uploadedAt || Date.now()),
+          status: 'ready',
+          metadata: metadata.metadata,
+        };
+      } else {
+        // Create basic metadata from trace file
+        const stats = fs.statSync(tracePath);
+        traceInfo = {
+          id: traceId,
+          filename: `${traceId}.trace`,
+          size: stats.size,
+          uploadTime: new Date(stats.mtime),
+          status: 'ready',
+        };
+      }
+
+      // Register in memory
+      this.traces.set(traceId, traceInfo);
+
+      // Create processor
+      const processor = await this.createProcessor(traceId);
+      this.processors.set(traceId, processor);
+
+      console.log(`[TraceProcessorService] Loaded trace from disk: ${traceId}`);
+      return traceInfo;
+    } catch (error: any) {
+      console.error(`[TraceProcessorService] Failed to load trace from disk:`, error.message);
+      return undefined;
+    }
+  }
+
+  /**
+   * Get or load trace - checks memory first, then tries to load from disk
+   */
+  public async getOrLoadTrace(traceId: string): Promise<TraceInfo | undefined> {
+    const trace = this.getTrace(traceId);
+    if (trace) {
+      return trace;
+    }
+    return this.loadTraceFromDisk(traceId);
+  }
+
+  /**
    * Get all traces
    */
   public getAllTraces(): TraceInfo[] {
@@ -284,6 +414,41 @@ export class TraceProcessorService extends EventEmitter {
   }
 
   /**
+   * Load a trace directly from a file path (for CLI/testing use)
+   * This copies the file to the upload directory and processes it
+   */
+  public async loadTraceFromFilePath(filePath: string): Promise<string> {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File not found: ${filePath}`);
+    }
+
+    const filename = path.basename(filePath);
+    const stats = fs.statSync(filePath);
+    const traceId = uuidv4();
+
+    // Create trace info
+    const traceInfo: TraceInfo = {
+      id: traceId,
+      filename,
+      size: stats.size,
+      uploadTime: new Date(),
+      status: 'processing',
+    };
+
+    this.traces.set(traceId, traceInfo);
+    this.emit('trace-initialized', traceInfo);
+
+    // Copy file to upload directory
+    const destPath = this.getTraceFilePath(traceId);
+    fs.copyFileSync(filePath, destPath);
+
+    // Process the trace
+    await this.processTrace(traceId);
+
+    return traceId;
+  }
+
+  /**
    * Get file path for a trace
    */
   private getTraceFilePath(traceId: string): string {
@@ -291,7 +456,8 @@ export class TraceProcessorService extends EventEmitter {
   }
 
   /**
-   * Cleanup old traces
+   * Cleanup old traces (older than maxAge)
+   * Note: This only cleans up old traces, not all processors
    */
   public async cleanup(maxAge = 7 * 24 * 60 * 60 * 1000): Promise<void> {
     const now = Date.now();
@@ -303,12 +469,15 @@ export class TraceProcessorService extends EventEmitter {
       }
     }
 
-    for (const traceId of tracesToDelete) {
-      await this.deleteTrace(traceId);
+    if (tracesToDelete.length > 0) {
+      console.log(`[TraceProcessorService] Cleaning up ${tracesToDelete.length} old traces`);
+      for (const traceId of tracesToDelete) {
+        await this.deleteTrace(traceId);
+      }
     }
-
-    // Cleanup processors
-    TraceProcessorFactory.cleanup();
+    // Note: Don't call TraceProcessorFactory.cleanup() here as it would
+    // destroy ALL processors, not just those for deleted traces.
+    // The deleteTrace() method already handles processor cleanup for each trace.
   }
 }
 

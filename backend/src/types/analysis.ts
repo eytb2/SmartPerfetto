@@ -268,13 +268,47 @@ export interface ProgressEvent extends SSEEvent {
   };
 }
 
+/**
+ * Skill section event - emits data for each skill analysis step
+ */
+export interface SkillSectionEvent extends SSEEvent {
+  type: 'skill_section';
+  data: {
+    sectionId: string;
+    sectionTitle: string;
+    sectionIndex: number;
+    totalSections: number;
+    columns: string[];
+    rows: any[][];
+    rowCount: number;
+    sql?: string;
+  };
+}
+
+/**
+ * Skill diagnostics event - emits diagnostic results from skill analysis
+ */
+export interface SkillDiagnosticsEvent extends SSEEvent {
+  type: 'skill_diagnostics';
+  data: {
+    diagnostics: Array<{
+      id: string;
+      severity: string;
+      message: string;
+      suggestions?: string[];
+    }>;
+  };
+}
+
 export type AnalysisSSEEvent =
   | SQLGeneratedEvent
   | SQLExecutedEvent
   | StepCompletedEvent
   | AnalysisCompletedEvent
   | ErrorEvent
-  | ProgressEvent;
+  | ProgressEvent
+  | SkillSectionEvent
+  | SkillDiagnosticsEvent;
 
 // ============================================================================
 // Orchestrator Types
@@ -317,6 +351,40 @@ export interface AISQLResponse {
   sql: string;
   explanation: string;
   thoughts?: string;
+  skillEngineResult?: {
+    skillId: string;
+    skillName: string;
+    sections: Record<string, any>;
+    diagnostics: Array<{
+      id: string;
+      severity: string;
+      message: string;
+      suggestions?: string[];
+    }>;
+    vendor?: string;
+    executionTimeMs: number;
+    // v2 skill engine 新增字段
+    directAnswer?: string;
+    summary?: string;
+    questionType?: string;
+    answerConfidence?: 'high' | 'medium' | 'low';
+    // 事件流
+    executionEvents?: Array<{
+      type: string;
+      timestamp: number;
+      skillId: string;
+      stepId?: string;
+      data?: any;
+    }>;
+    eventSummary?: {
+      totalEvents: number;
+      totalDurationMs: number;
+      completedSteps: number;
+      failedSteps: number;
+      hasAICall: boolean;
+      aiCallCount: number;
+    };
+  };
 }
 
 /**

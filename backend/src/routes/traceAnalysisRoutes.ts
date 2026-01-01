@@ -100,13 +100,17 @@ router.post('/create', async (req, res) => {
       });
     }
 
-    // Verify trace exists
-    const trace = s().traceProcessorService.getTrace(traceId);
+    // Verify trace exists - try to load from disk if not in memory
+    let trace = s().traceProcessorService.getTrace(traceId);
     if (!trace) {
-      return res.status(404).json({
-        success: false,
-        error: `Trace ${traceId} not found`,
-      });
+      // Try to load from disk (e.g., after server restart)
+      trace = await s().traceProcessorService.loadTraceFromDisk(traceId);
+      if (!trace) {
+        return res.status(404).json({
+          success: false,
+          error: `Trace ${traceId} not found`,
+        });
+      }
     }
 
     // Create session
@@ -252,12 +256,20 @@ router.get('/:sessionId/stream', (req, res) => {
   res.write(`data: ${JSON.stringify({ sessionId, timestamp: Date.now() })}\n\n`);
 
   // Subscribe to SSE events
+  console.log(`[SSE] Subscribed to events for session ${sessionId}`);
   const unsubscribe = s().sessionService.subscribeToSSE(sessionId, (event: AnalysisSSEEvent) => {
-    res.write(`event: ${event.type}\n`);
-    res.write(`data: ${JSON.stringify(event)}\n\n`);
+    console.log(`[SSE] Received event: ${event.type} for session ${sessionId}`);
+    try {
+      res.write(`event: ${event.type}\n`);
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+      console.log(`[SSE] Event ${event.type} written to response`);
+    } catch (err) {
+      console.error(`[SSE] Failed to write event ${event.type}:`, err);
+    }
 
     // Close connection if analysis is completed or failed
     if (event.type === 'analysis_completed' || (event.type === 'error' && !event.data.recoverable)) {
+      console.log(`[SSE] Closing connection for session ${sessionId}`);
       res.write(`event: end\n`);
       res.write(`data: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
       setTimeout(() => {
@@ -269,6 +281,7 @@ router.get('/:sessionId/stream', (req, res) => {
 
   // Handle client disconnect
   req.on('close', () => {
+    console.log(`[SSE] Client disconnected for session ${sessionId}`);
     unsubscribe();
   });
 
@@ -433,7 +446,16 @@ router.post('/analyze', async (req, res) => {
   try {
     const { traceId, question, packageName, timeRange, maxIterations = 10 } = req.body;
 
+    console.error('[TraceAnalysis] ========================================');
+    console.error('[TraceAnalysis] New analysis request received');
+    console.error('[TraceAnalysis] traceId:', traceId);
+    console.error('[TraceAnalysis] question:', question);
+    console.error('[TraceAnalysis] packageName:', packageName);
+    console.error('[TraceAnalysis] timeRange:', timeRange);
+    console.error('[TraceAnalysis] maxIterations:', maxIterations);
+
     if (!traceId) {
+      console.log('[TraceAnalysis] ERROR: Missing traceId');
       return res.status(400).json({
         success: false,
         error: 'traceId is required',
@@ -441,6 +463,7 @@ router.post('/analyze', async (req, res) => {
     }
 
     if (!question) {
+      console.log('[TraceAnalysis] ERROR: Missing question');
       return res.status(400).json({
         success: false,
         error: 'question is required',
@@ -448,8 +471,11 @@ router.post('/analyze', async (req, res) => {
     }
 
     // Verify trace exists in backend
+    console.log('[TraceAnalysis] Checking if trace exists in backend...');
     const trace = s().traceProcessorService.getTrace(traceId);
+    console.log('[TraceAnalysis] Trace found:', !!trace, trace ? `status: ${trace.status}` : 'not found');
     if (!trace) {
+      console.log('[TraceAnalysis] ERROR: Trace not found in backend');
       return res.status(404).json({
         success: false,
         error: 'Trace not found in backend',
@@ -459,6 +485,7 @@ router.post('/analyze', async (req, res) => {
     }
 
     // Create session
+    console.log('[TraceAnalysis] Creating session...');
     s().sessionService.createSession({
       traceId,
       question,
@@ -469,8 +496,10 @@ router.post('/analyze', async (req, res) => {
     // Get the created session
     const sessions = s().sessionService.getAllSessions();
     const createdSession = sessions.find((session: any) => session.traceId === traceId && session.question === question);
+    console.log('[TraceAnalysis] Session created:', createdSession ? createdSession.id : 'FAILED');
 
     if (!createdSession) {
+      console.log('[TraceAnalysis] ERROR: Failed to create session');
       return res.status(500).json({
         success: false,
         error: 'Failed to create analysis session',
@@ -478,6 +507,7 @@ router.post('/analyze', async (req, res) => {
     }
 
     // Start analysis in background
+    console.log('[TraceAnalysis] Starting analysis for session:', createdSession.id);
     s().orchestrator.startAnalysis(createdSession.id).catch((error: any) => {
       console.error(`[TraceAnalysis] Start error for session ${createdSession.id}:`, error);
       s().sessionService.updateState(createdSession.id, AnalysisState.FAILED, {

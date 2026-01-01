@@ -1,0 +1,432 @@
+# =============================================================================
+# 界面跳转分析 Skill (Navigation/Activity Transition Analysis)
+# =============================================================================
+# 版本: 1.0.0
+# 作者: SmartPerfetto Team
+# 最后更新: 2024-12
+#
+# 本 Skill 用于分析 Activity/Fragment 跳转性能，包括：
+# - 跳转耗时
+# - 生命周期阶段分析
+# - 动画性能
+# - 数据加载影响
+# =============================================================================
+
+name: navigation_analysis
+version: "1.0.0"
+type: performance
+category: app_lifecycle
+priority: high
+sop_doc: navigation.sop.md
+
+meta:
+  display_name: "界面跳转分析"
+  description: "分析 Activity/Fragment 跳转性能、生命周期耗时"
+  icon: "arrows-alt"
+  tags:
+    - navigation
+    - activity
+    - fragment
+    - transition
+
+triggers:
+  keywords:
+    zh:
+      - 界面跳转
+      - 页面切换
+      - Activity跳转
+      - Fragment切换
+      - 跳转慢
+      - 切换卡顿
+      - 页面加载
+      - 跳转耗时
+    en:
+      - navigation
+      - page transition
+      - activity transition
+      - fragment transition
+      - slow navigation
+
+  patterns:
+    - ".*跳转.*慢.*"
+    - ".*切换.*卡.*"
+    - ".*页面.*加载.*"
+    - ".*activity.*transition.*"
+
+prerequisites:
+  required_tables:
+    - slice
+    - thread
+    - process
+
+  optional_tables:
+    - android_startups
+    - frame_timeline_event
+
+  modules:
+    - android.startup.startups
+
+# -----------------------------------------------------------------------------
+# 分析步骤
+# -----------------------------------------------------------------------------
+steps:
+  # Step 1: 查找所有 Activity 生命周期事件
+  - id: activity_lifecycle_events
+    name: "Activity 生命周期事件"
+    description: "查找所有 Activity 的 onCreate/onStart/onResume 等生命周期事件"
+    sql: |
+      SELECT
+        s.name as lifecycle_event,
+        s.ts / 1e6 as ts_ms,
+        s.dur / 1e6 as dur_ms,
+        t.name as thread_name,
+        -- 提取 Activity 名称
+        CASE
+          WHEN s.name GLOB '*performCreate*' THEN 'onCreate'
+          WHEN s.name GLOB '*performStart*' THEN 'onStart'
+          WHEN s.name GLOB '*performResume*' THEN 'onResume'
+          WHEN s.name GLOB '*performPause*' THEN 'onPause'
+          WHEN s.name GLOB '*performStop*' THEN 'onStop'
+          WHEN s.name GLOB '*performDestroy*' THEN 'onDestroy'
+          ELSE s.name
+        END as lifecycle_phase
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name GLOB '${package}*'
+        AND t.tid = p.pid  -- Main thread: tid == pid
+        AND (s.name GLOB '*performCreate*'
+             OR s.name GLOB '*performStart*'
+             OR s.name GLOB '*performResume*'
+             OR s.name GLOB '*performPause*'
+             OR s.name GLOB '*performStop*'
+             OR s.name GLOB '*performDestroy*'
+             OR s.name GLOB '*Activity*onCreate*'
+             OR s.name GLOB '*Activity*onResume*')
+      ORDER BY s.ts ASC
+    save_as: lifecycle_events
+
+  # Step 2: 查找 Activity 跳转（通过 startActivity 等）
+  - id: activity_transitions
+    name: "Activity 跳转事件"
+    sql: |
+      SELECT
+        s.name as transition_event,
+        s.ts / 1e6 as ts_ms,
+        s.dur / 1e6 as dur_ms,
+        s.depth
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name GLOB '${package}*'
+        AND t.tid = p.pid  -- Main thread: tid == pid
+        AND (s.name GLOB '*startActivity*'
+             OR s.name GLOB '*navigat*'
+             OR s.name GLOB '*Intent*'
+             OR s.name GLOB '*activityStart*')
+      ORDER BY s.ts ASC
+
+  # Step 3: Fragment 事务分析
+  - id: fragment_transactions
+    name: "Fragment 事务分析"
+    sql: |
+      SELECT
+        s.name as fragment_event,
+        s.ts / 1e6 as ts_ms,
+        s.dur / 1e6 as dur_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name GLOB '${package}*'
+        AND (s.name GLOB '*FragmentTransaction*'
+             OR s.name GLOB '*Fragment*onCreate*'
+             OR s.name GLOB '*Fragment*onResume*'
+             OR s.name GLOB '*commit*Fragment*'
+             OR s.name GLOB '*performCreate*Fragment*')
+      ORDER BY s.ts ASC
+    optional: true
+
+  # Step 4: 转场动画分析
+  - id: transition_animations
+    name: "转场动画分析"
+    sql: |
+      SELECT
+        s.name as animation_event,
+        s.ts / 1e6 as ts_ms,
+        s.dur / 1e6 as dur_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name GLOB '${package}*'
+        AND (s.name GLOB '*Transition*'
+             OR s.name GLOB '*animation*'
+             OR s.name GLOB '*Animation*'
+             OR s.name GLOB '*SharedElement*'
+             OR s.name GLOB '*windowAnimation*')
+      ORDER BY s.ts ASC
+    optional: true
+
+  # Step 5: 跳转期间的主线程阻塞
+  - id: navigation_blocking
+    name: "跳转期间阻塞分析"
+    sql: |
+      SELECT
+        s.name as blocking_op,
+        s.dur / 1e6 as dur_ms,
+        s.ts / 1e6 as ts_ms,
+        CASE
+          WHEN s.name GLOB '*inflate*' THEN 'layout_inflate'
+          WHEN s.name GLOB '*database*' OR s.name GLOB '*SQL*' THEN 'database'
+          WHEN s.name GLOB '*network*' OR s.name GLOB '*http*' THEN 'network'
+          WHEN s.name GLOB '*file*' OR s.name GLOB '*IO*' THEN 'file_io'
+          WHEN s.name GLOB '*Binder*' THEN 'binder'
+          WHEN s.name GLOB '*GC*' THEN 'gc'
+          ELSE 'other'
+        END as block_type
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name GLOB '${package}*'
+        AND t.tid = p.pid  -- Main thread: tid == pid
+        AND s.dur > 5000000  -- > 5ms
+        AND s.name NOT GLOB '*perform*'
+        AND s.name NOT GLOB '*Activity*'
+        AND s.name NOT GLOB '*Fragment*'
+      ORDER BY s.dur DESC
+      LIMIT 30
+
+  # Step 6: 布局膨胀分析
+  - id: layout_inflation
+    name: "布局膨胀分析"
+    description: "分析布局文件加载耗时"
+    sql: |
+      SELECT
+        s.name as layout_event,
+        s.dur / 1e6 as dur_ms,
+        s.ts / 1e6 as ts_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name GLOB '${package}*'
+        AND t.tid = p.pid  -- Main thread: tid == pid
+        AND (s.name GLOB '*inflate*'
+             OR s.name GLOB '*LayoutInflater*'
+             OR s.name GLOB '*setContentView*')
+        AND s.dur > 1000000  -- > 1ms
+      ORDER BY s.dur DESC
+
+  # Step 7: 首帧渲染时间
+  - id: first_frame
+    name: "首帧渲染分析"
+    sql: |
+      SELECT
+        s.name as frame_event,
+        s.dur / 1e6 as dur_ms,
+        s.ts / 1e6 as ts_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name GLOB '${package}*'
+        AND t.tid = p.pid  -- Main thread: tid == pid
+        AND s.name GLOB '*Choreographer#doFrame*'
+      ORDER BY s.ts ASC
+      LIMIT 10
+
+  # Step 8: View 创建分析
+  - id: view_creation
+    name: "View 创建分析"
+    sql: |
+      SELECT
+        s.name as view_event,
+        COUNT(*) as count,
+        SUM(s.dur) / 1e6 as total_dur_ms,
+        AVG(s.dur) / 1e6 as avg_dur_ms,
+        MAX(s.dur) / 1e6 as max_dur_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name GLOB '${package}*'
+        AND t.tid = p.pid  -- Main thread: tid == pid
+        AND (s.name GLOB '*<init>*View*'
+             OR s.name GLOB '*Constructor*'
+             OR s.name GLOB '*measure*'
+             OR s.name GLOB '*layout*'
+             OR s.name GLOB '*draw*')
+        AND s.dur > 1000000
+      GROUP BY s.name
+      ORDER BY total_dur_ms DESC
+      LIMIT 20
+    optional: true
+
+  # Step 9: Binder 调用（系统服务）
+  - id: navigation_binder_calls
+    name: "跳转期间 Binder 调用"
+    sql: |
+      SELECT
+        client_process,
+        server_process,
+        client_dur / 1e6 as dur_ms,
+        COUNT(*) as call_count
+      FROM android_binder_txns
+      WHERE client_process GLOB '${package}*'
+        AND client_dur > 1000000  -- > 1ms
+      GROUP BY client_process, server_process
+      ORDER BY SUM(client_dur) DESC
+      LIMIT 15
+    optional: true
+
+# -----------------------------------------------------------------------------
+# 判断标准
+# -----------------------------------------------------------------------------
+thresholds:
+  # Activity onCreate 耗时
+  activity_oncreate:
+    unit: ms
+    description: "Activity onCreate 耗时"
+    levels:
+      excellent: { max: 50 }
+      good: { min: 50, max: 100 }
+      warning: { min: 100, max: 200 }
+      critical: { min: 200 }
+
+  # 总跳转时间
+  total_navigation_time:
+    unit: ms
+    description: "从点击到首帧显示的总时间"
+    levels:
+      excellent: { max: 200 }
+      good: { min: 200, max: 400 }
+      warning: { min: 400, max: 700 }
+      critical: { min: 700 }
+
+  # 布局膨胀时间
+  layout_inflate_time:
+    unit: ms
+    description: "布局文件加载时间"
+    levels:
+      excellent: { max: 20 }
+      good: { min: 20, max: 50 }
+      warning: { min: 50, max: 100 }
+      critical: { min: 100 }
+
+  # 转场动画时间
+  transition_animation:
+    unit: ms
+    description: "转场动画时长"
+    levels:
+      excellent: { max: 200 }
+      good: { min: 200, max: 350 }
+      warning: { min: 350, max: 500 }
+      critical: { min: 500 }
+
+# -----------------------------------------------------------------------------
+# 输出格式
+# -----------------------------------------------------------------------------
+output:
+  title: "界面跳转分析报告"
+
+  sections:
+    - id: lifecycle_overview
+      title: "生命周期概览"
+      type: timeline
+      from: activity_lifecycle_events
+      fields:
+        - { key: lifecycle_phase, label: "阶段" }
+        - { key: dur_ms, label: "耗时", unit: "ms" }
+        - { key: ts_ms, label: "时间点", unit: "ms" }
+
+    - id: layout_inflation
+      title: "布局膨胀耗时"
+      type: table
+      from: layout_inflation
+      limit: 10
+      fields:
+        - { key: layout_event, label: "布局" }
+        - { key: dur_ms, label: "耗时", unit: "ms" }
+
+    - id: blocking_analysis
+      title: "跳转期间阻塞"
+      type: grouped_table
+      from: navigation_blocking
+      group_by: block_type
+      fields:
+        - { key: block_type, label: "类型" }
+        - { key: blocking_op, label: "操作" }
+        - { key: dur_ms, label: "耗时", unit: "ms" }
+
+    - id: animations
+      title: "转场动画"
+      type: table
+      from: transition_animations
+      show_when: "transition_animations.count > 0"
+      fields:
+        - { key: animation_event, label: "动画" }
+        - { key: dur_ms, label: "耗时", unit: "ms" }
+
+    - id: fragments
+      title: "Fragment 事务"
+      type: table
+      from: fragment_transactions
+      show_when: "fragment_transactions.count > 0"
+      fields:
+        - { key: fragment_event, label: "事件" }
+        - { key: dur_ms, label: "耗时", unit: "ms" }
+
+# -----------------------------------------------------------------------------
+# 诊断规则
+# -----------------------------------------------------------------------------
+diagnostics:
+  - id: slow_oncreate
+    condition: "activity_lifecycle_events.onCreate.dur_ms > 200"
+    severity: warning
+    message: "Activity onCreate 耗时 ${dur_ms}ms，超过 200ms 阈值"
+    suggestions:
+      - "延迟初始化非必要组件"
+      - "将数据加载移到后台"
+      - "使用 ViewStub 延迟加载复杂布局"
+
+  - id: slow_layout_inflate
+    condition: "layout_inflation.any.dur_ms > 100"
+    severity: warning
+    message: "布局膨胀耗时 ${dur_ms}ms"
+    suggestions:
+      - "减少布局嵌套层级"
+      - "使用 merge 标签优化"
+      - "考虑使用异步布局膨胀"
+
+  - id: io_during_navigation
+    condition: "navigation_blocking.file_io.count > 0 OR navigation_blocking.database.count > 0"
+    severity: warning
+    message: "跳转期间检测到 IO 操作"
+    suggestions:
+      - "将 IO 操作移到后台线程"
+      - "使用 ViewModel 预加载数据"
+      - "实现懒加载策略"
+
+  - id: long_transition_animation
+    condition: "transition_animations.any.dur_ms > 500"
+    severity: info
+    message: "转场动画时长 ${dur_ms}ms"
+    suggestions:
+      - "检查动画是否过于复杂"
+      - "考虑缩短动画时长"
+      - "使用硬件加速"
+
+# -----------------------------------------------------------------------------
+# 参考资料
+# -----------------------------------------------------------------------------
+references:
+  - title: "Activity Lifecycle"
+    url: "https://developer.android.com/guide/components/activities/activity-lifecycle"
+  - title: "Navigation Component"
+    url: "https://developer.android.com/guide/navigation"
+  - title: "Activity Transitions"
+    url: "https://developer.android.com/training/transitions"

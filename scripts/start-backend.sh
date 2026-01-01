@@ -1,0 +1,25 @@
+#!/bin/bash
+# Start backend only with logging
+
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+LOGS_DIR="$PROJECT_ROOT/logs"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+
+mkdir -p "$LOGS_DIR"
+BACKEND_LOG="$LOGS_DIR/backend_${TIMESTAMP}.log"
+
+echo "Starting backend with logging to: $BACKEND_LOG"
+
+# Kill existing process on port 3000
+lsof -ti:3000 | xargs kill -9 2>/dev/null || true
+sleep 1
+
+cd "$PROJECT_ROOT/backend"
+npm run dev 2>&1 | tee "$BACKEND_LOG" &
+
+# Create symlink to latest
+ln -sf "$BACKEND_LOG" "$LOGS_DIR/backend_latest.log"
+
+echo ""
+echo "Backend started! Log: $BACKEND_LOG"
+echo "tail -f $LOGS_DIR/backend_latest.log"

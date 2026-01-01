@@ -1,0 +1,62 @@
+# =============================================================================
+# Binder 延迟分析（原子 Skill）
+# =============================================================================
+# 分析指定时间范围内的 Binder 调用
+
+name: binder_in_range
+version: "2.0"
+type: atomic
+
+meta:
+  display_name: "Binder 调用分析"
+  description: "分析指定时间范围内的 Binder 调用延迟"
+  icon: "swap_horiz"
+  tags: [binder, ipc, atomic]
+
+prerequisites:
+  modules:
+    - android.binder
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: true
+  - name: end_ts
+    type: timestamp
+    required: true
+  - name: package
+    type: string
+    required: false
+
+sql: |
+  SELECT
+    client_process,
+    server_process,
+    COUNT(*) as call_count,
+    SUM(client_dur) / 1e6 as total_client_ms,
+    MAX(client_dur) / 1e6 as max_delay_ms,
+    AVG(client_dur) / 1e6 as avg_delay_ms,
+    SUM(CASE WHEN client_dur > 10000000 THEN 1 ELSE 0 END) as slow_calls
+  FROM android_binder_txns
+  WHERE client_ts >= ${start_ts}
+    AND client_ts < ${end_ts}
+    AND (client_process GLOB '${package}*' OR '${package}' = '')
+  GROUP BY client_process, server_process
+  HAVING total_client_ms > 1
+  ORDER BY total_client_ms DESC
+
+output:
+  display:
+    level: detail
+    format: table
+  fields:
+    - name: client_process
+      label: "客户端"
+    - name: server_process
+      label: "服务端"
+    - name: total_client_ms
+      label: "总耗时(ms)"
+    - name: max_delay_ms
+      label: "最大延迟(ms)"
+    - name: slow_calls
+      label: "慢调用数"

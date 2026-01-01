@@ -1,0 +1,140 @@
+# =============================================================================
+# vivo OriginOS 启动分析覆盖配置
+# =============================================================================
+# 版本: 1.0.0
+# 基于: base/startup
+# 适用: vivo 设备 (OriginOS / FuntouchOS)
+# =============================================================================
+
+extends: base/startup
+version: "1.0.0"
+
+meta:
+  display_name: "vivo OriginOS 启动分析"
+  description: "针对 vivo OriginOS 优化的启动分析，包含 Jovi 智能优化检测"
+  vendor: vivo
+  os: OriginOS
+
+# -----------------------------------------------------------------------------
+# 厂商检测规则
+# -----------------------------------------------------------------------------
+vendor_detection:
+  signatures:
+    - pattern: "*OriginOS*"
+      confidence: high
+    - pattern: "*vivo*"
+      confidence: high
+    - pattern: "*Jovi*"
+      confidence: high
+    - pattern: "*Funtouch*"
+      confidence: medium
+    - pattern: "*bbk*"
+      confidence: medium
+
+# -----------------------------------------------------------------------------
+# 额外分析步骤
+# -----------------------------------------------------------------------------
+additional_steps:
+  # 检测 vivo 智能优化
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: vivo_smart_optimization
+    name: "vivo 智能优化检测"
+    description: "检查 Jovi 和 OriginOS 优化是否生效"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as optimization_event,
+        s.dur / 1e6 as dur_ms,
+        (s.ts - (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})) / 1e6 as relative_ts_ms
+      FROM slice s
+      WHERE (s.name GLOB '*Jovi*'
+             OR s.name GLOB '*OriginOS*'
+             OR s.name GLOB '*vivo*Boost*'
+             OR s.name GLOB '*SmartEngine*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.ts ASC
+
+  # vivo 系统服务检测
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: vivo_system_services
+    name: "vivo 系统服务调用"
+    for_each: startups
+    sql: |
+      SELECT
+        server_process,
+        client_dur / 1e6 as dur_ms,
+        COUNT(*) as call_count
+      FROM android_binder_txns
+      WHERE client_process GLOB '${package}*'
+        AND (server_process GLOB '*vivo*'
+             OR server_process GLOB '*bbk*'
+             OR server_process GLOB '*jovi*')
+        AND client_ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND client_ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      GROUP BY server_process
+      ORDER BY SUM(client_dur) DESC
+
+  # 内存优化状态
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: memory_optimization
+    name: "内存优化状态"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as memory_event,
+        s.dur / 1e6 as dur_ms
+      FROM slice s
+      WHERE (s.name GLOB '*MemoryOptimiz*'
+             OR s.name GLOB '*freeze*'
+             OR s.name GLOB '*Freeze*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.ts ASC
+
+# -----------------------------------------------------------------------------
+# 覆盖判断标准
+# -----------------------------------------------------------------------------
+thresholds_override:
+  cold_start_time:
+    levels:
+      excellent: { max: 450 }
+      good: { min: 450, max: 900 }
+      warning: { min: 900, max: 1500 }
+      critical: { min: 1500 }
+
+# -----------------------------------------------------------------------------
+# 额外诊断规则
+# -----------------------------------------------------------------------------
+additional_diagnostics:
+  - id: jovi_not_active
+    condition: "vivo_smart_optimization.count == 0"
+    severity: info
+    message: "未检测到 Jovi 智能优化，启动可能未享受到系统加速"
+    suggestions:
+      - "检查应用是否在 Jovi 白名单中"
+      - "联系 vivo 系统工程师确认优化策略"
+
+  - id: vivo_service_slow
+    condition: "vivo_system_services.any.dur_ms > 50"
+    severity: warning
+    message: "vivo 系统服务 ${server_process} 调用耗时 ${dur_ms}ms"
+    suggestions:
+      - "联系 vivo 系统侧确认服务状态"
+
+# -----------------------------------------------------------------------------
+# vivo 特有的 Trace Tag 参考
+# -----------------------------------------------------------------------------
+# OriginOS 系统:
+#   - OriginOS.* : OriginOS 系统相关
+#   - Jovi.* : Jovi 智能服务
+#   - SmartEngine : 智能优化引擎
+#
+# vivo 服务:
+#   - vivo.* : vivo 系统服务
+#   - bbk.* : BBK 集团服务
+#   - FuntouchOS.* : FuntouchOS 相关
+#
+# 性能优化:
+#   - BoostPool : 线程池加速
+#   - MemoryOptimize : 内存优化

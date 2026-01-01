@@ -1,0 +1,492 @@
+/**
+ * Skill Admin Controller
+ *
+ * Handles CRUD operations for skill management.
+ */
+
+import { Request, Response } from 'express';
+import fs from 'fs';
+import path from 'path';
+import yaml from 'js-yaml';
+import { skillRegistry, initializeSkills } from '../services/skillEngine/skillLoader';
+import { SkillDefinition, VendorType } from '../services/skillEngine/types';
+import { ErrorResponse } from '../types';
+
+const SKILLS_DIR = path.join(__dirname, '../../skills');
+const BASE_DIR = path.join(SKILLS_DIR, 'base');
+const VENDORS_DIR = path.join(SKILLS_DIR, 'vendors');
+const CUSTOM_DIR = path.join(SKILLS_DIR, 'custom');
+
+class SkillAdminController {
+  /**
+   * Ensure skill registry is initialized
+   */
+  private async ensureInitialized(): Promise<void> {
+    await initializeSkills();
+  }
+
+  /**
+   * List all skills with admin metadata
+   * GET /api/admin/skills
+   */
+  listSkills = async (req: Request, res: Response) => {
+    try {
+      await this.ensureInitialized();
+
+      const skills = skillRegistry.getAllSkills();
+
+      const result = skills.map(skill => ({
+        id: skill.id,
+        name: skill.definition.name,
+        version: skill.definition.version,
+        displayName: skill.definition.meta.display_name,
+        description: skill.definition.meta.description,
+        category: skill.definition.category,
+        type: skill.definition.type,
+        stepsCount: skill.definition.steps?.length ||
+          skill.definition.layers?.reduce((sum, l) => sum + l.steps.length, 0) || 0,
+        filePath: skill.filePath,
+        isCustom: skill.filePath.includes('/custom/'),
+        isEditable: skill.filePath.includes('/custom/'),
+        hasVendorOverrides: skill.overrides && skill.overrides.length > 0,
+        vendorOverrides: skill.overrides?.map(o => o.meta?.vendor) || [],
+        hasSOP: !!skill.sopContent,
+      }));
+
+      res.json({
+        skills: result,
+        count: result.length,
+      });
+    } catch (error) {
+      console.error('[SkillAdminController] Error listing skills:', error);
+      const errorResponse: ErrorResponse = {
+        error: 'Failed to list skills',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      };
+      res.status(500).json(errorResponse);
+    }
+  };
+
+  /**
+   * Get skill details including raw YAML
+   * GET /api/admin/skills/:skillId
+   */
+  getSkill = async (req: Request, res: Response) => {
+    try {
+      const { skillId } = req.params;
+      await this.ensureInitialized();
+
+      const skill = skillRegistry.getSkill(skillId);
+      if (!skill) {
+        return res.status(404).json({
+          error: 'Skill not found',
+          details: `No skill found with ID: ${skillId}`,
+        });
+      }
+
+      // Read raw YAML content
+      let rawYaml = '';
+      if (fs.existsSync(skill.filePath)) {
+        rawYaml = fs.readFileSync(skill.filePath, 'utf-8');
+      }
+
+      res.json({
+        id: skill.id,
+        definition: skill.definition,
+        rawYaml,
+        sopContent: skill.sopContent,
+        filePath: skill.filePath,
+        isCustom: skill.filePath.includes('/custom/'),
+        isEditable: skill.filePath.includes('/custom/'),
+        vendorOverrides: skill.overrides,
+      });
+    } catch (error) {
+      console.error('[SkillAdminController] Error getting skill:', error);
+      const errorResponse: ErrorResponse = {
+        error: 'Failed to get skill',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      };
+      res.status(500).json(errorResponse);
+    }
+  };
+
+  /**
+   * Create a new custom skill
+   * POST /api/admin/skills
+   * Body: { yaml: string } or { definition: SkillDefinition }
+   */
+  createSkill = async (req: Request, res: Response) => {
+    try {
+      const { yaml: yamlContent, definition } = req.body;
+
+      let skillDef: SkillDefinition;
+      let yamlToSave: string;
+
+      if (yamlContent) {
+        // Parse YAML
+        skillDef = yaml.load(yamlContent) as SkillDefinition;
+        yamlToSave = yamlContent;
+      } else if (definition) {
+        skillDef = definition;
+        yamlToSave = yaml.dump(definition);
+      } else {
+        return res.status(400).json({
+          error: 'Missing skill data',
+          details: 'Either yaml or definition is required',
+        });
+      }
+
+      // Validate required fields
+      if (!skillDef.name) {
+        return res.status(400).json({
+          error: 'Invalid skill definition',
+          details: 'Skill name is required',
+        });
+      }
+
+      // Ensure custom directory exists
+      if (!fs.existsSync(CUSTOM_DIR)) {
+        fs.mkdirSync(CUSTOM_DIR, { recursive: true });
+      }
+
+      // Check if skill already exists
+      const fileName = `${skillDef.name}.skill.yaml`;
+      const filePath = path.join(CUSTOM_DIR, fileName);
+
+      if (fs.existsSync(filePath)) {
+        return res.status(409).json({
+          error: 'Skill already exists',
+          details: `A skill with name '${skillDef.name}' already exists`,
+        });
+      }
+
+      // Save file
+      fs.writeFileSync(filePath, yamlToSave, 'utf-8');
+
+      // Reload skills
+      await skillRegistry.reload();
+
+      res.status(201).json({
+        success: true,
+        message: 'Skill created successfully',
+        skillId: skillDef.name,
+        filePath,
+      });
+    } catch (error) {
+      console.error('[SkillAdminController] Error creating skill:', error);
+      const errorResponse: ErrorResponse = {
+        error: 'Failed to create skill',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      };
+      res.status(500).json(errorResponse);
+    }
+  };
+
+  /**
+   * Update an existing custom skill
+   * PUT /api/admin/skills/:skillId
+   * Body: { yaml: string } or { definition: SkillDefinition }
+   */
+  updateSkill = async (req: Request, res: Response) => {
+    try {
+      const { skillId } = req.params;
+      const { yaml: yamlContent, definition } = req.body;
+
+      await this.ensureInitialized();
+
+      const skill = skillRegistry.getSkill(skillId);
+      if (!skill) {
+        return res.status(404).json({
+          error: 'Skill not found',
+          details: `No skill found with ID: ${skillId}`,
+        });
+      }
+
+      // Check if editable (only custom skills)
+      if (!skill.filePath.includes('/custom/')) {
+        return res.status(403).json({
+          error: 'Skill not editable',
+          details: 'Only custom skills can be edited. Base and vendor skills are read-only.',
+        });
+      }
+
+      let yamlToSave: string;
+
+      if (yamlContent) {
+        yamlToSave = yamlContent;
+      } else if (definition) {
+        yamlToSave = yaml.dump(definition);
+      } else {
+        return res.status(400).json({
+          error: 'Missing skill data',
+          details: 'Either yaml or definition is required',
+        });
+      }
+
+      // Save file
+      fs.writeFileSync(skill.filePath, yamlToSave, 'utf-8');
+
+      // Reload skills
+      await skillRegistry.reload();
+
+      res.json({
+        success: true,
+        message: 'Skill updated successfully',
+        skillId,
+      });
+    } catch (error) {
+      console.error('[SkillAdminController] Error updating skill:', error);
+      const errorResponse: ErrorResponse = {
+        error: 'Failed to update skill',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      };
+      res.status(500).json(errorResponse);
+    }
+  };
+
+  /**
+   * Delete a custom skill
+   * DELETE /api/admin/skills/:skillId
+   */
+  deleteSkill = async (req: Request, res: Response) => {
+    try {
+      const { skillId } = req.params;
+
+      await this.ensureInitialized();
+
+      const skill = skillRegistry.getSkill(skillId);
+      if (!skill) {
+        return res.status(404).json({
+          error: 'Skill not found',
+          details: `No skill found with ID: ${skillId}`,
+        });
+      }
+
+      // Check if deletable (only custom skills)
+      if (!skill.filePath.includes('/custom/')) {
+        return res.status(403).json({
+          error: 'Skill not deletable',
+          details: 'Only custom skills can be deleted. Base and vendor skills are protected.',
+        });
+      }
+
+      // Delete file
+      fs.unlinkSync(skill.filePath);
+
+      // Also delete SOP if exists
+      const sopPath = skill.filePath.replace('.skill.yaml', '.sop.md');
+      if (fs.existsSync(sopPath)) {
+        fs.unlinkSync(sopPath);
+      }
+
+      // Reload skills
+      await skillRegistry.reload();
+
+      res.json({
+        success: true,
+        message: 'Skill deleted successfully',
+        skillId,
+      });
+    } catch (error) {
+      console.error('[SkillAdminController] Error deleting skill:', error);
+      const errorResponse: ErrorResponse = {
+        error: 'Failed to delete skill',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      };
+      res.status(500).json(errorResponse);
+    }
+  };
+
+  /**
+   * Validate skill YAML
+   * POST /api/admin/skills/validate
+   * Body: { yaml: string }
+   */
+  validateSkill = async (req: Request, res: Response) => {
+    try {
+      const { yaml: yamlContent } = req.body;
+
+      if (!yamlContent) {
+        return res.status(400).json({
+          error: 'Missing YAML content',
+          details: 'yaml is required',
+        });
+      }
+
+      const errors: string[] = [];
+      const warnings: string[] = [];
+
+      // Parse YAML
+      let skillDef: SkillDefinition;
+      try {
+        skillDef = yaml.load(yamlContent) as SkillDefinition;
+      } catch (e: any) {
+        return res.json({
+          valid: false,
+          errors: [`YAML parse error: ${e.message}`],
+          warnings: [],
+        });
+      }
+
+      // Validate required fields
+      if (!skillDef.name) errors.push('Missing required field: name');
+      if (!skillDef.version) errors.push('Missing required field: version');
+      if (!skillDef.meta) errors.push('Missing required field: meta');
+      if (!skillDef.steps || skillDef.steps.length === 0) {
+        errors.push('Missing required field: steps');
+      }
+
+      // Validate meta
+      if (skillDef.meta) {
+        if (!skillDef.meta.display_name) errors.push('Missing meta.display_name');
+        if (!skillDef.meta.description) errors.push('Missing meta.description');
+      }
+
+      // Validate steps
+      if (skillDef.steps) {
+        const stepIds = new Set<string>();
+        skillDef.steps.forEach((step, i) => {
+          if (!step.id) errors.push(`steps[${i}]: Missing id`);
+          if (!step.name) errors.push(`steps[${i}]: Missing name`);
+          if (!step.sql) errors.push(`steps[${i}]: Missing sql`);
+          if (step.id && stepIds.has(step.id)) {
+            errors.push(`steps[${i}]: Duplicate id '${step.id}'`);
+          }
+          if (step.id) stepIds.add(step.id);
+        });
+      }
+
+      res.json({
+        valid: errors.length === 0,
+        errors,
+        warnings,
+        parsedDefinition: errors.length === 0 ? skillDef : undefined,
+      });
+    } catch (error) {
+      console.error('[SkillAdminController] Error validating skill:', error);
+      const errorResponse: ErrorResponse = {
+        error: 'Failed to validate skill',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      };
+      res.status(500).json(errorResponse);
+    }
+  };
+
+  /**
+   * List all vendors
+   * GET /api/admin/vendors
+   */
+  listVendors = async (req: Request, res: Response) => {
+    try {
+      if (!fs.existsSync(VENDORS_DIR)) {
+        return res.json({ vendors: [] });
+      }
+
+      const vendorDirs = fs.readdirSync(VENDORS_DIR).filter(f =>
+        fs.statSync(path.join(VENDORS_DIR, f)).isDirectory()
+      );
+
+      const vendors = vendorDirs.map(vendor => {
+        const vendorPath = path.join(VENDORS_DIR, vendor);
+        const overrides = fs.readdirSync(vendorPath).filter(f =>
+          f.endsWith('.override.yaml')
+        );
+
+        return {
+          id: vendor,
+          overrideCount: overrides.length,
+          overrides: overrides.map(f => f.replace('.override.yaml', '')),
+        };
+      });
+
+      res.json({
+        vendors,
+        count: vendors.length,
+      });
+    } catch (error) {
+      console.error('[SkillAdminController] Error listing vendors:', error);
+      const errorResponse: ErrorResponse = {
+        error: 'Failed to list vendors',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      };
+      res.status(500).json(errorResponse);
+    }
+  };
+
+  /**
+   * Get vendor overrides
+   * GET /api/admin/vendors/:vendor/overrides
+   */
+  getVendorOverrides = async (req: Request, res: Response) => {
+    try {
+      const { vendor } = req.params;
+      const vendorPath = path.join(VENDORS_DIR, vendor);
+
+      if (!fs.existsSync(vendorPath)) {
+        return res.status(404).json({
+          error: 'Vendor not found',
+          details: `No vendor found: ${vendor}`,
+        });
+      }
+
+      const overrideFiles = fs.readdirSync(vendorPath).filter(f =>
+        f.endsWith('.override.yaml')
+      );
+
+      const overrides = overrideFiles.map(file => {
+        const filePath = path.join(vendorPath, file);
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const override = yaml.load(content) as any;
+
+        return {
+          skillId: file.replace('.override.yaml', ''),
+          extends: override.extends,
+          version: override.version,
+          meta: override.meta,
+          additionalStepsCount: override.additional_steps?.length || 0,
+          rawYaml: content,
+        };
+      });
+
+      res.json({
+        vendor,
+        overrides,
+        count: overrides.length,
+      });
+    } catch (error) {
+      console.error('[SkillAdminController] Error getting vendor overrides:', error);
+      const errorResponse: ErrorResponse = {
+        error: 'Failed to get vendor overrides',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      };
+      res.status(500).json(errorResponse);
+    }
+  };
+
+  /**
+   * Reload all skills
+   * POST /api/admin/skills/reload
+   */
+  reloadSkills = async (req: Request, res: Response) => {
+    try {
+      await skillRegistry.reload();
+
+      const skills = skillRegistry.getAllSkills();
+
+      res.json({
+        success: true,
+        message: 'Skills reloaded successfully',
+        count: skills.length,
+      });
+    } catch (error) {
+      console.error('[SkillAdminController] Error reloading skills:', error);
+      const errorResponse: ErrorResponse = {
+        error: 'Failed to reload skills',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      };
+      res.status(500).json(errorResponse);
+    }
+  };
+}
+
+export default SkillAdminController;

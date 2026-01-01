@@ -1,0 +1,361 @@
+# =============================================================================
+# SurfaceFlinger 分析 Skill (SurfaceFlinger Analysis)
+# =============================================================================
+# 版本: 1.0.0
+# 作者: SmartPerfetto Team
+# 最后更新: 2024-12
+#
+# 本 Skill 用于分析 SurfaceFlinger 渲染合成，包括：
+# - 帧合成延迟
+# - GPU 合成分析
+# - VSYNC 分析
+# - Fence 等待时间
+# =============================================================================
+
+name: surfaceflinger_analysis
+version: "1.0.0"
+type: performance
+category: rendering
+priority: high
+
+# -----------------------------------------------------------------------------
+# 元信息
+# -----------------------------------------------------------------------------
+meta:
+  display_name: "SurfaceFlinger 分析"
+  description: "分析 SurfaceFlinger 帧合成、GPU 使用和 VSYNC 同步"
+  icon: "layers"
+  tags:
+    - surfaceflinger
+    - composition
+    - gpu
+    - vsync
+    - fence
+    - display
+
+# -----------------------------------------------------------------------------
+# 触发条件
+# -----------------------------------------------------------------------------
+triggers:
+  keywords:
+    zh:
+      - SurfaceFlinger
+      - 合成
+      - GPU合成
+      - VSYNC
+      - 显示
+      - 渲染
+      - fence
+    en:
+      - surfaceflinger
+      - composition
+      - gpu composition
+      - vsync
+      - display
+      - fence
+
+  patterns:
+    - ".*[Ss]urface[Ff]linger.*"
+    - ".*合成.*"
+    - ".*VSYNC.*"
+    - ".*GPU.*合成.*"
+
+# -----------------------------------------------------------------------------
+# 前置检查
+# -----------------------------------------------------------------------------
+prerequisites:
+  required_tables:
+    - slice
+    - thread
+    - process
+
+  optional_tables:
+    - gfx_composition
+    - actual_frame_timeline_slice
+
+# -----------------------------------------------------------------------------
+# 分析步骤
+# -----------------------------------------------------------------------------
+steps:
+  # Step 1: SurfaceFlinger 进程检测
+  - id: sf_process
+    name: "检测 SurfaceFlinger"
+    sql: |
+      SELECT upid, pid, name
+      FROM process
+      WHERE name = 'surfaceflinger'
+         OR name = '/system/bin/surfaceflinger'
+      LIMIT 1
+    save_as: sf_process
+    on_empty: "未找到 SurfaceFlinger 进程"
+
+  # Step 2: SF 帧合成事件
+  - id: sf_composition_events
+    name: "帧合成事件"
+    description: "分析 SurfaceFlinger 的帧合成"
+    sql: |
+      SELECT
+        s.ts / 1e6 as ts_ms,
+        s.dur / 1e6 as dur_ms,
+        s.name as event_name,
+        s.depth
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE (p.name = 'surfaceflinger' OR p.name LIKE '%surfaceflinger%')
+        AND (s.name GLOB '*composite*'
+             OR s.name GLOB '*onMessageReceived*'
+             OR s.name GLOB '*latchBuffer*'
+             OR s.name GLOB '*present*')
+      ORDER BY s.ts ASC
+    save_as: sf_composition_events
+
+  # Step 3: GPU 合成统计
+  - id: gpu_composition_stats
+    name: "GPU 合成统计"
+    description: "统计使用 GPU 合成的帧"
+    sql: |
+      SELECT
+        COUNT(*) as total_frames,
+        SUM(CASE WHEN gpu_composition = 1 THEN 1 ELSE 0 END) as gpu_frames,
+        SUM(CASE WHEN gpu_composition = 0 THEN 1 ELSE 0 END) as client_frames,
+        AVG(dur) / 1e6 as avg_dur_ms,
+        MAX(dur) / 1e6 as max_dur_ms
+      FROM gfx_composition
+    optional: true
+    save_as: gpu_composition_stats
+
+  # Step 4: VSYNC 分析
+  - id: vsync_events
+    name: "VSYNC 事件"
+    description: "分析 VSYNC 信号"
+    sql: |
+      SELECT
+        s.ts / 1e6 as ts_ms,
+        s.dur / 1e6 as dur_ms,
+        s.name as vsync_type
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE (p.name = 'surfaceflinger' OR p.name LIKE '%surfaceflinger%')
+        AND (s.name GLOB '*VSYNC*'
+             OR s.name GLOB '*vsync*'
+             OR s.name GLOB '*HWVsync*')
+      ORDER BY s.ts ASC
+    save_as: vsync_events
+
+  # Step 5: Fence 等待分析
+  - id: fence_waits
+    name: "Fence 等待"
+    description: "分析 GPU fence 等待时间"
+    sql: |
+      SELECT
+        s.ts / 1e6 as ts_ms,
+        s.dur / 1e6 as dur_ms,
+        s.name as fence_type
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE (p.name = 'surfaceflinger' OR p.name LIKE '%surfaceflinger%')
+        AND (s.name GLOB '*fence*'
+             OR s.name GLOB '*Fence*'
+             OR s.name GLOB '*wait*')
+        AND s.dur > 1000000  -- > 1ms
+      ORDER BY s.dur DESC
+      LIMIT 50
+    save_as: fence_waits
+
+  # Step 6: 慢帧合成检测
+  - id: slow_compositions
+    name: "慢帧合成"
+    description: "检测耗时过长的帧合成"
+    sql: |
+      SELECT
+        s.ts / 1e6 as ts_ms,
+        s.dur / 1e6 as dur_ms,
+        s.name as event
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE (p.name = 'surfaceflinger' OR p.name LIKE '%surfaceflinger%')
+        AND s.name GLOB '*composite*'
+        AND s.dur > 16000000  -- > 16ms (missed vsync)
+      ORDER BY s.dur DESC
+      LIMIT 30
+    save_as: slow_compositions
+
+  # Step 7: Layer 统计
+  - id: layer_stats
+    name: "Layer 统计"
+    description: "统计各 Layer 的渲染情况"
+    sql: |
+      SELECT
+        s.name as layer_name,
+        COUNT(*) as frame_count,
+        AVG(s.dur) / 1e6 as avg_dur_ms,
+        SUM(s.dur) / 1e6 as total_dur_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE (p.name = 'surfaceflinger' OR p.name LIKE '%surfaceflinger%')
+        AND s.name GLOB '*Layer*'
+      GROUP BY s.name
+      ORDER BY total_dur_ms DESC
+      LIMIT 20
+    optional: true
+    save_as: layer_stats
+
+  # Step 8: 目标应用的 SF 交互
+  - id: app_sf_interaction
+    name: "应用 SF 交互"
+    description: "分析目标应用与 SurfaceFlinger 的交互"
+    sql: |
+      SELECT
+        s.name as event,
+        s.ts / 1e6 as ts_ms,
+        s.dur / 1e6 as dur_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name GLOB '${package}*'
+        AND (s.name GLOB '*dequeueBuffer*'
+             OR s.name GLOB '*queueBuffer*'
+             OR s.name GLOB '*acquireBuffer*'
+             OR s.name GLOB '*releaseBuffer*')
+      ORDER BY s.ts ASC
+    save_as: app_sf_interaction
+
+# -----------------------------------------------------------------------------
+# 判断标准
+# -----------------------------------------------------------------------------
+thresholds:
+  composition_time:
+    unit: ms
+    description: "帧合成时间"
+    levels:
+      excellent: { max: 4 }
+      good: { min: 4, max: 8 }
+      warning: { min: 8, max: 16 }
+      critical: { min: 16 }
+    suggestions:
+      warning: "帧合成时间偏长"
+      critical: "帧合成超过 VSYNC 周期，会导致丢帧"
+
+  gpu_composition_ratio:
+    unit: percent
+    description: "GPU 合成比例"
+    levels:
+      excellent: { max: 30 }
+      good: { min: 30, max: 50 }
+      warning: { min: 50, max: 80 }
+      critical: { min: 80 }
+    suggestions:
+      warning: "GPU 合成比例较高，可能影响功耗"
+      critical: "大量使用 GPU 合成，检查 Layer 配置"
+
+  fence_wait_time:
+    unit: ms
+    description: "Fence 等待时间"
+    levels:
+      excellent: { max: 2 }
+      good: { min: 2, max: 5 }
+      warning: { min: 5, max: 10 }
+      critical: { min: 10 }
+
+# -----------------------------------------------------------------------------
+# 输出格式
+# -----------------------------------------------------------------------------
+output:
+  title: "SurfaceFlinger 分析报告"
+
+  sections:
+    - id: overview
+      title: "合成概览"
+      type: summary
+      from: gpu_composition_stats
+      fields:
+        - { key: total_frames, label: "总帧数" }
+        - { key: gpu_frames, label: "GPU 合成帧" }
+        - { key: avg_dur_ms, label: "平均合成时间", unit: "ms" }
+
+    - id: composition_timeline
+      title: "合成时间线"
+      type: timeline
+      from: sf_composition_events
+      limit: 100
+      fields:
+        - { key: ts_ms, label: "时间", unit: "ms" }
+        - { key: dur_ms, label: "耗时", unit: "ms" }
+        - { key: event_name, label: "事件" }
+
+    - id: slow_frames
+      title: "慢帧列表"
+      type: table
+      from: slow_compositions
+      fields:
+        - { key: ts_ms, label: "时间", unit: "ms" }
+        - { key: dur_ms, label: "耗时", unit: "ms" }
+        - { key: event, label: "事件" }
+
+    - id: fence_analysis
+      title: "Fence 等待"
+      type: table
+      from: fence_waits
+      fields:
+        - { key: dur_ms, label: "等待时间", unit: "ms" }
+        - { key: fence_type, label: "类型" }
+
+    - id: app_buffers
+      title: "应用 Buffer 操作"
+      type: table
+      from: app_sf_interaction
+      limit: 30
+      fields:
+        - { key: event, label: "操作" }
+        - { key: dur_ms, label: "耗时", unit: "ms" }
+
+# -----------------------------------------------------------------------------
+# 诊断规则
+# -----------------------------------------------------------------------------
+diagnostics:
+  - id: slow_composition
+    condition: "slow_compositions.count > 5"
+    severity: warning
+    message: "检测到 ${count} 帧合成时间超过 16ms"
+    suggestions:
+      - "检查 Layer 数量和复杂度"
+      - "减少需要 GPU 合成的 Layer"
+      - "优化动画效果"
+
+  - id: high_gpu_composition
+    condition: "gpu_composition_stats.gpu_frames > gpu_composition_stats.total_frames * 0.7"
+    severity: info
+    message: "GPU 合成比例达到 ${gpu_frames}/${total_frames}"
+    suggestions:
+      - "检查是否有 Layer 使用了 GPU 密集型效果"
+      - "考虑使用硬件合成"
+
+  - id: long_fence_wait
+    condition: "fence_waits.any.dur_ms > 10"
+    severity: warning
+    message: "Fence 等待时间达到 ${dur_ms}ms"
+    suggestions:
+      - "GPU 负载可能过高"
+      - "检查 GPU 是否有瓶颈"
+
+# -----------------------------------------------------------------------------
+# 参考资料
+# -----------------------------------------------------------------------------
+references:
+  - title: "Android Graphics Architecture"
+    url: "https://source.android.com/devices/graphics/architecture"
+  - title: "SurfaceFlinger and WindowManager"
+    url: "https://source.android.com/devices/graphics/surfaceflinger-windowmanager"
+  - title: "Perfetto Graphics Analysis"
+    url: "https://perfetto.dev/docs/analysis/graphics"

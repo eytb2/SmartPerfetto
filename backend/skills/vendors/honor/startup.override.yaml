@@ -1,0 +1,113 @@
+# =============================================================================
+# Honor MagicOS 启动分析覆盖配置
+# =============================================================================
+# 版本: 1.0.0
+# 基于: base/startup
+# 适用: 荣耀设备 (MagicOS)
+# =============================================================================
+
+extends: base/startup
+version: "1.0.0"
+
+meta:
+  display_name: "Honor MagicOS 启动分析"
+  description: "针对荣耀 MagicOS 优化的启动分析，包含 TurboX 检测"
+  vendor: honor
+  os: MagicOS
+
+# -----------------------------------------------------------------------------
+# 厂商检测规则
+# -----------------------------------------------------------------------------
+vendor_detection:
+  signatures:
+    - pattern: "*MagicOS*"
+      confidence: high
+    - pattern: "*Honor*"
+      confidence: high
+    - pattern: "*honor*"
+      confidence: high
+    - pattern: "*TurboX*"
+      confidence: high
+    - pattern: "*Magic*"
+      confidence: medium
+
+# -----------------------------------------------------------------------------
+# 额外分析步骤
+# -----------------------------------------------------------------------------
+additional_steps:
+  # 检测 Honor 优化引擎
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: honor_turbo_engine
+    name: "Honor TurboX 引擎检测"
+    description: "检查 GPU Turbo、Link Turbo 等优化是否生效"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as turbo_event,
+        s.dur / 1e6 as dur_ms,
+        (s.ts - (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})) / 1e6 as relative_ts_ms
+      FROM slice s
+      WHERE (s.name GLOB '*TurboX*'
+             OR s.name GLOB '*GPUTurbo*'
+             OR s.name GLOB '*LinkTurbo*'
+             OR s.name GLOB '*MagicOS*'
+             OR s.name GLOB '*Honor*Boost*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.ts ASC
+
+  # Honor 系统服务
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: honor_system_services
+    name: "Honor 系统服务调用"
+    for_each: startups
+    sql: |
+      SELECT
+        server_process,
+        client_dur / 1e6 as dur_ms,
+        COUNT(*) as call_count
+      FROM android_binder_txns
+      WHERE client_process GLOB '${package}*'
+        AND (server_process GLOB '*honor*'
+             OR server_process GLOB '*Honor*'
+             OR server_process GLOB '*magic*')
+        AND client_ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND client_ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      GROUP BY server_process
+      ORDER BY SUM(client_dur) DESC
+
+# -----------------------------------------------------------------------------
+# 覆盖判断标准
+# -----------------------------------------------------------------------------
+thresholds_override:
+  cold_start_time:
+    levels:
+      excellent: { max: 420 }
+      good: { min: 420, max: 850 }
+      warning: { min: 850, max: 1400 }
+      critical: { min: 1400 }
+
+# -----------------------------------------------------------------------------
+# 额外诊断规则
+# -----------------------------------------------------------------------------
+additional_diagnostics:
+  - id: turbo_not_active
+    condition: "honor_turbo_engine.count == 0"
+    severity: info
+    message: "未检测到 TurboX 加速"
+    suggestions:
+      - "检查应用是否支持 GPU Turbo"
+      - "联系 Honor 系统工程师确认优化策略"
+
+# -----------------------------------------------------------------------------
+# Honor 特有的 Trace Tag 参考
+# -----------------------------------------------------------------------------
+# MagicOS 系统:
+#   - MagicOS.* : MagicOS 系统相关
+#   - TurboX.* : TurboX 加速引擎
+#   - GPUTurbo : GPU 加速
+#   - LinkTurbo : 网络加速
+#
+# Honor 服务:
+#   - Honor.* : Honor 系统服务
+#   - Magic* : Magic 系列功能

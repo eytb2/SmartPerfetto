@@ -600,6 +600,8 @@ export interface PerfettoSqlResponse {
   details?: Record<string, unknown>;
   /** AI context enriched with official Perfetto SQL patterns */
   aiContext?: string;
+  /** Error message if the analysis failed */
+  error?: string;
 }
 
 /**

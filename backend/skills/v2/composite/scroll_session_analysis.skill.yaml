@@ -1,0 +1,324 @@
+# =============================================================================
+# 滑动区间分析 v2.1（组合 Skill）
+# =============================================================================
+# 分析单个完整滑动区间的性能
+#
+# 一次完整滑动 = 按压滑动阶段(Touch) + Fling阶段
+# 分别统计两个阶段的 FPS 和掉帧情况
+
+name: scroll_session_analysis
+version: "2.1"
+type: composite
+
+meta:
+  display_name: "滑动区间分析"
+  description: "分析单个滑动区间的帧性能，区分按压滑动和Fling阶段"
+  icon: "analytics"
+  tags: [scrolling, session, touch, fling, composite]
+
+inputs:
+  - name: session_id
+    type: number
+    required: true
+  - name: start_ts
+    type: timestamp
+    required: true
+  - name: end_ts
+    type: timestamp
+    required: true
+  - name: duration_ms
+    type: number
+    required: false
+  - name: frame_count
+    type: number
+    required: false
+  # 按压滑动阶段
+  - name: touch_start_ts
+    type: timestamp
+    required: false
+  - name: touch_end_ts
+    type: timestamp
+    required: false
+  - name: touch_duration_ms
+    type: number
+    required: false
+  # Fling 阶段
+  - name: fling_start_ts
+    type: timestamp
+    required: false
+  - name: fling_end_ts
+    type: timestamp
+    required: false
+  - name: fling_duration_ms
+    type: number
+    required: false
+  - name: has_fling
+    type: number
+    required: false
+
+context:
+  - package
+  - vsync_period_ns
+  - refresh_rate_hz
+
+steps:
+  # ========== 完整区间帧统计 ==========
+  - id: full_session_stats
+    type: atomic
+    name: "完整区间统计"
+    display:
+      level: summary
+      title: "区间 ${session_id} - 完整滑动统计"
+    sql: |
+      WITH frames AS (
+        SELECT
+          ts,
+          dur,
+          dur / 1e6 AS dur_ms,
+          CASE
+            WHEN dur > 16666666 * 2 THEN 1
+            ELSE 0
+          END AS is_janky
+        FROM slice
+        WHERE (name GLOB '*doFrame*' OR name GLOB '*Choreographer#doFrame*' OR name GLOB '*DrawFrame*')
+          AND ts >= ${start_ts}
+          AND ts <= ${end_ts}
+      )
+      SELECT
+        ${session_id} AS session_id,
+        COUNT(*) AS total_frames,
+        SUM(is_janky) AS janky_frames,
+        ROUND(100.0 * SUM(is_janky) / NULLIF(COUNT(*), 0), 2) AS jank_rate,
+        ROUND(AVG(dur_ms), 2) AS avg_frame_ms,
+        ROUND(MAX(dur_ms), 2) AS max_frame_ms,
+        ROUND(MIN(dur_ms), 2) AS min_frame_ms,
+        ROUND(1000.0 / NULLIF(AVG(dur_ms), 0), 1) AS estimated_fps,
+        ROUND((${end_ts} - ${start_ts}) / 1e6, 1) AS duration_ms
+      FROM frames
+    save_as: full_stats
+
+  # ========== 按压滑动阶段统计 ==========
+  - id: touch_phase_stats
+    type: atomic
+    name: "按压滑动阶段统计"
+    display:
+      level: detail
+      title: "区间 ${session_id} - 按压滑动阶段"
+    sql: |
+      WITH touch_frames AS (
+        SELECT
+          ts,
+          dur,
+          dur / 1e6 AS dur_ms,
+          CASE
+            WHEN dur > 16666666 * 2 THEN 1
+            ELSE 0
+          END AS is_janky
+        FROM slice
+        WHERE (name GLOB '*doFrame*' OR name GLOB '*Choreographer#doFrame*' OR name GLOB '*DrawFrame*')
+          AND ts >= ${touch_start_ts}
+          AND ts <= ${touch_end_ts}
+      )
+      SELECT
+        'touch' AS phase,
+        COUNT(*) AS frame_count,
+        SUM(is_janky) AS janky_count,
+        ROUND(100.0 * SUM(is_janky) / NULLIF(COUNT(*), 0), 2) AS jank_rate,
+        ROUND(AVG(dur_ms), 2) AS avg_frame_ms,
+        ROUND(MAX(dur_ms), 2) AS max_frame_ms,
+        ROUND(1000.0 / NULLIF(AVG(dur_ms), 0), 1) AS fps,
+        ROUND((${touch_end_ts} - ${touch_start_ts}) / 1e6, 1) AS duration_ms
+      FROM touch_frames
+    save_as: touch_stats
+    # 仅当有 touch 阶段时执行
+    condition: touch_start_ts != null
+
+  # ========== Fling 阶段统计 ==========
+  - id: fling_phase_stats
+    type: atomic
+    name: "Fling 阶段统计"
+    display:
+      level: detail
+      title: "区间 ${session_id} - Fling 阶段"
+    sql: |
+      WITH fling_frames AS (
+        SELECT
+          ts,
+          dur,
+          dur / 1e6 AS dur_ms,
+          CASE
+            WHEN dur > 16666666 * 2 THEN 1
+            ELSE 0
+          END AS is_janky
+        FROM slice
+        WHERE (name GLOB '*doFrame*' OR name GLOB '*Choreographer#doFrame*' OR name GLOB '*DrawFrame*')
+          AND ts >= ${fling_start_ts}
+          AND ts <= ${fling_end_ts}
+      )
+      SELECT
+        'fling' AS phase,
+        COUNT(*) AS frame_count,
+        SUM(is_janky) AS janky_count,
+        ROUND(100.0 * SUM(is_janky) / NULLIF(COUNT(*), 0), 2) AS jank_rate,
+        ROUND(AVG(dur_ms), 2) AS avg_frame_ms,
+        ROUND(MAX(dur_ms), 2) AS max_frame_ms,
+        ROUND(1000.0 / NULLIF(AVG(dur_ms), 0), 1) AS fps,
+        ROUND((${fling_end_ts} - ${fling_start_ts}) / 1e6, 1) AS duration_ms
+      FROM fling_frames
+    save_as: fling_stats
+    # 仅当有 Fling 阶段时执行
+    condition: has_fling == 1
+
+  # ========== 识别掉帧 ==========
+  - id: identify_janky_frames
+    type: atomic
+    name: "识别掉帧"
+    display:
+      level: detail
+      title: "掉帧列表 (区间 ${session_id})"
+    sql: |
+      WITH frames AS (
+        SELECT
+          ts,
+          dur,
+          dur / 1e6 AS dur_ms,
+          CASE
+            WHEN ts < ${touch_end_ts} THEN 'touch'
+            ELSE 'fling'
+          END AS phase,
+          ROW_NUMBER() OVER (ORDER BY ts) AS frame_number
+        FROM slice
+        WHERE (name GLOB '*doFrame*' OR name GLOB '*Choreographer#doFrame*' OR name GLOB '*DrawFrame*')
+          AND ts >= ${start_ts}
+          AND ts <= ${end_ts}
+      )
+      SELECT
+        frame_number,
+        phase,
+        printf('%d', ts) as ts_str,
+        printf('%d', dur) as dur_str,
+        ROUND(dur_ms, 2) AS dur_ms,
+        CASE
+          WHEN dur_ms > 50 THEN 'severe'
+          WHEN dur_ms > 33 THEN 'bad'
+          WHEN dur_ms > 16.67 THEN 'jank'
+          ELSE 'normal'
+        END AS jank_level,
+        ROUND(dur_ms / 16.67, 1) AS frames_dropped
+      FROM frames
+      WHERE dur_ms > 16.67  -- 超过 16.67ms 为掉帧
+      ORDER BY dur_ms DESC
+      LIMIT 20
+    save_as: janky_frames
+
+  # ========== 对严重掉帧进行深度分析 ==========
+  - id: analyze_janky_frames
+    type: iterator
+    name: "掉帧原因分析"
+    source: janky_frames
+    item_skill: janky_frame_analysis
+    item_params:
+      frame_ts: ts_str
+      frame_dur: dur_str
+    display:
+      level: key
+      title: "掉帧原因分析 (区间 ${session_id})"
+      format: table
+      columns:
+        - frame_number
+        - phase
+        - dur_ms
+        - diagnosis
+        - confidence
+    save_as: frame_diagnostics
+    max_items: 10
+    # 仅分析严重掉帧
+    filter: jank_level == 'severe' OR jank_level == 'bad'
+
+  # ========== 区间诊断 ==========
+  - id: session_diagnosis
+    type: diagnostic
+    name: "区间诊断"
+    display:
+      level: summary
+      title: "区间 ${session_id} 诊断"
+    inputs: [full_stats, touch_stats, fling_stats, janky_frames]
+    rules:
+      # 整体掉帧率诊断
+      - condition: "${full_stats.data[0].jank_rate} > 15"
+        severity: critical
+        diagnosis: "滑动掉帧率过高 (${full_stats.data[0].jank_rate}%)"
+        confidence: high
+        suggestions:
+          - "检查主线程耗时操作"
+          - "优化列表项布局复杂度"
+          - "使用 RecyclerView 的 setHasFixedSize 和 setItemViewCacheSize"
+
+      - condition: "${full_stats.data[0].jank_rate} > 5"
+        severity: warning
+        diagnosis: "滑动存在掉帧 (${full_stats.data[0].jank_rate}%)"
+        confidence: medium
+        suggestions:
+          - "检查 onBindViewHolder 耗时"
+          - "避免在滑动时加载图片"
+
+      # 严重卡顿诊断
+      - condition: "${full_stats.data[0].max_frame_ms} > 100"
+        severity: critical
+        diagnosis: "存在严重卡顿帧 (最大 ${full_stats.data[0].max_frame_ms}ms)"
+        confidence: high
+        suggestions:
+          - "检查是否有 IO 操作在主线程"
+          - "检查是否有同步 Binder 调用"
+          - "分析可能的 ANR 风险"
+
+      # 按压阶段 vs Fling 阶段对比
+      - condition: "${touch_stats.data[0].jank_rate} > ${fling_stats.data[0].jank_rate} * 2"
+        severity: warning
+        diagnosis: "按压滑动阶段掉帧更严重"
+        confidence: medium
+        suggestions:
+          - "检查 dispatchTouchEvent 链路"
+          - "优化手势响应代码"
+
+      - condition: "${fling_stats.data[0].jank_rate} > ${touch_stats.data[0].jank_rate} * 2"
+        severity: warning
+        diagnosis: "Fling 阶段掉帧更严重"
+        confidence: medium
+        suggestions:
+          - "检查 Fling 动画计算"
+          - "优化滑动曲线计算逻辑"
+
+      # 帧率诊断
+      - condition: "${full_stats.data[0].estimated_fps} < 50"
+        severity: warning
+        diagnosis: "帧率偏低 (${full_stats.data[0].estimated_fps} fps)"
+        confidence: medium
+        suggestions:
+          - "优化 onDraw 方法"
+          - "减少过度绘制"
+          - "使用硬件加速"
+
+output:
+  display:
+    level: summary
+    format: summary
+  fields:
+    - name: session_id
+      label: "区间"
+    - name: duration_ms
+      label: "时长(ms)"
+    - name: total_frames
+      label: "总帧数"
+    - name: janky_frames
+      label: "掉帧数"
+    - name: jank_rate
+      label: "掉帧率(%)"
+    - name: estimated_fps
+      label: "帧率(fps)"
+    - name: touch_fps
+      label: "按压帧率"
+      source: touch_stats.data[0].fps
+    - name: fling_fps
+      label: "Fling帧率"
+      source: fling_stats.data[0].fps

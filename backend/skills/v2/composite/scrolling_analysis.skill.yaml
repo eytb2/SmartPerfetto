@@ -1,0 +1,300 @@
+# =============================================================================
+# 滑动性能分析 v2.1（组合 Skill）
+# =============================================================================
+# 专业的滑动性能分析流程
+#
+# 滑动分析知识：
+# 1. 一次完整滑动 = 按压滑动阶段 + Fling 阶段
+#    - 按压滑动阶段 (Touch/Scroll): 手指在屏幕上滑动，View 根据 input 报点更新
+#    - Fling 阶段: 手指抬起后的惯性滑动，View 位置根据滑动曲线计算
+# 2. 一份 Trace 可能有多个完整滑动区间，需要分别分析
+# 3. FPS 统计：完整滑动 FPS + 单独的 Fling FPS
+# 4. 最终汇总：所有区间的 FPS、掉帧数、原因等
+
+name: scrolling_analysis
+version: "2.1"
+type: composite
+
+meta:
+  display_name: "滑动性能分析"
+  description: "分析滑动过程中的掉帧问题及原因，区分按压滑动和Fling阶段"
+  icon: "swipe"
+  tags: [scrolling, jank, fps, fling, touch, composite]
+
+triggers:
+  keywords:
+    zh: [滑动, 卡顿, 帧率, 掉帧, 丢帧, FPS, 流畅度, 列表滑动, fling]
+    en: [scroll, jank, fps, frame, fling, stutter, smoothness, list]
+  patterns:
+    - ".*滑动.*卡.*"
+    - ".*scroll.*jank.*"
+    - ".*帧率.*低.*"
+    - ".*fling.*"
+
+prerequisites:
+  modules:
+    - android.frames.timeline
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "应用包名（可选，不填则分析所有应用）"
+
+steps:
+  # ========== 环境检测 ==========
+  - id: detect_refresh_rate
+    type: atomic
+    name: "检测刷新率"
+    display:
+      level: summary
+      title: "环境信息"
+    sql: |
+      WITH vsync_intervals AS (
+        SELECT
+          ts,
+          LEAD(ts) OVER (ORDER BY ts) - ts AS interval_ns
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        WHERE s.name GLOB '*VSYNC*' OR s.name GLOB '*HW_VSYNC*'
+        LIMIT 1000
+      )
+      SELECT
+        CASE
+          WHEN AVG(interval_ns) < 9000000 THEN 120
+          WHEN AVG(interval_ns) < 12000000 THEN 90
+          ELSE 60
+        END AS refresh_rate_hz,
+        ROUND(AVG(interval_ns) / 1e6, 2) AS vsync_period_ms,
+        PRINTF('%.2fms', AVG(interval_ns) / 1e6) AS vsync_period_display
+      FROM vsync_intervals
+      WHERE interval_ns > 5000000 AND interval_ns < 20000000
+    save_as: environment
+
+  # ========== 识别完整滑动区间（按压+Fling）==========
+  - id: find_scroll_sessions
+    type: atomic
+    name: "识别完整滑动区间"
+    display:
+      level: summary
+      title: "检测到的滑动区间"
+    sql: |
+      -- 完整滑动区间检测（简化版）
+      -- 基于连续帧渲染来识别滑动区间
+
+      -- Step 1: 获取所有渲染帧
+      WITH frame_events AS (
+        SELECT
+          ts,
+          dur,
+          ts + dur AS frame_end,
+          LAG(ts + dur) OVER (ORDER BY ts) AS prev_frame_end
+        FROM slice
+        WHERE name GLOB '*Choreographer#doFrame*'
+           OR name GLOB '*doFrame*'
+           OR name GLOB '*DrawFrame*'
+        ORDER BY ts
+      ),
+
+      -- Step 2: 标记连续帧（间隔 < 50ms 视为连续）
+      marked_frames AS (
+        SELECT
+          ts,
+          dur,
+          frame_end,
+          CASE
+            WHEN prev_frame_end IS NULL THEN 1
+            WHEN ts - prev_frame_end > 50000000 THEN 1  -- 间隔 > 50ms，新区间开始
+            ELSE 0
+          END AS new_session
+        FROM frame_events
+      ),
+
+      -- Step 3: 分配 session ID
+      session_groups AS (
+        SELECT
+          ts,
+          dur,
+          frame_end,
+          SUM(new_session) OVER (ORDER BY ts) AS session_id
+        FROM marked_frames
+      ),
+
+      -- Step 4: 聚合成滑动区间
+      sessions AS (
+        SELECT
+          session_id,
+          MIN(ts) AS start_ts,
+          MAX(frame_end) AS end_ts,
+          COUNT(*) AS frame_count,
+          ROUND((MAX(frame_end) - MIN(ts)) / 1e6, 1) AS duration_ms,
+          ROUND(AVG(dur) / 1e6, 2) AS avg_frame_ms,
+          ROUND(MAX(dur) / 1e6, 2) AS max_frame_ms
+        FROM session_groups
+        GROUP BY session_id
+        HAVING COUNT(*) >= 5  -- 至少5帧
+          AND (MAX(frame_end) - MIN(ts)) > 100000000  -- 至少100ms
+      )
+
+      -- 最终输出
+      SELECT
+        ROW_NUMBER() OVER (ORDER BY start_ts) AS session_id,
+        start_ts,
+        end_ts,
+        duration_ms,
+        frame_count,
+        avg_frame_ms,
+        max_frame_ms,
+        -- 暂时不区分 touch/fling，整个区间作为滑动
+        start_ts AS touch_start_ts,
+        end_ts AS touch_end_ts,
+        duration_ms AS touch_duration_ms,
+        NULL AS fling_start_ts,
+        NULL AS fling_end_ts,
+        0 AS fling_duration_ms,
+        0 AS has_fling
+      FROM sessions
+      ORDER BY start_ts
+      LIMIT 20
+    save_as: scroll_sessions
+
+  # ========== 分析每个完整滑动区间 ==========
+  - id: analyze_sessions
+    type: iterator
+    name: "区间详细分析"
+    source: scroll_sessions
+    item_skill: scroll_session_analysis
+    item_params:
+      session_id: session_id
+      start_ts: start_ts
+      end_ts: end_ts
+      duration_ms: duration_ms
+      frame_count: frame_count
+      touch_start_ts: touch_start_ts
+      touch_end_ts: touch_end_ts
+      touch_duration_ms: touch_duration_ms
+      fling_start_ts: fling_start_ts
+      fling_end_ts: fling_end_ts
+      fling_duration_ms: fling_duration_ms
+      has_fling: has_fling
+    display:
+      level: detail
+      title: "各区间分析"
+      aggregate: true
+    save_as: session_results
+    max_items: 10
+    skip_if_empty: true
+
+  # ========== 汇总统计 ==========
+  - id: aggregate_stats
+    type: atomic
+    name: "汇总统计"
+    display:
+      level: key
+      title: "滑动性能汇总"
+    sql: |
+      -- 汇总所有滑动区间的统计数据
+      WITH all_frames AS (
+        SELECT
+          ts,
+          dur,
+          dur / 1e6 AS frame_ms,
+          CASE
+            WHEN dur > 16666666 * 2 THEN 1  -- 超过2帧时间视为掉帧
+            ELSE 0
+          END AS is_janky
+        FROM slice
+        WHERE (name GLOB '*doFrame*' OR name GLOB '*Choreographer#doFrame*' OR name GLOB '*DrawFrame*')
+          -- 仅统计滑动区间内的帧
+          AND EXISTS (
+            SELECT 1 FROM (
+              SELECT start_ts, end_ts FROM (${scroll_sessions})
+            ) s WHERE ts >= s.start_ts AND ts <= s.end_ts
+          )
+      ),
+      frame_stats AS (
+        SELECT
+          COUNT(*) AS total_frames,
+          SUM(is_janky) AS janky_frames,
+          ROUND(100.0 * SUM(is_janky) / COUNT(*), 1) AS jank_rate,
+          ROUND(AVG(frame_ms), 2) AS avg_frame_ms,
+          ROUND(MAX(frame_ms), 2) AS max_frame_ms,
+          ROUND(MIN(frame_ms), 2) AS min_frame_ms,
+          ROUND(1000.0 / AVG(frame_ms), 1) AS estimated_fps
+        FROM all_frames
+      )
+      SELECT
+        (SELECT COUNT(*) FROM (${scroll_sessions})) AS total_sessions,
+        (SELECT SUM(CASE WHEN has_fling = 1 THEN 1 ELSE 0 END) FROM (${scroll_sessions})) AS sessions_with_fling,
+        total_frames,
+        janky_frames,
+        jank_rate || '%' AS jank_rate_display,
+        avg_frame_ms || 'ms' AS avg_frame_display,
+        max_frame_ms || 'ms' AS max_frame_display,
+        estimated_fps || ' fps' AS fps_display,
+        CASE
+          WHEN jank_rate < 1 THEN '优秀'
+          WHEN jank_rate < 5 THEN '良好'
+          WHEN jank_rate < 15 THEN '一般'
+          ELSE '较差'
+        END AS performance_rating
+      FROM frame_stats
+    save_as: summary_stats
+    # 仅在有滑动区间时执行
+    condition: scroll_sessions.data.length > 0
+
+  # ========== 全局总结 ==========
+  - id: global_summary
+    type: ai_summary
+    name: "分析总结"
+    display:
+      level: key
+      title: "分析总结"
+    inputs: [environment, scroll_sessions, session_results, summary_stats]
+    prompt: |
+      请基于以下滑动分析结果，生成专业的性能评估总结。
+
+      ## 环境信息
+      刷新率: ${environment.data[0].refresh_rate_hz}Hz
+      Vsync周期: ${environment.data[0].vsync_period_ms}ms
+
+      ## 滑动区间检测
+      共检测到 ${scroll_sessions.data.length} 个完整滑动区间
+
+      ## 汇总统计
+      ${summary_stats}
+
+      ## 各区间详细分析
+      ${session_results}
+
+      ## 专业分析要求
+
+      如果滑动区间数量为0，请输出：
+      "未检测到完整的滑动操作。
+
+      一次完整滑动包括：按压滑动阶段（手指在屏幕上滑动）+ Fling阶段（惯性滑动）。
+
+      可能原因：
+      - Trace采集期间未进行列表滑动操作
+      - 滑动时间过短（<100ms）未被识别
+
+      建议：请在Trace采集期间进行完整的列表滑动操作（按住-滑动-抬手）后重新分析。"
+
+      如果检测到滑动区间，请分析并输出：
+      1. **整体评价**：基于掉帧率给出评价（<1%优秀，<5%良好，<15%一般，>=15%较差）
+      2. **阶段分析**：
+         - 按压滑动阶段的表现
+         - Fling阶段的表现（如有）
+         - 哪个阶段问题更严重
+      3. **关键指标**：总帧数、掉帧数、掉帧率、平均帧耗时、最大帧耗时
+      4. **优化建议**：基于实际问题给出1-3条具体建议
+
+      ## 严格要求
+      - 只基于提供的实际数据分析，不要编造数据
+      - 区分按压滑动和Fling阶段分别说明
+      - 格式清晰，不超过300字
+
+output:
+  display:
+    level: key
+    format: summary

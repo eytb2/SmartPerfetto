@@ -3,28 +3,102 @@
  *
  * API endpoints for Perfetto SQL-based trace analysis.
  * All SQL patterns are based on official Perfetto documentation.
+ *
+ * Architecture:
+ * - Uses SkillExecutor (YAML-based) for skills that have YAML definitions
+ * - Falls back to PerfettoSqlSkill (hardcoded) for legacy endpoints
  */
 
 import express from 'express';
 import { PerfettoSqlSkill } from '../services/perfettoSqlSkill';
 import { PerfettoSkillType } from '../types/perfettoSql';
 import type { PerfettoSqlRequest } from '../types/perfettoSql';
+import { SkillAnalysisAdapter, createSkillAnalysisAdapter } from '../services/skillEngine/skillAnalysisAdapter';
 
 const router = express.Router();
 
-// Shared TraceProcessorService instance (same as in other route modules)
-let _sharedTraceProcessorService: any = null;
-const getSharedTraceProcessorService = () => {
-  if (!_sharedTraceProcessorService) {
-    const { TraceProcessorService } = require('../services/traceProcessorService');
-    _sharedTraceProcessorService = new TraceProcessorService();
+// Use the shared TraceProcessorService singleton
+import { getTraceProcessorService } from '../services/traceProcessorService';
+
+// Get the shared TraceProcessorService instance
+const traceProcessorService = getTraceProcessorService();
+const perfettoSqlSkill = new PerfettoSqlSkill(traceProcessorService);
+
+// Skill Engine adapter (uses YAML-based skills)
+let skillAdapter: SkillAnalysisAdapter | null = null;
+const getSkillAdapter = (): SkillAnalysisAdapter => {
+  if (!skillAdapter) {
+    skillAdapter = createSkillAnalysisAdapter(traceProcessorService);
   }
-  return _sharedTraceProcessorService;
+  return skillAdapter;
 };
 
-// Initialize services
-const traceProcessorService = getSharedTraceProcessorService();
-const perfettoSqlSkill = new PerfettoSqlSkill(traceProcessorService);
+// Mapping from route skill names to YAML skill IDs
+const SKILL_ID_MAP: Record<string, string> = {
+  startup: 'startup_analysis',
+  scrolling: 'scrolling_analysis',
+  memory: 'memory_analysis',
+  cpu: 'cpu_analysis',
+  binder: 'binder_analysis',
+  surfaceflinger: 'surfaceflinger_analysis',
+  navigation: 'navigation_analysis',
+  'click-response': 'click_response_analysis',
+};
+
+// Flag to enable/disable Skill Engine (can be controlled via env var)
+const USE_SKILL_ENGINE = process.env.USE_SKILL_ENGINE !== 'false';
+
+/**
+ * Execute analysis using the Skill Engine
+ * Returns null if skill not found (will fallback to legacy)
+ */
+async function executeWithSkillEngine(
+  skillId: string,
+  traceId: string,
+  packageName?: string
+): Promise<any | null> {
+  if (!USE_SKILL_ENGINE) {
+    return null;
+  }
+
+  try {
+    const adapter = getSkillAdapter();
+    await adapter.ensureInitialized();
+
+    const skill = await adapter.getSkillDetail(skillId);
+    if (!skill) {
+      console.log(`[PerfettoSql] Skill ${skillId} not found in YAML, using legacy`);
+      return null;
+    }
+
+    console.log(`[PerfettoSql] Using Skill Engine for: ${skillId}`);
+    const startTime = Date.now();
+
+    const result = await adapter.analyze({
+      traceId,
+      skillId,
+      packageName,
+    });
+
+    console.log(`[PerfettoSql] Skill ${skillId} completed in ${Date.now() - startTime}ms`);
+
+    // Convert to legacy format with enhanced data
+    return {
+      analysisType: skillId,
+      skillEngine: true,
+      skillName: result.skillName,
+      vendor: result.vendor,
+      sections: result.sections,
+      diagnostics: result.diagnostics,
+      summary: result.summary,
+      executionTimeMs: result.executionTimeMs,
+      success: result.success,
+    };
+  } catch (error: any) {
+    console.error(`[PerfettoSql] Skill Engine error for ${skillId}:`, error.message);
+    return null; // Fallback to legacy
+  }
+}
 
 // ============================================================================
 // Routes
@@ -89,6 +163,7 @@ router.post('/analyze', async (req, res) => {
  * POST /api/perfetto-sql/startup
  *
  * Analyze app startup performance (cold/warm/hot)
+ * Uses YAML Skill Engine with fallback to legacy
  *
  * Body: { traceId, packageName? }
  * Response: Startup analysis results
@@ -104,6 +179,16 @@ router.post('/startup', async (req, res) => {
       });
     }
 
+    // Try Skill Engine first
+    const skillResult = await executeWithSkillEngine(SKILL_ID_MAP.startup, traceId, packageName);
+    if (skillResult) {
+      return res.json({
+        success: true,
+        ...skillResult,
+      });
+    }
+
+    // Fallback to legacy
     const result = await perfettoSqlSkill.analyzeStartup(traceId, packageName);
 
     res.json({
@@ -123,6 +208,7 @@ router.post('/startup', async (req, res) => {
  * POST /api/perfetto-sql/scrolling
  *
  * Analyze scrolling performance and jank
+ * Uses YAML Skill Engine with fallback to legacy
  *
  * Body: { traceId, packageName? }
  * Response: Scrolling analysis results
@@ -138,6 +224,16 @@ router.post('/scrolling', async (req, res) => {
       });
     }
 
+    // Try Skill Engine first
+    const skillResult = await executeWithSkillEngine(SKILL_ID_MAP.scrolling, traceId, packageName);
+    if (skillResult) {
+      return res.json({
+        success: true,
+        ...skillResult,
+      });
+    }
+
+    // Fallback to legacy
     const result = await perfettoSqlSkill.analyzeScrolling(traceId, packageName);
 
     res.json({
@@ -157,6 +253,7 @@ router.post('/scrolling', async (req, res) => {
  * POST /api/perfetto-sql/memory
  *
  * Analyze memory usage (GC, allocations, OOM)
+ * Uses YAML Skill Engine with fallback to legacy
  *
  * Body: { traceId, packageName? }
  * Response: Memory analysis results
@@ -172,6 +269,16 @@ router.post('/memory', async (req, res) => {
       });
     }
 
+    // Try Skill Engine first
+    const skillResult = await executeWithSkillEngine(SKILL_ID_MAP.memory, traceId, packageName);
+    if (skillResult) {
+      return res.json({
+        success: true,
+        ...skillResult,
+      });
+    }
+
+    // Fallback to legacy
     const result = await perfettoSqlSkill.analyzeMemory(traceId, packageName);
 
     res.json({
@@ -191,6 +298,7 @@ router.post('/memory', async (req, res) => {
  * POST /api/perfetto-sql/cpu
  *
  * Analyze CPU utilization
+ * Uses YAML Skill Engine with fallback to legacy
  *
  * Body: { traceId, packageName? }
  * Response: CPU analysis results
@@ -206,6 +314,16 @@ router.post('/cpu', async (req, res) => {
       });
     }
 
+    // Try Skill Engine first
+    const skillResult = await executeWithSkillEngine(SKILL_ID_MAP.cpu, traceId, packageName);
+    if (skillResult) {
+      return res.json({
+        success: true,
+        ...skillResult,
+      });
+    }
+
+    // Fallback to legacy
     const result = await perfettoSqlSkill.analyzeCpu(traceId, packageName);
 
     res.json({
@@ -225,13 +343,14 @@ router.post('/cpu', async (req, res) => {
  * POST /api/perfetto-sql/surfaceflinger
  *
  * Analyze SurfaceFlinger performance
+ * Uses YAML Skill Engine with fallback to legacy
  *
  * Body: { traceId }
  * Response: SurfaceFlinger analysis results
  */
 router.post('/surfaceflinger', async (req, res) => {
   try {
-    const { traceId } = req.body;
+    const { traceId, packageName } = req.body;
 
     if (!traceId) {
       return res.status(400).json({
@@ -240,6 +359,16 @@ router.post('/surfaceflinger', async (req, res) => {
       });
     }
 
+    // Try Skill Engine first
+    const skillResult = await executeWithSkillEngine(SKILL_ID_MAP.surfaceflinger, traceId, packageName);
+    if (skillResult) {
+      return res.json({
+        success: true,
+        ...skillResult,
+      });
+    }
+
+    // Fallback to legacy
     const result = await perfettoSqlSkill.analyzeSurfaceFlinger(traceId);
 
     res.json({
@@ -259,6 +388,7 @@ router.post('/surfaceflinger', async (req, res) => {
  * POST /api/perfetto-sql/binder
  *
  * Analyze Binder transaction performance
+ * Uses YAML Skill Engine with fallback to legacy
  *
  * Body: { traceId, packageName? }
  * Response: Binder analysis results
@@ -274,6 +404,16 @@ router.post('/binder', async (req, res) => {
       });
     }
 
+    // Try Skill Engine first
+    const skillResult = await executeWithSkillEngine(SKILL_ID_MAP.binder, traceId, packageName);
+    if (skillResult) {
+      return res.json({
+        success: true,
+        ...skillResult,
+      });
+    }
+
+    // Fallback to legacy
     const result = await perfettoSqlSkill.analyzeBinder(traceId, packageName);
 
     res.json({
@@ -470,6 +610,7 @@ router.post('/sql', async (req, res) => {
  * POST /api/perfetto-sql/navigation
  *
  * Analyze navigation/activity switching performance
+ * Uses YAML Skill Engine with fallback to legacy
  *
  * Body: { traceId, packageName? }
  * Response: Navigation analysis results
@@ -485,6 +626,16 @@ router.post('/navigation', async (req, res) => {
       });
     }
 
+    // Try Skill Engine first
+    const skillResult = await executeWithSkillEngine(SKILL_ID_MAP.navigation, traceId, packageName);
+    if (skillResult) {
+      return res.json({
+        success: true,
+        ...skillResult,
+      });
+    }
+
+    // Fallback to legacy
     const result = await perfettoSqlSkill.analyzeNavigation(traceId, packageName);
 
     res.json({
@@ -504,6 +655,7 @@ router.post('/navigation', async (req, res) => {
  * POST /api/perfetto-sql/click-response
  *
  * Analyze click/tap response performance
+ * Uses YAML Skill Engine with fallback to legacy
  *
  * Body: { traceId, packageName? }
  * Response: Click response analysis results
@@ -519,6 +671,16 @@ router.post('/click-response', async (req, res) => {
       });
     }
 
+    // Try Skill Engine first
+    const skillResult = await executeWithSkillEngine(SKILL_ID_MAP['click-response'], traceId, packageName);
+    if (skillResult) {
+      return res.json({
+        success: true,
+        ...skillResult,
+      });
+    }
+
+    // Fallback to legacy
     const result = await perfettoSqlSkill.analyzeClickResponse(traceId, packageName);
 
     res.json({

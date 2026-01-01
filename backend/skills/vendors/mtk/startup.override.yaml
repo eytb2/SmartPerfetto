@@ -1,0 +1,129 @@
+# =============================================================================
+# MTK (MediaTek) 平台启动分析覆盖配置
+# =============================================================================
+# 版本: 1.0.0
+# 基于: base/startup
+# 适用: 联发科平台设备
+# =============================================================================
+
+extends: base/startup
+version: "1.0.0"
+
+meta:
+  display_name: "MTK 平台启动分析"
+  description: "针对联发科平台优化的启动分析"
+  vendor: mtk
+  platform: MediaTek
+
+# -----------------------------------------------------------------------------
+# 平台检测规则
+# -----------------------------------------------------------------------------
+vendor_detection:
+  signatures:
+    - pattern: "*MTK*"
+      confidence: high
+    - pattern: "*MediaTek*"
+      confidence: high
+    - pattern: "*MTKFB*"
+      confidence: high
+    - pattern: "*mtk*"
+      confidence: medium
+    - pattern: "*Dimensity*"
+      confidence: medium
+    - pattern: "*Helio*"
+      confidence: medium
+
+# -----------------------------------------------------------------------------
+# 额外分析步骤
+# -----------------------------------------------------------------------------
+additional_steps:
+  # MTK 平台特有分析
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: mtk_platform_events
+    name: "MTK 平台事件"
+    description: "分析 MTK 平台特有的系统事件"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as mtk_event,
+        s.dur / 1e6 as dur_ms,
+        (s.ts - (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})) / 1e6 as relative_ts_ms
+      FROM slice s
+      WHERE (s.name GLOB '*MTK*'
+             OR s.name GLOB '*MTKFB*'
+             OR s.name GLOB '*MediaTek*'
+             OR s.name GLOB '*PerfService*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.ts ASC
+
+  # MTK 性能服务
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: mtk_perf_service
+    name: "MTK 性能服务"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as perf_event,
+        s.dur / 1e6 as dur_ms
+      FROM slice s
+      WHERE (s.name GLOB '*PerfService*'
+             OR s.name GLOB '*PowerHal*'
+             OR s.name GLOB '*fps_policy*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.dur DESC
+
+  # MTK GPU 分析
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: mtk_gpu_analysis
+    name: "MTK GPU 分析"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as gpu_event,
+        s.dur / 1e6 as dur_ms
+      FROM slice s
+      WHERE (s.name GLOB '*Mali*'
+             OR s.name GLOB '*PowerVR*'
+             OR s.name GLOB '*IMG*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.dur DESC
+      LIMIT 20
+
+# -----------------------------------------------------------------------------
+# MTK CPU 核心配置说明
+# -----------------------------------------------------------------------------
+# 常见 MTK 芯片核心配置:
+#
+# Dimensity 9300 (旗舰):
+#   - CPU 0-3: Cortex-A520 小核
+#   - CPU 4-6: Cortex-A720 中核
+#   - CPU 7: Cortex-X4 超大核
+#
+# Dimensity 8300:
+#   - CPU 0-3: Cortex-A510 小核
+#   - CPU 4-7: Cortex-A715 大核
+#
+# Helio G99:
+#   - CPU 0-5: Cortex-A55 小核
+#   - CPU 6-7: Cortex-A76 大核
+
+# -----------------------------------------------------------------------------
+# MTK 特有的 Trace Tag 参考
+# -----------------------------------------------------------------------------
+# 系统服务:
+#   - MTK* : MTK 平台服务
+#   - MTKFB : 显示框架
+#   - PerfService : 性能调度服务
+#   - PowerHal : 电源管理
+#
+# GPU 相关:
+#   - Mali* : Mali GPU (部分设备)
+#   - PowerVR* : PowerVR GPU (部分设备)
+#   - IMG* : Imagination GPU
+#
+# 调度相关:
+#   - fps_policy : 帧率策略
+#   - cpu_ctrl : CPU 控制

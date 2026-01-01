@@ -1,10 +1,10 @@
 import { Request, Response } from 'express';
-import { TraceProcessorService } from '../services/traceProcessorService';
+import { getTraceProcessorService } from '../services/traceProcessorService';
 import multer from 'multer';
 import path from 'path';
 
-// Initialize trace processor service
-const traceService = new TraceProcessorService();
+// Get the shared TraceProcessorService singleton
+const traceService = getTraceProcessorService();
 
 // Configure multer for file uploads
 const storage = multer.memoryStorage();

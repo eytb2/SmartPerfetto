@@ -16,6 +16,10 @@ import { TraceProcessorService } from './traceProcessorService';
 import { AnalysisSessionService } from './analysisSessionService';
 import SQLValidator from './sqlValidator';
 import { PerfettoSqlSkill } from './perfettoSqlSkill';
+import { SkillAnalysisAdapter, getSkillAnalysisAdapter } from './skillEngine/skillAnalysisAdapter';
+import { SkillAnalysisAdapterV2, getSkillAnalysisAdapterV2 } from './skillEngine/skillAnalysisAdapterV2';
+import { SkillEventCollector, createEventCollector } from './skillEngine/eventCollector';
+import { SkillEvent } from './skillEngine/types_v2';
 import { SessionPersistenceService } from './sessionPersistenceService';
 import { StoredSession, StoredMessage } from '../models/sessionSchema';
 import PromptTemplateService from './promptTemplateService';
@@ -47,6 +51,10 @@ export class PerfettoAnalysisOrchestrator {
   private openai?: OpenAI;
   private isConfigured: boolean;
   private perfettoSqlSkill?: PerfettoSqlSkill;
+  private skillAdapter: SkillAnalysisAdapter;
+  private skillAdapterV2: SkillAnalysisAdapterV2;
+  private skillEngineInitialized: boolean = false;
+  private skillEngineV2Initialized: boolean = false;
 
   constructor(
     traceProcessor: TraceProcessorService,
@@ -58,6 +66,8 @@ export class PerfettoAnalysisOrchestrator {
     this.sessionService = sessionService;
     this.sqlValidator = new SQLValidator();
     this.perfettoSqlSkill = perfettoSqlSkill;
+    this.skillAdapter = getSkillAnalysisAdapter(traceProcessor);
+    this.skillAdapterV2 = getSkillAnalysisAdapterV2(traceProcessor);
 
     // Default configuration
     this.config = {
@@ -105,6 +115,54 @@ export class PerfettoAnalysisOrchestrator {
   }
 
   /**
+   * Assess question complexity to determine which model to use
+   * Complex questions benefit from deepseek-reasoner (with thinking)
+   * Simple questions can use faster deepseek-chat
+   */
+  private assessQuestionComplexity(question: string): 'simple' | 'complex' {
+    const complexPatterns = [
+      // Chinese patterns
+      /为什么|原因|分析|诊断|优化|建议|瓶颈|问题|调优/i,
+      /启动|卡顿|ANR|内存泄漏|性能瓶颈|帧率|掉帧|卡死/i,
+      /多个|对比|比较|关联|综合|完整|详细|深入/i,
+      // English patterns
+      /why|reason|analyze|diagnose|optimize|suggest|bottleneck/i,
+      /startup|jank|ANR|memory leak|performance|frame drop/i,
+      /multiple|compare|correlation|comprehensive|detailed|deep/i,
+      /root cause|how to improve|what causes/i,
+    ];
+
+    const isComplex = complexPatterns.some(pattern => pattern.test(question));
+    console.log(`[Orchestrator] Question complexity: ${isComplex ? 'complex' : 'simple'} for: "${question.substring(0, 50)}..."`);
+    return isComplex ? 'complex' : 'simple';
+  }
+
+  /**
+   * Get the appropriate model based on question complexity
+   */
+  private getModelForQuestion(question: string): { model: string; temperature: number; maxTokens: number } {
+    const complexity = this.assessQuestionComplexity(question);
+    const defaultModel = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
+
+    if (complexity === 'complex') {
+      // Use deepseek-reasoner for complex questions if configured
+      const reasonerModel = process.env.DEEPSEEK_REASONER_MODEL || 'deepseek-reasoner';
+      return {
+        model: reasonerModel,
+        temperature: 0.5,
+        maxTokens: 4000,
+      };
+    }
+
+    // Use faster chat model for simple questions
+    return {
+      model: defaultModel,
+      temperature: 0.3,
+      maxTokens: 2000,
+    };
+  }
+
+  /**
    * Start analysis for a session
    */
   public async startAnalysis(sessionId: string): Promise<void> {
@@ -120,7 +178,7 @@ export class PerfettoAnalysisOrchestrator {
       id: session.id,
       traceId: session.traceId,
       question: session.question,
-      state: session.state
+      status: session.status
     });
 
     // Verify trace exists
@@ -159,6 +217,12 @@ export class PerfettoAnalysisOrchestrator {
     const maxIterations = session.maxIterations;
     const startTime = Date.now();
 
+    // 重复检测：用于检测相同SQL或相同结果的重复
+    let lastSql = '';
+    let lastRowCount = -1;
+    let repeatCount = 0;
+    const MAX_REPEATS = 2;  // 连续重复2次就停止
+
     // Main loop
     while (session.currentIteration < maxIterations) {
       this.sessionService.incrementIteration(sessionId);
@@ -185,6 +249,100 @@ export class PerfettoAnalysisOrchestrator {
         console.log(`[Orchestrator] Explanation:`, sqlResult.explanation);
       }
 
+      // =========================================================================
+      // Handle Skill Engine results directly (skip SQL execution)
+      // =========================================================================
+      if (sqlResult.skillEngineResult) {
+        console.log(`[Orchestrator] Skill Engine result available, using directly`);
+        const skillResult = sqlResult.skillEngineResult;
+
+        // Emit skill_started event
+        this.emitProgress(sessionId, 'skill_started', `🚀 正在执行 ${skillResult.skillName} 分析...`);
+
+        // Emit each section as a separate event with data for frontend display
+        let sectionIndex = 0;
+        for (const [sectionId, sectionData] of Object.entries(skillResult.sections)) {
+          sectionIndex++;
+          if (!sectionData) continue;
+
+          // Handle for_each steps: array of {itemIndex, item, data, rowCount}
+          let tableData: { columns: string[]; rows: any[][]; rowCount: number } | null = null;
+          let sectionTitle = sectionId;
+
+          if (Array.isArray(sectionData)) {
+            // Collect all data from for_each iterations
+            const allRows: any[][] = [];
+            let columns: string[] = [];
+
+            for (const itemResult of sectionData) {
+              if (itemResult && itemResult.data && Array.isArray(itemResult.data)) {
+                // Get columns from first row with data
+                if (columns.length === 0 && itemResult.data.length > 0) {
+                  columns = Object.keys(itemResult.data[0]);
+                }
+                // Add rows
+                for (const row of itemResult.data) {
+                  allRows.push(columns.map(col => row[col]));
+                }
+              }
+            }
+
+            if (allRows.length > 0) {
+              tableData = { columns, rows: allRows, rowCount: allRows.length };
+            }
+          }
+          // Handle regular steps: {title, data, rowCount, sql}
+          else if (sectionData.data && Array.isArray(sectionData.data) && sectionData.data.length > 0) {
+            sectionTitle = sectionData.title || sectionId;
+            const columns = Object.keys(sectionData.data[0]);
+            const rows = sectionData.data.map((row: any) => columns.map(col => row[col]));
+            tableData = { columns, rows, rowCount: rows.length };
+          }
+
+          // Emit section data event
+          if (tableData) {
+            this.emitSkillSection(sessionId, {
+              sectionId,
+              sectionTitle,
+              sectionIndex,
+              totalSections: Object.keys(skillResult.sections).length,
+              columns: tableData.columns,
+              rows: tableData.rows,
+              rowCount: tableData.rowCount,
+              sql: sectionData.sql || undefined,
+            });
+          }
+        }
+
+        // Emit diagnostics if any
+        if (skillResult.diagnostics && skillResult.diagnostics.length > 0) {
+          this.emitSkillDiagnostics(sessionId, skillResult.diagnostics);
+        }
+
+        // Collect results for final answer
+        const collectedResult: CollectedResult = {
+          sql: `-- Skill: ${skillResult.skillId}`,
+          result: {
+            columns: ['section', 'data'],
+            rows: Object.entries(skillResult.sections).map(([k, v]) => [k, JSON.stringify(v)]),
+            rowCount: Object.keys(skillResult.sections).length,
+            durationMs: skillResult.executionTimeMs,
+          },
+          insight: sqlResult.explanation,
+          timestamp: Date.now(),
+          stepNumber: iteration,
+        };
+        this.sessionService.addCollectedResult(sessionId, collectedResult);
+
+        // Generate final answer from skill results
+        console.log('[Orchestrator] Generating final answer from Skill Engine results...');
+        this.emitProgress(sessionId, 'generating_answer', '✍️ 正在生成分析报告...');
+        const skillAnswer = await this.generateFinalAnswerFromSkill(sessionId, skillResult, sqlResult.explanation);
+        this.sessionService.completeSession(sessionId, skillAnswer);
+        this.emitCompleted(sessionId, skillAnswer, startTime);
+        return;
+      }
+
       if (!sqlResult.sql) {
         // AI couldn't generate SQL, try to answer directly
         console.log('[Orchestrator] No SQL generated, calling generateDirectAnswer...');
@@ -194,6 +352,21 @@ export class PerfettoAnalysisOrchestrator {
         this.emitCompleted(sessionId, directAnswer, startTime);
         return;
       }
+
+      // 重复检测：检查是否生成了相同的SQL
+      const sqlNormalized = sqlResult.sql.replace(/\s+/g, ' ').trim();
+      const lastSqlNormalized = lastSql.replace(/\s+/g, ' ').trim();
+      if (sqlNormalized === lastSqlNormalized) {
+        repeatCount++;
+        console.log(`[Orchestrator] Detected repeated SQL (count: ${repeatCount})`);
+        if (repeatCount >= MAX_REPEATS) {
+          console.log('[Orchestrator] Breaking due to repeated SQL');
+          break;
+        }
+      } else {
+        repeatCount = 0;
+      }
+      lastSql = sqlResult.sql;
 
       // Emit SQL generated event
       this.emitSQLGenerated(sessionId, iteration, sqlResult.sql, sqlResult.explanation);
@@ -240,16 +413,42 @@ export class PerfettoAnalysisOrchestrator {
           return;
         }
 
-        // Ask AI to adjust approach
-        console.log('[Orchestrator] Retrying with adjusted prompt...');
+        // Ask AI to adjust approach with diagnosis of trace contents
+        console.log('[Orchestrator] Retrying with adjusted prompt and trace diagnosis...');
         this.sessionService.updateState(sessionId, AnalysisState.RETRYING);
-        const adjustPrompt = this.buildAdjustPrompt(sqlResult.sql, sqlResult.explanation);
-        console.log('[Orchestrator] Adjusted prompt:', adjustPrompt.substring(0, 150) + '...');
+        this.emitProgress(sessionId, 'diagnosing', '🔍 正在诊断 trace 内容...');
+        const adjustPrompt = await this.buildAdjustPromptWithDiagnosis(
+          session.traceId,
+          sqlResult.sql,
+          sqlResult.explanation
+        );
+        console.log('[Orchestrator] Adjusted prompt with diagnosis:', adjustPrompt.substring(0, 300) + '...');
         currentQuestion = adjustPrompt;
         continue;
       }
 
       console.log(`[Orchestrator] Iteration ${iteration} - SUCCESS! Got ${queryResult.rowCount} rows`);
+
+      // 重复检测：检查是否获得相同行数的结果（可能是相同数据）
+      if (queryResult.rowCount === lastRowCount && queryResult.rowCount > 0) {
+        repeatCount++;
+        console.log(`[Orchestrator] Detected repeated row count (count: ${repeatCount})`);
+        if (repeatCount >= MAX_REPEATS) {
+          console.log('[Orchestrator] Breaking due to repeated results');
+          // 先收集当前结果，再退出
+          const insight = await this.analyzeQueryResult(sessionId, sqlResult.sql, queryResult);
+          const collectedResult: CollectedResult = {
+            sql: sqlResult.sql,
+            result: queryResult,
+            insight,
+            timestamp: Date.now(),
+            stepNumber: iteration,
+          };
+          this.sessionService.addCollectedResult(sessionId, collectedResult);
+          break;
+        }
+      }
+      lastRowCount = queryResult.rowCount;
 
       // Step 5: Collect successful result
       this.emitProgress(sessionId, 'analyzing', '📊 正在分析结果...');
@@ -315,17 +514,189 @@ export class PerfettoAnalysisOrchestrator {
     // Get enriched AI context from the skill (with official Perfetto SQL patterns)
     let enrichedAIContext = '';
 
-    // Try Perfetto SQL Skill first if available
+    // =========================================================================
+    // Step 1: Try Skill Engine first (YAML-based skills)
+    // Only on first iteration - retries should use AI for fixing SQL errors
+    // =========================================================================
+    const isFirstIteration = session.currentIteration <= 1;
+
+    if (isFirstIteration) {
+      // =========================================================================
+      // Try v2 Skill Engine first (new composable skills)
+      // =========================================================================
+      try {
+        if (!this.skillEngineV2Initialized) {
+          await this.skillAdapterV2.ensureInitialized();
+
+          // 注入 AI 服务到 v2 skill engine
+          if (this.openai && this.isConfigured) {
+            const aiModel = this.config.aiService === 'deepseek'
+              ? (process.env.DEEPSEEK_MODEL || 'deepseek-chat')
+              : (process.env.OPENAI_MODEL || 'gpt-4');
+
+            this.skillAdapterV2.setAIService({
+              chat: async (prompt: string) => {
+                try {
+                  const completion = await this.openai!.chat.completions.create({
+                    model: aiModel,
+                    messages: [
+                      {
+                        role: 'system',
+                        content: 'You are a performance analysis expert. Analyze the data provided and give concise, actionable insights in Chinese. Focus on root causes and specific recommendations.',
+                      },
+                      { role: 'user', content: prompt },
+                    ],
+                    temperature: 0.3,
+                    max_tokens: 1024,
+                  });
+                  return completion.choices[0]?.message?.content || '';
+                } catch (error: any) {
+                  console.error('[Orchestrator] AI service call failed:', error.message);
+                  return '';
+                }
+              },
+            });
+            console.log('[Orchestrator] AI service injected to Skill Engine v2');
+          }
+
+          this.skillEngineV2Initialized = true;
+          console.log('[Orchestrator] Skill Engine v2 initialized');
+        }
+
+        // Detect intent from question using v2 skill registry
+        const skillIdV2 = this.skillAdapterV2.detectIntent(question);
+
+        if (skillIdV2) {
+          console.log(`[Orchestrator] Skill Engine v2 matched: ${skillIdV2} for question: "${question}"`);
+
+          // Extract package name from question if present
+          const packageMatch = question.match(/([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)+)/);
+          const packageName = packageMatch ? packageMatch[1] : undefined;
+
+          const skillResultV2 = await this.skillAdapterV2.analyze({
+            traceId: session.traceId,
+            skillId: skillIdV2,
+            question,
+            packageName,
+          });
+
+          if (skillResultV2.success && Object.keys(skillResultV2.sections).length > 0) {
+            console.log(`[Orchestrator] Skill Engine v2 executed successfully: ${skillIdV2}`);
+
+            // Generate summary SQL from skill sections for display
+            const sectionKeys = Object.keys(skillResultV2.sections);
+            const firstSection = skillResultV2.sections[sectionKeys[0]];
+            const displaySql = firstSection?.sql || `-- Skill v2: ${skillIdV2}\n-- Executed ${sectionKeys.length} analysis steps`;
+
+            // 优先使用 directAnswer（直接回答用户问题），否则使用 summary
+            const explanation = skillResultV2.directAnswer || skillResultV2.summary;
+
+            return {
+              sql: displaySql,
+              explanation,
+              skillEngineResult: {
+                skillId: skillResultV2.skillId,
+                skillName: skillResultV2.skillName,
+                sections: skillResultV2.sections,
+                diagnostics: skillResultV2.diagnostics,
+                vendor: skillResultV2.vendor,
+                executionTimeMs: skillResultV2.executionTimeMs,
+                // v2 新增字段
+                directAnswer: skillResultV2.directAnswer,
+                summary: skillResultV2.summary,
+                questionType: skillResultV2.questionType,
+                answerConfidence: skillResultV2.answerConfidence,
+              },
+            };
+          } else {
+            console.log(`[Orchestrator] Skill Engine v2 returned no data for: ${skillIdV2}, falling back to v1`);
+          }
+        } else {
+          console.log(`[Orchestrator] Skill Engine v2 no match for: "${question}", trying v1`);
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.log('[Orchestrator] Skill Engine v2 failed:', errorMessage, '- falling back to v1');
+      }
+
+      // =========================================================================
+      // Try v1 Skill Engine (legacy YAML skills)
+      // =========================================================================
+      try {
+        // Initialize skill registry if needed
+        if (!this.skillEngineInitialized) {
+          await this.skillAdapter.ensureInitialized();
+          this.skillEngineInitialized = true;
+          console.log('[Orchestrator] Skill Engine v1 initialized');
+        }
+
+        // Detect intent from question
+        const skillId = this.skillAdapter.detectIntent(question);
+
+        if (skillId) {
+          console.log(`[Orchestrator] Skill Engine matched: ${skillId} for question: "${question}"`);
+
+          // Extract package name from question if present
+          const packageMatch = question.match(/([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)+)/);
+          const packageName = packageMatch ? packageMatch[1] : undefined;
+          if (packageName) {
+            console.log(`[Orchestrator] Extracted package name: ${packageName}`);
+          }
+
+          const skillResult = await this.skillAdapter.analyze({
+            traceId: session.traceId,
+            skillId,
+            question,
+            packageName,
+          });
+
+          if (skillResult.success && Object.keys(skillResult.sections).length > 0) {
+            console.log(`[Orchestrator] Skill Engine executed successfully: ${skillId}`);
+
+            // Generate summary SQL from skill sections for display
+            const sectionKeys = Object.keys(skillResult.sections);
+            const firstSection = skillResult.sections[sectionKeys[0]];
+            const displaySql = firstSection?.sql || `-- Skill: ${skillId}\n-- Executed ${sectionKeys.length} analysis steps`;
+
+            return {
+              sql: displaySql,
+              explanation: skillResult.summary,
+              skillEngineResult: {
+                skillId: skillResult.skillId,
+                skillName: skillResult.skillName,
+                sections: skillResult.sections,
+                diagnostics: skillResult.diagnostics,
+                vendor: skillResult.vendor,
+                executionTimeMs: skillResult.executionTimeMs,
+              },
+            };
+          } else {
+            console.log(`[Orchestrator] Skill Engine returned no data for: ${skillId}, falling back`);
+          }
+        } else {
+          console.log(`[Orchestrator] Skill Engine no match for: "${question}", trying legacy skill`);
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.log('[Orchestrator] Skill Engine failed:', errorMessage, '- falling back to legacy');
+      }
+    } else {
+      console.log(`[Orchestrator] Skipping Skill Engine (iteration ${session.currentIteration}), using AI for retry`);
+    }
+
+    // =========================================================================
+    // Step 2: Try legacy Perfetto SQL Skill
+    // =========================================================================
     if (this.perfettoSqlSkill) {
       try {
-        console.log('[Orchestrator] Using Perfetto SQL Skill for:', question);
+        console.log('[Orchestrator] Using legacy Perfetto SQL Skill for:', question);
         const perfettoResult = await this.perfettoSqlSkill.analyze({
           traceId: session.traceId,
           question,
         });
 
         if (perfettoResult.sql && perfettoResult.rowCount >= 0) {
-          console.log('[Orchestrator] Perfetto SQL Skill generated SQL successfully');
+          console.log('[Orchestrator] Legacy Perfetto SQL Skill generated SQL successfully');
           return {
             sql: perfettoResult.sql,
             explanation: perfettoResult.summary,
@@ -339,7 +710,7 @@ export class PerfettoAnalysisOrchestrator {
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        console.log('[Orchestrator] Perfetto SQL Skill failed, falling back to AI:', errorMessage);
+        console.log('[Orchestrator] Legacy Perfetto SQL Skill failed, falling back to AI:', errorMessage);
       }
 
       // Try to get enriched context even if skill didn't return SQL
@@ -364,11 +735,15 @@ export class PerfettoAnalysisOrchestrator {
     }
 
     try {
+      // Use dynamic model based on question complexity
+      const modelConfig = this.getModelForQuestion(question);
+      console.log(`[Orchestrator] Using model: ${modelConfig.model} for SQL generation`);
+
       const completion = await this.openai.chat.completions.create({
-        model: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+        model: modelConfig.model,
         messages,
-        temperature: 0.3,
-        max_tokens: 2000,
+        temperature: modelConfig.temperature,
+        max_tokens: modelConfig.maxTokens,
       });
 
       const response = completion.choices[0]?.message?.content || '';
@@ -479,6 +854,22 @@ export class PerfettoAnalysisOrchestrator {
   /**
    * Evaluate if result is complete
    */
+  /**
+   * Format a sample of query results for AI evaluation
+   */
+  private formatDataSample(result: QueryResult): string {
+    if (result.rowCount === 0) return '(无数据)';
+
+    // Show column names and first 5 rows
+    const header = result.columns.join(' | ');
+    const rows = result.rows.slice(0, 5)
+      .map((row: any[]) => row.map(v => String(v ?? 'NULL').substring(0, 50)).join(' | '))
+      .join('\n');
+
+    const moreRows = result.rowCount > 5 ? `\n... (还有 ${result.rowCount - 5} 行)` : '';
+    return `| ${header} |\n${rows}${moreRows}`;
+  }
+
   private async evaluateResultCompleteness(
     sessionId: string,
     question: string,
@@ -501,27 +892,46 @@ export class PerfettoAnalysisOrchestrator {
       };
     }
 
+    // Format data sample for AI evaluation
+    const dataSample = this.formatDataSample(result.result);
+
     const messages = [
       {
         role: 'system' as const,
-        content: `Evaluate if the query result sufficiently answers the user's question.
-Respond with a JSON object:
+        content: `你是 Perfetto trace 分析专家。评估当前查询结果是否足够回答用户问题。
+
+返回 JSON:
 {
   "isSufficient": true/false,
   "confidence": "high/medium/low",
-  "reasoning": "brief explanation",
-  "needsMoreData": true/false,
-  "suggestedNextSteps": ["optional next query to run"]
-}`,
+  "reasoning": "为什么足够/不足够",
+  "missingInfo": ["缺失的信息列表"],
+  "suggestedNextSteps": ["建议的下一步查询"]
+}
+
+评估标准:
+- 如果数据直接回答了用户问题的核心部分，则认为足够
+- 如果只有部分信息但不完整，则需要更多数据
+- 考虑数据是否有时间顺序、是否覆盖完整场景`,
       },
       {
         role: 'user' as const,
-        content: `User Question: "${question}"
-SQL: ${result.sql}
-Results: ${result.result.rowCount} rows found
-Insight: ${result.insight}
+        content: `用户问题: "${question}"
 
-Is this sufficient to answer the question?`,
+执行的查询:
+\`\`\`sql
+${result.sql}
+\`\`\`
+
+返回数据 (${result.result.rowCount} 行):
+${dataSample}
+
+当前分析: ${result.insight}
+
+请评估:
+1. 这些数据是否足够回答用户问题？
+2. 如果不够，还缺少什么信息？
+3. 建议下一步应该查询什么？`,
       },
     ];
 
@@ -530,8 +940,8 @@ Is this sufficient to answer the question?`,
         this.openai.chat.completions.create({
           model: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
           messages,
-          temperature: 0,
-          max_tokens: 300,
+          temperature: 0.5,  // Increased from 0 for more nuanced evaluation
+          max_tokens: 500,
           response_format: { type: 'json_object' },
         }),
         new Promise<never>((_, reject) =>
@@ -541,6 +951,12 @@ Is this sufficient to answer the question?`,
 
       const response = completion.choices[0]?.message?.content || '{}';
       const parsed = JSON.parse(response);
+
+      console.log('[Orchestrator] Evaluation result:', {
+        isSufficient: parsed.isSufficient,
+        confidence: parsed.confidence,
+        reasoning: parsed.reasoning?.substring(0, 100),
+      });
 
       return {
         completeness: parsed.isSufficient ? CompletenessLevel.COMPLETE : CompletenessLevel.PARTIAL,
@@ -624,6 +1040,115 @@ Provide a final answer that directly addresses the user's question. Include spec
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`[Orchestrator] Final answer generation error:`, errorMessage);
       return session.collectedResults.map((cr) => cr.insight).join('\n\n');
+    }
+  }
+
+  /**
+   * Generate final answer from Skill Engine results
+   */
+  private async generateFinalAnswerFromSkill(
+    sessionId: string,
+    skillResult: {
+      skillId: string;
+      skillName: string;
+      sections: Record<string, any>;
+      diagnostics: Array<{ id: string; severity: string; message: string; suggestions?: string[] }>;
+      vendor?: string;
+      executionTimeMs: number;
+    },
+    summary: string
+  ): Promise<string> {
+    const session = this.sessionService.getSession(sessionId);
+    if (!session) return 'Session not found';
+
+    // Build detailed data summary from sections
+    const sectionDetails: string[] = [];
+    for (const [sectionId, sectionData] of Object.entries(skillResult.sections)) {
+      if (!sectionData) continue;
+
+      // Handle for_each steps: array of {itemIndex, item, data, rowCount}
+      if (Array.isArray(sectionData)) {
+        const allData: any[] = [];
+        for (const itemResult of sectionData) {
+          if (itemResult && itemResult.data && Array.isArray(itemResult.data)) {
+            allData.push(...itemResult.data);
+          }
+        }
+        if (allData.length > 0) {
+          const dataPreview = allData.slice(0, 10).map((row: any) => JSON.stringify(row)).join('\n');
+          sectionDetails.push(`### ${sectionId} (${allData.length} 条记录)\n${dataPreview}`);
+        }
+      }
+      // Handle regular steps: {title, data, rowCount, sql}
+      else if (sectionData.data && Array.isArray(sectionData.data)) {
+        const dataPreview = sectionData.data.slice(0, 10).map((row: any) => JSON.stringify(row)).join('\n');
+        sectionDetails.push(`### ${sectionId} (${sectionData.data.length} 条记录)\n${dataPreview}`);
+      }
+    }
+
+    // Build diagnostics summary
+    const diagnosticDetails = skillResult.diagnostics
+      .map(d => `- [${d.severity.toUpperCase()}] ${d.message}${d.suggestions ? '\n  建议: ' + d.suggestions.join(', ') : ''}`)
+      .join('\n');
+
+    if (!this.isConfigured || !this.openai) {
+      // Return raw skill summary if AI not configured
+      return `## ${skillResult.skillName} 分析结果\n\n${summary}\n\n### 诊断结果\n${diagnosticDetails || '无诊断问题'}\n\n### 详细数据\n${sectionDetails.join('\n\n')}`;
+    }
+
+    // Use AI to generate a natural language answer
+    // Note: Keep the summary concise - detailed data is already shown in tables
+    const messages = [
+      {
+        role: 'system' as const,
+        content: `你是一个 Android 性能分析专家。基于 Skill Engine 的分析结果，生成一份**简洁**的性能评估总结。
+
+要求：
+- 简洁明了，不超过 300 字
+- 只输出核心结论和性能评估
+- **不要**输出具体的优化建议（前端会单独显示诊断结果）
+- **不要**重复列出详细数据（前端已经用表格显示了）
+- 使用表情符号增加可读性
+
+格式示例：
+📊 **性能评估：良好**
+该应用冷启动耗时 301.84ms，处于优秀水平。主线程 CPU 利用率 68.5%，系统调度良好。
+主要耗时点：布局加载(42ms)、Activity创建(86ms)。`,
+      },
+      {
+        role: 'user' as const,
+        content: `用户问题: "${session.question}"
+
+分析类型: ${skillResult.skillName}
+执行耗时: ${skillResult.executionTimeMs}ms
+${skillResult.vendor ? `厂商: ${skillResult.vendor}` : ''}
+
+### 分析摘要
+${summary}
+
+### 诊断结果
+${diagnosticDetails || '无诊断问题'}
+
+### 详细数据预览
+${sectionDetails.slice(0, 3).join('\n\n')}
+
+请生成一份简洁的性能评估总结（不超过300字，不需要优化建议，不需要重复列出数据）。`,
+      },
+    ];
+
+    try {
+      const completion = await this.openai.chat.completions.create({
+        model: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+        messages,
+        temperature: 0.3,
+        max_tokens: 2000,
+      });
+
+      return completion.choices[0]?.message?.content || summary;
+    } catch (error) {
+      console.error('[Orchestrator] Failed to generate answer from skill results:', error);
+      // Fallback to raw summary
+      return `## ${skillResult.skillName} 分析结果\n\n${summary}\n\n### 诊断结果\n${diagnosticDetails || '无诊断问题'}`;
     }
   }
 
@@ -810,6 +1335,96 @@ Note: SQL queries couldn't be generated for this question. Please provide genera
     });
   }
 
+  /**
+   * Diagnose why a query returned empty results by exploring trace contents
+   */
+  private async diagnoseEmptyResult(traceId: string, failedSql: string): Promise<string> {
+    const diagnosisLines: string[] = [];
+
+    try {
+      // 1. Query what tables are available
+      const tablesResult = await this.traceProcessor.query(traceId,
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+      );
+      if (tablesResult.rows && tablesResult.rows.length > 0) {
+        const tableNames = tablesResult.rows.map((r: any[]) => r[0]).slice(0, 30);
+        diagnosisLines.push(`可用表: ${tableNames.join(', ')}`);
+      }
+
+      // 2. Query common slice names in the trace
+      const sliceNamesResult = await this.traceProcessor.query(traceId,
+        "SELECT name, COUNT(*) as cnt FROM slice WHERE name IS NOT NULL GROUP BY name ORDER BY cnt DESC LIMIT 20"
+      );
+      if (sliceNamesResult.rows && sliceNamesResult.rows.length > 0) {
+        const sliceNames = sliceNamesResult.rows.map((r: any[]) => `${r[0]}(${r[1]})`).slice(0, 15);
+        diagnosisLines.push(`常见 slice 事件: ${sliceNames.join(', ')}`);
+      }
+
+      // 3. Query process names
+      const processesResult = await this.traceProcessor.query(traceId,
+        "SELECT name FROM process WHERE name IS NOT NULL AND name != '' GROUP BY name ORDER BY name LIMIT 20"
+      );
+      if (processesResult.rows && processesResult.rows.length > 0) {
+        const processNames = processesResult.rows.map((r: any[]) => r[0]);
+        diagnosisLines.push(`进程列表: ${processNames.join(', ')}`);
+      }
+
+      // 4. Check if android_startup table exists and has data
+      const startupCheck = await this.traceProcessor.query(traceId,
+        "SELECT COUNT(*) FROM android_startup_processes"
+      );
+      if (startupCheck.rows && startupCheck.rows.length > 0) {
+        const count = startupCheck.rows[0][0] as number;
+        diagnosisLines.push(`android_startup_processes: ${count} 条记录`);
+      }
+
+      // 5. Check FrameTimeline data
+      const ftCheck = await this.traceProcessor.query(traceId,
+        "SELECT COUNT(*) FROM actual_frame_timeline_slice"
+      );
+      if (ftCheck.rows && ftCheck.rows.length > 0) {
+        const count = ftCheck.rows[0][0] as number;
+        diagnosisLines.push(`FrameTimeline frames: ${count} 帧`);
+      }
+    } catch (error) {
+      // Some queries may fail if tables don't exist, that's ok
+      console.log('[Orchestrator] Diagnosis query failed (expected for some traces):', error);
+    }
+
+    if (diagnosisLines.length === 0) {
+      return 'Trace 诊断: 无法获取 trace 元数据';
+    }
+
+    return `Trace 内容诊断:\n${diagnosisLines.map(l => `- ${l}`).join('\n')}`;
+  }
+
+  private async buildAdjustPromptWithDiagnosis(
+    traceId: string,
+    sql: string,
+    explanation: string
+  ): Promise<string> {
+    // Get diagnosis of trace contents
+    const diagnosis = await this.diagnoseEmptyResult(traceId, sql);
+
+    return `查询返回空结果，需要调整策略。
+
+原始查询:
+\`\`\`sql
+${sql}
+\`\`\`
+
+查询意图: ${explanation}
+
+${diagnosis}
+
+请分析:
+1. 为什么原查询返回空？WHERE 条件是否过于严格？
+2. 根据 trace 中实际存在的数据，应该如何调整查询？
+3. 是否需要换一种方式来回答用户的问题？
+
+请生成一个更合适的 SQL 查询。`;
+  }
+
   private buildAdjustPrompt(sql: string, explanation: string): string {
     // Use PromptTemplateService for unified template management
     const templateService = PromptTemplateService.getInstance();
@@ -952,6 +1567,8 @@ LIMIT 50;`,
   }
 
   private emitCompleted(sessionId: string, answer: string, startTime: number): void {
+    console.log(`[Orchestrator] emitCompleted called for session ${sessionId}`);
+    console.log(`[Orchestrator] Answer length: ${answer?.length || 0}`);
     const session = this.sessionService.getSession(sessionId);
     const event: AnalysisCompletedEvent = {
       type: 'analysis_completed',
@@ -966,7 +1583,9 @@ LIMIT 50;`,
         },
       },
     };
+    console.log(`[Orchestrator] Emitting analysis_completed event`);
     this.sessionService.emitSSE(sessionId, event);
+    console.log(`[Orchestrator] analysis_completed event emitted`);
   }
 
   private emitError(sessionId: string, error: string, recoverable: boolean): void {
@@ -976,6 +1595,37 @@ LIMIT 50;`,
       data: { error, recoverable },
     };
     this.sessionService.emitSSE(sessionId, event);
+  }
+
+  private emitSkillSection(
+    sessionId: string,
+    sectionData: {
+      sectionId: string;
+      sectionTitle: string;
+      sectionIndex: number;
+      totalSections: number;
+      columns: string[];
+      rows: any[][];
+      rowCount: number;
+      sql?: string;
+    }
+  ): void {
+    this.sessionService.emitSSE(sessionId, {
+      type: 'skill_section',
+      timestamp: Date.now(),
+      data: sectionData,
+    });
+  }
+
+  private emitSkillDiagnostics(
+    sessionId: string,
+    diagnostics: Array<{ id: string; severity: string; message: string; suggestions?: string[] }>
+  ): void {
+    this.sessionService.emitSSE(sessionId, {
+      type: 'skill_diagnostics',
+      timestamp: Date.now(),
+      data: { diagnostics },
+    });
   }
 }
 

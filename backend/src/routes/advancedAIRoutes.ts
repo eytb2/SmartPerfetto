@@ -9,6 +9,9 @@ import {
   deleteSession,
   executeQuery,
   getSmartSummary,
+  getLearningStats,
+  getLearningReport,
+  triggerLearning,
 } from '../controllers/advancedAIController';
 import { authenticate } from '../middleware/auth';
 
@@ -33,5 +36,10 @@ router.get('/summary/:traceId', getSmartSummary);
 
 // Query execution
 router.post('/query', executeQuery);
+
+// SQL Learning system
+router.get('/learning/stats', getLearningStats);
+router.get('/learning/report', getLearningReport);
+router.post('/learning/train', triggerLearning);
 
 export default router;

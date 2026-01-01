@@ -1,0 +1,171 @@
+# =============================================================================
+# Qualcomm (高通) 平台启动分析覆盖配置
+# =============================================================================
+# 版本: 1.0.0
+# 基于: base/startup
+# 适用: 高通平台设备 (Snapdragon)
+# =============================================================================
+
+extends: base/startup
+version: "1.0.0"
+
+meta:
+  display_name: "高通平台启动分析"
+  description: "针对高通 Snapdragon 平台优化的启动分析"
+  vendor: qualcomm
+  platform: Snapdragon
+
+# -----------------------------------------------------------------------------
+# 平台检测规则
+# -----------------------------------------------------------------------------
+vendor_detection:
+  signatures:
+    - pattern: "*QTI*"
+      confidence: high
+    - pattern: "*Qualcomm*"
+      confidence: high
+    - pattern: "*qualcomm*"
+      confidence: high
+    - pattern: "*Adreno*"
+      confidence: high
+    - pattern: "*Snapdragon*"
+      confidence: medium
+    - pattern: "*qcom*"
+      confidence: medium
+
+# -----------------------------------------------------------------------------
+# 额外分析步骤
+# -----------------------------------------------------------------------------
+additional_steps:
+  # 高通平台事件分析
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: qualcomm_platform_events
+    name: "高通平台事件"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as qcom_event,
+        s.dur / 1e6 as dur_ms,
+        (s.ts - (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})) / 1e6 as relative_ts_ms
+      FROM slice s
+      WHERE (s.name GLOB '*QTI*'
+             OR s.name GLOB '*Qualcomm*'
+             OR s.name GLOB '*qcom*'
+             OR s.name GLOB '*QSEE*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.ts ASC
+
+  # Adreno GPU 分析
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: adreno_gpu_analysis
+    name: "Adreno GPU 分析"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as gpu_event,
+        s.dur / 1e6 as dur_ms,
+        (s.ts - (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})) / 1e6 as relative_ts_ms
+      FROM slice s
+      WHERE (s.name GLOB '*Adreno*'
+             OR s.name GLOB '*adreno*'
+             OR s.name GLOB '*gpu*fence*'
+             OR s.name GLOB '*kgsl*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.dur DESC
+      LIMIT 20
+
+  # 高通性能服务
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: qualcomm_perf_service
+    name: "高通性能服务"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as perf_event,
+        s.dur / 1e6 as dur_ms
+      FROM slice s
+      WHERE (s.name GLOB '*perf-hal*'
+             OR s.name GLOB '*perflock*'
+             OR s.name GLOB '*boost*'
+             OR s.name GLOB '*hint*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.dur DESC
+
+  # DSP/NPU 使用
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: dsp_npu_usage
+    name: "DSP/NPU 使用分析"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as dsp_event,
+        s.dur / 1e6 as dur_ms
+      FROM slice s
+      WHERE (s.name GLOB '*DSP*'
+             OR s.name GLOB '*NPU*'
+             OR s.name GLOB '*Hexagon*'
+             OR s.name GLOB '*CDSP*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.dur DESC
+    optional: true
+
+# -----------------------------------------------------------------------------
+# 高通 CPU 核心配置说明
+# -----------------------------------------------------------------------------
+# 常见 Snapdragon 芯片核心配置:
+#
+# Snapdragon 8 Gen 3 (旗舰):
+#   - CPU 0-1: Cortex-A520 小核 (效率核)
+#   - CPU 2-4: Cortex-A720 中核 (性能核)
+#   - CPU 5: Cortex-X4 Prime 核
+#   - CPU 6-7: Cortex-X4 超大核
+#
+# Snapdragon 8 Gen 2:
+#   - CPU 0-1: Cortex-A510 小核
+#   - CPU 2-4: Cortex-A715/A710 中核
+#   - CPU 5-7: Cortex-X3 大核
+#
+# Snapdragon 778G:
+#   - CPU 0-3: Cortex-A55 小核
+#   - CPU 4-6: Cortex-A78 大核
+#   - CPU 7: Cortex-A78 Prime 核
+
+# -----------------------------------------------------------------------------
+# 额外诊断规则
+# -----------------------------------------------------------------------------
+additional_diagnostics:
+  - id: gpu_bottleneck
+    condition: "adreno_gpu_analysis.any.dur_ms > 16"
+    severity: warning
+    message: "Adreno GPU 操作耗时 ${dur_ms}ms，可能影响渲染"
+    suggestions:
+      - "检查是否有复杂的 GPU 计算"
+      - "优化着色器复杂度"
+      - "减少过度绘制"
+
+# -----------------------------------------------------------------------------
+# 高通特有的 Trace Tag 参考
+# -----------------------------------------------------------------------------
+# 系统服务:
+#   - QTI* : 高通技术相关
+#   - qcom* : 高通组件
+#   - QSEE : 安全执行环境
+#
+# GPU 相关:
+#   - Adreno* : Adreno GPU
+#   - kgsl* : 内核图形系统层
+#   - gpu* : GPU 相关
+#
+# 性能相关:
+#   - perf-hal : 性能 HAL
+#   - perflock : 性能锁
+#   - boost : 性能加速
+#
+# AI/ML 相关:
+#   - Hexagon : Hexagon DSP
+#   - CDSP : 计算 DSP
+#   - NPU : 神经处理单元

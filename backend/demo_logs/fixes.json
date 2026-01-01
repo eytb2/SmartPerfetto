@@ -1,0 +1,82 @@
+[
+  {
+    "id": "fix_1766920047115_ho5eg4ajx",
+    "timestamp": "2025-12-28T11:07:27.115Z",
+    "errorId": "err_1766920047115_ftgjmotyh",
+    "originalSQL": "SELECT * FROM app_launch WHERE ts > 1000",
+    "fixedSQL": "SELECT * FROM slice WHERE ts > 1000",
+    "fixMethod": "learned",
+    "success": true,
+    "validationResult": {
+      "isValid": true,
+      "errors": []
+    }
+  },
+  {
+    "id": "fix_1766920047116_1hu39om5h",
+    "timestamp": "2025-12-28T11:07:27.116Z",
+    "errorId": "err_1766920047116_lce9i91n5",
+    "originalSQL": "SELECT name, dur FROM app_launch LIMIT 10",
+    "fixedSQL": "SELECT name, dur FROM slice LIMIT 10",
+    "fixMethod": "learned",
+    "success": true,
+    "validationResult": {
+      "isValid": true,
+      "errors": []
+    }
+  },
+  {
+    "id": "fix_1766920047116_hcyblhrbn",
+    "timestamp": "2025-12-28T11:07:27.116Z",
+    "errorId": "err_1766920047116_44qrx88mc",
+    "originalSQL": "SELECT cpu, value FROM counter WHERE ts > 1000",
+    "fixedSQL": "SELECT cpu, value FROM counter WHERE ts > 1000",
+    "fixMethod": "auto",
+    "success": false,
+    "validationResult": {
+      "isValid": false,
+      "errors": [
+        "Column 'cpu' doesn't exist in table 'counter'"
+      ]
+    }
+  },
+  {
+    "id": "fix_1766920047117_qu5c2711x",
+    "timestamp": "2025-12-28T11:07:27.117Z",
+    "errorId": "err_1766920047117_uanvzqa5f",
+    "originalSQL": "SELECT ts FROM slice WHERE name = 'test1'",
+    "fixedSQL": "SELECT ts / 1e9 AS timestamp_s FROM slice WHERE name = 'test1'",
+    "fixMethod": "learned",
+    "success": true,
+    "validationResult": {
+      "isValid": true,
+      "errors": []
+    }
+  },
+  {
+    "id": "fix_1766920047117_0yleys547",
+    "timestamp": "2025-12-28T11:07:27.117Z",
+    "errorId": "err_1766920047117_9qe8m8vuy",
+    "originalSQL": "SELECT timestamp FROM slice WHERE name = 'test2'",
+    "fixedSQL": "SELECT timestamp FROM slice WHERE name = 'test2'",
+    "fixMethod": "auto",
+    "success": true,
+    "validationResult": {
+      "isValid": true,
+      "errors": []
+    }
+  },
+  {
+    "id": "fix_1766920047117_23gtwo2to",
+    "timestamp": "2025-12-28T11:07:27.117Z",
+    "errorId": "err_1766920047117_xv9sdu5vf",
+    "originalSQL": "SELECT ts, name FROM slice LIMIT 10",
+    "fixedSQL": "SELECT ts, name FROM slice LIMIT 10",
+    "fixMethod": "auto",
+    "success": true,
+    "validationResult": {
+      "isValid": true,
+      "errors": []
+    }
+  }
+]

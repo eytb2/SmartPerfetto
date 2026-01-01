@@ -1,0 +1,116 @@
+# =============================================================================
+# 小米 MIUI 启动分析覆盖配置
+# =============================================================================
+# 版本: 1.0.0
+# 基于: base/startup
+# 适用: 小米设备 (MIUI / HyperOS)
+# =============================================================================
+
+extends: base/startup
+version: "1.0.0"
+
+meta:
+  display_name: "小米 MIUI 启动分析"
+  description: "针对小米 MIUI/HyperOS 优化的启动分析"
+  vendor: xiaomi
+  os: MIUI/HyperOS
+
+# -----------------------------------------------------------------------------
+# 厂商检测规则
+# -----------------------------------------------------------------------------
+vendor_detection:
+  signatures:
+    - pattern: "*miui*"
+      confidence: high
+    - pattern: "*MIUI*"
+      confidence: high
+    - pattern: "*xiaomi*"
+      confidence: high
+    - pattern: "*Xiaomi*"
+      confidence: high
+    - pattern: "*HyperOS*"
+      confidence: high
+
+# -----------------------------------------------------------------------------
+# 额外分析步骤
+# -----------------------------------------------------------------------------
+additional_steps:
+  # 检测 MIUI 优化引擎
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: miui_optimization
+    name: "MIUI 优化检测"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as optimization_event,
+        s.dur / 1e6 as dur_ms,
+        (s.ts - (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})) / 1e6 as relative_ts_ms
+      FROM slice s
+      WHERE (s.name GLOB '*MIUI*'
+             OR s.name GLOB '*miui*'
+             OR s.name GLOB '*MiBoost*'
+             OR s.name GLOB '*Boost*Pool*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.ts ASC
+
+  # 小米云控/广告服务检测
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: xiaomi_cloud_services
+    name: "小米云服务检测"
+    description: "检查云控和推送服务对启动的影响"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as service_event,
+        s.dur / 1e6 as dur_ms,
+        t.name as thread_name
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name GLOB '${package}*'
+        AND (s.name GLOB '*MiPush*'
+             OR s.name GLOB '*XMPush*'
+             OR s.name GLOB '*Analytics*'
+             OR s.name GLOB '*cloud*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.dur > 1000000
+      ORDER BY s.dur DESC
+
+  # 检测内存优化 (LMKD)
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: memory_optimization
+    name: "内存优化状态"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as memory_event,
+        s.dur / 1e6 as dur_ms
+      FROM slice s
+      WHERE (s.name GLOB '*lmk*'
+             OR s.name GLOB '*memory*reclaim*'
+             OR s.name GLOB '*compaction*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.ts ASC
+
+# -----------------------------------------------------------------------------
+# 小米特有的 Trace Tag 参考
+# -----------------------------------------------------------------------------
+# MIUI 系统:
+#   - MIUI.* : MIUI 系统相关
+#   - MiuiBoost.* : MIUI 性能加速
+#   - MiBoost : 游戏加速
+#   - BoostPool : 线程池优化
+#
+# 小米服务:
+#   - MiPush : 小米推送
+#   - XMPush : 小米推送 (旧版)
+#   - MiCloud : 小米云服务
+#   - Analytics : 数据统计
+#
+# HyperOS (MIUI 15+):
+#   - HyperOS.* : HyperOS 系统相关
+#   - HyperConnect : 设备互联

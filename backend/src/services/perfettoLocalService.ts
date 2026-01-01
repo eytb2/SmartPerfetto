@@ -23,8 +23,11 @@ export class PerfettoLocalService extends EventEmitter {
 
   constructor() {
     super();
-    // Use the trace_processor_shell from Perfetto-Tools directory
-    this.traceProcessorPath = '/Users/chris/Code/SmartPerfetto/Perfetto-Tools/mac-amd64/trace_processor_shell';
+    // Use the trace_processor_shell - prefer locally built version with viz stdlib modules
+    // Can be overridden via TRACE_PROCESSOR_PATH environment variable
+    // Path: backend/src/services/ -> ../../../ -> perfetto/out/ui/
+    this.traceProcessorPath = process.env.TRACE_PROCESSOR_PATH ||
+      path.resolve(__dirname, '../../../perfetto/out/ui/trace_processor_shell');
 
     // Handle error events to prevent crashes
     this.on('error', (error) => {

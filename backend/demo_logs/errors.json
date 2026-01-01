@@ -1,0 +1,50 @@
+[
+  {
+    "id": "err_1766920047115_ftgjmotyh",
+    "timestamp": "2025-12-28T11:07:27.115Z",
+    "originalSQL": "SELECT * FROM app_launch WHERE ts > 1000",
+    "errorType": "TABLE_NOT_FOUND",
+    "errorMessage": "Table 'app_launch' doesn't exist",
+    "userQuery": "查询应用启动信息"
+  },
+  {
+    "id": "err_1766920047116_lce9i91n5",
+    "timestamp": "2025-12-28T11:07:27.116Z",
+    "originalSQL": "SELECT name, dur FROM app_launch LIMIT 10",
+    "errorType": "TABLE_NOT_FOUND",
+    "errorMessage": "Table 'app_launch' doesn't exist",
+    "userQuery": "获取启动数据"
+  },
+  {
+    "id": "err_1766920047116_44qrx88mc",
+    "timestamp": "2025-12-28T11:07:27.116Z",
+    "originalSQL": "SELECT cpu, value FROM counter WHERE ts > 1000",
+    "errorType": "TABLE_NOT_FOUND",
+    "errorMessage": "Column 'cpu' doesn't exist in table 'counter'",
+    "userQuery": "查询CPU信息"
+  },
+  {
+    "id": "err_1766920047117_uanvzqa5f",
+    "timestamp": "2025-12-28T11:07:27.117Z",
+    "originalSQL": "SELECT ts FROM slice WHERE name = 'test1'",
+    "errorType": "UNKNOWN",
+    "errorMessage": "Warning: timestamp should be converted",
+    "userQuery": "用户1的查询"
+  },
+  {
+    "id": "err_1766920047117_9qe8m8vuy",
+    "timestamp": "2025-12-28T11:07:27.117Z",
+    "originalSQL": "SELECT timestamp FROM slice WHERE name = 'test2'",
+    "errorType": "UNKNOWN",
+    "errorMessage": "Warning: timestamp should be converted",
+    "userQuery": "用户2的查询"
+  },
+  {
+    "id": "err_1766920047117_xv9sdu5vf",
+    "timestamp": "2025-12-28T11:07:27.117Z",
+    "originalSQL": "SELECT ts, name FROM slice LIMIT 10",
+    "errorType": "UNKNOWN",
+    "errorMessage": "Warning: timestamp should be converted",
+    "userQuery": "用户3的查询"
+  }
+]

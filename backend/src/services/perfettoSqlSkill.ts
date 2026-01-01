@@ -160,6 +160,51 @@ const SKILL_PATTERNS: SkillPattern[] = [
 ];
 
 // ============================================================================
+// Helper Functions
+// ============================================================================
+
+/**
+ * Convert row arrays to row objects for easier access
+ * TraceProcessor returns rows as arrays, this converts them to keyed objects
+ */
+function rowsToObjects(columns: string[], rows: any[][]): Record<string, any>[] {
+  return rows.map(row => {
+    const obj: Record<string, any> = {};
+    columns.forEach((col, idx) => {
+      obj[col] = row[idx];
+    });
+    return obj;
+  });
+}
+
+/**
+ * Format a row for summary display (handles both array and object formats)
+ */
+function formatRowForSummary(
+  row: any[] | Record<string, any>,
+  columns: string[],
+  formatSpec: { nameCol: string; valueCol: string; extraCol?: string }
+): string {
+  // If row is an array, convert to object first
+  let obj: Record<string, any>;
+  if (Array.isArray(row)) {
+    obj = {};
+    columns.forEach((col, idx) => {
+      obj[col] = row[idx];
+    });
+  } else {
+    obj = row;
+  }
+
+  const name = obj[formatSpec.nameCol] ?? 'unknown';
+  const value = obj[formatSpec.valueCol];
+  const valueStr = typeof value === 'number' ? value.toFixed(2) : String(value ?? 'N/A');
+  const extra = formatSpec.extraCol ? ` (${obj[formatSpec.extraCol] ?? ''})` : '';
+
+  return `- ${name}: ${valueStr}ms${extra}`;
+}
+
+// ============================================================================
 // Main Perfetto SQL Skill Service
 // ============================================================================
 
@@ -535,8 +580,7 @@ SELECT
   ttfd
 FROM android_startups
 ${whereClause}
-ORDER BY ts DESC
-LIMIT 20;
+ORDER BY ts ASC;
     `;
   }
 
@@ -556,8 +600,7 @@ SELECT
 FROM actual_frame_timeline_slice afs
 LEFT JOIN process p ON afs.upid = p.upid
 ${processFilter}
-ORDER BY afs.ts DESC
-LIMIT 100;
+ORDER BY afs.ts ASC;
     `;
   }
 
@@ -573,8 +616,7 @@ SELECT
   reason
 FROM activity_manager_transitions
 ${whereClause}
-ORDER BY ts DESC
-LIMIT 50;
+ORDER BY ts ASC;
     `;
   }
 
@@ -591,8 +633,7 @@ JOIN track t ON e.track_id = t.id
 JOIN process_track pt ON t.id = pt.id
 JOIN process p ON pt.upid = p.upid
 ${whereClause.replace('WHERE', 'AND')} AND e.name LIKE '%Click%'
-ORDER BY e.ts DESC
-LIMIT 50;
+ORDER BY e.ts ASC;
     `;
   }
 
@@ -608,8 +649,7 @@ SELECT
   file_rss,
   swap_rss
 FROM heap_profile_summary
-ORDER BY ts DESC
-LIMIT 50;
+ORDER BY ts ASC;
     `;
   }
 
@@ -627,8 +667,7 @@ JOIN thread t ON s.utid = t.utid
 LEFT JOIN process p ON t.upid = p.upid
 ${whereClause.replace('WHERE', 'AND')}
 GROUP BY t.tid, t.name, p.name
-ORDER BY total_cpu_sec DESC
-LIMIT 50;
+ORDER BY total_cpu_sec DESC;
     `;
   }
 
@@ -643,8 +682,7 @@ SELECT
   gpu_composition,
   sf_jank_type
 FROM gfx_composition
-ORDER BY ts DESC
-LIMIT 100;
+ORDER BY ts ASC;
     `;
   }
 
@@ -661,8 +699,7 @@ JOIN track t ON e.track_id = t.id
 JOIN process_track pt ON t.id = pt.id
 JOIN process p ON pt.upid = p.upid
 ${whereClause.replace('WHERE', 'AND')} AND (e.name GLOB '*Input*' OR e.name GLOB '*Touch*' OR e.name GLOB '*Key*')
-ORDER BY e.ts DESC
-LIMIT 50;
+ORDER BY e.ts ASC;
     `;
   }
 
@@ -678,8 +715,7 @@ SELECT
   thread_name
 FROM binder_txn
 ${whereClause.replace('WHERE', 'AND')}
-ORDER BY ts DESC
-LIMIT 50;
+ORDER BY ts ASC;
     `;
   }
 
@@ -692,8 +728,7 @@ SELECT
   fence_wait_time_ns / 1e6 as fence_wait_ms,
   buffer_id
 FROM buffer_queue_state
-ORDER BY ts DESC
-LIMIT 50;
+ORDER BY ts ASC;
     `;
   }
 
@@ -706,8 +741,7 @@ SELECT
   service_name,
   interface_name
 FROM system_server_calls
-ORDER BY ts DESC
-LIMIT 50;
+ORDER BY ts ASC;
     `;
   }
 
@@ -728,8 +762,7 @@ JOIN process_track pt ON t.id = pt.id
 JOIN process p ON pt.upid = p.upid
 ${processFilter.replace('WHERE', 'AND')} AND s.dur > 16000000
 GROUP BY s.name, p.name
-ORDER BY total_dur_ms DESC
-LIMIT 50;
+ORDER BY total_dur_ms DESC;
     `;
   }
 
@@ -750,8 +783,7 @@ JOIN thread t ON tt.utid = t.utid
 JOIN process p ON t.upid = p.upid
 WHERE 1=1
   ${processFilter}
-ORDER BY net.dur DESC
-LIMIT 100;
+ORDER BY net.ts ASC;
     `;
   }
 
@@ -771,8 +803,7 @@ JOIN thread t ON tt.utid = t.utid
 JOIN process p ON t.upid = p.upid
 WHERE s.name GLOB '*sqlite*%' OR s.name GLOB '*room*%'
   ${processFilter}
-ORDER BY s.dur DESC
-LIMIT 100;
+ORDER BY s.ts ASC;
     `;
   }
 
@@ -792,8 +823,7 @@ JOIN thread t ON tt.utid = t.utid
 JOIN process p ON t.upid = p.upid
 WHERE s.name GLOB '*read*%' OR s.name GLOB '*write*%' OR s.name GLOB '*fs_*%'
   ${processFilter}
-ORDER BY s.dur DESC
-LIMIT 100;
+ORDER BY s.ts ASC;
     `;
   }
 
@@ -806,13 +836,981 @@ LIMIT 100;
    * Based on: perfetto_sql/stdlib/android/startup/startups_minsdk33.sql
    */
   async analyzeStartup(traceId: string, packageName?: string): Promise<PerfettoSqlResponse> {
-    // Build WHERE clause
+    // 尝试多种方法获取启动数据
+    console.log('[PerfettoSqlSkill] analyzeStartup called for package:', packageName);
+
+    // 方法1: 尝试使用 android_startup_processes 表（更可靠）
+    try {
+      await this.traceProcessor.query(traceId, 'INCLUDE PERFETTO MODULE android.startup.startup_events;');
+      console.log('[PerfettoSqlSkill] android.startup.startup_events module included');
+    } catch (e) {
+      console.log('[PerfettoSqlSkill] startup_events module not available');
+    }
+
+    // 方法2: 尝试 android.startup.startups 模块
+    try {
+      await this.traceProcessor.query(traceId, 'INCLUDE PERFETTO MODULE android.startup.startups;');
+      console.log('[PerfettoSqlSkill] android.startup.startups module included');
+    } catch (e) {
+      console.log('[PerfettoSqlSkill] startups module not available');
+    }
+
+    // 诊断：检查可用的启动相关表
+    const availableTables: string[] = [];
+    const tablesToCheck = ['android_startups', 'android_startup_processes', '_startup_events'];
+    for (const table of tablesToCheck) {
+      try {
+        const checkResult = await this.traceProcessor.query(traceId, `SELECT COUNT(*) as cnt FROM ${table}`);
+        const count = checkResult.rows?.[0]?.[0] ?? 0;
+        console.log(`[PerfettoSqlSkill] Table ${table}: ${count} rows`);
+        if (count > 0) availableTables.push(table);
+      } catch (e) {
+        console.log(`[PerfettoSqlSkill] Table ${table} not available`);
+      }
+    }
+
+    // 如果 android_startups 有数据，使用它
+    if (availableTables.includes('android_startups')) {
+      let whereClause = '';
+      if (packageName) {
+        whereClause = `WHERE (
+          package GLOB '${packageName}*'
+          OR package GLOB '*${packageName.split('.').pop()}*'
+        )`;
+      }
+
+      const sql = `
+        SELECT
+          startup_id,
+          ts / 1e6 as ts_ms,
+          dur / 1e6 as dur_ms,
+          package,
+          startup_type
+        FROM android_startups
+        ${whereClause}
+        ORDER BY ts ASC
+      `;
+
+      const queryResult = await this.traceProcessor.query(traceId, sql);
+      if (!queryResult.error && queryResult.rows.length > 0) {
+        console.log('[PerfettoSqlSkill] Got data from android_startups:', queryResult.rows.length, 'rows');
+        const startupObjects = rowsToObjects(queryResult.columns, queryResult.rows);
+        return {
+          analysisType: 'startup',
+          sql,
+          rows: queryResult.rows,
+          rowCount: queryResult.rows.length,
+          summary: this.formatStartupSummary(startupObjects),
+          metrics: {
+            totalStartups: queryResult.rows.length,
+            coldStarts: startupObjects.filter((s: any) => s.startup_type === 'cold').length,
+            warmStarts: startupObjects.filter((s: any) => s.startup_type === 'warm').length,
+            hotStarts: startupObjects.filter((s: any) => s.startup_type === 'hot').length,
+          },
+        };
+      }
+    }
+
+    // 如果 android_startup_processes 有数据，使用它
+    if (availableTables.includes('android_startup_processes')) {
+      let whereClause = '';
+      if (packageName) {
+        whereClause = `WHERE (
+          package GLOB '${packageName}*'
+          OR package GLOB '*${packageName.split('.').pop()}*'
+          OR name GLOB '${packageName}*'
+        )`;
+      }
+
+      const sql = `
+        SELECT
+          startup_id,
+          startup_type,
+          package,
+          name as process_name,
+          ts / 1e6 as ts_ms,
+          dur / 1e6 as dur_ms
+        FROM android_startup_processes
+        ${whereClause}
+        ORDER BY ts ASC
+      `;
+
+      const queryResult = await this.traceProcessor.query(traceId, sql);
+      if (!queryResult.error && queryResult.rows.length > 0) {
+        console.log('[PerfettoSqlSkill] Got data from android_startup_processes:', queryResult.rows.length, 'rows');
+        const startupObjects = rowsToObjects(queryResult.columns, queryResult.rows);
+        return {
+          analysisType: 'startup',
+          sql,
+          rows: queryResult.rows,
+          rowCount: queryResult.rows.length,
+          summary: this.formatStartupProcessesSummary(startupObjects),
+          metrics: {
+            totalStartups: queryResult.rows.length,
+            coldStarts: startupObjects.filter((s: any) => s.startup_type === 'cold').length,
+            warmStarts: startupObjects.filter((s: any) => s.startup_type === 'warm').length,
+            hotStarts: startupObjects.filter((s: any) => s.startup_type === 'hot').length,
+          },
+        };
+      }
+    }
+
+    // 方法3: 直接从 slice 表查询启动生命周期事件
+    console.log('[PerfettoSqlSkill] Falling back to slice-based startup analysis');
+    return this.analyzeStartupFromSlices(traceId, packageName);
+  }
+
+  /**
+   * 从 slice 表直接分析启动事件
+   * 查询完整的 Activity 生命周期和启动相关事件
+   */
+  private async analyzeStartupFromSlices(traceId: string, packageName?: string): Promise<PerfettoSqlResponse> {
+    // 构建进程过滤条件 - 支持包名和进程名的多种匹配方式
+    let processFilter = '';
+    if (packageName) {
+      // Android 进程名可能被截断，所以使用多种匹配方式
+      const lastPart = packageName.split('.').pop() || packageName;
+      processFilter = `AND (
+        p.name GLOB '${packageName}*'
+        OR p.name GLOB '*${lastPart}*'
+        OR p.name LIKE '%${packageName}%'
+        OR p.cmdline GLOB '*${packageName}*'
+      )`;
+    }
+
+    // 查询完整的启动生命周期事件
+    const sql = `
+      SELECT
+        s.name as event_name,
+        s.ts / 1e6 as ts_ms,
+        s.dur / 1e6 as dur_ms,
+        p.name as process_name,
+        t.name as thread_name,
+        p.pid,
+        CASE
+          WHEN s.name GLOB '*bindApplication*' THEN 1
+          WHEN s.name GLOB '*activityStart*' THEN 2
+          WHEN s.name GLOB '*performCreate*' OR s.name GLOB '*onCreate*' THEN 3
+          WHEN s.name GLOB '*performResume*' OR s.name GLOB '*onResume*' THEN 4
+          WHEN s.name GLOB '*inflate*' THEN 5
+          WHEN s.name GLOB '*traversal*' OR s.name GLOB '*measure*' OR s.name GLOB '*layout*' THEN 6
+          WHEN s.name GLOB '*draw*' OR s.name GLOB '*Choreographer*doFrame*' THEN 7
+          WHEN s.name GLOB '*reportFullyDrawn*' THEN 8
+          ELSE 99
+        END as phase_order
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE (
+        s.name GLOB '*bindApplication*'
+        OR s.name GLOB '*activityStart*'
+        OR s.name GLOB '*ActivityThread*main*'
+        OR s.name GLOB '*performCreate*'
+        OR s.name GLOB '*onCreate*'
+        OR s.name GLOB '*performResume*'
+        OR s.name GLOB '*onResume*'
+        OR s.name GLOB '*inflate*'
+        OR s.name GLOB '*traversal*'
+        OR s.name GLOB '*measure*'
+        OR s.name GLOB '*layout*'
+        OR s.name GLOB '*draw*'
+        OR s.name GLOB '*Choreographer*doFrame*'
+        OR s.name GLOB '*reportFullyDrawn*'
+        OR s.name GLOB '*launching*'
+        OR s.name GLOB '*ResourcesImpl*'
+        OR s.name GLOB '*Lock*contention*'
+        OR s.name GLOB '*Choreographer*'
+      )
+      ${processFilter}
+      ORDER BY s.ts ASC
+    `;
+
+    console.log('[PerfettoSqlSkill] analyzeStartupFromSlices SQL (truncated):', sql.substring(0, 400));
+    const queryResult = await this.traceProcessor.query(traceId, sql);
+
+    if (queryResult.error) {
+      console.log('[PerfettoSqlSkill] analyzeStartupFromSlices error:', queryResult.error);
+      return this.analyzeStartupFallback(traceId, packageName);
+    }
+
+    if (queryResult.rows.length === 0) {
+      console.log('[PerfettoSqlSkill] analyzeStartupFromSlices: no results, trying broader fallback');
+      return this.analyzeStartupFallback(traceId, packageName);
+    }
+
+    console.log('[PerfettoSqlSkill] analyzeStartupFromSlices found', queryResult.rows.length, 'events');
+
+    // 转换为对象并生成摘要
+    const events = rowsToObjects(queryResult.columns, queryResult.rows);
+    const summary = this.formatStartupEventsSummary(events);
+
+    return {
+      analysisType: 'startup',
+      sql,
+      rows: queryResult.rows,
+      rowCount: queryResult.rows.length,
+      summary,
+      details: {
+        method: 'slice_based_analysis',
+        events: events.slice(0, 20), // 前 20 个事件
+      },
+    };
+  }
+
+  /**
+   * Analyze app startup with detailed breakdown
+   * Includes: slice durations, CPU core distribution, frequency, thread blocking
+   */
+  async analyzeStartupDetailed(traceId: string, packageName?: string): Promise<PerfettoSqlResponse> {
+    console.log('[PerfettoSqlSkill] analyzeStartupDetailed called for package:', packageName);
+
+    // Include startup modules
+    try {
+      await this.traceProcessor.query(traceId, 'INCLUDE PERFETTO MODULE android.startup.startups;');
+    } catch (e) {
+      console.log('[PerfettoSqlSkill] startups module not available');
+    }
+
+    // 1. First, get all startups from android_startups table
+    let whereClause = '';
+    if (packageName) {
+      whereClause = `WHERE (package GLOB '${packageName}*' OR package GLOB '*${packageName.split('.').pop()}*')`;
+    }
+
+    const startupsSql = `
+      SELECT
+        startup_id,
+        ts,
+        ts + dur as ts_end,
+        ts / 1e6 as ts_ms,
+        dur / 1e6 as dur_ms,
+        package,
+        startup_type
+      FROM android_startups
+      ${whereClause}
+      ORDER BY ts ASC
+    `;
+
+    const startupsResult = await this.traceProcessor.query(traceId, startupsSql);
+
+    if (startupsResult.error || startupsResult.rows.length === 0) {
+      console.log('[PerfettoSqlSkill] No startups found in android_startups table');
+      return {
+        analysisType: 'startup_detailed',
+        sql: startupsSql,
+        rows: [],
+        rowCount: 0,
+        summary: '未找到启动事件。请确保 Trace 包含应用启动数据。',
+        error: startupsResult.error || 'No startup events found',
+      };
+    }
+
+    const startups = rowsToObjects(startupsResult.columns, startupsResult.rows);
+    console.log(`[PerfettoSqlSkill] Found ${startups.length} startup(s) to analyze`);
+
+    // Analyze each startup separately
+    const startupAnalyses: any[] = [];
+
+    for (let i = 0; i < startups.length; i++) {
+      const startup = startups[i];
+      const startupStart = startup.ts as number;
+      const startupEnd = startup.ts_end as number;
+      const startupPackage = startup.package as string;
+      const startupType = startup.startup_type as string;
+      const startupDurMs = startup.dur_ms as number;
+
+      console.log(`[PerfettoSqlSkill] Analyzing startup ${i + 1}/${startups.length}: ${startupPackage} (${startupType}), ${startupDurMs.toFixed(2)}ms`);
+
+      // Get main thread utid for this startup
+      let mainThreadUtid = 0;
+      try {
+        const utidSql = `
+          SELECT t.utid
+          FROM thread t
+          JOIN process p ON t.upid = p.upid
+          WHERE t.name = 'main' AND p.name GLOB '${startupPackage}*'
+          LIMIT 1
+        `;
+        const utidResult = await this.traceProcessor.query(traceId, utidSql);
+        if (utidResult.rows.length > 0) {
+          mainThreadUtid = utidResult.rows[0][0] as number;
+        }
+      } catch (e) {
+        console.log('[PerfettoSqlSkill] Could not find main thread utid');
+      }
+
+      const analysis = await this.analyzeOneStartup(
+        traceId,
+        startupStart,
+        startupEnd,
+        startupPackage,
+        startupType,
+        startupDurMs,
+        mainThreadUtid,
+        i + 1
+      );
+
+      startupAnalyses.push(analysis);
+    }
+
+    // Build final result
+    const results: any = {
+      analysisType: 'startup_detailed',
+      packageName: packageName || 'all',
+      totalStartups: startups.length,
+      startupAnalyses,
+      sql: startupsSql,
+      rowCount: startups.length,
+    };
+
+    results.summary = this.formatMultiStartupSummary(startupAnalyses);
+    return results;
+  }
+
+  /**
+   * Analyze a single startup event with all detailed metrics
+   */
+  private async analyzeOneStartup(
+    traceId: string,
+    startupStart: number,
+    startupEnd: number,
+    packageName: string,
+    startupType: string,
+    durationMs: number,
+    mainThreadUtid: number,
+    startupIndex: number
+  ): Promise<any> {
+    const sections: any = {};
+
+    // Basic info
+    sections.basicInfo = {
+      title: `启动 #${startupIndex} 基本信息`,
+      data: {
+        packageName,
+        startupType,
+        durationMs: durationMs.toFixed(2),
+        startTimeNs: startupStart,
+        endTimeNs: startupEnd,
+      }
+    };
+
+    // 2. Get top slices by duration during startup
+    try {
+      const topSlicesSql = `
+        SELECT
+          s.name as slice_name,
+          s.dur / 1e6 as dur_ms,
+          (s.ts - ${startupStart}) / 1e6 as relative_ts_ms,
+          t.name as thread_name,
+          s.depth
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE s.dur > 0
+          AND p.name GLOB '${packageName}*'
+          AND s.ts >= ${startupStart} AND s.ts <= ${startupEnd}
+        ORDER BY s.dur DESC
+        LIMIT 50
+      `;
+
+      const topSlicesResult = await this.traceProcessor.query(traceId, topSlicesSql);
+      if (!topSlicesResult.error && topSlicesResult.rows.length > 0) {
+        sections.topSlices = {
+          title: '启动期间耗时最长的 Slice',
+          columns: topSlicesResult.columns,
+          data: rowsToObjects(topSlicesResult.columns, topSlicesResult.rows),
+          sql: topSlicesSql,
+        };
+      }
+    } catch (e) {
+      console.log('[PerfettoSqlSkill] topSlices query failed:', e);
+    }
+
+    // 3. CPU Core Distribution (Big vs Little cores) for main thread
+    try {
+      const utidFilter = mainThreadUtid > 0 ? `sched.utid = ${mainThreadUtid}` :
+        `t.name = 'main' AND p.name GLOB '${packageName}*'`;
+
+      const cpuCoreSql = `
+        SELECT
+          sched.cpu,
+          CASE
+            WHEN sched.cpu IN (0, 1, 2, 3) THEN 'little'
+            WHEN sched.cpu IN (4, 5, 6, 7) THEN 'big'
+            ELSE 'unknown'
+          END as core_type,
+          SUM(sched.dur) / 1e6 as total_dur_ms,
+          COUNT(*) as slice_count,
+          AVG(sched.dur) / 1e6 as avg_dur_ms
+        FROM sched_slice sched
+        JOIN thread t ON sched.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE sched.dur > 0
+          AND ${utidFilter}
+          AND sched.ts >= ${startupStart} AND sched.ts <= ${startupEnd}
+        GROUP BY sched.cpu
+        ORDER BY total_dur_ms DESC
+      `;
+
+      const cpuCoreResult = await this.traceProcessor.query(traceId, cpuCoreSql);
+      if (!cpuCoreResult.error && cpuCoreResult.rows.length > 0) {
+        const coreData = rowsToObjects(cpuCoreResult.columns, cpuCoreResult.rows);
+
+        // Calculate big vs little ratio
+        let bigCoreTime = 0;
+        let littleCoreTime = 0;
+        coreData.forEach((row: any) => {
+          if (row.core_type === 'big') bigCoreTime += row.total_dur_ms || 0;
+          else if (row.core_type === 'little') littleCoreTime += row.total_dur_ms || 0;
+        });
+
+        const totalCoreTime = bigCoreTime + littleCoreTime;
+        sections.cpuCoreDistribution = {
+          title: 'CPU 大小核分布',
+          data: coreData,
+          summary: {
+            bigCoreTime: bigCoreTime.toFixed(2),
+            littleCoreTime: littleCoreTime.toFixed(2),
+            bigCorePercent: totalCoreTime > 0 ? ((bigCoreTime / totalCoreTime) * 100).toFixed(1) : '0',
+            littleCorePercent: totalCoreTime > 0 ? ((littleCoreTime / totalCoreTime) * 100).toFixed(1) : '0',
+          },
+          sql: cpuCoreSql,
+        };
+      }
+    } catch (e) {
+      console.log('[PerfettoSqlSkill] cpuCore query failed:', e);
+    }
+
+    // 4. CPU Frequency during startup
+    try {
+      const cpuFreqSql = `
+        SELECT
+          cpu,
+          CAST(AVG(value) AS INTEGER) / 1000 as avg_freq_mhz,
+          CAST(MAX(value) AS INTEGER) / 1000 as max_freq_mhz,
+          CAST(MIN(value) AS INTEGER) / 1000 as min_freq_mhz
+        FROM counter c
+        JOIN cpu_counter_track cct ON c.track_id = cct.id
+        WHERE cct.name = 'cpufreq'
+          AND c.ts >= ${startupStart} AND c.ts <= ${startupEnd}
+        GROUP BY cpu
+        ORDER BY cpu
+      `;
+
+      const cpuFreqResult = await this.traceProcessor.query(traceId, cpuFreqSql);
+      if (!cpuFreqResult.error && cpuFreqResult.rows.length > 0) {
+        const freqData = rowsToObjects(cpuFreqResult.columns, cpuFreqResult.rows);
+
+        // Calculate average across big and little cores
+        let bigCoreAvgFreq = 0;
+        let littleCoreAvgFreq = 0;
+        let bigCount = 0;
+        let littleCount = 0;
+
+        freqData.forEach((row: any) => {
+          const cpu = row.cpu as number;
+          const avgFreq = row.avg_freq_mhz || 0;
+          if (cpu >= 4) {
+            bigCoreAvgFreq += avgFreq;
+            bigCount++;
+          } else {
+            littleCoreAvgFreq += avgFreq;
+            littleCount++;
+          }
+        });
+
+        sections.cpuFrequency = {
+          title: 'CPU 频率信息',
+          data: freqData,
+          summary: {
+            bigCoreAvgFreq: bigCount > 0 ? (bigCoreAvgFreq / bigCount).toFixed(0) : 'N/A',
+            littleCoreAvgFreq: littleCount > 0 ? (littleCoreAvgFreq / littleCount).toFixed(0) : 'N/A',
+          },
+          sql: cpuFreqSql,
+        };
+      }
+    } catch (e) {
+      console.log('[PerfettoSqlSkill] cpuFreq query failed:', e);
+    }
+
+    // 5. Main Thread State Analysis (Running/Runnable/Sleeping breakdown)
+    try {
+      const utidFilter = mainThreadUtid > 0 ? `ts.utid = ${mainThreadUtid}` :
+        `t.name = 'main' AND p.name GLOB '${packageName}*'`;
+
+      const threadStateSql = `
+        SELECT
+          ts.state,
+          CASE ts.state
+            WHEN 'Running' THEN 'Running (执行中)'
+            WHEN 'R' THEN 'Runnable (可运行)'
+            WHEN 'R+' THEN 'Runnable (可运行,抢占)'
+            WHEN 'S' THEN 'Sleeping (睡眠)'
+            WHEN 'D' THEN 'Uninterruptible Sleep (不可中断睡眠)'
+            WHEN 'I' THEN 'Idle (空闲)'
+            ELSE ts.state
+          END as state_desc,
+          SUM(ts.dur) / 1e6 as total_dur_ms,
+          COUNT(*) as count,
+          (SUM(ts.dur) * 100.0) / ${startupEnd - startupStart} as percent
+        FROM thread_state ts
+        JOIN thread t ON ts.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE ${utidFilter}
+          AND ts.ts >= ${startupStart} AND ts.ts <= ${startupEnd}
+        GROUP BY ts.state
+        ORDER BY total_dur_ms DESC
+      `;
+
+      const threadStateResult = await this.traceProcessor.query(traceId, threadStateSql);
+      if (!threadStateResult.error && threadStateResult.rows.length > 0) {
+        sections.threadStateDistribution = {
+          title: '主线程状态分布',
+          data: rowsToObjects(threadStateResult.columns, threadStateResult.rows),
+          sql: threadStateSql,
+        };
+      }
+    } catch (e) {
+      console.log('[PerfettoSqlSkill] threadState query failed:', e);
+    }
+
+    // 6. Thread Blocking Analysis (detailed)
+    try {
+      const utidFilter = mainThreadUtid > 0 ? `ts.utid = ${mainThreadUtid}` : '';
+
+      const blockingSql = `
+        SELECT
+          ts.state,
+          ts.blocked_function,
+          ts.dur / 1e6 as dur_ms,
+          (ts.ts - ${startupStart}) / 1e6 as relative_ts_ms,
+          CASE
+            WHEN ts.blocked_function GLOB '*binder*' THEN 'binder'
+            WHEN ts.blocked_function GLOB '*futex*' OR ts.blocked_function GLOB '*mutex*' THEN 'lock_contention'
+            WHEN ts.blocked_function GLOB '*epoll*' OR ts.blocked_function GLOB '*poll*' THEN 'io_wait'
+            WHEN ts.blocked_function GLOB '*sleep*' THEN 'sleep'
+            WHEN ts.blocked_function GLOB '*SurfaceFlinger*' OR ts.blocked_function GLOB '*dequeue*' THEN 'surfaceflinger'
+            WHEN ts.blocked_function GLOB '*GC*' OR ts.blocked_function GLOB '*art::gc*' THEN 'gc'
+            ELSE 'other'
+          END as block_type
+        FROM thread_state ts
+        JOIN thread t ON ts.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE ts.state IN ('S', 'D', 'I')
+          AND ts.dur > 1000000
+          ${utidFilter ? `AND ${utidFilter}` : `AND t.name = 'main' AND p.name GLOB '${packageName}*'`}
+          AND ts.ts >= ${startupStart} AND ts.ts <= ${startupEnd}
+        ORDER BY ts.dur DESC
+        LIMIT 50
+      `;
+
+      const blockingResult = await this.traceProcessor.query(traceId, blockingSql);
+      if (!blockingResult.error && blockingResult.rows.length > 0) {
+        const blockData = rowsToObjects(blockingResult.columns, blockingResult.rows);
+
+        // Summarize by block type
+        const blockSummary: Record<string, { count: number; totalMs: number }> = {};
+        blockData.forEach((row: any) => {
+          const type = row.block_type || 'other';
+          if (!blockSummary[type]) {
+            blockSummary[type] = { count: 0, totalMs: 0 };
+          }
+          blockSummary[type].count++;
+          blockSummary[type].totalMs += row.dur_ms || 0;
+        });
+
+        sections.threadBlocking = {
+          title: '主线程阻塞分析',
+          data: blockData,
+          summary: blockSummary,
+          sql: blockingSql,
+        };
+      }
+    } catch (e) {
+      console.log('[PerfettoSqlSkill] blocking query failed:', e);
+    }
+
+    // 7. Binder transactions during startup
+    try {
+      const binderTxnSql = `
+        SELECT
+          client_process,
+          server_process,
+          client_dur / 1e6 as client_dur_ms,
+          server_dur / 1e6 as server_dur_ms,
+          (client_ts - ${startupStart}) / 1e6 as relative_ts_ms
+        FROM android_binder_txns
+        WHERE client_dur > 1000000
+          AND (client_process GLOB '${packageName}*' OR server_process GLOB '${packageName}*')
+          AND client_ts >= ${startupStart} AND client_ts <= ${startupEnd}
+        ORDER BY client_dur DESC
+        LIMIT 30
+      `;
+
+      const binderResult = await this.traceProcessor.query(traceId, binderTxnSql);
+      if (!binderResult.error && binderResult.rows.length > 0) {
+        sections.binderTransactions = {
+          title: 'Binder 事务分析',
+          data: rowsToObjects(binderResult.columns, binderResult.rows),
+          sql: binderTxnSql,
+        };
+      }
+    } catch (e) {
+      console.log('[PerfettoSqlSkill] binder query failed (table may not exist):', e);
+    }
+
+    // 8. Main thread CPU utilization
+    try {
+      const utidFilter = mainThreadUtid > 0 ? `sched.utid = ${mainThreadUtid}` :
+        `t.name = 'main' AND p.name GLOB '${packageName}*'`;
+
+      const cpuUtilSql = `
+        SELECT
+          SUM(sched.dur) / 1e6 as running_time_ms,
+          ${durationMs.toFixed(2)} as total_time_ms,
+          (SUM(sched.dur) * 100.0) / ${startupEnd - startupStart} as cpu_utilization_percent
+        FROM sched_slice sched
+        JOIN thread t ON sched.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE ${utidFilter}
+          AND sched.ts >= ${startupStart} AND sched.ts <= ${startupEnd}
+      `;
+
+      const cpuUtilResult = await this.traceProcessor.query(traceId, cpuUtilSql);
+      if (!cpuUtilResult.error && cpuUtilResult.rows.length > 0) {
+        const utilData = rowsToObjects(cpuUtilResult.columns, cpuUtilResult.rows);
+        sections.cpuUtilization = {
+          title: '主线程 CPU 利用率',
+          data: utilData[0],
+          sql: cpuUtilSql,
+        };
+      }
+    } catch (e) {
+      console.log('[PerfettoSqlSkill] cpuUtil query failed:', e);
+    }
+
+    // 9. GC Events during startup
+    try {
+      const gcSql = `
+        SELECT
+          s.name as gc_type,
+          s.dur / 1e6 as dur_ms,
+          (s.ts - ${startupStart}) / 1e6 as relative_ts_ms
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE p.name GLOB '${packageName}*'
+          AND (s.name GLOB '*GC*' OR s.name GLOB '*garbage*' OR s.name GLOB '*art::gc*')
+          AND s.ts >= ${startupStart} AND s.ts <= ${startupEnd}
+        ORDER BY s.dur DESC
+      `;
+
+      const gcResult = await this.traceProcessor.query(traceId, gcSql);
+      if (!gcResult.error && gcResult.rows.length > 0) {
+        const gcData = rowsToObjects(gcResult.columns, gcResult.rows);
+        const totalGcTime = gcData.reduce((sum: number, row: any) => sum + (row.dur_ms || 0), 0);
+        sections.gcEvents = {
+          title: 'GC 事件',
+          data: gcData,
+          summary: {
+            count: gcData.length,
+            totalTimeMs: totalGcTime.toFixed(2),
+            percentOfStartup: ((totalGcTime / durationMs) * 100).toFixed(1),
+          },
+          sql: gcSql,
+        };
+      }
+    } catch (e) {
+      console.log('[PerfettoSqlSkill] GC query failed:', e);
+    }
+
+    // 10. Key startup phases breakdown
+    try {
+      const phasesSql = `
+        SELECT
+          s.name as phase_name,
+          s.dur / 1e6 as dur_ms,
+          (s.ts - ${startupStart}) / 1e6 as relative_start_ms,
+          ((s.ts + s.dur) - ${startupStart}) / 1e6 as relative_end_ms
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE p.name GLOB '${packageName}*'
+          AND t.name = 'main'
+          AND (s.name GLOB '*bindApplication*'
+               OR s.name GLOB '*activityStart*'
+               OR s.name GLOB '*performCreate*'
+               OR s.name GLOB '*onCreate*'
+               OR s.name GLOB '*performResume*'
+               OR s.name GLOB '*onResume*'
+               OR s.name GLOB '*Choreographer#doFrame*'
+               OR s.name GLOB '*reportFullyDrawn*'
+               OR s.name GLOB '*contentProviderCreate*'
+               OR s.name GLOB '*Application.onCreate*')
+          AND s.ts >= ${startupStart} AND s.ts <= ${startupEnd}
+        ORDER BY s.ts ASC
+      `;
+
+      const phasesResult = await this.traceProcessor.query(traceId, phasesSql);
+      if (!phasesResult.error && phasesResult.rows.length > 0) {
+        sections.startupPhases = {
+          title: '关键启动阶段',
+          data: rowsToObjects(phasesResult.columns, phasesResult.rows),
+          sql: phasesSql,
+        };
+      }
+    } catch (e) {
+      console.log('[PerfettoSqlSkill] phases query failed:', e);
+    }
+
+    // Return the complete analysis for this startup
+    return {
+      startupIndex,
+      packageName,
+      startupType,
+      durationMs: durationMs.toFixed(2),
+      sections,
+      summary: this.formatSingleStartupSummary(sections, packageName, startupType, durationMs, startupIndex),
+    };
+  }
+
+  /**
+   * Format summary for a single startup event
+   */
+  private formatSingleStartupSummary(
+    sections: any,
+    packageName: string,
+    startupType: string,
+    durationMs: number,
+    startupIndex: number
+  ): string {
+    const lines: string[] = [`\n========== 启动 #${startupIndex} 详细分析 ==========\n`];
+
+    // Basic info
+    lines.push('【基础信息】');
+    lines.push(`  包名: ${packageName}`);
+    lines.push(`  启动类型: ${startupType}`);
+    lines.push(`  总耗时: ${durationMs.toFixed(2)}ms`);
+    lines.push('');
+
+    // Key startup phases
+    if (sections.startupPhases?.data?.length > 0) {
+      lines.push('【关键启动阶段】');
+      sections.startupPhases.data.forEach((row: any) => {
+        lines.push(`  ${row.phase_name}: ${row.dur_ms?.toFixed(2) ?? 'N/A'}ms (@ ${row.relative_start_ms?.toFixed(1) ?? 'N/A'}ms)`);
+      });
+      lines.push('');
+    }
+
+    // Top Slices
+    if (sections.topSlices?.data?.length > 0) {
+      lines.push('【耗时最长的操作 (Top 10)】');
+      sections.topSlices.data.slice(0, 10).forEach((row: any, idx: number) => {
+        lines.push(`  ${idx + 1}. ${row.slice_name}: ${row.dur_ms?.toFixed(2) ?? 'N/A'}ms (${row.thread_name})`);
+      });
+      lines.push('');
+    }
+
+    // Thread State Distribution
+    if (sections.threadStateDistribution?.data?.length > 0) {
+      lines.push('【主线程状态分布】');
+      sections.threadStateDistribution.data.forEach((row: any) => {
+        lines.push(`  ${row.state_desc || row.state}: ${row.total_dur_ms?.toFixed(2) ?? 'N/A'}ms (${row.percent?.toFixed(1) ?? 'N/A'}%)`);
+      });
+      lines.push('');
+    }
+
+    // CPU Core Distribution
+    if (sections.cpuCoreDistribution?.summary) {
+      const s = sections.cpuCoreDistribution.summary;
+      lines.push('【CPU 大小核分布】');
+      lines.push(`  大核运行时间: ${s.bigCoreTime}ms (${s.bigCorePercent}%)`);
+      lines.push(`  小核运行时间: ${s.littleCoreTime}ms (${s.littleCorePercent}%)`);
+      lines.push('');
+    }
+
+    // CPU Frequency
+    if (sections.cpuFrequency?.summary) {
+      const s = sections.cpuFrequency.summary;
+      lines.push('【CPU 平均频率】');
+      lines.push(`  大核平均频率: ${s.bigCoreAvgFreq} MHz`);
+      lines.push(`  小核平均频率: ${s.littleCoreAvgFreq} MHz`);
+      lines.push('');
+    }
+
+    // CPU Utilization
+    if (sections.cpuUtilization?.data) {
+      const d = sections.cpuUtilization.data;
+      lines.push('【主线程 CPU 利用率】');
+      lines.push(`  运行时间: ${d.running_time_ms?.toFixed(2) ?? 'N/A'}ms`);
+      lines.push(`  CPU 利用率: ${d.cpu_utilization_percent?.toFixed(1) ?? 'N/A'}%`);
+      lines.push('');
+    }
+
+    // GC Events
+    if (sections.gcEvents?.summary) {
+      const s = sections.gcEvents.summary;
+      lines.push('【GC 事件】');
+      lines.push(`  GC 次数: ${s.count}`);
+      lines.push(`  GC 总耗时: ${s.totalTimeMs}ms (占启动 ${s.percentOfStartup}%)`);
+      lines.push('');
+    }
+
+    // Thread Blocking Summary
+    if (sections.threadBlocking?.summary) {
+      const s = sections.threadBlocking.summary;
+      lines.push('【主线程阻塞分析】');
+      Object.entries(s).forEach(([type, info]: [string, any]) => {
+        lines.push(`  ${type}: ${info.count}次, 总计 ${info.totalMs.toFixed(2)}ms`);
+      });
+      lines.push('');
+
+      // Top blocking events
+      if (sections.threadBlocking.data?.length > 0) {
+        lines.push('  Top 5 阻塞事件:');
+        sections.threadBlocking.data.slice(0, 5).forEach((row: any, idx: number) => {
+          const func = row.blocked_function || 'unknown';
+          const shortFunc = func.length > 50 ? func.substring(0, 50) + '...' : func;
+          lines.push(`    ${idx + 1}. [${row.block_type}] ${shortFunc}: ${row.dur_ms?.toFixed(2) ?? 'N/A'}ms (@ ${row.relative_ts_ms?.toFixed(1)}ms)`);
+        });
+      }
+      lines.push('');
+    }
+
+    // Binder transactions
+    if (sections.binderTransactions?.data?.length > 0) {
+      lines.push('【Binder 事务 (耗时最长)】');
+      sections.binderTransactions.data.slice(0, 5).forEach((row: any, idx: number) => {
+        lines.push(`  ${idx + 1}. ${row.client_process} -> ${row.server_process}: ${row.client_dur_ms?.toFixed(2) ?? 'N/A'}ms`);
+      });
+      lines.push('');
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Format summary for multiple startup events
+   */
+  private formatMultiStartupSummary(startupAnalyses: any[]): string {
+    if (startupAnalyses.length === 0) {
+      return '未找到启动事件';
+    }
+
+    const lines: string[] = ['╔══════════════════════════════════════════════════════════════╗'];
+    lines.push(`║             详细启动分析报告 (共 ${startupAnalyses.length} 个启动事件)              ║`);
+    lines.push('╚══════════════════════════════════════════════════════════════╝\n');
+
+    // Quick overview
+    lines.push('【启动事件概览】');
+    startupAnalyses.forEach((analysis: any) => {
+      const typeLabel = analysis.startupType === 'cold' ? '冷启动' :
+                       analysis.startupType === 'warm' ? '温启动' :
+                       analysis.startupType === 'hot' ? '热启动' : analysis.startupType;
+      lines.push(`  #${analysis.startupIndex}: ${analysis.packageName} (${typeLabel}) - ${analysis.durationMs}ms`);
+    });
+    lines.push('');
+
+    // Detailed analysis for each startup
+    startupAnalyses.forEach((analysis: any) => {
+      lines.push(analysis.summary);
+    });
+
+    return lines.join('\n');
+  }
+
+  /**
+   * 格式化 android_startup_processes 查询结果
+   */
+  private formatStartupProcessesSummary(startups: Record<string, any>[]): string {
+    if (startups.length === 0) return '未找到启动数据';
+
+    const lines = ['=== 应用启动分析 ===\n'];
+
+    startups.forEach((s, idx) => {
+      lines.push(`启动 #${idx + 1}:`);
+      lines.push(`  包名: ${s.package || s.process_name || 'unknown'}`);
+      lines.push(`  类型: ${s.startup_type || 'unknown'}`);
+      lines.push(`  耗时: ${s.dur_ms?.toFixed?.(2) ?? s.dur_ms ?? 'N/A'} ms`);
+      lines.push(`  开始时间: ${s.ts_ms?.toFixed?.(2) ?? s.ts_ms ?? 'N/A'} ms\n`);
+    });
+
+    return lines.join('\n');
+  }
+
+  /**
+   * 格式化启动事件摘要（从 slice 表查询的数据）
+   */
+  private formatStartupEventsSummary(events: Record<string, any>[]): string {
+    if (events.length === 0) return '未找到启动事件';
+
+    const lines = ['=== 应用启动事件分析 ===\n'];
+
+    // 按进程分组
+    const byProcess = new Map<string, Record<string, any>[]>();
+    events.forEach(e => {
+      const proc = e.process_name || 'unknown';
+      if (!byProcess.has(proc)) byProcess.set(proc, []);
+      byProcess.get(proc)!.push(e);
+    });
+
+    byProcess.forEach((procEvents, procName) => {
+      lines.push(`进程: ${procName}`);
+      lines.push(`  事件数: ${procEvents.length}`);
+
+      // 找关键生命周期事件
+      const bindApp = procEvents.find(e => e.event_name?.includes('bindApplication'));
+      const actStart = procEvents.find(e => e.event_name?.includes('activityStart'));
+      const onCreate = procEvents.find(e => e.event_name?.includes('performCreate') || e.event_name?.includes('onCreate'));
+      const onResume = procEvents.find(e => e.event_name?.includes('performResume') || e.event_name?.includes('onResume'));
+      const firstFrame = procEvents.find(e => e.event_name?.includes('Choreographer') && e.event_name?.includes('doFrame'));
+
+      if (bindApp) lines.push(`  bindApplication: ${bindApp.dur_ms?.toFixed?.(2) ?? 'N/A'} ms`);
+      if (actStart) lines.push(`  activityStart: ${actStart.dur_ms?.toFixed?.(2) ?? 'N/A'} ms`);
+      if (onCreate) lines.push(`  onCreate/performCreate: ${onCreate.dur_ms?.toFixed?.(2) ?? 'N/A'} ms`);
+      if (onResume) lines.push(`  onResume/performResume: ${onResume.dur_ms?.toFixed?.(2) ?? 'N/A'} ms`);
+      if (firstFrame) lines.push(`  首帧 (Choreographer): ${firstFrame.dur_ms?.toFixed?.(2) ?? 'N/A'} ms`);
+
+      // 计算总耗时（从最早到最晚事件）
+      if (procEvents.length > 1) {
+        const sorted = [...procEvents].sort((a, b) => (a.ts_ms || 0) - (b.ts_ms || 0));
+        const first = sorted[0];
+        const last = sorted[sorted.length - 1];
+        const totalDur = (last.ts_ms || 0) + (last.dur_ms || 0) - (first.ts_ms || 0);
+        lines.push(`  总耗时(估算): ${totalDur.toFixed(2)} ms`);
+      }
+
+      lines.push('');
+    });
+
+    // 添加关键事件列表
+    lines.push('关键启动事件:');
+    const keyEvents = events.filter(e =>
+      e.event_name?.includes('bindApplication') ||
+      e.event_name?.includes('activityStart') ||
+      e.event_name?.includes('performCreate') ||
+      e.event_name?.includes('performResume') ||
+      e.event_name?.includes('inflate')
+    ).slice(0, 10);
+
+    keyEvents.forEach(e => {
+      lines.push(`  - ${e.event_name}: ${e.dur_ms?.toFixed?.(2) ?? 'N/A'} ms @ ${e.ts_ms?.toFixed?.(2) ?? 'N/A'} ms`);
+    });
+
+    return lines.join('\n');
+  }
+
+  // 保留原有的 android_startups 查询逻辑（作为备用）
+  private async analyzeStartupLegacy(traceId: string, packageName?: string): Promise<PerfettoSqlResponse> {
     let whereClause = '';
     if (packageName) {
       whereClause = `WHERE package GLOB '${packageName}*'`;
     }
 
-    // Official SQL pattern from android_startup.sql
     const sql = `
       SELECT
         startup_id,
@@ -822,37 +1820,159 @@ LIMIT 100;
         startup_type
       FROM android_startups
       ${whereClause}
-      ORDER BY ts DESC
-      LIMIT 20
+      ORDER BY ts ASC
     `;
 
     const queryResult = await this.traceProcessor.query(traceId, sql);
 
     if (queryResult.error) {
-      return {
-        analysisType: 'startup',
-        sql,
-        rows: [],
-        rowCount: 0,
-        summary: `Error analyzing startup: ${queryResult.error}`,
-      };
+      // android_startups table might not exist, try fallback
+      console.log('[PerfettoSqlSkill] android_startups query failed, trying fallback...');
+      return this.analyzeStartupFallback(traceId, packageName);
     }
 
-    // Parse results - rows are arrays, need to cast for formatting
-    const startups = queryResult.rows as any[];
-    const summary = this.formatStartupSummary(startups);
+    // If no results from android_startups, try fallback approach
+    if (queryResult.rows.length === 0) {
+      console.log('[PerfettoSqlSkill] android_startups returned 0 rows, trying fallback...');
+      return this.analyzeStartupFallback(traceId, packageName);
+    }
+
+    // Convert rows (arrays) to objects for easier property access
+    const startupObjects = rowsToObjects(queryResult.columns, queryResult.rows);
+
+    const summary = this.formatStartupSummary(startupObjects);
 
     return {
       analysisType: 'startup',
       sql,
-      rows: startups,
-      rowCount: startups.length,
+      rows: queryResult.rows,
+      rowCount: queryResult.rows.length,
       summary,
       metrics: {
-        totalStartups: startups.length,
-        coldStarts: startups.filter((s: any) => s.startup_type === 'cold').length,
-        warmStarts: startups.filter((s: any) => s.startup_type === 'warm').length,
-        hotStarts: startups.filter((s: any) => s.startup_type === 'hot').length,
+        totalStartups: queryResult.rows.length,
+        coldStarts: startupObjects.filter((s: any) => s.startup_type === 'cold').length,
+        warmStarts: startupObjects.filter((s: any) => s.startup_type === 'warm').length,
+        hotStarts: startupObjects.filter((s: any) => s.startup_type === 'hot').length,
+      },
+    };
+  }
+
+  /**
+   * Fallback startup analysis when android_startups is not available
+   * Uses slice table to find activity lifecycle events
+   */
+  private async analyzeStartupFallback(traceId: string, packageName?: string): Promise<PerfettoSqlResponse> {
+    // Try to find activity launch slices
+    let processFilter = '';
+    if (packageName) {
+      processFilter = `AND process.name GLOB '${packageName}*'`;
+    }
+
+    // Look for common activity launch patterns
+    // IMPORTANT: Use ASC to get earliest (startup) events first, not latest!
+    const fallbackSql = `
+      SELECT
+        slice.name,
+        slice.ts / 1e6 as ts_ms,
+        slice.dur / 1e6 as dur_ms,
+        process.name as process_name,
+        thread.name as thread_name
+      FROM slice
+      JOIN thread_track ON slice.track_id = thread_track.id
+      JOIN thread USING (utid)
+      JOIN process USING (upid)
+      WHERE (
+        slice.name GLOB '*launching*'
+        OR slice.name GLOB '*activityStart*'
+        OR slice.name GLOB '*ActivityThread*'
+        OR slice.name GLOB '*bindApplication*'
+        OR slice.name GLOB '*Choreographer#doFrame*'
+        OR slice.name = 'inflate'
+        OR slice.name GLOB '*onCreate*'
+        OR slice.name GLOB '*onStart*'
+        OR slice.name GLOB '*onResume*'
+        OR slice.name GLOB '*reportFullyDrawn*'
+        OR slice.name GLOB '*performCreate*'
+        OR slice.name GLOB '*traversal*'
+        OR slice.name GLOB '*measure*'
+        OR slice.name GLOB '*layout*'
+        OR slice.name GLOB '*draw*'
+      )
+      ${processFilter}
+      ORDER BY slice.ts ASC
+    `;
+
+    const fallbackResult = await this.traceProcessor.query(traceId, fallbackSql);
+
+    if (fallbackResult.error || fallbackResult.rows.length === 0) {
+      // Try even more generic approach - look for any slow slices on main thread
+      const genericSql = `
+        SELECT
+          slice.name,
+          slice.ts / 1e6 as ts_ms,
+          slice.dur / 1e6 as dur_ms,
+          process.name as process_name,
+          thread.name as thread_name
+        FROM slice
+        JOIN thread_track ON slice.track_id = thread_track.id
+        JOIN thread USING (utid)
+        JOIN process USING (upid)
+        WHERE slice.dur > 10000000  -- > 10ms
+        AND thread.is_main_thread = 1
+        ${processFilter}
+        ORDER BY slice.ts ASC
+      `;
+
+      const genericResult = await this.traceProcessor.query(traceId, genericSql);
+
+      if (genericResult.error) {
+        return {
+          analysisType: 'startup',
+          sql: genericSql,
+          rows: [],
+          rowCount: 0,
+          summary: `无法分析启动性能。此 trace 可能不包含 Android 应用启动数据。\n\n错误: ${genericResult.error}\n\n建议:\n- 确保 trace 包含应用启动过程\n- 尝试使用 "分析慢函数" 或 "分析主线程" 等其他分析方式`,
+        };
+      }
+
+      if (genericResult.rows.length === 0) {
+        return {
+          analysisType: 'startup',
+          sql: genericSql,
+          rows: [],
+          rowCount: 0,
+          summary: `此 trace 中未找到启动相关数据。\n\n可能的原因:\n1. Trace 未捕获应用启动过程\n2. Trace 来自非 Android 平台\n3. 应用已经在后台运行\n\n建议:\n- 尝试其他分析类型，如 "分析慢函数" 或 "分析 CPU 使用"`,
+        };
+      }
+
+      // Found some slow slices - convert to objects for easier access
+      const columns = genericResult.columns;
+      const sliceObjects = rowsToObjects(columns, genericResult.rows);
+      return {
+        analysisType: 'startup',
+        sql: genericSql,
+        rows: genericResult.rows,
+        rowCount: genericResult.rows.length,
+        summary: `未找到标准启动事件，但发现 ${genericResult.rows.length} 个主线程慢操作。\n\n最慢的操作:\n${sliceObjects.slice(0, 5).map((s: Record<string, any>) => `- ${s.name}: ${s.dur_ms?.toFixed?.(2) ?? s.dur_ms ?? 'N/A'}ms`).join('\n')}`,
+        details: {
+          method: 'fallback_slow_slices',
+          note: 'android_startups 表为空，使用慢操作分析替代',
+        },
+      };
+    }
+
+    // Found activity launch related slices - convert to objects for easier access
+    const columns = fallbackResult.columns;
+    const sliceObjects = rowsToObjects(columns, fallbackResult.rows);
+    return {
+      analysisType: 'startup',
+      sql: fallbackSql,
+      rows: fallbackResult.rows,
+      rowCount: fallbackResult.rows.length,
+      summary: `找到 ${fallbackResult.rows.length} 个启动相关事件。\n\n主要事件:\n${sliceObjects.slice(0, 5).map((s: Record<string, any>) => `- ${s.name}: ${s.dur_ms?.toFixed?.(2) ?? s.dur_ms ?? 'N/A'}ms (${s.process_name})`).join('\n')}`,
+      details: {
+        method: 'fallback_activity_slices',
+        note: 'android_startups 表为空，使用 Activity 生命周期事件分析',
       },
     };
   }
@@ -954,7 +2074,8 @@ LIMIT 100;
       };
     }
 
-    const rows = queryResult.rows as any[];
+    // Convert rows to objects for easier access
+    const rowObjects = rowsToObjects(queryResult.columns, queryResult.rows);
 
     // Get jank type breakdown for more detailed analysis
     const jankTypeSql = `
@@ -972,7 +2093,7 @@ LIMIT 100;
     `;
 
     const jankTypeResult = await this.traceProcessor.query(traceId, jankTypeSql);
-    const jankTypeRows = jankTypeResult.rows || [];
+    const jankTypeRowObjects = rowsToObjects(jankTypeResult.columns, jankTypeResult.rows || []);
 
     // Add enhanced analysis for consecutive jank and frozen frames
     const enhancedAnalysis = await this.analyzeJankySessions(traceId, packageName);
@@ -984,8 +2105,8 @@ LIMIT 100;
     const rootCauseAnalysis = await this.analyzeJankRootCauses(traceId, packageName);
 
     const summary = this.formatFrameTimelineScrollingSummary(
-      rows,
-      jankTypeRows as any[],
+      rowObjects,
+      jankTypeRowObjects,
       enhancedAnalysis,
       stabilityAnalysis,
       rootCauseAnalysis
@@ -994,12 +2115,12 @@ LIMIT 100;
     return {
       analysisType: 'scrolling_frametimeline',
       sql,
-      rows,
-      rowCount: rows.length,
+      rows: queryResult.rows,
+      rowCount: queryResult.rows.length,
       summary,
-      metrics: rows.length > 0 ? rows[0] as any : {},
+      metrics: rowObjects.length > 0 ? rowObjects[0] : {},
       details: {
-        jankBreakdown: jankTypeRows,
+        jankBreakdown: jankTypeRowObjects,
         method: 'FrameTimeline (Android 12+)',
         enhancedAnalysis,
         stabilityAnalysis,
@@ -1087,6 +2208,7 @@ LIMIT 100;
     `;
 
     const jankSessionsResult = await this.traceProcessor.query(traceId, sql);
+    const jankSessionsObjects = rowsToObjects(jankSessionsResult.columns || [], jankSessionsResult.rows || []);
 
     // Detect frozen frames (> 700ms - very long frames that freeze UI)
     const frozenFrameSql = `
@@ -1099,11 +2221,11 @@ LIMIT 100;
       JOIN process p ON a.upid = p.upid
       WHERE a.dur > 700000000
         ${processFilter}
-      ORDER BY a.dur DESC
-      LIMIT 10
+      ORDER BY a.ts ASC
     `;
 
     const frozenFrameResult = await this.traceProcessor.query(traceId, frozenFrameSql);
+    const frozenFrameObjects = rowsToObjects(frozenFrameResult.columns || [], frozenFrameResult.rows || []);
 
     // Get consecutive jank statistics
     const consecutiveJankSql = `
@@ -1140,23 +2262,24 @@ LIMIT 100;
     `;
 
     const consecutiveResult = await this.traceProcessor.query(traceId, consecutiveJankSql);
+    const consecutiveObjects = rowsToObjects(consecutiveResult.columns || [], consecutiveResult.rows || []);
 
     return {
-      jankySessions: (jankSessionsResult.rows || []).map((r: any) => ({
+      jankySessions: jankSessionsObjects.map((r: any) => ({
         startIdx: r.start_frame,
         length: r.session_length,
         severity: r.severity,
         totalDurMs: r.total_dur_ms,
         process: r.process_name,
       })),
-      frozenFrames: (frozenFrameResult.rows || []).map((r: any) => ({
+      frozenFrames: frozenFrameObjects.map((r: any) => ({
         ts: r.ts,
         dur: r.dur_ms,
         process: r.process_name,
         jankType: r.jank_type,
       })),
-      consecutiveJankCount: consecutiveResult.rows && consecutiveResult.rows.length > 0
-        ? (consecutiveResult.rows[0] as any).max_consecutive_jank || 0
+      consecutiveJankCount: consecutiveObjects.length > 0
+        ? (consecutiveObjects[0].max_consecutive_jank as number) || 0
         : 0,
     };
   }
@@ -1226,9 +2349,10 @@ LIMIT 100;
       return null;
     }
 
-    const r = result.rows[0] as any;
-    const avgMs = r.avg_ms || 0;
-    const stdDevMs = r.std_dev_ms || 0;
+    const rowObjects = rowsToObjects(result.columns || [], result.rows);
+    const r = rowObjects[0];
+    const avgMs = (r.avg_ms as number) || 0;
+    const stdDevMs = (r.std_dev_ms as number) || 0;
 
     // Calculate coefficient of variation (CV = std/mean)
     // Lower CV means more stable frame rate
@@ -1296,7 +2420,6 @@ LIMIT 100;
         WHERE a.jank_type IS NOT NULL AND a.jank_type != 'None'
           ${processFilter}
         ORDER BY a.ts
-        LIMIT 100
       ),
       thread_analysis AS (
         SELECT
@@ -1342,7 +2465,8 @@ LIMIT 100;
       return null;
     }
 
-    const rows = result.rows as any[];
+    // Convert rows to objects for easier access
+    const rowObjects = rowsToObjects(result.columns, result.rows);
 
     // Count by root cause
     let mainThreadJank = 0;
@@ -1350,7 +2474,7 @@ LIMIT 100;
     let sfJank = 0;
     let bufferJank = 0;
 
-    const details = rows.map((r: any) => {
+    const details = rowObjects.map((r) => {
       if (r.root_cause === 'MainThread') mainThreadJank++;
       else if (r.root_cause === 'GPU') gpuJank++;
       else if (r.root_cause === 'BufferQueue') bufferJank++;
@@ -1360,7 +2484,7 @@ LIMIT 100;
         frameTs: r.ts,
         jankType: r.jank_type,
         rootCause: r.root_cause,
-        description: this.getRootCauseDescription(r.root_cause, r.jank_type),
+        description: this.getRootCauseDescription(r.root_cause as string, r.jank_type as string),
       };
     });
 
@@ -1497,16 +2621,17 @@ LIMIT 100;
       };
     }
 
-    const rows = queryResult.rows as any[];
-    const summary = this.formatLegacyScrollingSummary(rows);
+    // Convert rows to objects for easier access
+    const rowObjects = rowsToObjects(queryResult.columns, queryResult.rows);
+    const summary = this.formatLegacyScrollingSummary(rowObjects);
 
     return {
       analysisType: 'scrolling_legacy',
       sql,
-      rows,
-      rowCount: rows.length,
+      rows: queryResult.rows,
+      rowCount: queryResult.rows.length,
       summary,
-      metrics: rows.length > 0 ? rows[0] as any : {},
+      metrics: rowObjects.length > 0 ? rowObjects[0] : {},
       details: {
         method: 'Legacy multi-dimensional (Android < 12)',
         note: 'For accurate jank detection, use Android 12+ with FrameTimeline',
@@ -1554,14 +2679,15 @@ LIMIT 100;
       };
     }
 
-    const rows = queryResult.rows as any[];
-    const summary = this.formatMemorySummary(rows);
+    // Convert rows to objects for easier access
+    const rowObjects = rowsToObjects(queryResult.columns, queryResult.rows);
+    const summary = this.formatMemorySummary(rowObjects);
 
     return {
       analysisType: 'memory',
       sql,
-      rows,
-      rowCount: rows.length,
+      rows: queryResult.rows,
+      rowCount: queryResult.rows.length,
       summary,
     };
   }
@@ -1592,7 +2718,6 @@ LIMIT 100;
         ${processFilter}
       GROUP BY t.name, p.name
       ORDER BY total_dur_ms DESC
-      LIMIT 20
     `;
 
     const queryResult = await this.traceProcessor.query(traceId, sql);
@@ -1607,14 +2732,15 @@ LIMIT 100;
       };
     }
 
-    const rows = queryResult.rows as any[];
-    const summary = this.formatCpuSummary(rows);
+    // Convert rows to objects for easier access
+    const rowObjects = rowsToObjects(queryResult.columns, queryResult.rows);
+    const summary = this.formatCpuSummary(rowObjects);
 
     return {
       analysisType: 'cpu',
       sql,
-      rows,
-      rowCount: rows.length,
+      rows: queryResult.rows,
+      rowCount: queryResult.rows.length,
       summary,
     };
   }
@@ -1651,16 +2777,17 @@ LIMIT 100;
       };
     }
 
-    const rows = queryResult.rows as any[];
-    const summary = this.formatSurfaceFlingerSummary(rows);
+    // Convert rows to objects for easier access
+    const rowObjects = rowsToObjects(queryResult.columns, queryResult.rows);
+    const summary = this.formatSurfaceFlingerSummary(rowObjects);
 
     return {
       analysisType: 'surfaceflinger',
       sql,
-      rows,
-      rowCount: rows.length,
+      rows: queryResult.rows,
+      rowCount: queryResult.rows.length,
       summary,
-      metrics: rows.length > 0 ? rows[0] as any : {},
+      metrics: rowObjects.length > 0 ? rowObjects[0] : {},
     };
   }
 
@@ -1704,14 +2831,15 @@ LIMIT 100;
       };
     }
 
-    const rows = queryResult.rows as any[];
-    const summary = this.formatBinderSummary(rows);
+    // Convert rows to objects for easier access
+    const rowObjects = rowsToObjects(queryResult.columns, queryResult.rows);
+    const summary = this.formatBinderSummary(rowObjects);
 
     return {
       analysisType: 'binder',
       sql,
-      rows,
-      rowCount: rows.length,
+      rows: queryResult.rows,
+      rowCount: queryResult.rows.length,
       summary,
     };
   }
@@ -1734,7 +2862,6 @@ LIMIT 100;
       FROM slice s
       GROUP BY s.name
       ORDER BY count DESC
-      LIMIT 20
     `;
 
     const queryResult = await this.traceProcessor.query(traceId, sql);
@@ -1798,14 +2925,14 @@ LIMIT 100;
       };
     }
 
-    const rows = queryResult.rows as any[];
-    const summary = this.formatNavigationSummary(rows);
+    const rowObjects = rowsToObjects(queryResult.columns, queryResult.rows);
+    const summary = this.formatNavigationSummary(rowObjects);
 
     return {
       analysisType: 'navigation',
       sql,
-      rows,
-      rowCount: rows.length,
+      rows: rowObjects,
+      rowCount: rowObjects.length,
       summary,
     };
   }
@@ -1850,14 +2977,14 @@ LIMIT 100;
       };
     }
 
-    const rows = queryResult.rows as any[];
-    const summary = this.formatClickResponseSummary(rows);
+    const rowObjects = rowsToObjects(queryResult.columns, queryResult.rows);
+    const summary = this.formatClickResponseSummary(rowObjects);
 
     return {
       analysisType: 'click_response',
       sql,
-      rows,
-      rowCount: rows.length,
+      rows: rowObjects,
+      rowCount: rowObjects.length,
       summary,
     };
   }
@@ -1901,14 +3028,14 @@ LIMIT 100;
       };
     }
 
-    const rows = queryResult.rows as any[];
-    const summary = this.formatInputSummary(rows);
+    const rowObjects = rowsToObjects(queryResult.columns, queryResult.rows);
+    const summary = this.formatInputSummary(rowObjects);
 
     return {
       analysisType: 'input',
       sql,
-      rows,
-      rowCount: rows.length,
+      rows: rowObjects,
+      rowCount: rowObjects.length,
       summary,
     };
   }
@@ -1946,14 +3073,14 @@ LIMIT 100;
       };
     }
 
-    const rows = queryResult.rows as any[];
-    const summary = this.formatBufferFlowSummary(rows);
+    const rowObjects = rowsToObjects(queryResult.columns, queryResult.rows);
+    const summary = this.formatBufferFlowSummary(rowObjects);
 
     return {
       analysisType: 'bufferflow',
       sql,
-      rows,
-      rowCount: rows.length,
+      rows: rowObjects,
+      rowCount: rowObjects.length,
       summary,
     };
   }
@@ -1978,7 +3105,6 @@ LIMIT 100;
         AND s.dur > 10000000
       GROUP BY s.name
       ORDER BY total_dur_ms DESC
-      LIMIT 50
     `;
 
     const queryResult = await this.traceProcessor.query(traceId, sql);
@@ -1993,14 +3119,14 @@ LIMIT 100;
       };
     }
 
-    const rows = queryResult.rows as any[];
-    const summary = this.formatSystemServerSummary(rows);
+    const rowObjects = rowsToObjects(queryResult.columns, queryResult.rows);
+    const summary = this.formatSystemServerSummary(rowObjects);
 
     return {
       analysisType: 'systemserver',
       sql,
-      rows,
-      rowCount: rows.length,
+      rows: rowObjects,
+      rowCount: rowObjects.length,
       summary,
     };
   }
@@ -2052,7 +3178,6 @@ LIMIT 100;
         total_dur_ms
       FROM aggregated
       ORDER BY total_dur_ms DESC
-      LIMIT 50
     `;
 
     const queryResult = await this.traceProcessor.query(traceId, sql);
@@ -2067,7 +3192,7 @@ LIMIT 100;
       };
     }
 
-    const rows = queryResult.rows as any[];
+    const rowObjects = rowsToObjects(queryResult.columns, queryResult.rows);
 
     // Get top slowest individual instances
     const topSlowestSql = `
@@ -2084,27 +3209,26 @@ LIMIT 100;
       JOIN process p ON t.upid = p.upid
       WHERE s.dur > 16000000
         ${processFilter}
-      ORDER BY s.dur DESC
-      LIMIT 20
+      ORDER BY s.ts ASC
     `;
 
     const topSlowestResult = await this.traceProcessor.query(traceId, topSlowestSql);
-    const topSlowest = topSlowestResult.rows || [];
+    const topSlowestObjects = rowsToObjects(topSlowestResult.columns || [], topSlowestResult.rows || []);
 
-    const summary = this.formatSlowFunctionsSummary(rows, topSlowest as any[]);
+    const summary = this.formatSlowFunctionsSummary(rowObjects, topSlowestObjects);
 
     return {
       analysisType: 'slow_functions',
       sql,
-      rows,
-      rowCount: rows.length,
+      rows: rowObjects,
+      rowCount: rowObjects.length,
       summary,
       metrics: {
-        totalSlowFunctions: rows.length,
+        totalSlowFunctions: rowObjects.length,
         threshold: '16ms (frame budget)',
       },
       details: {
-        topSlowest,
+        topSlowest: topSlowestObjects,
       },
     };
   }
@@ -2133,8 +3257,7 @@ LIMIT 100;
       JOIN process p ON t.upid = p.upid
       WHERE 1=1
         ${processFilter}
-      ORDER BY net.dur DESC
-      LIMIT 100
+      ORDER BY net.ts ASC
     `;
 
     const queryResult = await this.traceProcessor.query(traceId, sql);
@@ -2149,7 +3272,7 @@ LIMIT 100;
       };
     }
 
-    const rows = queryResult.rows as any[];
+    const rowObjects = rowsToObjects(queryResult.columns, queryResult.rows);
 
     // Get aggregate statistics
     const statsSql = `
@@ -2168,21 +3291,22 @@ LIMIT 100;
     `;
 
     const statsResult = await this.traceProcessor.query(traceId, statsSql);
-    const stats = statsResult.rows && statsResult.rows.length > 0 ? statsResult.rows[0] as any : null;
+    const statsObjects = rowsToObjects(statsResult.columns || [], statsResult.rows || []);
+    const stats = statsObjects.length > 0 ? statsObjects[0] : null;
 
-    const summary = this.formatNetworkSummary(rows, stats);
+    const summary = this.formatNetworkSummary(rowObjects, stats);
 
     return {
       analysisType: 'network',
       sql,
-      rows,
-      rowCount: rows.length,
+      rows: rowObjects,
+      rowCount: rowObjects.length,
       summary,
       metrics: stats ? {
-        totalRequests: stats.total_requests,
-        avgDurationMs: stats.avg_dur_ms,
-        maxDurationMs: stats.max_dur_ms,
-        slowRequests: stats.slow_requests,
+        totalRequests: stats.total_requests as number,
+        avgDurationMs: stats.avg_dur_ms as number,
+        maxDurationMs: stats.max_dur_ms as number,
+        slowRequests: stats.slow_requests as number,
       } : undefined,
     };
   }
@@ -2210,8 +3334,7 @@ LIMIT 100;
       JOIN process p ON t.upid = p.upid
       WHERE s.name GLOB '*sqlite*%' OR s.name GLOB '*room*%'
         ${processFilter}
-      ORDER BY s.dur DESC
-      LIMIT 100
+      ORDER BY s.ts ASC
     `;
 
     const queryResult = await this.traceProcessor.query(traceId, sql);
@@ -2226,7 +3349,7 @@ LIMIT 100;
       };
     }
 
-    const rows = queryResult.rows as any[];
+    const rowObjects = rowsToObjects(queryResult.columns, queryResult.rows);
 
     // Get aggregate statistics by query type
     const statsSql = `
@@ -2244,21 +3367,22 @@ LIMIT 100;
     `;
 
     const statsResult = await this.traceProcessor.query(traceId, statsSql);
-    const stats = statsResult.rows && statsResult.rows.length > 0 ? statsResult.rows[0] as any : null;
+    const statsObjects = rowsToObjects(statsResult.columns || [], statsResult.rows || []);
+    const stats = statsObjects.length > 0 ? statsObjects[0] : null;
 
-    const summary = this.formatDatabaseSummary(rows, stats);
+    const summary = this.formatDatabaseSummary(rowObjects, stats);
 
     return {
       analysisType: 'database',
       sql,
-      rows,
-      rowCount: rows.length,
+      rows: rowObjects,
+      rowCount: rowObjects.length,
       summary,
       metrics: stats ? {
-        totalQueries: stats.total_queries,
-        avgDurationMs: stats.avg_dur_ms,
-        maxDurationMs: stats.max_dur_ms,
-        slowQueries: stats.slow_queries,
+        totalQueries: stats.total_queries as number,
+        avgDurationMs: stats.avg_dur_ms as number,
+        maxDurationMs: stats.max_dur_ms as number,
+        slowQueries: stats.slow_queries as number,
       } : undefined,
     };
   }
@@ -2286,8 +3410,7 @@ LIMIT 100;
       JOIN process p ON t.upid = p.upid
       WHERE s.name GLOB '*read*%' OR s.name GLOB '*write*%' OR s.name GLOB '*fs_*%'
         ${processFilter}
-      ORDER BY s.dur DESC
-      LIMIT 100
+      ORDER BY s.ts ASC
     `;
 
     const queryResult = await this.traceProcessor.query(traceId, sql);
@@ -2302,7 +3425,7 @@ LIMIT 100;
       };
     }
 
-    const rows = queryResult.rows as any[];
+    const rowObjects = rowsToObjects(queryResult.columns, queryResult.rows);
 
     // Get aggregate statistics
     const statsSql = `
@@ -2321,22 +3444,23 @@ LIMIT 100;
     `;
 
     const statsResult = await this.traceProcessor.query(traceId, statsSql);
-    const stats = statsResult.rows && statsResult.rows.length > 0 ? statsResult.rows[0] as any : null;
+    const statsObjects = rowsToObjects(statsResult.columns || [], statsResult.rows || []);
+    const stats = statsObjects.length > 0 ? statsObjects[0] : null;
 
-    const summary = this.formatFileIOSummary(rows, stats);
+    const summary = this.formatFileIOSummary(rowObjects, stats);
 
     return {
       analysisType: 'file_io',
       sql,
-      rows,
-      rowCount: rows.length,
+      rows: rowObjects,
+      rowCount: rowObjects.length,
       summary,
       metrics: stats ? {
-        totalOperations: stats.total_operations,
-        avgDurationMs: stats.avg_dur_ms,
-        maxDurationMs: stats.max_dur_ms,
-        readOps: stats.read_ops,
-        writeOps: stats.write_ops,
+        totalOperations: stats.total_operations as number,
+        avgDurationMs: stats.avg_dur_ms as number,
+        maxDurationMs: stats.max_dur_ms as number,
+        readOps: stats.read_ops as number,
+        writeOps: stats.write_ops as number,
       } : undefined,
     };
   }

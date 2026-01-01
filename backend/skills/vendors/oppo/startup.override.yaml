@@ -1,0 +1,184 @@
+# =============================================================================
+# OPPO ColorOS 启动分析覆盖配置
+# =============================================================================
+# 版本: 1.0.0
+# 基于: base/startup
+# 适用: OPPO 设备 (ColorOS)
+# =============================================================================
+
+extends: base/startup
+version: "1.0.0"
+
+meta:
+  display_name: "OPPO ColorOS 启动分析"
+  description: "针对 OPPO ColorOS 优化的启动分析，包含 HyperBoost 检测"
+  vendor: oppo
+  os: ColorOS
+
+# -----------------------------------------------------------------------------
+# 厂商检测规则
+# -----------------------------------------------------------------------------
+vendor_detection:
+  # 通过 trace 中的特征来识别 OPPO 设备
+  signatures:
+    - pattern: "*ColorOS*"
+      confidence: high
+    - pattern: "*OPPO*"
+      confidence: high
+    - pattern: "*HyperBoost*"
+      confidence: high
+    - pattern: "*oplus*"
+      confidence: medium
+
+# -----------------------------------------------------------------------------
+# 额外分析步骤 (追加到基础步骤之后)
+# -----------------------------------------------------------------------------
+additional_steps:
+  # 检测 ColorOS 加速引擎
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: coloross_boost_engine
+    name: "ColorOS 加速引擎检测"
+    description: "检查 HyperBoost 是否在启动期间生效"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as boost_event,
+        s.dur / 1e6 as dur_ms,
+        (s.ts - (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})) / 1e6 as relative_ts_ms
+      FROM slice s
+      WHERE (s.name GLOB '*HyperBoost*'
+             OR s.name GLOB '*ColorOS*Boost*'
+             OR s.name GLOB '*oplus*boost*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.ts ASC
+
+  # 检测 OPPO 特有的系统服务调用
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: oppo_system_services
+    name: "OPPO 系统服务调用"
+    for_each: startups
+    sql: |
+      SELECT
+        server_process,
+        client_dur / 1e6 as dur_ms,
+        COUNT(*) as call_count
+      FROM android_binder_txns
+      WHERE client_process GLOB '${package}*'
+        AND (server_process GLOB '*oppo*'
+             OR server_process GLOB '*oplus*'
+             OR server_process GLOB '*color*')
+        AND client_ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND client_ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      GROUP BY server_process
+      ORDER BY SUM(client_dur) DESC
+
+  # 检测 ColorOS 应用冻结状态
+  # NOTE: 使用子查询获取 ts，避免 JavaScript 大整数精度丢失问题
+  - id: app_freeze_state
+    name: "应用冻结状态检测"
+    description: "检查应用是否从冻结状态恢复"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as freeze_event,
+        s.dur / 1e6 as dur_ms,
+        (s.ts - (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})) / 1e6 as relative_ts_ms
+      FROM slice s
+      WHERE (s.name GLOB '*freeze*'
+             OR s.name GLOB '*Freeze*'
+             OR s.name GLOB '*thaw*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.ts ASC
+
+# -----------------------------------------------------------------------------
+# 覆盖判断标准 (OPPO 设备可能有更好的优化)
+# -----------------------------------------------------------------------------
+thresholds_override:
+  # OPPO 的 HyperBoost 可能让启动更快，所以标准可以更严格
+  cold_start_time:
+    levels:
+      excellent: { max: 400 }     # 比基础标准更严格
+      good: { min: 400, max: 800 }
+      warning: { min: 800, max: 1500 }
+      critical: { min: 1500 }
+
+  # 大核占比期望更高（HyperBoost 应该会调度到大核）
+  big_core_ratio:
+    levels:
+      excellent: { min: 80 }      # OPPO 应该有更高的大核占比
+      good: { min: 60, max: 80 }
+      warning: { min: 40, max: 60 }
+      critical: { max: 40 }
+
+# -----------------------------------------------------------------------------
+# 额外诊断规则
+# -----------------------------------------------------------------------------
+additional_diagnostics:
+  - id: hyperboost_not_active
+    condition: "coloross_boost_engine.count == 0"
+    severity: info
+    message: "未检测到 HyperBoost 加速，启动可能未享受到系统加速"
+    suggestions:
+      - "检查应用是否在 HyperBoost 白名单中"
+      - "联系 OPPO 系统工程师确认加速策略"
+
+  - id: oppo_service_slow
+    condition: "oppo_system_services.any.dur_ms > 50"
+    severity: warning
+    message: "OPPO 系统服务 ${server_process} 调用耗时 ${dur_ms}ms"
+    suggestions:
+      - "联系 OPPO 系统侧确认服务状态"
+      - "检查是否可以异步调用"
+
+  - id: freeze_recovery_slow
+    condition: "app_freeze_state.any.dur_ms > 100"
+    severity: warning
+    message: "从冻结状态恢复耗时 ${dur_ms}ms"
+    suggestions:
+      - "检查应用是否有大量状态需要恢复"
+      - "优化 onResume 中的逻辑"
+
+# -----------------------------------------------------------------------------
+# 额外输出
+# -----------------------------------------------------------------------------
+additional_output_sections:
+  - id: hyperboost
+    title: "HyperBoost 加速状态"
+    type: status
+    from: coloross_boost_engine
+    show_when: "coloross_boost_engine.count > 0"
+    fields:
+      - { key: boost_event, label: "加速事件" }
+      - { key: dur_ms, label: "持续时间", unit: "ms" }
+
+  - id: oppo_services
+    title: "OPPO 系统服务调用"
+    type: table
+    from: oppo_system_services
+    show_when: "oppo_system_services.count > 0"
+    fields:
+      - { key: server_process, label: "服务" }
+      - { key: dur_ms, label: "耗时", unit: "ms" }
+      - { key: call_count, label: "调用次数" }
+
+# -----------------------------------------------------------------------------
+# OPPO 特有的 Trace Tag 参考
+# -----------------------------------------------------------------------------
+# 以下是 OPPO 设备上常见的 Trace Tag，供分析参考：
+#
+# ColorOS 系统:
+#   - ColorOS.* : ColorOS 系统相关
+#   - HyperBoost.* : 加速引擎
+#   - oplus.* : OPPO 自有服务
+#   - OplusAds.* : 广告相关
+#
+# 性能优化:
+#   - BoostPool : 线程池加速
+#   - GameAssistant : 游戏优化
+#   - TouchBoost : 触控加速
+#
+# 电源管理:
+#   - OplusBattery : 电池管理
+#   - PowerSaving : 省电模式

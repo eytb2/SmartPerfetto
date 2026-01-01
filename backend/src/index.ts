@@ -21,9 +21,15 @@ import traceAnalysisRouter from './routes/traceAnalysisRoutes';
 import sessionRoutes from './routes/sessionRoutes';
 import perfettoSqlRoutes from './routes/perfettoSqlRoutes';
 import exportRoutes from './routes/exportRoutes';
+import templateAnalysisRoutes from './routes/templateAnalysisRoutes';
+import skillRoutes from './routes/skillRoutes';
+import skillAdminRoutes from './routes/skillAdminRoutes';
 
 // Import article aggregator initialization
 import { initArticleAggregator } from './controllers/articleController';
+// Import cleanup utilities
+import { TraceProcessorFactory, killOrphanProcessors } from './services/workingTraceProcessor';
+import { getPortPool, resetPortPool } from './services/portPool';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -83,6 +89,9 @@ app.use('/api/trace-analysis', traceAnalysisRouter);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/perfetto-sql', perfettoSqlRoutes);
 app.use('/api/export', exportRoutes);
+app.use('/api/template-analysis', templateAnalysisRoutes);
+app.use('/api/skills', skillRoutes);
+app.use('/api/admin', skillAdminRoutes);
 
 // Serve uploaded files in development
 if (NODE_ENV === 'development') {
@@ -109,12 +118,50 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 });
 
 // Initialize services
+// Kill orphan trace_processor processes from previous runs
+killOrphanProcessors();
 initArticleAggregator();
 
+// Graceful shutdown handler
+function gracefulShutdown(signal: string) {
+  console.log(`\n📴 Received ${signal}, shutting down gracefully...`);
+
+  // Cleanup all trace processors (this will also release ports)
+  console.log('🧹 Cleaning up trace processors...');
+  TraceProcessorFactory.cleanup();
+
+  // Reset port pool
+  console.log('🔌 Resetting port pool...');
+  resetPortPool();
+
+  console.log('✅ Cleanup complete, exiting...');
+  process.exit(0);
+}
+
+// Register signal handlers
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('❌ Uncaught Exception:', error);
+  gracefulShutdown('uncaughtException');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 // Start server
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📊 Environment: ${NODE_ENV}`);
   console.log(`🔗 API URL: http://localhost:${PORT}/api`);
   console.log(`❤️  Health check: http://localhost:${PORT}/health`);
+  console.log(`📈 Stats: http://localhost:${PORT}/api/traces/stats`);
+});
+
+// Handle server close
+server.on('close', () => {
+  console.log('🔒 Server closed');
 });

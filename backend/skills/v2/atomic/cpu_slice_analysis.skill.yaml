@@ -1,0 +1,77 @@
+# =============================================================================
+# CPU 时间分析（原子 Skill）
+# =============================================================================
+# 分析指定时间范围内的 CPU 使用情况
+
+name: cpu_slice_analysis
+version: "2.0"
+type: atomic
+
+meta:
+  display_name: "CPU 时间分析"
+  description: "分析指定时间范围内的 CPU 占用和分布"
+  icon: "memory"
+  tags: [cpu, performance, atomic]
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: true
+    description: "开始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: true
+    description: "结束时间戳(ns)"
+  - name: package
+    type: string
+    required: false
+    description: "应用包名（可选）"
+
+sql: |
+  WITH target_threads AS (
+    SELECT t.utid, t.tid, t.name as thread_name, p.name as process_name
+    FROM thread t
+    JOIN process p ON t.upid = p.upid
+    WHERE p.name GLOB '${package}*' OR '${package}' = ''
+  ),
+  cpu_slices AS (
+    SELECT
+      ss.utid,
+      ss.dur,
+      ss.cpu,
+      CASE
+        WHEN ss.cpu >= 4 THEN 'big'
+        ELSE 'little'
+      END as core_type
+    FROM sched_slice ss
+    WHERE ss.ts >= ${start_ts}
+      AND ss.ts < ${end_ts}
+      AND ss.utid IN (SELECT utid FROM target_threads)
+  )
+  SELECT
+    tt.thread_name,
+    tt.process_name,
+    SUM(cs.dur) / 1e6 as total_cpu_ms,
+    SUM(CASE WHEN cs.core_type = 'big' THEN cs.dur ELSE 0 END) / 1e6 as big_core_ms,
+    SUM(CASE WHEN cs.core_type = 'little' THEN cs.dur ELSE 0 END) / 1e6 as little_core_ms,
+    COUNT(*) as slice_count,
+    AVG(cs.dur) / 1e6 as avg_slice_ms
+  FROM target_threads tt
+  LEFT JOIN cpu_slices cs ON tt.utid = cs.utid
+  GROUP BY tt.utid
+  HAVING total_cpu_ms > 0
+  ORDER BY total_cpu_ms DESC
+
+output:
+  display:
+    level: detail
+    format: table
+  fields:
+    - name: thread_name
+      label: "线程"
+    - name: total_cpu_ms
+      label: "CPU时间(ms)"
+    - name: big_core_ms
+      label: "大核(ms)"
+    - name: little_core_ms
+      label: "小核(ms)"

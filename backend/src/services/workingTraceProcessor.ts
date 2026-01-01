@@ -1,9 +1,57 @@
 import { EventEmitter } from 'events';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, execSync } from 'child_process';
+import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import axios from 'axios';
+import { encodeQueryArgs, decodeQueryResult } from './traceProcessorProtobuf';
+import { getPortPool } from './portPool';
+
+// Path to the trace_processor_shell binary
+// Use the locally built version from perfetto/out/ui which has the viz stdlib modules
+// Can be overridden via TRACE_PROCESSOR_PATH environment variable
+// Path: backend/src/services/ -> ../../../ -> perfetto/out/ui/
+const TRACE_PROCESSOR_PATH = process.env.TRACE_PROCESSOR_PATH ||
+  path.resolve(__dirname, '../../../perfetto/out/ui/trace_processor_shell');
+
+/**
+ * Kill all orphan trace_processor_shell processes.
+ * This should be called at startup to clean up processes from previous runs.
+ */
+export function killOrphanProcessors(): number {
+  console.log('[TraceProcessor] Checking for orphan trace_processor_shell processes...');
+
+  try {
+    // Find all trace_processor_shell processes
+    const result = execSync('pgrep -f trace_processor_shell 2>/dev/null || true', { encoding: 'utf-8' });
+    const pids = result.trim().split('\n').filter(pid => pid.length > 0);
+
+    if (pids.length === 0) {
+      console.log('[TraceProcessor] No orphan processes found');
+      return 0;
+    }
+
+    console.log(`[TraceProcessor] Found ${pids.length} orphan process(es): ${pids.join(', ')}`);
+
+    // Kill each process
+    let killed = 0;
+    for (const pid of pids) {
+      try {
+        execSync(`kill ${pid} 2>/dev/null || true`);
+        killed++;
+        console.log(`[TraceProcessor] Killed orphan process ${pid}`);
+      } catch (e) {
+        // Process may already be dead
+      }
+    }
+
+    console.log(`[TraceProcessor] Killed ${killed} orphan process(es)`);
+    return killed;
+  } catch (error: any) {
+    console.log('[TraceProcessor] Error checking for orphan processes:', error.message);
+    return 0;
+  }
+}
 
 export interface QueryResult {
   columns: string[];
@@ -21,7 +69,13 @@ export interface TraceProcessor {
 }
 
 /**
- * A working Trace Processor that uses the trace_processor_shell in HTTP mode
+ * A working Trace Processor that uses trace_processor_shell in HTTP mode.
+ *
+ * This implementation:
+ * 1. Starts trace_processor_shell with --httpd flag
+ * 2. Loads the trace file once at initialization
+ * 3. Executes queries via HTTP requests (fast, no reload)
+ * 4. Properly cleans up the process on destroy
  */
 export class WorkingTraceProcessor extends EventEmitter implements TraceProcessor {
   public id: string;
@@ -30,48 +84,170 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
 
   private process: ChildProcess | null = null;
   private tracePath: string;
-  private httpPort: number;
-  private httpUrl: string;
+  private _httpPort: number;
+
+  /** Get the HTTP port this processor is listening on */
+  public get httpPort(): number {
+    return this._httpPort;
+  }
   private isDestroyed = false;
+  private serverReady = false;
 
   constructor(traceId: string, tracePath: string) {
     super();
     this.id = uuidv4();
     this.traceId = traceId;
     this.tracePath = tracePath;
-    this.httpPort = 9001 + Math.floor(Math.random() * 1000); // Random port
-    this.httpUrl = `http://localhost:${this.httpPort}`;
+
+    // Allocate port from pool
+    this._httpPort = getPortPool().allocate(traceId);
   }
 
   async initialize(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      console.log(`Initializing trace processor for: ${this.tracePath}`);
+    console.log(`[TraceProcessor] Initializing HTTP mode for trace: ${this.tracePath}`);
+    console.log(`[TraceProcessor] Using port: ${this.httpPort}`);
 
-      // Check if trace file exists
-      if (!fs.existsSync(this.tracePath)) {
-        reject(new Error(`Trace file not found: ${this.tracePath}`));
-        return;
+    // Check if trace file exists
+    if (!fs.existsSync(this.tracePath)) {
+      throw new Error(`Trace file not found: ${this.tracePath}`);
+    }
+
+    // Check if trace_processor_shell exists
+    if (!fs.existsSync(TRACE_PROCESSOR_PATH)) {
+      throw new Error(`trace_processor_shell not found at: ${TRACE_PROCESSOR_PATH}`);
+    }
+
+    if (this.isDestroyed) {
+      throw new Error('Processor destroyed during initialization');
+    }
+
+    // Start trace_processor_shell in HTTP mode
+    try {
+      await this.startHttpServer();
+
+      // Verify server is working with a test query
+      console.log(`[TraceProcessor] Verifying server with test query...`);
+      const testResult = await this.executeHttpQuery('SELECT 1 as test');
+
+      if (testResult.error) {
+        throw new Error(`Server verification failed: ${testResult.error}`);
       }
 
-      // For now, simulate the processor with mock data
-      // In production, you would run:
-      // const process = spawn('trace_processor_shell', [
-      //   '--httpd', this.httpPort.toString(),
-      //   this.tracePath
-      // ]);
+      this.status = 'ready';
+      console.log(`[TraceProcessor] Processor ${this.id} ready (HTTP mode) for trace ${this.traceId}`);
+      this.emit('ready');
+    } catch (error: any) {
+      console.error(`[TraceProcessor] Initialization failed:`, error.message);
+      this.status = 'error';
+      this.destroy();
+      throw error;
+    }
+  }
 
-      // Simulate initialization
-      setTimeout(() => {
-        if (this.isDestroyed) {
-          reject(new Error('Processor destroyed during initialization'));
-          return;
+  /**
+   * Start trace_processor_shell HTTP server
+   */
+  private async startHttpServer(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const args = [
+        '--httpd',
+        '--http-port', String(this.httpPort),
+        // Allow CORS from the Perfetto UI origin
+        '--http-additional-cors-origins', 'http://localhost:10000,http://127.0.0.1:10000',
+        this.tracePath
+      ];
+
+      console.log(`[TraceProcessor] Starting: ${TRACE_PROCESSOR_PATH} ${args.join(' ')}`);
+
+      this.process = spawn(TRACE_PROCESSOR_PATH, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: false,
+      });
+
+      let stdout = '';
+      let stderr = '';
+      let resolved = false;
+
+      // Timeout for server startup
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          reject(new Error(`Server startup timeout. stdout: ${stdout}, stderr: ${stderr}`));
+        }
+      }, 30000);
+
+      this.process.stdout?.on('data', (data) => {
+        const text = data.toString();
+        stdout += text;
+        console.log(`[TraceProcessor] stdout: ${text.trim()}`);
+
+        // Check if server is ready
+        if (text.includes('Starting HTTP server') || text.includes('Trace loaded')) {
+          // Wait a bit for server to be fully ready
+          setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timeout);
+              this.serverReady = true;
+              resolve();
+            }
+          }, 500);
+        }
+      });
+
+      this.process.stderr?.on('data', (data) => {
+        const text = data.toString();
+        stderr += text;
+        console.log(`[TraceProcessor] stderr: ${text.trim()}`);
+
+        // Also check stderr for server ready message
+        if (text.includes('Starting HTTP server') || text.includes('Trace loaded')) {
+          setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timeout);
+              this.serverReady = true;
+              resolve();
+            }
+          }, 500);
         }
 
-        this.status = 'ready';
-        console.log(`Trace processor ${this.id} ready for trace ${this.traceId}`);
-        this.emit('ready');
-        resolve();
-      }, 3000); // Simulate 3 second initialization
+        // Check for errors
+        if (text.includes('Could not open') || text.includes('Could not read')) {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            reject(new Error(`Failed to load trace: ${text}`));
+          }
+        }
+
+        // Check for port in use error
+        if (text.includes('Failed to listen') || text.includes('Address already in use')) {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            reject(new Error(`PORT_IN_USE:${this.httpPort}`));
+          }
+        }
+      });
+
+      this.process.on('error', (error) => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          reject(error);
+        }
+      });
+
+      this.process.on('close', (code) => {
+        console.log(`[TraceProcessor] Process exited with code ${code}`);
+        this.serverReady = false;
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          reject(new Error(`Process exited unexpectedly with code ${code}`));
+        }
+      });
     });
   }
 
@@ -80,151 +256,131 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
       throw new Error(`Trace processor not ready (status: ${this.status})`);
     }
 
-    const startTime = Date.now();
+    if (!this.serverReady) {
+      throw new Error('HTTP server not ready');
+    }
 
-    // Simulate real query processing with better mock data
-    return this.mockRealisticQuery(sql);
+    const startTime = Date.now();
+    console.log(`[TraceProcessor] Executing HTTP query: ${sql.substring(0, 200)}${sql.length > 200 ? '...' : ''}`);
+
+    return this.executeHttpQuery(sql);
   }
 
-  private async mockRealisticQuery(sql: string): Promise<QueryResult> {
+  /**
+   * Execute SQL query via HTTP
+   */
+  private executeHttpQuery(sql: string): Promise<QueryResult> {
     const startTime = Date.now();
-    const lowerSql = sql.toLowerCase();
 
-    // Simulate query delay
-    await new Promise(resolve => setTimeout(resolve, 50 + Math.random() * 200));
+    return new Promise((resolve) => {
+      // Encode QueryArgs protobuf
+      const requestBody = encodeQueryArgs(sql);
 
-    // Handle different query types
-    if (lowerSql.includes('slice') && lowerSql.includes('select')) {
-      // Return realistic slice data
-      const slices = [
-        [1, 1000000000, 16666000, 'Choreographer: doFrame', 1, 'ui'],
-        [2, 10166660000, 8333000, 'draw', 2, 'ui'],
-        [3, 10174993000, 4166000, 'RecordView#draw', 3, 'ui'],
-        [4, 10179159000, 4999000, 'DecorView#draw', 4, 'ui'],
-        [5, 10184158000, 5832000, 'ViewRootImpl#draw', 5, 'ui'],
-        [6, 10189990000, 24999000, 'FrameDisplayEventReceiver#onVsync', 6, 'vsync'],
-        [7, 10214989000, 7499000, 'inflate', 7, 'layout'],
-        [8, 10222488000, 3332000, 'measure', 8, 'layout'],
-        [9, 10225820000, 4166000, 'layout', 9, 'layout'],
-        [10, 10229986000, 4999000, 'draw', 10, 'rendering'],
-      ];
-
-      // Filter based on query
-      if (lowerSql.includes('dur >')) {
-        const match = sql.match(/dur > (\d+)/);
-        if (match) {
-          const threshold = parseInt(match[1]);
-          return {
-            columns: ['id', 'ts', 'dur', 'name', 'track_id', 'category'],
-            rows: slices.filter(row => Number(row[2]) > threshold),
-            durationMs: Date.now() - startTime,
-          };
-        }
-      }
-
-      return {
-        columns: ['id', 'ts', 'dur', 'name', 'track_id', 'category'],
-        rows: slices,
-        durationMs: Date.now() - startTime,
+      const options = {
+        hostname: 'localhost',
+        port: this.httpPort,
+        path: '/query',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-protobuf',
+          'Content-Length': requestBody.length,
+        },
+        timeout: 60000,
       };
-    }
 
-    if (lowerSql.includes('thread')) {
-      return {
-        columns: ['utid', 'tid', 'pid', 'name'],
-        rows: [
-          [1, 1, 1234, 'main'],
-          [2, 2, 1234, 'RenderThread'],
-          [3, 3, 1234, 'HWUI Task'],
-          [4, 4, 5678, 'system_server'],
-          [5, 5, 5678, 'ActivityManager'],
-          [6, 6, 5678, 'WindowManager'],
-        ],
-        durationMs: Date.now() - startTime,
-      };
-    }
+      const req = http.request(options, (res) => {
+        const chunks: Buffer[] = [];
 
-    if (lowerSql.includes('process')) {
-      return {
-        columns: ['upid', 'pid', 'name', 'cmdline'],
-        rows: [
-          [1, 1234, 'com.example.app', 'com.example.app'],
-          [2, 5678, 'system_server', 'system_server'],
-          [3, 9012, 'surfaceflinger', '/system/bin/surfaceflinger'],
-        ],
-        durationMs: Date.now() - startTime,
-      };
-    }
+        res.on('data', (chunk) => chunks.push(chunk));
 
-    if (lowerSql.includes('counter') && lowerSql.includes('fps')) {
-      // Mock FPS counter data
-      const fpsData = [];
-      let timestamp = 1000000000;
-      for (let i = 0; i < 100; i++) {
-        fpsData.push([1, timestamp, 60 - Math.random() * 10, 1]); // Track ID 1
-        timestamp += 16666000; // ~60fps
-      }
-      return {
-        columns: ['id', 'ts', 'value', 'track_id'],
-        rows: fpsData,
-        durationMs: Date.now() - startTime,
-      };
-    }
+        res.on('end', () => {
+          const responseBuffer = Buffer.concat(chunks);
+          const durationMs = Date.now() - startTime;
 
-    if (lowerSql.includes('android_log')) {
-      return {
-        columns: ['id', 'ts', 'prio', 'tag', 'msg'],
-        rows: [
-          [1, 1000005000, 'I', 'Choreographer', 'Skipped 30 frames! The application may be doing too much work on its main thread.'],
-          [2, 1001000000, 'W', 'ActivityManager', 'Activity idle timeout for ActivityRecord'],
-          [3, 1002000000, 'D', 'OpenGLRenderer', 'endAllActiveAnimators on 0x7d8f9b4000 (RippleDrawable) with handle 0x7d8f9b4140'],
-        ],
-        durationMs: Date.now() - startTime,
-      };
-    }
+          try {
+            // Decode QueryResult protobuf
+            const parsed = decodeQueryResult(responseBuffer);
 
-    // Default empty result
-    return {
-      columns: [],
-      rows: [],
-      durationMs: Date.now() - startTime,
-    };
-  }
+            if (parsed.error) {
+              console.log(`[TraceProcessor] Query error: ${parsed.error}`);
+              resolve({
+                columns: parsed.columnNames,
+                rows: parsed.rows,
+                durationMs,
+                error: parsed.error,
+              });
+            } else {
+              console.log(`[TraceProcessor] Query returned ${parsed.rows.length} rows, ${parsed.columnNames.length} columns in ${durationMs}ms`);
+              resolve({
+                columns: parsed.columnNames,
+                rows: parsed.rows,
+                durationMs,
+              });
+            }
+          } catch (parseError: any) {
+            console.error(`[TraceProcessor] Failed to parse response:`, parseError.message);
+            resolve({
+              columns: [],
+              rows: [],
+              durationMs,
+              error: `Failed to parse response: ${parseError.message}`,
+            });
+          }
+        });
+      });
 
-  async queryWithHttp(sql: string): Promise<QueryResult> {
-    // In a real implementation with HTTP RPC mode:
-    try {
-      const response = await axios.post(
-        `${this.httpUrl}/rpc/query`,
-        { sql },
-        {
-          headers: { 'Content-Type': 'application/json' },
-          timeout: 30000,
-        }
-      );
+      req.on('error', (error) => {
+        console.error(`[TraceProcessor] HTTP request failed:`, error.message);
+        resolve({
+          columns: [],
+          rows: [],
+          durationMs: Date.now() - startTime,
+          error: `HTTP request failed: ${error.message}`,
+        });
+      });
 
-      return {
-        columns: response.data.columns || [],
-        rows: response.data.rows || [],
-        durationMs: response.data.durationMs || 0,
-      };
-    } catch (error) {
-      return {
-        columns: [],
-        rows: [],
-        durationMs: 0,
-        error: error instanceof Error ? error.message : 'Query failed',
-      };
-    }
+      req.on('timeout', () => {
+        req.destroy();
+        resolve({
+          columns: [],
+          rows: [],
+          durationMs: Date.now() - startTime,
+          error: 'Query timeout',
+        });
+      });
+
+      req.write(requestBody);
+      req.end();
+    });
   }
 
   destroy(): void {
+    console.log(`[TraceProcessor] Destroying processor ${this.id} for trace ${this.traceId}`);
     this.isDestroyed = true;
+    this.serverReady = false;
     this.status = 'error';
 
     if (this.process) {
-      this.process.kill('SIGTERM');
+      try {
+        // Try graceful shutdown first
+        this.process.kill('SIGTERM');
+
+        // Force kill after timeout
+        setTimeout(() => {
+          if (this.process && !this.process.killed) {
+            this.process.kill('SIGKILL');
+          }
+          // Release port after process is killed
+          getPortPool().release(this.traceId);
+        }, 2000);
+      } catch (e) {
+        // Process may already be dead, still release port
+        getPortPool().release(this.traceId);
+      }
       this.process = null;
+    } else {
+      // No process, but still release port
+      getPortPool().release(this.traceId);
     }
 
     this.removeAllListeners();
@@ -239,20 +395,32 @@ export class TraceProcessorFactory {
   private static maxProcessors = 5;
 
   static async create(traceId: string, tracePath: string): Promise<WorkingTraceProcessor> {
-    // Check if processor already exists
+    // Check if processor already exists and is ready
     const existing = this.processors.get(traceId);
     if (existing && existing.status === 'ready') {
+      console.log(`[TraceProcessorFactory] Reusing existing processor for trace ${traceId}`);
       return existing;
     }
 
-    // Clean up if too many processors
-    if (this.processors.size >= this.maxProcessors) {
-      const oldest = Array.from(this.processors.values())[0];
-      oldest.destroy();
-      this.processors.delete(oldest.traceId);
+    // Clean up failed processor if exists
+    if (existing && existing.status !== 'ready') {
+      console.log(`[TraceProcessorFactory] Cleaning up failed processor for trace ${traceId}`);
+      existing.destroy();
+      this.processors.delete(traceId);
+    }
+
+    // Clean up oldest processors if too many
+    while (this.processors.size >= this.maxProcessors) {
+      const oldest = Array.from(this.processors.entries())[0];
+      if (oldest) {
+        console.log(`[TraceProcessorFactory] Cleaning up oldest processor: ${oldest[0]}`);
+        oldest[1].destroy();
+        this.processors.delete(oldest[0]);
+      }
     }
 
     // Create new processor
+    console.log(`[TraceProcessorFactory] Creating new HTTP-mode processor for trace ${traceId}`);
     const processor = new WorkingTraceProcessor(traceId, tracePath);
 
     processor.on('error', () => {
@@ -269,10 +437,141 @@ export class TraceProcessorFactory {
     return this.processors.get(traceId);
   }
 
+  static remove(traceId: string): boolean {
+    const processor = this.processors.get(traceId);
+    if (processor) {
+      console.log(`[TraceProcessorFactory] Removing processor for trace ${traceId}`);
+      processor.destroy();
+      this.processors.delete(traceId);
+      return true;
+    }
+    return false;
+  }
+
   static cleanup(): void {
+    console.log(`[TraceProcessorFactory] Cleaning up all processors`);
     for (const processor of this.processors.values()) {
       processor.destroy();
     }
     this.processors.clear();
+  }
+
+  static getStats(): { count: number; traceIds: string[] } {
+    return {
+      count: this.processors.size,
+      traceIds: Array.from(this.processors.keys()),
+    };
+  }
+
+  /**
+   * Create a processor that connects to an existing external HTTP RPC endpoint.
+   * This is used when the frontend is already connected to a trace_processor via HTTP RPC.
+   * We don't start a new process, we just create a wrapper that queries the existing one.
+   */
+  static async createFromExternalRpc(traceId: string, port: number): Promise<ExternalRpcProcessor> {
+    console.log(`[TraceProcessorFactory] Creating external RPC processor for port ${port}`);
+
+    const processor = new ExternalRpcProcessor(traceId, port);
+
+    // Verify connection by running a simple query
+    try {
+      await processor.query('SELECT 1');
+      console.log(`[TraceProcessorFactory] External RPC connection verified on port ${port}`);
+    } catch (error) {
+      console.error(`[TraceProcessorFactory] Failed to verify external RPC connection:`, error);
+      throw new Error(`Cannot connect to external trace_processor on port ${port}`);
+    }
+
+    this.processors.set(traceId, processor as any);
+    return processor;
+  }
+}
+
+/**
+ * A lightweight processor that connects to an external trace_processor HTTP RPC endpoint.
+ * Unlike WorkingTraceProcessor, this doesn't start a new process.
+ */
+export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor {
+  public id: string;
+  public traceId: string;
+  public status: 'initializing' | 'ready' | 'busy' | 'error' = 'ready';
+
+  private _httpPort: number;
+
+  public get httpPort(): number {
+    return this._httpPort;
+  }
+
+  constructor(traceId: string, port: number) {
+    super();
+    this.id = `external-${port}`;
+    this.traceId = traceId;
+    this._httpPort = port;
+    console.log(`[ExternalRpcProcessor] Created for trace ${traceId} on port ${port}`);
+  }
+
+  async query(sql: string): Promise<QueryResult> {
+    const startTime = Date.now();
+
+    try {
+      // Use protobuf encoding for the query
+      const requestBody = encodeQueryArgs(sql);
+
+      return new Promise((resolve, reject) => {
+        const req = http.request({
+          hostname: '127.0.0.1',
+          port: this._httpPort,
+          path: '/query',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-protobuf',
+            'Content-Length': requestBody.length,
+          },
+        }, (res) => {
+          const chunks: Buffer[] = [];
+
+          res.on('data', (chunk) => chunks.push(chunk));
+
+          res.on('end', () => {
+            const responseBody = Buffer.concat(chunks);
+
+            if (res.statusCode !== 200) {
+              reject(new Error(`HTTP ${res.statusCode}: ${responseBody.toString()}`));
+              return;
+            }
+
+            try {
+              const result = decodeQueryResult(responseBody);
+              resolve({
+                columns: result.columnNames,
+                rows: result.rows,
+                durationMs: Date.now() - startTime,
+                error: result.error,
+              });
+            } catch (decodeError: any) {
+              reject(new Error(`Failed to decode response: ${decodeError.message}`));
+            }
+          });
+        });
+
+        req.on('error', reject);
+        req.write(requestBody);
+        req.end();
+      });
+    } catch (error: any) {
+      return {
+        columns: [],
+        rows: [],
+        durationMs: Date.now() - startTime,
+        error: error.message,
+      };
+    }
+  }
+
+  destroy(): void {
+    // External RPC processor doesn't own the process, so nothing to clean up
+    console.log(`[ExternalRpcProcessor] Destroyed (trace ${this.traceId})`);
+    this.status = 'error';
+    this.emit('destroyed');
   }
 }

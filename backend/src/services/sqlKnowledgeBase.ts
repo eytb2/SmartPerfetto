@@ -1225,7 +1225,10 @@ LIMIT 20;`
 }
 
 // Default instance (uses local Perfetto project path)
-const DEFAULT_PERFETTO_PATH = '/Users/chris/Code/SmartPerfetto/SmartPerfetto/perfetto';
+// Can be overridden via PERFETTO_PATH environment variable
+// Path: backend/src/services/ -> ../../../ -> perfetto/
+const DEFAULT_PERFETTO_PATH = process.env.PERFETTO_PATH ||
+  path.resolve(__dirname, '../../../perfetto');
 
 export function createKnowledgeBase(perfettoPath = DEFAULT_PERFETTO_PATH): SqlKnowledgeBase {
   return new SqlKnowledgeBase(perfettoPath);
