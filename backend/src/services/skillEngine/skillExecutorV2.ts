@@ -31,6 +31,25 @@ import {
 } from './types_v2';
 
 // =============================================================================
+// Layered Result Types
+// =============================================================================
+
+export interface LayeredResult {
+  layers: {
+    L1?: Record<string, StepResult>;
+    L2?: Record<string, StepResult>;
+    L3?: Record<string, Record<string, StepResult>>;
+    L4?: Record<string, Record<string, StepResult>>;
+  };
+  defaultExpanded: ('L1' | 'L2' | 'L3' | 'L4')[];
+  metadata: {
+    skillName: string;
+    version: string;
+    executedAt: string;
+  };
+}
+
+// =============================================================================
 // 表达式求值器
 // =============================================================================
 
@@ -302,6 +321,73 @@ function substituteVariables(sql: string, context: SkillExecutionContextV2): str
 }
 
 // =============================================================================
+// Layer Organization Functions
+// =============================================================================
+
+function organizeByLayer(steps: StepResult[]): LayeredResult['layers'] {
+  const layers: LayeredResult['layers'] = {
+    L1: {},
+    L2: {},
+    L3: {},
+    L4: {}
+  };
+
+  for (const step of steps) {
+    const layer = step.display?.layer;
+    if (!layer) continue;
+
+    switch (layer) {
+      case 'L1':
+      case 'L2':
+        const targetLayer = layers[layer];
+        if (targetLayer) {
+          targetLayer[step.stepId] = step;
+        }
+        break;
+      case 'L3':
+        // L3 数据需要按 session_id 组织
+        // 从 step.data 中提取 session_id
+        const sessionId3 = extractSessionId(step);
+        if (!layers.L3![sessionId3]) {
+          layers.L3![sessionId3] = {};
+        }
+        layers.L3![sessionId3][step.stepId] = step;
+        break;
+      case 'L4':
+        // L4 数据需要按 session_id 和 frame_id 组织
+        const sessionId4 = extractSessionId(step);
+        const frameId = extractFrameId(step);
+        if (!layers.L4![sessionId4]) {
+          layers.L4![sessionId4] = {};
+        }
+        layers.L4![sessionId4][frameId] = step;
+        break;
+    }
+  }
+
+  return layers;
+}
+
+function extractSessionId(step: StepResult): string {
+  // 尝试从 step.data 中提取 session_id
+  if (Array.isArray(step.data) && step.data.length > 0) {
+    return `session_${step.data[0].session_id ?? 0}`;
+  }
+  return 'session_0';
+}
+
+function extractFrameId(step: StepResult): string {
+  // 尝试从 step 中提取 frame_id
+  if (step.stepId.startsWith('frame_')) {
+    return step.stepId;
+  }
+  if (Array.isArray(step.data) && step.data.length > 0) {
+    return `frame_${step.data[0].frame_index ?? step.data[0].frame_id ?? 0}`;
+  }
+  return 'frame_0';
+}
+
+// =============================================================================
 // Skill Executor V2
 // =============================================================================
 
@@ -494,6 +580,58 @@ export class SkillExecutorV2 {
         error: error.message,
       };
     }
+  }
+
+  /**
+   * Execute composite skill and return layered results
+   * This is an alternative execution path that organizes output by layers (L1/L2/L3/L4)
+   */
+  async executeCompositeSkill(
+    skill: SkillDefinitionV2,
+    inputs: Record<string, any>,
+    context: Partial<SkillExecutionContextV2>
+  ): Promise<LayeredResult> {
+    const startTime = Date.now();
+
+    // Create execution context
+    const execContext: SkillExecutionContextV2 = {
+      traceId: context.traceId || '',
+      params: inputs,
+      inherited: context.inherited || {},
+      results: {},
+      variables: {},
+    };
+
+    // Execute all steps
+    const stepResults: StepResult[] = [];
+    if (skill.steps) {
+      for (const step of skill.steps) {
+        const stepResult = await this.executeStep(step, execContext, skill.name);
+
+        // Save result to context
+        if (stepResult.success) {
+          execContext.results[step.id] = stepResult;
+
+          // Save to variables if save_as is specified
+          if ('save_as' in step && step.save_as) {
+            execContext.variables[step.save_as] = stepResult.data;
+          }
+        }
+
+        stepResults.push(stepResult);
+      }
+    }
+
+    // Return layered structure
+    return {
+      layers: organizeByLayer(stepResults),
+      defaultExpanded: ['L1', 'L2'],
+      metadata: {
+        skillName: skill.name,
+        version: skill.version || '1.0.0',
+        executedAt: new Date().toISOString()
+      }
+    };
   }
 
   /**

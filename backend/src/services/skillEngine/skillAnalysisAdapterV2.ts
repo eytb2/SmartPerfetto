@@ -6,7 +6,7 @@
  */
 
 import { TraceProcessorService } from '../traceProcessorService';
-import { SkillExecutorV2, createSkillExecutorV2 } from './skillExecutorV2';
+import { SkillExecutorV2, createSkillExecutorV2, LayeredResult } from './skillExecutorV2';
 import { skillRegistryV2, ensureSkillRegistryV2Initialized, getSkillsDir } from './skillLoaderV2';
 import { SkillDefinitionV2, SkillEvent, DisplayLevel } from './types_v2';
 import { smartSummaryGenerator } from './smartSummaryGenerator';
@@ -70,6 +70,13 @@ export interface SkillListItemV2 {
   type: string;
   keywords: string[];
   tags?: string[];
+}
+
+export interface AdaptedResult {
+  format: 'layered';
+  layers: LayeredResult['layers'];
+  defaultExpanded: ('L1' | 'L2' | 'L3' | 'L4')[];
+  metadata: LayeredResult['metadata'];
 }
 
 // =============================================================================
@@ -406,6 +413,20 @@ export class SkillAnalysisAdapterV2 {
   async getSkillDetail(skillId: string): Promise<SkillDefinitionV2 | null> {
     await this.ensureInitialized();
     return skillRegistryV2.getSkill(skillId) || null;
+  }
+
+  /**
+   * Adapt skill result to layered format
+   * This method converts LayeredResult to AdaptedResult for API responses
+   */
+  async adaptSkillResult(result: LayeredResult): Promise<AdaptedResult> {
+    // 处理新的分层格式
+    return {
+      format: 'layered',
+      layers: result.layers,
+      defaultExpanded: result.defaultExpanded,
+      metadata: result.metadata
+    };
   }
 }
 
