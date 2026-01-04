@@ -88,6 +88,7 @@ steps:
     name: "检测环境"
     display:
       level: summary
+      layer: L1
       title: "环境信息"
     sql: |
       -- 检测刷新率和帧数据可用性
@@ -153,6 +154,7 @@ steps:
     name: "获取掉帧信息"
     display:
       level: key
+      layer: L3
       title: "掉帧详情（基于 FrameTimeline）"
     sql: |
       -- 使用 actual_frame_timeline_slice 获取精确的掉帧类型
@@ -195,6 +197,7 @@ steps:
     name: "掉帧类型统计"
     display:
       level: key
+      layer: L3
       title: "掉帧类型分布"
     sql: |
       -- 按掉帧类型统计
@@ -229,6 +232,7 @@ steps:
     name: "帧性能汇总"
     display:
       level: key
+      layer: L1
       title: "帧性能汇总"
     sql: |
       WITH frame_stats AS (
@@ -274,6 +278,7 @@ steps:
     name: "计算 FPS"
     display:
       level: key
+      layer: L3
       title: "FPS 指标（SurfaceFlinger 消费端）"
     sql: |
       -- 区分 touch 和 fling 阶段计算 FPS
@@ -413,6 +418,7 @@ steps:
     name: "识别滑动区间"
     display:
       level: summary
+      layer: L2
       title: "滑动区间"
     sql: |
       -- 基于 android_frames 识别连续渲染区间
@@ -467,6 +473,7 @@ steps:
     name: "区间掉帧分析"
     display:
       level: detail
+      layer: L2
       title: "各区间掉帧分析"
     sql: |
       -- 分析每个滑动区间的掉帧情况
@@ -533,6 +540,7 @@ steps:
     name: "获取应用掉帧帧"
     display:
       level: detail
+      layer: L4
       title: "应用掉帧帧列表"
     sql: |
       -- 基于 Perfetto FrameTimeline 获取掉帧帧
@@ -652,6 +660,7 @@ steps:
     name: "逐帧详细分析"
     display:
       level: key
+      layer: L4
       title: "掉帧帧详细分析"
     source: app_jank_frames
     # 不限制数量，分析所有掉帧帧
@@ -742,6 +751,7 @@ steps:
     name: "分析总结"
     display:
       level: key
+      layer: L1
       title: "滑动分析总结"
     inputs: [environment, performance_summary, jank_stats, scroll_sessions, jank_diagnosis]
     prompt: |
