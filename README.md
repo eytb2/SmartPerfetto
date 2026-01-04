@@ -26,6 +26,180 @@ SmartPerfetto 是一个基于 AI 的 Perfetto 性能分析平台，通过 AI 助
 - 📋 **结果表格优化**：支持时间戳点击跳转、智能显示限制（最多 50 行）
 - 🚀 **简单易用**：无需复杂配置，上传 Trace 即可开始分析
 
+## Perfetto 子模块管理
+
+SmartPerfetto 使用定制化的 Perfetto UI（通过 Git 子模块）。为了支持多端开发和与上游同步，我们使用了 fork 仓库和分支策略。
+
+### 子模块配置
+
+本项目使用自定义的 Perfetto fork：
+- **Fork 仓库**: `git@github.com:Gracker/perfetto.git`
+- **定制分支**: `smartperfetto`
+- **上游仓库**: `https://github.com/google/perfetto.git`
+
+### 首次克隆项目
+
+如果你是第一次克隆 SmartPerfetto 项目：
+
+```bash
+# 克隆主项目
+git clone git@github.com:Gracker/SmartPerfetto.git
+cd SmartPerfetto
+
+# 初始化并更新子模块（会自动切换到 smartperfetto 分支）
+git submodule update --init --recursive
+```
+
+### 多设备开发同步
+
+当你在不同设备上工作时，需要同步 perfetto 子模块的更新：
+
+```bash
+# 1. 拉取主项目的最新代码
+git pull origin main
+
+# 2. 更新 perfetto 子模块到最新的 smartperfetto 分支
+cd perfetto
+git checkout smartperfetto
+git pull fork smartperfetto
+cd ..
+
+# 3. 在主项目中更新子模块指针
+git add perfetto
+git commit -m "chore: sync perfetto submodule to latest smartperfetto"
+```
+
+### 在 Perfetto 子模块中开发
+
+当你需要修改 Perfetto UI 代码时：
+
+```bash
+# 1. 进入 perfetto 子模块
+cd perfetto
+
+# 2. 确认在 smartperfetto 分支
+git branch  # 应该显示 * smartperfetto
+
+# 3. 进行修改并提交
+git add .
+git commit -m "feat: your modification description"
+
+# 4. 推送到你的 fork
+git push fork smartperfetto
+
+# 5. 回到主项目更新子模块指针
+cd ..
+git add perfetto
+git commit -m "chore: update perfetto submodule with custom changes"
+```
+
+### 从上游（官方 Perfetto）合并更新
+
+定期从官方 Perfetto 合并更新以获取最新功能和修复：
+
+```bash
+# 1. 进入 perfetto 子模块
+cd perfetto
+
+# 2. 确保在 smartperfetto 分支且所有更改已提交
+git checkout smartperfetto
+git status  # 确保没有未提交的更改
+
+# 3. 获取上游最新代码
+git fetch origin main
+
+# 4. 合并上游更新到 smartperfetto 分支
+git merge origin/main
+# 如果有冲突，解决冲突后：
+# git add .
+# git commit -m "chore: merge upstream perfetto changes"
+
+# 5. 推送到你的 fork
+git push fork smartperfetto
+
+# 6. 回到主项目更新子模块指针
+cd ..
+git add perfetto
+git commit -m "chore: merge upstream perfetto updates"
+
+# 7. 推送主项目的更新
+git push origin main
+```
+
+**处理合并冲突**：
+
+如果合并上游更新时出现冲突：
+
+```bash
+# 1. 查看冲突文件
+git status
+
+# 2. 手动解决冲突（保留 SmartPerfetto 的定制）
+# 冲突标记 <<<<<<< 和 >>>>>>> 之间是需要解决的内容
+
+# 3. 标记冲突已解决
+git add <resolved-files>
+
+# 4. 完成合并
+git commit -m "chore: merge upstream perfetto (resolved conflicts)"
+
+# 5. 验证 Perfetto UI 仍能正常工作
+cd ui
+npm run dev  # 测试 UI 是否正常启动
+```
+
+### 子模块故障排除
+
+#### 子模块处于游离 HEAD 状态
+
+```bash
+cd perfetto
+git checkout smartperfetto
+cd ..
+git add perfetto
+git commit -m "fix: pin perfetto to smartperfetto branch"
+```
+
+#### 子模块显示"修改的内容"
+
+```bash
+# 查看子模块状态
+cd perfetto
+git status
+
+# 如果有未提交的更改，先提交
+git add .
+git commit -m "feat: describe your changes"
+git push fork smartperfetto
+
+# 然后在主项目中更新指针
+cd ..
+git add perfetto
+git commit -m "chore: update perfetto submodule"
+```
+
+#### 重置子模块到干净状态
+
+```bash
+# 清理子模块（慎用，会丢失本地更改）
+git submodule deinit -f perfetto
+rm -rf .git/modules/perfetto
+git submodule update --init --recursive
+cd perfetto
+git checkout smartperfetto
+```
+
+### 架构说明
+
+使用 fork + 分支策略的优势：
+
+| 方面 | 说明 |
+|------|------|
+| **多端同步** | 所有开发者使用同一个 fork 和分支，代码自动同步 |
+| **上游跟踪** | 清晰区分官方代码和 SmartPerfetto 定制 |
+| **独立更新** | main 分支跟踪上游，smartperfetto 分支存储定制 |
+| **协作友好** | 团队成员可以向 fork 提交 PR 来贡献定制 |
+
 ## 已完成功能
 
 - ✅ Perfetto UI AI 助手插件
