@@ -77,3 +77,10 @@ temp/
 
 # Git worktrees
 .worktrees/
+
+# ===================
+# Claude Code
+# ===================
+# Local settings (project-specific, not shared)
+.claude/settings.local.json
+# But track settings.json for shared plugin/marketplace config
