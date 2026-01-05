@@ -23,6 +23,7 @@ import templateAnalysisRoutes from './routes/templateAnalysisRoutes';
 import skillRoutes from './routes/skillRoutes';
 import skillAdminRoutes from './routes/skillAdminRoutes';
 import reportRoutes from './routes/reportRoutes';
+import agentRoutes from './routes/agentRoutes';
 
 // Import cleanup utilities
 import { TraceProcessorFactory, killOrphanProcessors } from './services/workingTraceProcessor';
@@ -88,6 +89,7 @@ app.use('/api/template-analysis', templateAnalysisRoutes);
 app.use('/api/skills', skillRoutes);
 app.use('/api/admin', skillAdminRoutes);
 app.use('/api/reports', reportRoutes);
+app.use('/api/agent', agentRoutes);
 
 // Serve uploaded files in development
 if (NODE_ENV === 'development') {

@@ -16,6 +16,7 @@ import {
   QueryResult,
   AnalysisCompletedEvent,
 } from '../types/analysis';
+import { OrchestratorResult, Finding, Diagnostic, ExpertResult } from '../agent/types';
 
 export interface ReportData {
   sessionId: string;
@@ -39,6 +40,13 @@ export interface ReportData {
       suggestions?: string[];
     }>;
   };
+  timestamp: number;
+}
+
+export interface AgentReportData {
+  traceId: string;
+  query: string;
+  result: OrchestratorResult;
   timestamp: number;
 }
 
@@ -2038,9 +2046,292 @@ export class HTMLReportGenerator {
     return text.replace(/[&<>"']/g, m => map[m]);
   }
 
-  /**
-   * Generate HTML from session
-   */
+  generateAgentHTML(data: AgentReportData): string {
+    const { traceId, query, result, timestamp } = data;
+    const { intent, plan, expertResults, synthesizedAnswer, confidence, executionTimeMs, trace } = result;
+
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SmartPerfetto Agent 分析报告 - ${new Date(timestamp).toLocaleString('zh-CN')}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      line-height: 1.5; color: #333; background: #f5f7fa; padding: 15px;
+    }
+    .container {
+      max-width: 1200px; margin: 0 auto; background: white;
+      border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); overflow: hidden;
+    }
+    .header {
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      color: white; padding: 20px;
+    }
+    .header h1 { font-size: 28px; margin-bottom: 10px; }
+    .header .meta { opacity: 0.9; font-size: 14px; }
+    .header .meta span { margin-right: 20px; }
+    .badge {
+      display: inline-block; padding: 4px 12px; border-radius: 12px;
+      font-size: 12px; font-weight: 600;
+    }
+    .badge-agent { background: rgba(255,255,255,0.2); }
+    .section { padding: 20px; border-bottom: 1px solid #eaeaea; }
+    .section:last-child { border-bottom: none; }
+    .section-title {
+      font-size: 20px; font-weight: 600; margin-bottom: 20px; color: #2c3e50;
+      display: flex; align-items: center;
+    }
+    .section-title::before {
+      content: ''; width: 4px; height: 20px; background: #10b981;
+      margin-right: 12px; border-radius: 2px;
+    }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 20px; }
+    .metric-card { background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; }
+    .metric-card .value { font-size: 28px; font-weight: 700; color: #10b981; }
+    .metric-card .label { font-size: 14px; color: #666; margin-top: 5px; }
+    .intent-box {
+      background: #f0fdf4; padding: 15px; border-radius: 8px; border-left: 4px solid #10b981;
+    }
+    .intent-box .goal { font-size: 18px; font-weight: 600; color: #166534; margin-bottom: 8px; }
+    .intent-box .aspects { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .aspect-tag {
+      background: #dcfce7; color: #166534; padding: 4px 10px;
+      border-radius: 4px; font-size: 13px;
+    }
+    .answer-box {
+      background: #f0f9ff; padding: 20px; border-radius: 8px;
+      border-left: 4px solid #3b82f6; line-height: 1.8;
+    }
+    .plan-task {
+      padding: 12px 15px; margin-bottom: 10px; background: #fafafa;
+      border-radius: 8px; border-left: 4px solid #6366f1;
+    }
+    .plan-task .task-header { display: flex; justify-content: space-between; align-items: center; }
+    .plan-task .expert { font-weight: 600; color: #4f46e5; }
+    .plan-task .objective { color: #666; margin-top: 5px; }
+    .finding {
+      padding: 12px 15px; margin-bottom: 10px; border-radius: 8px; border-left: 4px solid;
+    }
+    .finding.critical { background: #fef2f2; border-color: #ef4444; }
+    .finding.warning { background: #fffbeb; border-color: #f59e0b; }
+    .finding.info { background: #eff6ff; border-color: #3b82f6; }
+    .finding .title { font-weight: 600; margin-bottom: 5px; }
+    .finding.critical .title { color: #dc2626; }
+    .finding.warning .title { color: #d97706; }
+    .finding.info .title { color: #2563eb; }
+    .diagnostic {
+      padding: 10px 15px; margin-bottom: 8px; background: #f8f9fa;
+      border-radius: 6px; display: flex; align-items: flex-start; gap: 10px;
+    }
+    .diagnostic .status { font-size: 16px; }
+    .diagnostic .message { flex: 1; }
+    .suggestions { margin-top: 8px; padding-left: 20px; }
+    .suggestions li { margin-bottom: 4px; color: #666; }
+    .expert-section {
+      margin-bottom: 20px; border: 1px solid #e5e7eb;
+      border-radius: 8px; overflow: hidden;
+    }
+    .expert-header {
+      padding: 12px 16px; background: #f3f4f6;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .expert-header .name { font-weight: 600; color: #374151; }
+    .expert-header .confidence {
+      background: #dcfce7; color: #166534; padding: 2px 8px;
+      border-radius: 4px; font-size: 12px;
+    }
+    .expert-body { padding: 16px; }
+    .trace-section { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 8px; }
+    .trace-section pre { white-space: pre-wrap; font-size: 12px; }
+    .collapsible { cursor: pointer; user-select: none; }
+    .collapsible-content { display: none; }
+    .collapsible-content.show { display: block; }
+    .toggle-icon { margin-right: 8px; transition: transform 0.2s; }
+    .footer {
+      text-align: center; padding: 20px; color: #666;
+      font-size: 14px; background: #f8f9fa;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🤖 SmartPerfetto Agent 分析报告</h1>
+      <div class="meta">
+        <span class="badge badge-agent">Agent Mode</span>
+        <span>📅 ${new Date(timestamp).toLocaleString('zh-CN')}</span>
+        <span>📁 Trace ID: ${traceId}</span>
+        <span>⏱️ ${(executionTimeMs / 1000).toFixed(2)}s</span>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">分析概览</h2>
+      <div class="metrics">
+        <div class="metric-card">
+          <div class="value">${(confidence * 100).toFixed(0)}%</div>
+          <div class="label">置信度</div>
+        </div>
+        <div class="metric-card">
+          <div class="value">${expertResults.length}</div>
+          <div class="label">专家参与</div>
+        </div>
+        <div class="metric-card">
+          <div class="value">${trace.totalLLMCalls}</div>
+          <div class="label">LLM 调用</div>
+        </div>
+        <div class="metric-card">
+          <div class="value">${(executionTimeMs / 1000).toFixed(1)}s</div>
+          <div class="label">总耗时</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">用户查询与意图</h2>
+      <div class="intent-box">
+        <div class="goal">🎯 ${this.escapeHtml(intent.primaryGoal)}</div>
+        <div style="margin-top: 8px; color: #666;">
+          <strong>原始查询：</strong>${this.escapeHtml(query)}
+        </div>
+        <div class="aspects">
+          ${intent.aspects.map(a => `<span class="aspect-tag">${this.escapeHtml(a)}</span>`).join('')}
+        </div>
+        <div style="margin-top: 10px; font-size: 13px; color: #666;">
+          <span>输出类型: <strong>${intent.expectedOutputType}</strong></span>
+          <span style="margin-left: 15px;">复杂度: <strong>${intent.complexity}</strong></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">分析计划</h2>
+      ${plan.tasks.map((task, idx) => `
+        <div class="plan-task">
+          <div class="task-header">
+            <span class="expert">📋 Task ${idx + 1}: ${this.escapeHtml(task.expertAgent)}</span>
+            <span style="color: #666; font-size: 13px;">优先级: ${task.priority}</span>
+          </div>
+          <div class="objective">${this.escapeHtml(task.objective)}</div>
+        </div>
+      `).join('')}
+      <div style="margin-top: 10px; font-size: 13px; color: #666;">
+        预估时长: ${plan.estimatedDuration}ms | 可并行: ${plan.parallelizable ? '是' : '否'}
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">分析结论</h2>
+      <div class="answer-box">
+        ${this.formatAnswer(synthesizedAnswer)}
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">专家分析结果</h2>
+      ${expertResults.map(expert => this.renderExpertResult(expert)).join('')}
+    </div>
+
+    <div class="section">
+      <h2 class="section-title collapsible" onclick="toggleSection('trace-details')">
+        <span class="toggle-icon">▶</span> 执行追踪 (调试信息)
+      </h2>
+      <div id="trace-details" class="collapsible-content">
+        <div class="trace-section">
+          <pre>${this.escapeHtml(JSON.stringify(trace, null, 2))}</pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <p>由 SmartPerfetto Agent 架构生成</p>
+      <p style="margin-top: 5px; font-size: 12px;">Powered by Expert Agents + LLM Orchestration</p>
+    </div>
+  </div>
+
+  <script>
+    function toggleSection(id) {
+      const content = document.getElementById(id);
+      const icon = content.previousElementSibling.querySelector('.toggle-icon');
+      if (content.classList.contains('show')) {
+        content.classList.remove('show');
+        icon.textContent = '▶';
+      } else {
+        content.classList.add('show');
+        icon.textContent = '▼';
+      }
+    }
+  </script>
+</body>
+</html>`;
+  }
+
+  private renderExpertResult(expert: ExpertResult): string {
+    return `
+      <div class="expert-section">
+        <div class="expert-header">
+          <span class="name">🔬 ${this.escapeHtml(expert.agentName)}</span>
+          <span class="confidence">${(expert.confidence * 100).toFixed(0)}% 置信度</span>
+        </div>
+        <div class="expert-body">
+          ${expert.findings.length > 0 ? `
+            <h4 style="margin-bottom: 10px; color: #374151;">发现 (${expert.findings.length})</h4>
+            ${expert.findings.map((f: Finding) => this.renderFinding(f)).join('')}
+          ` : ''}
+          
+          ${expert.diagnostics.length > 0 ? `
+            <h4 style="margin: 15px 0 10px; color: #374151;">诊断 (${expert.diagnostics.length})</h4>
+            ${expert.diagnostics.map((d: Diagnostic) => this.renderDiagnostic(d)).join('')}
+          ` : ''}
+          
+          ${expert.suggestions.length > 0 ? `
+            <h4 style="margin: 15px 0 10px; color: #374151;">建议</h4>
+            <ul style="padding-left: 20px;">
+              ${expert.suggestions.map((s: string) => `<li style="margin-bottom: 5px;">${this.escapeHtml(s)}</li>`).join('')}
+            </ul>
+          ` : ''}
+          
+          <div style="margin-top: 10px; font-size: 12px; color: #9ca3af;">
+            耗时: ${expert.executionTimeMs}ms
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderFinding(finding: Finding): string {
+    return `
+      <div class="finding ${finding.severity}">
+        <div class="title">${this.escapeHtml(finding.title)}</div>
+        <div>${this.escapeHtml(finding.description)}</div>
+        ${finding.evidence.length > 0 ? `
+          <div style="margin-top: 8px; font-size: 12px; color: #666;">
+            证据: ${finding.evidence.length} 项
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  private renderDiagnostic(diagnostic: Diagnostic): string {
+    return `
+      <div class="diagnostic">
+        <span class="status">${diagnostic.matched ? '✅' : '❌'}</span>
+        <div class="message">
+          <div>${this.escapeHtml(diagnostic.message)}</div>
+          ${diagnostic.suggestions.length > 0 ? `
+            <ul class="suggestions">
+              ${diagnostic.suggestions.map(s => `<li>${this.escapeHtml(s)}</li>`).join('')}
+            </ul>
+          ` : ''}
+        </div>
+      </div>
+    `;
+  }
+
   generateFromSession(session: AnalysisSession, answer: string): string {
     const data: ReportData = {
       sessionId: session.id,

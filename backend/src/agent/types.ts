@@ -47,7 +47,8 @@ export interface Tool<TParams = any, TResult = any> {
 
 export interface ToolContext {
   traceId: string;
-  traceProcessor: any;
+  traceProcessor?: any;
+  traceProcessorService?: any;
   package?: string;
 }
 
@@ -229,18 +230,20 @@ export interface OrchestratorAgent {
   handleQuery(query: string, traceId: string, options?: OrchestratorOptions): Promise<OrchestratorResult>;
   understandIntent(query: string): Promise<Intent>;
   planAnalysis(intent: Intent, context: AnalysisContext): Promise<AnalysisPlan>;
-  selectExpert(task: AnalysisTask): ExpertAgent;
+  selectExpert(task: AnalysisTask): ExpertAgent | undefined;
   synthesize(results: ExpertResult[], intent: Intent): Promise<string>;
 }
 
 export interface OrchestratorOptions {
   maxDuration?: number;
   maxLLMCalls?: number;
+  maxExpertIterations?: number;
+  confidenceThreshold?: number;
   streamingCallback?: (update: StreamingUpdate) => void;
 }
 
 export interface StreamingUpdate {
-  type: 'thought' | 'tool_call' | 'finding' | 'progress' | 'conclusion';
+  type: 'thought' | 'tool_call' | 'finding' | 'progress' | 'conclusion' | 'error';
   content: any;
   timestamp: number;
 }
