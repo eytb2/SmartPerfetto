@@ -30,6 +30,7 @@ SmartPerfetto
 | **Add new Skill** | N/A | `backend/skills/v2/composite/*.skill.yaml` |
 | **Modify Skill logic** | N/A | `backend/skills/v2/**/*.skill.yaml` |
 | **HTTP RPC endpoints** | `perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/` | `backend/src/routes/` |
+| **Agent analysis** | `ai_panel.ts` (mode toggle, SSE handler) | `backend/src/agent/`, `backend/src/routes/agentRoutes.ts` |
 
 ## Frontend-Backend Data Flow
 
@@ -320,9 +321,20 @@ console.log('[L2SessionList] Data:', {
 | File | Purpose |
 |------|---------|
 | `layered_result_view.ts` | Main layer manager |
-| `ai_panel.ts` | AI assistant panel |
+| `ai_panel.ts` | AI assistant panel (supports Skill/Agent mode) |
 | `plugin.ts` | Plugin entry point |
 | `commands.ts` | Slash command handlers |
+
+### Agent System Files
+
+| File | Purpose |
+|------|---------|
+| `backend/src/agent/orchestrator.ts` | Main orchestrator agent |
+| `backend/src/agent/agents/scrollingExpertAgent.ts` | Scrolling analysis expert |
+| `backend/src/agent/agents/baseExpertAgent.ts` | Base expert with Think-Act loop |
+| `backend/src/agent/tools/*.ts` | SQL executor, frame analyzer, stats tools |
+| `backend/src/agent/llmAdapter.ts` | LLM client (DeepSeek, OpenAI, Mock) |
+| `backend/src/routes/agentRoutes.ts` | Agent API endpoints |
 
 ## HTTP RPC Details
 

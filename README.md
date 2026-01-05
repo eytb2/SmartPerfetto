@@ -274,6 +274,14 @@ git checkout smartperfetto
   - 通过 HTTP RPC 模式实现数据一致性
   - CORS 支持，允许前端直接连接后端启动的 trace_processor
   - 自动端口分配和管理
+- ✅ **Agent 架构 (v3.0)**
+  - 三层架构：Tool Layer → Expert Agent Layer → Orchestrator Agent
+  - LLM 驱动的 Think-Act 循环
+  - 支持多专家协作分析
+  - 完整的 Trace 记录和 Eval 系统
+  - 前端 Skill/Agent 模式切换
+  - Agent API 端点 (`/api/agent/analyze`, `/api/agent/:id/stream`)
+  - Agent 分析 HTML 报告生成
 
 ## 待实现功能
 
@@ -872,6 +880,179 @@ SmartPerfetto 使用完整的 Session 生命周期管理，确保资源（端口
    - 内存隔离，避免 Trace 间污染
    - 崩溃隔离，单进程失败不影响其他
    - 资源回收简单（kill 进程即可）
+
+### Agent 架构 (v3.0)
+
+SmartPerfetto 引入了基于 LLM 的 Agent 架构，让 AI 能够动态决定分析路径，而不是依赖固定的 YAML 工作流：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            用户查询                                          │
+│                    "分析这个 trace 的滑动性能"                                │
+└───────────────────────────────────┬─────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Orchestrator Agent                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  1. understandIntent() → LLM 解析用户意图                            │   │
+│  │     Intent: { goal: "analyze scrolling", aspects: ["jank", "fps"] }  │   │
+│  │                                                                      │   │
+│  │  2. planAnalysis() → LLM 制定分析计划                                 │   │
+│  │     Plan: [{ expert: "ScrollingExpert", task: "分析帧性能" }]         │   │
+│  │                                                                      │   │
+│  │  3. selectExpert() → 路由到合适的专家                                 │   │
+│  │                                                                      │   │
+│  │  4. synthesize() → 综合多专家结果生成最终答案                         │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+└───────────────────────────────────┬─────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │                               │
+                    ▼                               ▼
+┌─────────────────────────────────┐   ┌─────────────────────────────────┐
+│      ScrollingExpertAgent       │   │      (Future Experts)           │
+│  ┌───────────────────────────┐  │   │  • StartupExpertAgent           │
+│  │  Think-Act Loop (LLM)     │  │   │  • MemoryExpertAgent            │
+│  │                           │  │   │  • ANRExpertAgent               │
+│  │  1. think() → 下一步做什么 │  │   │  • CPUExpertAgent               │
+│  │  2. selectTools() → 工具  │  │   └─────────────────────────────────┘
+│  │  3. executeTool() → 执行  │  │
+│  │  4. extractFindings()     │  │
+│  │  5. generateConclusion()  │  │
+│  └─────────────┬─────────────┘  │
+│                │                │
+│   Domain Knowledge:             │
+│   • Jank patterns               │
+│   • Quadrant analysis           │
+│   • Frame timing thresholds     │
+└────────────────┬────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            Tool Layer                                        │
+│  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐                   │
+│  │ execute_sql   │  │ analyze_frame │  │ calculate_stats│                   │
+│  │               │  │               │  │               │                   │
+│  │ SQL 查询执行   │  │ 帧详情分析     │  │ 统计计算       │                   │
+│  │ via TraceProc │  │ 四象限分析     │  │ 离群值检测     │                   │
+│  └───────────────┘  └───────────────┘  └───────────────┘                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Agent vs Workflow 对比
+
+| 特性 | Workflow (Skill V2) | Agent |
+|------|---------------------|-------|
+| **决策方式** | 固定 YAML 步骤 | LLM 动态决策 |
+| **灵活性** | 低 (预定义路径) | 高 (根据数据调整) |
+| **可解释性** | 高 (步骤透明) | 中 (需要 trace) |
+| **成本** | 低 (无 LLM 调用) | 高 (多次 LLM) |
+| **适用场景** | 标准化分析 | 探索性分析 |
+
+#### Agent 文件结构
+
+```
+backend/src/agent/
+├── index.ts              # 统一导出
+├── types.ts              # 核心类型定义
+│   ├── Tool, ToolDefinition, ToolContext, ToolResult
+│   ├── ExpertAgent, ExpertAgentConfig
+│   ├── OrchestratorAgent, OrchestratorOptions
+│   └── AgentTrace, ToolCall, Finding
+├── toolRegistry.ts       # Tool 注册表
+├── orchestrator.ts       # 编排 Agent
+├── llmAdapter.ts         # LLM 客户端适配器
+│   ├── createDeepSeekLLMClient()
+│   ├── createOpenAILLMClient()
+│   └── createMockLLMClient()
+├── traceRecorder.ts      # Trace 记录器
+├── evalSystem.ts         # 评估系统
+├── tools/                # Tool 实现
+│   ├── sqlExecutor.ts    # SQL 执行
+│   ├── frameAnalyzer.ts  # 帧分析
+│   └── dataStats.ts      # 统计计算
+└── agents/               # Expert Agent 实现
+    ├── baseExpertAgent.ts    # 基类 (Think-Act 循环)
+    └── scrollingExpertAgent.ts  # 滑动分析专家
+```
+
+#### 核心接口
+
+```typescript
+// Tool 接口
+interface Tool<TParams, TResult> {
+  definition: ToolDefinition;
+  execute(params: TParams, context: ToolContext): Promise<ToolResult<TResult>>;
+}
+
+// Expert Agent 接口
+interface ExpertAgent {
+  config: ExpertAgentConfig;
+  analyze(context: AnalysisContext): Promise<ExpertResult>;
+  canHandle(intent: Intent): boolean;
+}
+
+// Orchestrator 接口
+interface OrchestratorAgent {
+  handleQuery(query: string, traceId: string): Promise<OrchestratorResult>;
+  understandIntent(query: string): Promise<Intent>;
+  planAnalysis(intent: Intent, context: AnalysisContext): Promise<AnalysisPlan>;
+  synthesize(results: ExpertResult[], intent: Intent): Promise<string>;
+}
+```
+
+#### 使用示例
+
+```typescript
+import {
+  createOrchestrator,
+  createScrollingExpertAgent,
+  createLLMClient,
+  registerCoreTools,
+} from './agent';
+
+// 初始化
+const llm = createLLMClient(); // 使用 DeepSeek
+registerCoreTools();
+
+const orchestrator = createOrchestrator(llm);
+const scrollingExpert = createScrollingExpertAgent(llm);
+scrollingExpert.setTraceProcessorService(traceProcessor, traceId);
+orchestrator.registerExpert(scrollingExpert);
+
+// 执行分析
+const result = await orchestrator.handleQuery(
+  '分析滑动性能',
+  traceId,
+  {
+    streamingCallback: (update) => console.log(update),
+  }
+);
+
+console.log(result.synthesizedAnswer);
+console.log(result.confidence);
+```
+
+#### Trace 记录与评估
+
+Agent 系统内置 Trace 记录和评估功能：
+
+```typescript
+// Trace 记录
+import { getAgentTraceRecorder } from './agent';
+
+const recorder = getAgentTraceRecorder();
+const stats = recorder.getStatistics();
+// { totalTraces: 10, avgDurationMs: 1500, avgConfidence: 0.75, ... }
+
+// 评估系统
+import { createEvalSystem, SCROLLING_EVAL_CASES } from './agent';
+
+const evalSystem = createEvalSystem();
+const summary = evalSystem.runEvaluation(traces);
+// { passedCases: 8, failedCases: 2, avgScore: 0.82, ... }
+```
 
 ## 快速开始
 

@@ -55,16 +55,19 @@ export const sqlExecutorTool: Tool<SQLExecutorParams, SQLExecutorResult> = {
         };
       }
 
-      const { traceProcessor } = context;
-      if (!traceProcessor) {
+      let result;
+      
+      if (context.traceProcessorService && context.traceId) {
+        result = await context.traceProcessorService.query(context.traceId, params.sql);
+      } else if (context.traceProcessor) {
+        result = await context.traceProcessor.query(params.sql);
+      } else {
         return {
           success: false,
-          error: 'TraceProcessor not available in context',
+          error: 'TraceProcessor or TraceProcessorService not available in context',
           executionTimeMs: Date.now() - startTime,
         };
       }
-
-      const result = await traceProcessor.query(params.sql);
       
       return {
         success: true,
