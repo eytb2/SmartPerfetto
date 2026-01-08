@@ -11,7 +11,7 @@ import { getHTMLReportGenerator } from '../services/htmlReportGenerator';
 const router = express.Router();
 
 // Store generated reports in memory (in production, use persistent storage)
-const reportStore = new Map<string, {
+export const reportStore = new Map<string, {
   html: string;
   generatedAt: number;
   sessionId: string;

@@ -16,7 +16,7 @@ import {
   QueryResult,
   AnalysisCompletedEvent,
 } from '../types/analysis';
-import { OrchestratorResult, Finding, Diagnostic, ExpertResult } from '../agent/types';
+import { OrchestratorResult, Finding, Diagnostic, ExpertResult, MasterOrchestratorResult, StageResult } from '../agent/types';
 
 export interface ReportData {
   sessionId: string;
@@ -47,6 +47,13 @@ export interface AgentReportData {
   traceId: string;
   query: string;
   result: OrchestratorResult;
+  timestamp: number;
+}
+
+export interface MasterAgentReportData {
+  traceId: string;
+  query: string;
+  result: MasterOrchestratorResult;
   timestamp: number;
 }
 
@@ -2327,6 +2334,225 @@ export class HTMLReportGenerator {
               ${diagnostic.suggestions.map(s => `<li>${this.escapeHtml(s)}</li>`).join('')}
             </ul>
           ` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Generate HTML report from MasterOrchestratorResult (new architecture)
+   */
+  generateMasterAgentHTML(data: MasterAgentReportData): string {
+    const { traceId, query, result, timestamp } = data;
+    const { intent, plan, stageResults, synthesizedAnswer, confidence, totalDuration, evaluation, modelUsage } = result;
+
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SmartPerfetto Agent 分析报告 - ${new Date(timestamp).toLocaleString('zh-CN')}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      line-height: 1.5; color: #333; background: #f5f7fa; padding: 15px;
+    }
+    .container {
+      max-width: 1200px; margin: 0 auto; background: white;
+      border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); overflow: hidden;
+    }
+    .header {
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      color: white; padding: 20px;
+    }
+    .header h1 { font-size: 28px; margin-bottom: 10px; }
+    .header .meta { opacity: 0.9; font-size: 14px; }
+    .header .meta span { margin-right: 20px; }
+    .badge {
+      display: inline-block; padding: 4px 12px; border-radius: 12px;
+      font-size: 12px; font-weight: 600;
+    }
+    .badge-agent { background: rgba(255,255,255,0.2); }
+    .section { padding: 20px; border-bottom: 1px solid #eaeaea; }
+    .section:last-child { border-bottom: none; }
+    .section-title {
+      font-size: 20px; font-weight: 600; margin-bottom: 20px; color: #2c3e50;
+      display: flex; align-items: center;
+    }
+    .section-title::before {
+      content: ''; width: 4px; height: 20px; background: #10b981;
+      margin-right: 12px; border-radius: 2px;
+    }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 20px; }
+    .metric-card { background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; }
+    .metric-card .value { font-size: 28px; font-weight: 700; color: #10b981; }
+    .metric-card .label { font-size: 14px; color: #666; margin-top: 5px; }
+    .intent-box {
+      background: #f0fdf4; padding: 15px; border-radius: 8px; border-left: 4px solid #10b981;
+    }
+    .intent-box .goal { font-size: 18px; font-weight: 600; color: #166534; margin-bottom: 8px; }
+    .answer-box {
+      background: #f8f9fa; padding: 20px; border-radius: 8px;
+      white-space: pre-wrap; font-size: 15px; line-height: 1.8;
+    }
+    .stage-section { margin-bottom: 20px; }
+    .stage-header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 10px 15px; background: #f3f4f6; border-radius: 8px 8px 0 0;
+      font-weight: 600;
+    }
+    .stage-body { padding: 15px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px; }
+    .finding { margin-bottom: 10px; padding: 10px; border-radius: 6px; border-left: 3px solid; }
+    .finding.critical { background: #fef2f2; border-color: #dc2626; }
+    .finding.high { background: #fff7ed; border-color: #ea580c; }
+    .finding.medium { background: #fefce8; border-color: #ca8a04; }
+    .finding.low { background: #f0fdf4; border-color: #16a34a; }
+    .finding.info { background: #eff6ff; border-color: #2563eb; }
+    .finding .title { font-weight: 600; margin-bottom: 5px; }
+    .evaluation-box { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+    .eval-item { background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; }
+    .eval-item .score { font-size: 32px; font-weight: 700; }
+    .eval-item .label { font-size: 13px; color: #666; }
+    .footer { padding: 20px; text-align: center; color: #999; font-size: 13px; background: #f8f9fa; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🤖 SmartPerfetto Agent 分析报告</h1>
+      <div class="meta">
+        <span>📁 Trace ID: ${this.escapeHtml(traceId)}</span>
+        <span>⏱️ ${new Date(timestamp).toLocaleString('zh-CN')}</span>
+        <span class="badge badge-agent">Master Orchestrator</span>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">执行概览</h2>
+      <div class="metrics">
+        <div class="metric-card">
+          <div class="value">${(totalDuration / 1000).toFixed(1)}s</div>
+          <div class="label">总耗时</div>
+        </div>
+        <div class="metric-card">
+          <div class="value">${(confidence * 100).toFixed(0)}%</div>
+          <div class="label">置信度</div>
+        </div>
+        <div class="metric-card">
+          <div class="value">${stageResults?.length || 0}</div>
+          <div class="label">执行阶段</div>
+        </div>
+        <div class="metric-card">
+          <div class="value">${evaluation?.passed ? '✅' : '❌'}</div>
+          <div class="label">评估通过</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">用户问题</h2>
+      <div class="intent-box">
+        <div class="goal">${this.escapeHtml(query)}</div>
+        ${intent?.primaryGoal ? `<div style="margin-top: 8px; color: #166534;">${this.escapeHtml(intent.primaryGoal)}</div>` : ''}
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">分析结论</h2>
+      <div class="answer-box">
+        ${this.formatAnswer(synthesizedAnswer)}
+      </div>
+    </div>
+
+    ${stageResults && stageResults.length > 0 ? `
+    <div class="section">
+      <h2 class="section-title">分析阶段结果</h2>
+      ${stageResults.map((stage, idx) => this.renderStageResult(stage, idx)).join('')}
+    </div>
+    ` : ''}
+
+    ${evaluation ? `
+    <div class="section">
+      <h2 class="section-title">质量评估</h2>
+      <div class="evaluation-box">
+        <div class="eval-item">
+          <div class="score" style="color: ${evaluation.qualityScore >= 0.7 ? '#10b981' : '#ef4444'}">
+            ${(evaluation.qualityScore * 100).toFixed(0)}%
+          </div>
+          <div class="label">质量分数</div>
+        </div>
+        <div class="eval-item">
+          <div class="score" style="color: ${evaluation.completenessScore >= 0.8 ? '#10b981' : '#ef4444'}">
+            ${(evaluation.completenessScore * 100).toFixed(0)}%
+          </div>
+          <div class="label">完整度</div>
+        </div>
+        <div class="eval-item">
+          <div class="score">${evaluation.passed ? '✅' : '❌'}</div>
+          <div class="label">评估结果</div>
+        </div>
+      </div>
+      ${evaluation.feedback ? `
+      <div style="margin-top: 15px; padding: 15px; background: #fef3c7; border-radius: 8px;">
+        <strong>评估反馈:</strong>
+        ${evaluation.feedback.improvementSuggestions?.length > 0 ? `
+          <ul style="margin: 8px 0 0 16px;">
+            ${evaluation.feedback.improvementSuggestions.map((s: string) => `<li>${this.escapeHtml(s)}</li>`).join('')}
+          </ul>
+        ` : ''}
+      </div>
+      ` : ''}
+    </div>
+    ` : ''}
+
+    ${modelUsage ? `
+    <div class="section">
+      <h2 class="section-title">模型使用统计</h2>
+      <div class="metrics">
+        <div class="metric-card">
+          <div class="value">${modelUsage.totalInputTokens.toLocaleString()}</div>
+          <div class="label">输入 Tokens</div>
+        </div>
+        <div class="metric-card">
+          <div class="value">${modelUsage.totalOutputTokens.toLocaleString()}</div>
+          <div class="label">输出 Tokens</div>
+        </div>
+        <div class="metric-card">
+          <div class="value">$${modelUsage.totalCost.toFixed(4)}</div>
+          <div class="label">总成本</div>
+        </div>
+      </div>
+    </div>
+    ` : ''}
+
+    <div class="footer">
+      <p>由 SmartPerfetto Master Orchestrator 生成</p>
+      <p style="margin-top: 5px; font-size: 12px;">Powered by Pipeline + Evaluator Architecture</p>
+    </div>
+  </div>
+</body>
+</html>`;
+  }
+
+  private renderStageResult(stage: StageResult, idx: number): string {
+    const findings = stage.findings || [];
+    return `
+      <div class="stage-section">
+        <div class="stage-header">
+          <span>📋 阶段 ${idx + 1}: ${this.escapeHtml(stage.stageId)}</span>
+          <span style="color: ${stage.success ? '#10b981' : '#ef4444'};">
+            ${stage.success ? '✅ 成功' : '❌ 失败'}
+          </span>
+        </div>
+        <div class="stage-body">
+          ${findings.length > 0 ? `
+            <div style="margin-bottom: 10px; font-weight: 600;">发现 (${findings.length})</div>
+            ${findings.map((f: Finding) => this.renderFinding(f)).join('')}
+          ` : '<div style="color: #666;">无发现</div>'}
+          <div style="margin-top: 10px; font-size: 12px; color: #999;">
+            耗时: ${((stage.endTime - stage.startTime) || 0).toFixed(0)}ms
+          </div>
         </div>
       </div>
     `;

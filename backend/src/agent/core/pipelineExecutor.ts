@@ -1,0 +1,698 @@
+/**
+ * SmartPerfetto Pipeline Executor
+ *
+ * 流水线执行器，负责：
+ * 1. 按阶段顺序执行分析任务
+ * 2. 管理阶段依赖关系
+ * 3. 支持并行执行
+ * 4. 检查点和恢复
+ * 5. 错误处理和重试
+ */
+
+import { EventEmitter } from 'events';
+import {
+  PipelineStage,
+  StageResult,
+  PipelineConfig,
+  PipelineErrorDecision,
+  PipelineResult,
+  PipelineCallbacks,
+  PipelineProgress,
+  Finding,
+  SubAgentContext,
+  SubAgentResult,
+} from '../types';
+
+// 默认阶段定义
+const DEFAULT_STAGES: PipelineStage[] = [
+  {
+    id: 'plan',
+    name: '任务规划',
+    description: '理解用户意图，分解分析任务',
+    agentType: 'planner',
+    dependencies: [],
+    canParallelize: false,
+    timeout: 30000,
+    maxRetries: 2,
+  },
+  {
+    id: 'execute',
+    name: '专家分析',
+    description: '执行具体的性能分析任务',
+    agentType: 'worker',
+    dependencies: ['plan'],
+    canParallelize: true,
+    timeout: 60000,
+    maxRetries: 2,
+  },
+  {
+    id: 'evaluate',
+    name: '结果评估',
+    description: '评估分析结果的质量和完整性',
+    agentType: 'evaluator',
+    dependencies: ['execute'],
+    canParallelize: false,
+    timeout: 30000,
+    maxRetries: 1,
+  },
+  {
+    id: 'refine',
+    name: '优化迭代',
+    description: '根据评估反馈优化分析结果',
+    agentType: 'worker',
+    dependencies: ['evaluate'],
+    canParallelize: false,
+    timeout: 60000,
+    maxRetries: 2,
+  },
+  {
+    id: 'conclude',
+    name: '综合结论',
+    description: '综合所有发现，生成最终答案',
+    agentType: 'synthesizer',
+    dependencies: ['refine'],
+    canParallelize: false,
+    timeout: 30000,
+    maxRetries: 1,
+  },
+];
+
+// 默认配置
+const DEFAULT_CONFIG: Partial<PipelineConfig> = {
+  maxTotalDuration: 300000, // 5 分钟
+  enableParallelization: true,
+};
+
+/**
+ * 阶段执行器接口
+ */
+export interface StageExecutor {
+  execute(stage: PipelineStage, context: SubAgentContext): Promise<SubAgentResult>;
+}
+
+/**
+ * 流水线执行器实现
+ */
+export class PipelineExecutor extends EventEmitter {
+  private config: PipelineConfig;
+  private stages: Map<string, PipelineStage>;
+  private stageResults: Map<string, StageResult>;
+  private executors: Map<string, StageExecutor>;
+  private isRunning: boolean = false;
+  private isPaused: boolean = false;
+  private startTime: number = 0;
+
+  constructor(config: Partial<PipelineConfig> = {}) {
+    super();
+
+    const stages = (config.stages && config.stages.length > 0) ? config.stages : DEFAULT_STAGES;
+
+    this.config = {
+      stages,
+      maxTotalDuration: config.maxTotalDuration || DEFAULT_CONFIG.maxTotalDuration!,
+      enableParallelization: config.enableParallelization ?? true,
+      onStageComplete: config.onStageComplete,
+      onStageError: config.onStageError,
+    };
+
+    // 构建阶段索引
+    this.stages = new Map();
+    for (const stage of stages) {
+      this.stages.set(stage.id, stage);
+    }
+
+    this.stageResults = new Map();
+    this.executors = new Map();
+  }
+
+  // ==========================================================================
+  // 执行器注册
+  // ==========================================================================
+
+  /**
+   * 注册阶段执行器
+   */
+  registerExecutor(stageId: string, executor: StageExecutor): void {
+    this.executors.set(stageId, executor);
+  }
+
+  /**
+   * 注册多个阶段执行器
+   */
+  registerExecutors(executors: Record<string, StageExecutor>): void {
+    for (const [stageId, executor] of Object.entries(executors)) {
+      this.registerExecutor(stageId, executor);
+    }
+  }
+
+  // ==========================================================================
+  // 流水线执行
+  // ==========================================================================
+
+  /**
+   * 执行完整流水线
+   */
+  async execute(
+    context: SubAgentContext,
+    callbacks?: Partial<PipelineCallbacks>,
+    startFromStage?: string
+  ): Promise<PipelineResult> {
+    if (this.isRunning) {
+      throw new Error('Pipeline is already running');
+    }
+
+    this.isRunning = true;
+    this.isPaused = false;
+    this.startTime = Date.now();
+
+    const completedStages: string[] = [];
+    const failedStages: string[] = [];
+
+    try {
+      // 获取执行顺序
+      const executionOrder = this.getExecutionOrder(startFromStage);
+
+      for (let i = 0; i < executionOrder.length; i++) {
+        const stage = executionOrder[i];
+
+        // 检查是否暂停
+        if (this.isPaused) {
+          return this.createPausedResult(completedStages, failedStages, stage.id);
+        }
+
+        // 检查超时
+        if (this.isTimedOut()) {
+          throw new PipelineTimeoutError(
+            `Pipeline timed out after ${this.config.maxTotalDuration}ms`
+          );
+        }
+
+        // 检查依赖
+        const dependenciesMet = await this.waitForDependencies(stage);
+        if (!dependenciesMet) {
+          failedStages.push(stage.id);
+          continue;
+        }
+
+        // 触发开始事件
+        callbacks?.onStageStart?.(stage);
+        this.emit('stageStart', stage);
+
+        // 报告进度
+        const progress = this.calculateProgress(i, executionOrder.length);
+        callbacks?.onProgress?.(progress);
+        this.emit('progress', progress);
+
+        // 执行阶段
+        const result = await this.executeStage(stage, context, callbacks);
+
+        // 保存结果
+        this.stageResults.set(stage.id, result);
+
+        if (result.success) {
+          completedStages.push(stage.id);
+          callbacks?.onStageComplete?.(stage, result);
+          this.config.onStageComplete?.(stage, result);
+          this.emit('stageComplete', { stage, result });
+        } else {
+          failedStages.push(stage.id);
+
+          // 处理错误
+          const decision = await this.handleStageError(stage, result.error!, callbacks);
+
+          if (decision === 'abort') {
+            throw new PipelineAbortError(`Pipeline aborted at stage: ${stage.id}`);
+          } else if (decision === 'ask_user') {
+            return this.createPausedResult(completedStages, failedStages, stage.id);
+          }
+          // 'retry' 和 'skip' 继续执行
+        }
+      }
+
+      return this.createSuccessResult(completedStages, failedStages);
+    } catch (error: any) {
+      return this.createErrorResult(completedStages, failedStages, error.message);
+    } finally {
+      this.isRunning = false;
+    }
+  }
+
+  /**
+   * 从检查点恢复执行
+   */
+  async resumeFrom(
+    checkpointStageId: string,
+    context: SubAgentContext,
+    previousResults: StageResult[],
+    callbacks?: Partial<PipelineCallbacks>
+  ): Promise<PipelineResult> {
+    // 恢复之前的结果
+    for (const result of previousResults) {
+      this.stageResults.set(result.stageId, result);
+    }
+
+    // 从指定阶段继续执行
+    return this.execute(context, callbacks, checkpointStageId);
+  }
+
+  /**
+   * 执行单个阶段
+   */
+  private async executeStage(
+    stage: PipelineStage,
+    context: SubAgentContext,
+    _callbacks?: Partial<PipelineCallbacks>
+  ): Promise<StageResult> {
+    const startTime = Date.now();
+    let retryCount = 0;
+
+    // Debug: Log incoming context
+    console.log(`[PipelineExecutor] executeStage(${stage.id}) called`);
+    console.log(`[PipelineExecutor] input context keys: ${Object.keys(context).join(', ')}`);
+    console.log(`[PipelineExecutor] input context.traceProcessorService: ${!!context.traceProcessorService}`);
+    console.log(`[PipelineExecutor] input context.traceId: ${context.traceId}`);
+
+    while (retryCount <= stage.maxRetries) {
+      try {
+        // 获取执行器
+        const executor = this.executors.get(stage.id);
+        if (!executor) {
+          throw new Error(`No executor registered for stage: ${stage.id}`);
+        }
+
+        // 准备上下文，包含之前阶段的结果
+        const enrichedContext: SubAgentContext = {
+          ...context,
+          previousResults: Array.from(this.stageResults.values()),
+        };
+
+        // Debug: Log enriched context
+        console.log(`[PipelineExecutor] enrichedContext keys: ${Object.keys(enrichedContext).join(', ')}`);
+        console.log(`[PipelineExecutor] enrichedContext.traceProcessorService: ${!!enrichedContext.traceProcessorService}`);
+
+        // 创建超时 Promise
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            reject(new StageTimeoutError(`Stage ${stage.id} timed out after ${stage.timeout}ms`));
+          }, stage.timeout);
+        });
+
+        // 执行阶段
+        const result = await Promise.race([
+          executor.execute(stage, enrichedContext),
+          timeoutPromise,
+        ]);
+
+        return {
+          stageId: stage.id,
+          success: result.success,
+          data: result.data,
+          findings: result.findings,
+          startTime,
+          endTime: Date.now(),
+          retryCount,
+        };
+      } catch (error: any) {
+        retryCount++;
+
+        if (retryCount > stage.maxRetries) {
+          return {
+            stageId: stage.id,
+            success: false,
+            error: error.message,
+            findings: [],
+            startTime,
+            endTime: Date.now(),
+            retryCount: retryCount - 1,
+          };
+        }
+
+        // 等待后重试
+        await this.delay(1000 * retryCount);
+      }
+    }
+
+    // 不应该到达这里
+    return {
+      stageId: stage.id,
+      success: false,
+      error: 'Unexpected execution path',
+      findings: [],
+      startTime,
+      endTime: Date.now(),
+      retryCount,
+    };
+  }
+
+  /**
+   * 处理阶段错误
+   */
+  private async handleStageError(
+    stage: PipelineStage,
+    error: string,
+    callbacks?: Partial<PipelineCallbacks>
+  ): Promise<PipelineErrorDecision> {
+    // 使用配置的错误处理器
+    if (this.config.onStageError) {
+      return this.config.onStageError(stage, new Error(error));
+    }
+
+    // 使用回调的错误处理器
+    if (callbacks?.onError) {
+      return callbacks.onError(stage, new Error(error));
+    }
+
+    // 默认行为：重试失败则跳过
+    return 'skip';
+  }
+
+  // ==========================================================================
+  // 依赖管理
+  // ==========================================================================
+
+  /**
+   * 获取执行顺序（拓扑排序）
+   */
+  private getExecutionOrder(startFromStage?: string): PipelineStage[] {
+    const stages = Array.from(this.stages.values());
+
+    // 简单实现：按依赖排序
+    const sorted: PipelineStage[] = [];
+    const visited = new Set<string>();
+
+    const visit = (stage: PipelineStage) => {
+      if (visited.has(stage.id)) return;
+      visited.add(stage.id);
+
+      // 先访问依赖
+      for (const depId of stage.dependencies) {
+        const dep = this.stages.get(depId);
+        if (dep) {
+          visit(dep);
+        }
+      }
+
+      sorted.push(stage);
+    };
+
+    for (const stage of stages) {
+      visit(stage);
+    }
+
+    // 如果指定了起始阶段，跳过之前的阶段
+    if (startFromStage) {
+      const startIndex = sorted.findIndex(s => s.id === startFromStage);
+      if (startIndex >= 0) {
+        return sorted.slice(startIndex);
+      }
+    }
+
+    return sorted;
+  }
+
+  /**
+   * 等待依赖阶段完成
+   */
+  private async waitForDependencies(stage: PipelineStage): Promise<boolean> {
+    for (const depId of stage.dependencies) {
+      const depResult = this.stageResults.get(depId);
+
+      if (!depResult) {
+        // 依赖还未执行
+        return false;
+      }
+
+      if (!depResult.success) {
+        // 依赖执行失败
+        this.emit('dependencyFailed', { stage: stage.id, dependency: depId });
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  // ==========================================================================
+  // 并行执行
+  // ==========================================================================
+
+  /**
+   * 并行执行一组阶段
+   */
+  async executeParallel(
+    stages: PipelineStage[],
+    context: SubAgentContext,
+    callbacks?: Partial<PipelineCallbacks>
+  ): Promise<StageResult[]> {
+    if (!this.config.enableParallelization) {
+      // 回退到串行执行
+      const results: StageResult[] = [];
+      for (const stage of stages) {
+        const result = await this.executeStage(stage, context, callbacks);
+        results.push(result);
+      }
+      return results;
+    }
+
+    // 并行执行
+    return Promise.all(
+      stages.map(stage => this.executeStage(stage, context, callbacks))
+    );
+  }
+
+  /**
+   * 获取可并行执行的阶段组
+   */
+  getParallelGroups(): PipelineStage[][] {
+    const groups: PipelineStage[][] = [];
+    const remaining = new Set(this.stages.keys());
+    const completed = new Set<string>();
+
+    while (remaining.size > 0) {
+      const group: PipelineStage[] = [];
+
+      for (const stageId of remaining) {
+        const stage = this.stages.get(stageId)!;
+        const depsComplete = stage.dependencies.every(d => completed.has(d));
+
+        if (depsComplete && stage.canParallelize) {
+          group.push(stage);
+        } else if (depsComplete && group.length === 0) {
+          // 不可并行的阶段单独成组
+          group.push(stage);
+          break;
+        }
+      }
+
+      if (group.length === 0) {
+        // 防止无限循环
+        break;
+      }
+
+      groups.push(group);
+
+      for (const stage of group) {
+        remaining.delete(stage.id);
+        completed.add(stage.id);
+      }
+    }
+
+    return groups;
+  }
+
+  // ==========================================================================
+  // 流程控制
+  // ==========================================================================
+
+  /**
+   * 暂停执行
+   */
+  pause(): void {
+    this.isPaused = true;
+    this.emit('paused');
+  }
+
+  /**
+   * 恢复执行
+   */
+  resume(): void {
+    this.isPaused = false;
+    this.emit('resumed');
+  }
+
+  /**
+   * 取消执行
+   */
+  cancel(): void {
+    this.isRunning = false;
+    this.emit('cancelled');
+  }
+
+  /**
+   * 检查是否超时
+   */
+  private isTimedOut(): boolean {
+    return Date.now() - this.startTime > this.config.maxTotalDuration;
+  }
+
+  // ==========================================================================
+  // 结果和状态
+  // ==========================================================================
+
+  /**
+   * 获取阶段结果
+   */
+  getStageResult(stageId: string): StageResult | undefined {
+    return this.stageResults.get(stageId);
+  }
+
+  /**
+   * 获取所有阶段结果
+   */
+  getAllResults(): StageResult[] {
+    return Array.from(this.stageResults.values());
+  }
+
+  /**
+   * 获取所有发现
+   */
+  getAllFindings(): Finding[] {
+    const findings: Finding[] = [];
+    for (const result of this.stageResults.values()) {
+      findings.push(...result.findings);
+    }
+    return findings;
+  }
+
+  /**
+   * 计算进度
+   */
+  private calculateProgress(currentIndex: number, totalStages: number): PipelineProgress {
+    const elapsedMs = Date.now() - this.startTime;
+    const avgStageTime = currentIndex > 0 ? elapsedMs / currentIndex : 10000;
+    const remainingStages = totalStages - currentIndex;
+    const estimatedRemainingMs = remainingStages * avgStageTime;
+
+    const stage = Array.from(this.stages.values())[currentIndex];
+
+    return {
+      currentStage: stage?.id || 'unknown',
+      completedStages: currentIndex,
+      totalStages,
+      elapsedMs,
+      estimatedRemainingMs,
+    };
+  }
+
+  // ==========================================================================
+  // 结果构建
+  // ==========================================================================
+
+  private createSuccessResult(
+    completedStages: string[],
+    failedStages: string[]
+  ): PipelineResult {
+    return {
+      success: failedStages.length === 0,
+      stageResults: Array.from(this.stageResults.values()),
+      totalDuration: Date.now() - this.startTime,
+      completedStages,
+      failedStages,
+    };
+  }
+
+  private createErrorResult(
+    completedStages: string[],
+    failedStages: string[],
+    error: string
+  ): PipelineResult {
+    return {
+      success: false,
+      stageResults: Array.from(this.stageResults.values()),
+      totalDuration: Date.now() - this.startTime,
+      completedStages,
+      failedStages,
+      error,
+    };
+  }
+
+  private createPausedResult(
+    completedStages: string[],
+    failedStages: string[],
+    pausedAt: string
+  ): PipelineResult {
+    return {
+      success: false,
+      stageResults: Array.from(this.stageResults.values()),
+      totalDuration: Date.now() - this.startTime,
+      completedStages,
+      failedStages,
+      pausedAt,
+    };
+  }
+
+  // ==========================================================================
+  // 工具方法
+  // ==========================================================================
+
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * 获取阶段列表
+   */
+  getStages(): PipelineStage[] {
+    return Array.from(this.stages.values());
+  }
+
+  /**
+   * 获取阶段
+   */
+  getStage(stageId: string): PipelineStage | undefined {
+    return this.stages.get(stageId);
+  }
+
+  /**
+   * 重置执行器状态
+   */
+  reset(): void {
+    this.stageResults.clear();
+    this.isRunning = false;
+    this.isPaused = false;
+    this.emit('reset');
+  }
+}
+
+/**
+ * 流水线超时错误
+ */
+class PipelineTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PipelineTimeoutError';
+  }
+}
+
+/**
+ * 流水线中止错误
+ */
+class PipelineAbortError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PipelineAbortError';
+  }
+}
+
+/**
+ * 阶段超时错误
+ */
+class StageTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StageTimeoutError';
+  }
+}
+
+export { PipelineTimeoutError, PipelineAbortError, StageTimeoutError };
+export default PipelineExecutor;

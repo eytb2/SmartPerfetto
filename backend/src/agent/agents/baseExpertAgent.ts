@@ -36,6 +36,12 @@ export abstract class BaseExpertAgent implements ExpertAgent {
   protected abstract getSystemPrompt(): string;
   protected abstract getAnalysisGoals(context: AnalysisContext): string[];
 
+  /**
+   * Override this method to provide initial SQL queries to execute
+   * before the main think-act loop. Results will be added to state.toolResults.
+   */
+  protected getInitialQueries?(): string[];
+
   async analyze(context: AnalysisContext): Promise<ExpertResult> {
     const startTime = Date.now();
     const trace: AgentTrace = {
@@ -57,10 +63,43 @@ export abstract class BaseExpertAgent implements ExpertAgent {
     };
 
     const findings: Finding[] = [];
+    const findingTitles = new Set<string>(); // For de-duplication
     const diagnostics: Diagnostic[] = [];
     const suggestions: string[] = [];
 
     try {
+      // Execute initial queries if defined by subclass
+      const initialQueries = this.getInitialQueries?.();
+      if (initialQueries && initialQueries.length > 0) {
+        console.log(`[${this.config.name}] Executing ${initialQueries.length} initial queries`);
+        for (const sql of initialQueries) {
+          const toolCallStart = Date.now();
+          const result = await this.executeTool('execute_sql', { sql }, context);
+          const toolCall: ToolCall = {
+            toolName: 'execute_sql',
+            params: { sql },
+            result,
+            startTime: toolCallStart,
+            endTime: Date.now(),
+          };
+          trace.toolCalls.push(toolCall);
+          state.toolResults.push(result);
+
+          if (result.success) {
+            const newFindings = await this.extractFindings(result, 'execute_sql', state);
+            // De-duplicate findings by title
+            for (const f of newFindings) {
+              if (!findingTitles.has(f.title)) {
+                findingTitles.add(f.title);
+                findings.push(f);
+                state.findings.push(f.title);
+              }
+            }
+          }
+        }
+        console.log(`[${this.config.name}] Initial queries completed, ${findings.length} unique findings extracted`);
+      }
+
       while (!state.isComplete && state.currentStep < this.config.maxIterations) {
         const thought = await this.think(state);
         state.thoughts.push(thought);
@@ -88,8 +127,14 @@ export abstract class BaseExpertAgent implements ExpertAgent {
 
           if (result.success) {
             const newFindings = await this.extractFindings(result, toolName, state);
-            findings.push(...newFindings);
-            state.findings.push(...newFindings.map(f => f.title));
+            // De-duplicate findings by title
+            for (const f of newFindings) {
+              if (!findingTitles.has(f.title)) {
+                findingTitles.add(f.title);
+                findings.push(f);
+                state.findings.push(f.title);
+              }
+            }
           }
         }
 
@@ -132,6 +177,23 @@ export abstract class BaseExpertAgent implements ExpertAgent {
   }
 
   protected async think(state: AgentState): Promise<AgentThought> {
+    // Auto-conclude if we have enough findings from initial queries
+    const hasGoodFindings = state.findings.length >= 3;
+    const isLastStep = state.currentStep >= this.config.maxIterations - 1;
+
+    if (hasGoodFindings || isLastStep) {
+      console.log(`[${this.config.name}] Auto-concluding: findings=${state.findings.length}, step=${state.currentStep}`);
+      return {
+        step: state.currentStep + 1,
+        observation: `Collected ${state.findings.length} findings from analysis`,
+        reasoning: hasGoodFindings
+          ? 'We have sufficient findings to answer the user query'
+          : 'Reached maximum analysis steps, concluding with current findings',
+        decision: 'conclude',
+        confidence: Math.min(0.5 + state.findings.length * 0.1, 0.9),
+      };
+    }
+
     const prompt = `${this.getSystemPrompt()}
 
 Current Analysis State:
@@ -139,23 +201,22 @@ Current Analysis State:
 - Findings so far: ${state.findings.length > 0 ? state.findings.join(', ') : 'None yet'}
 - Tool results collected: ${state.toolResults.length}
 
-Previous thoughts:
-${state.thoughts.map(t => `Step ${t.step}: ${t.reasoning} -> ${t.decision}`).join('\n') || 'None'}
+IMPORTANT: If we already have 2+ findings that answer the user's question, you should CONCLUDE.
+Only request more data if the current findings are insufficient to answer the query.
 
 Analysis goals:
 ${this.getAnalysisGoals(state.context).map((g, i) => `${i + 1}. ${g}`).join('\n')}
 
-Based on the current state, decide what to do next:
-1. What have we observed so far?
-2. What information do we still need?
-3. What should be the next action? (use a tool, or conclude if we have enough information)
-4. How confident are we in our current understanding? (0-1)
+Decide what to do next:
+1. What have we observed?
+2. Do we have enough information to conclude? (If yes, set decision to "conclude")
+3. If not, what specific information is still missing?
 
 Respond in JSON format:
 {
-  "observation": "what we've learned so far",
-  "reasoning": "why we need more info or can conclude",
-  "decision": "tool_call" or "conclude",
+  "observation": "what we've learned",
+  "reasoning": "why we can conclude or need more info",
+  "decision": "conclude" or "tool_call",
   "confidence": 0.0-1.0
 }`;
 

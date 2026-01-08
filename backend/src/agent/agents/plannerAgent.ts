@@ -1,0 +1,334 @@
+/**
+ * SmartPerfetto Planner Agent
+ *
+ * 规划专家，负责：
+ * 1. 理解用户意图
+ * 2. 分解分析任务
+ * 3. 规划执行顺序
+ * 4. 估算资源需求
+ */
+
+import {
+  SubAgentConfig,
+  SubAgentContext,
+  SubAgentResult,
+  Finding,
+  Intent,
+  AnalysisPlan,
+  AnalysisTask,
+  PipelineStage,
+} from '../types';
+import { BaseSubAgent } from './base/baseSubAgent';
+import { ModelRouter } from '../core/modelRouter';
+
+// 默认配置
+const DEFAULT_CONFIG: SubAgentConfig = {
+  id: 'planner',
+  name: '规划专家',
+  type: 'planner',
+  description: '负责理解用户意图并规划分析任务',
+  preferredModel: 'intent_understanding',
+  tools: [],
+  maxIterations: 1, // 规划通常一次完成
+  confidenceThreshold: 0.7,
+};
+
+// 可用的分析领域
+const ANALYSIS_DOMAINS = [
+  { id: 'scrolling', name: '滑动性能', keywords: ['滑动', '卡顿', 'jank', 'fps', '帧率', '掉帧', 'scroll'] },
+  { id: 'startup', name: '启动性能', keywords: ['启动', '冷启动', '热启动', 'launch', 'start', 'ttid', 'ttfd'] },
+  { id: 'memory', name: '内存分析', keywords: ['内存', 'memory', 'gc', '泄漏', 'leak', 'oom'] },
+  { id: 'cpu', name: 'CPU 分析', keywords: ['cpu', '负载', 'load', '占用', '调度'] },
+  { id: 'binder', name: 'Binder 分析', keywords: ['binder', 'ipc', '进程间', '通信'] },
+  { id: 'scene', name: '场景还原', keywords: ['场景', '操作', '时间线', '还原', 'scene'] },
+  { id: 'general', name: '综合分析', keywords: ['分析', '性能', '问题', '整体'] },
+];
+
+/**
+ * 规划专家实现
+ */
+export class PlannerAgent extends BaseSubAgent {
+  constructor(modelRouter: ModelRouter, config?: Partial<SubAgentConfig>) {
+    super({ ...DEFAULT_CONFIG, ...config }, modelRouter);
+  }
+
+  // ==========================================================================
+  // 实现抽象方法
+  // ==========================================================================
+
+  protected buildSystemPrompt(_context: SubAgentContext): string {
+    return `你是 SmartPerfetto 的规划专家，专门负责理解用户的性能分析需求并规划分析任务。
+
+你的职责：
+1. 理解用户想要分析什么类型的性能问题
+2. 识别需要调用哪些分析专家
+3. 规划分析任务的执行顺序
+4. 估算分析的复杂度
+
+可用的分析领域：
+${ANALYSIS_DOMAINS.map(d => `- ${d.id}: ${d.name} (关键词: ${d.keywords.join(', ')})`).join('\n')}
+
+输出格式要求：JSON`;
+  }
+
+  protected buildTaskPrompt(context: SubAgentContext): string {
+    const previousContext = context.previousResults
+      ? `\n\n之前的分析结果:\n${context.previousResults.map(r => `- ${r.stageId}: ${r.success ? '成功' : '失败'}`).join('\n')}`
+      : '';
+
+    return `用户查询: "${context.intent?.primaryGoal || '分析性能问题'}"
+
+请分析用户意图并规划分析任务。
+${previousContext}`;
+  }
+
+  protected parseResponse(response: string, _context: SubAgentContext): SubAgentResult {
+    try {
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          agentId: this.config.id,
+          success: true,
+          findings: [],
+          suggestions: [],
+          data: {
+            intent: parsed.intent,
+            plan: parsed.plan,
+          },
+          confidence: parsed.confidence || 0.8,
+          executionTimeMs: 0,
+        };
+      }
+    } catch (error) {
+      // 解析失败
+    }
+
+    return {
+      agentId: this.config.id,
+      success: false,
+      findings: [],
+      suggestions: [],
+      confidence: 0,
+      executionTimeMs: 0,
+      error: 'Failed to parse planning response',
+    };
+  }
+
+  // ==========================================================================
+  // 规划方法
+  // ==========================================================================
+
+  /**
+   * 理解用户意图
+   */
+  async understandIntent(query: string, context: SubAgentContext): Promise<Intent> {
+    const prompt = `分析以下用户查询，提取分析意图：
+
+用户查询: "${query}"
+
+请以 JSON 格式返回意图分析结果：
+{
+  "primaryGoal": "用户的主要目标",
+  "aspects": ["需要分析的方面1", "方面2"],
+  "expectedOutputType": "diagnosis | comparison | timeline | summary",
+  "complexity": "simple | moderate | complex"
+}`;
+
+    const response = await this.modelRouter.callWithFallback(prompt, 'intent_understanding');
+
+    try {
+      const jsonMatch = response.response.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        return JSON.parse(jsonMatch[0]) as Intent;
+      }
+    } catch (error) {
+      // 解析失败
+    }
+
+    // 默认意图
+    return {
+      primaryGoal: query,
+      aspects: this.extractAspects(query),
+      expectedOutputType: 'diagnosis',
+      complexity: 'moderate',
+    };
+  }
+
+  /**
+   * 创建分析计划
+   */
+  async createPlan(intent: Intent, context: SubAgentContext): Promise<AnalysisPlan> {
+    const prompt = `基于以下意图创建分析计划：
+
+意图：
+- 主要目标: ${intent.primaryGoal}
+- 分析方面: ${intent.aspects.join(', ')}
+- 复杂度: ${intent.complexity}
+
+可用分析专家：
+${ANALYSIS_DOMAINS.map(d => `- ${d.id}: ${d.name}`).join('\n')}
+
+请以 JSON 格式返回分析计划：
+{
+  "tasks": [
+    {
+      "id": "任务ID",
+      "expertAgent": "专家ID",
+      "objective": "任务目标",
+      "dependencies": [],
+      "priority": 1,
+      "context": {}
+    }
+  ],
+  "estimatedDuration": 30000,
+  "parallelizable": true
+}`;
+
+    const response = await this.modelRouter.callWithFallback(prompt, 'planning');
+
+    try {
+      const jsonMatch = response.response.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const plan = JSON.parse(jsonMatch[0]) as AnalysisPlan;
+        return this.validateAndEnrichPlan(plan, intent);
+      }
+    } catch (error) {
+      // 解析失败
+    }
+
+    // 生成默认计划
+    return this.generateDefaultPlan(intent);
+  }
+
+  /**
+   * 从查询中提取分析方面
+   */
+  private extractAspects(query: string): string[] {
+    const aspects: string[] = [];
+    const lowerQuery = query.toLowerCase();
+
+    for (const domain of ANALYSIS_DOMAINS) {
+      for (const keyword of domain.keywords) {
+        if (lowerQuery.includes(keyword.toLowerCase())) {
+          if (!aspects.includes(domain.id)) {
+            aspects.push(domain.id);
+          }
+          break;
+        }
+      }
+    }
+
+    if (aspects.length === 0) {
+      aspects.push('general');
+    }
+
+    return aspects;
+  }
+
+  /**
+   * 验证并丰富计划
+   */
+  private validateAndEnrichPlan(plan: AnalysisPlan, intent: Intent): AnalysisPlan {
+    // 确保每个任务都有有效的专家
+    for (const task of plan.tasks) {
+      const validDomain = ANALYSIS_DOMAINS.find(d => d.id === task.expertAgent);
+      if (!validDomain) {
+        task.expertAgent = 'general';
+      }
+    }
+
+    // 确保至少有一个任务
+    if (plan.tasks.length === 0) {
+      plan.tasks = this.generateDefaultTasks(intent);
+    }
+
+    // 计算估计时间
+    if (!plan.estimatedDuration) {
+      plan.estimatedDuration = plan.tasks.length * 15000; // 每个任务约 15 秒
+    }
+
+    return plan;
+  }
+
+  /**
+   * 生成默认计划
+   */
+  private generateDefaultPlan(intent: Intent): AnalysisPlan {
+    return {
+      tasks: this.generateDefaultTasks(intent),
+      estimatedDuration: 60000,
+      parallelizable: intent.complexity !== 'complex',
+    };
+  }
+
+  /**
+   * 生成默认任务
+   */
+  private generateDefaultTasks(intent: Intent): AnalysisTask[] {
+    const tasks: AnalysisTask[] = [];
+    let priority = 1;
+
+    for (const aspect of intent.aspects) {
+      tasks.push({
+        id: `task_${aspect}_${Date.now()}`,
+        expertAgent: aspect,
+        objective: `分析 ${ANALYSIS_DOMAINS.find(d => d.id === aspect)?.name || aspect}`,
+        dependencies: priority > 1 ? [tasks[priority - 2].id] : [],
+        priority: priority++,
+        context: {},
+      });
+    }
+
+    return tasks;
+  }
+
+  // ==========================================================================
+  // 重写执行方法
+  // ==========================================================================
+
+  /**
+   * 执行规划（简化版，不使用 Think-Act 循环）
+   */
+  async execute(stage: PipelineStage, context: SubAgentContext): Promise<SubAgentResult> {
+    const startTime = Date.now();
+
+    try {
+      this.emit('start', { agentId: this.config.id, stage: stage.id });
+
+      // 理解意图
+      const query = context.intent?.primaryGoal || '';
+      const intent = await this.understandIntent(query, context);
+
+      // 创建计划
+      const plan = await this.createPlan(intent, context);
+
+      const result: SubAgentResult = {
+        agentId: this.config.id,
+        success: true,
+        findings: [],
+        suggestions: [`计划包含 ${plan.tasks.length} 个分析任务`],
+        data: { intent, plan },
+        confidence: 0.85,
+        executionTimeMs: Date.now() - startTime,
+      };
+
+      this.emit('complete', { agentId: this.config.id, result });
+      return result;
+    } catch (error: any) {
+      this.emit('error', { agentId: this.config.id, error: error.message });
+
+      return {
+        agentId: this.config.id,
+        success: false,
+        findings: [],
+        suggestions: [],
+        confidence: 0,
+        executionTimeMs: Date.now() - startTime,
+        error: error.message,
+      };
+    }
+  }
+}
+
+export default PlannerAgent;

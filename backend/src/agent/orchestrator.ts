@@ -97,6 +97,21 @@ export class PerfettoOrchestratorAgent implements OrchestratorAgent {
         expertResults.push(result);
         trace.expertTraces.push(result.trace);
 
+        // Stream tool calls with raw data (for transparency)
+        for (const toolCall of result.trace.toolCalls) {
+          streamCallback?.({
+            type: 'tool_call',
+            content: {
+              toolName: toolCall.toolName,
+              params: toolCall.params,
+              success: toolCall.result.success,
+              data: toolCall.result.data,
+              executionTimeMs: toolCall.endTime - toolCall.startTime,
+            },
+            timestamp: Date.now(),
+          });
+        }
+
         for (const finding of result.findings) {
           streamCallback?.({ type: 'finding', content: finding, timestamp: Date.now() });
         }

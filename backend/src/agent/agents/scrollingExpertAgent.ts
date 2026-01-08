@@ -6,8 +6,8 @@ const SCROLLING_EXPERT_CONFIG: ExpertAgentConfig = {
   domain: 'scrolling_performance',
   description: 'Analyzes scrolling performance, frame drops, jank causes, and rendering issues',
   tools: ['execute_sql', 'analyze_frame', 'calculate_stats'],
-  maxIterations: 10,
-  confidenceThreshold: 0.8,
+  maxIterations: 3, // Reduced from 10 - initial queries should provide most info
+  confidenceThreshold: 0.7, // Lower threshold to conclude faster
 };
 
 const JANK_KNOWLEDGE = {
@@ -81,17 +81,54 @@ Be efficient: if you see the same pattern in multiple frames, you don't need to 
 
   protected getInitialQueries(): string[] {
     return [
-      `SELECT 
+      // Query 1: Overall frame statistics
+      `SELECT
         COUNT(*) as total_frames,
         SUM(CASE WHEN jank_type != 'None' THEN 1 ELSE 0 END) as janky_frames,
-        ROUND(100.0 * SUM(CASE WHEN jank_type != 'None' THEN 1 ELSE 0 END) / COUNT(*), 2) as jank_rate
-      FROM actual_frame_timeline_slice`,
-      
-      `SELECT jank_type, COUNT(*) as count
+        ROUND(100.0 * SUM(CASE WHEN jank_type != 'None' THEN 1 ELSE 0 END) / COUNT(*), 2) as jank_rate_pct,
+        ROUND(AVG(dur) / 1e6, 2) as avg_frame_time_ms,
+        ROUND(MAX(dur) / 1e6, 2) as max_frame_time_ms
+      FROM actual_frame_timeline_slice
+      WHERE surface_frame_token IS NOT NULL`,
+
+      // Query 2: Jank type distribution
+      `SELECT jank_type, COUNT(*) as count,
+        ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM actual_frame_timeline_slice WHERE jank_type != 'None'), 1) as pct
       FROM actual_frame_timeline_slice
       WHERE jank_type != 'None'
       GROUP BY jank_type
       ORDER BY count DESC`,
+
+      // Query 3: Scroll sessions with FPS (key metric)
+      `WITH frames_with_gap AS (
+        SELECT
+          ts,
+          dur,
+          jank_type,
+          ts - LAG(ts + dur) OVER (ORDER BY ts) AS gap_ns
+        FROM actual_frame_timeline_slice
+        WHERE surface_frame_token IS NOT NULL AND dur > 0
+      ),
+      session_boundaries AS (
+        SELECT
+          ts,
+          dur,
+          jank_type,
+          SUM(CASE WHEN gap_ns IS NULL OR gap_ns > 100000000 THEN 1 ELSE 0 END)
+            OVER (ORDER BY ts ROWS UNBOUNDED PRECEDING) AS session_id
+        FROM frames_with_gap
+      )
+      SELECT
+        session_id,
+        COUNT(*) as frame_count,
+        ROUND(1e9 * COUNT(*) / NULLIF(MAX(ts + dur) - MIN(ts), 0), 1) as fps,
+        ROUND(100.0 * SUM(CASE WHEN jank_type != 'None' THEN 1 ELSE 0 END) / COUNT(*), 1) as jank_pct,
+        ROUND((MAX(ts + dur) - MIN(ts)) / 1e6, 1) as duration_ms
+      FROM session_boundaries
+      GROUP BY session_id
+      HAVING frame_count >= 10 AND duration_ms > 200
+      ORDER BY frame_count DESC
+      LIMIT 10`,
     ];
   }
 }

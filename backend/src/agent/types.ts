@@ -244,7 +244,384 @@ export interface OrchestratorOptions {
 }
 
 export interface StreamingUpdate {
-  type: 'thought' | 'tool_call' | 'finding' | 'progress' | 'conclusion' | 'error';
+  type: 'thought' | 'tool_call' | 'finding' | 'progress' | 'conclusion' | 'error' | 'scene_detected' | 'track_data' | 'skill_data';
   content: any;
   timestamp: number;
+}
+
+// =============================================================================
+// State Machine Types (新架构)
+// =============================================================================
+
+export type AgentPhase =
+  | 'idle'
+  | 'planning'
+  | 'executing'
+  | 'evaluating'
+  | 'refining'
+  | 'awaiting_user'
+  | 'completed'
+  | 'failed';
+
+export interface StateEvent {
+  type:
+    | 'START_ANALYSIS'
+    | 'INTENT_UNDERSTOOD'
+    | 'PLAN_CREATED'
+    | 'STAGE_STARTED'
+    | 'STAGE_COMPLETED'
+    | 'EVALUATION_COMPLETE'
+    | 'NEEDS_REFINEMENT'
+    | 'CIRCUIT_TRIPPED'
+    | 'USER_RESPONDED'
+    | 'ANALYSIS_COMPLETE'
+    | 'ERROR_OCCURRED';
+  payload?: any;
+  timestamp?: number;
+}
+
+export interface Checkpoint {
+  id: string;
+  stageId: string;
+  timestamp: number;
+  phase: AgentPhase;
+  agentState: SerializedAgentState;
+  stageResults: StageResult[];
+  findings: Finding[];
+  canResume: boolean;
+}
+
+export interface SerializedAgentState {
+  query: string;
+  traceId: string;
+  intent?: Intent;
+  plan?: AnalysisPlan;
+  expertResults: ExpertResult[];
+  iterationCount: number;
+  metadata: Record<string, any>;
+}
+
+export interface StateMachineConfig {
+  sessionId: string;
+  traceId: string;
+  persistPath?: string;
+  autoSave?: boolean;
+  autoSaveIntervalMs?: number;
+}
+
+export interface AgentStateMachineState {
+  sessionId: string;
+  traceId: string;
+  phase: AgentPhase;
+  checkpoints: Map<string, Checkpoint>;
+  iterationCounters: Map<string, number>;
+  currentStageIndex: number;
+  stageResults: Map<string, StageResult>;
+  events: StateEvent[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+// =============================================================================
+// Pipeline Types (新架构)
+// =============================================================================
+
+export interface PipelineStage {
+  id: string;
+  name: string;
+  description: string;
+  agentType: 'planner' | 'worker' | 'evaluator' | 'synthesizer';
+  dependencies: string[];
+  canParallelize: boolean;
+  timeout: number;
+  maxRetries: number;
+}
+
+export interface StageResult {
+  stageId: string;
+  success: boolean;
+  data?: any;
+  error?: string;
+  findings: Finding[];
+  startTime: number;
+  endTime: number;
+  retryCount: number;
+}
+
+export interface PipelineConfig {
+  stages: PipelineStage[];
+  maxTotalDuration: number;
+  enableParallelization: boolean;
+  onStageComplete?: (stage: PipelineStage, result: StageResult) => void;
+  onStageError?: (stage: PipelineStage, error: Error) => PipelineErrorDecision;
+}
+
+export type PipelineErrorDecision = 'retry' | 'skip' | 'abort' | 'ask_user';
+
+export interface PipelineResult {
+  success: boolean;
+  stageResults: StageResult[];
+  totalDuration: number;
+  completedStages: string[];
+  failedStages: string[];
+  pausedAt?: string;
+  error?: string;
+}
+
+export interface PipelineCallbacks {
+  onStageComplete: (stage: PipelineStage, result: StageResult) => void;
+  onStageStart: (stage: PipelineStage) => void;
+  onError: (stage: PipelineStage, error: Error) => Promise<PipelineErrorDecision>;
+  onProgress: (progress: PipelineProgress) => void;
+}
+
+export interface PipelineProgress {
+  currentStage: string;
+  completedStages: number;
+  totalStages: number;
+  elapsedMs: number;
+  estimatedRemainingMs: number;
+}
+
+// =============================================================================
+// Circuit Breaker Types (新架构)
+// =============================================================================
+
+export type CircuitState = 'closed' | 'open' | 'half-open';
+
+export interface CircuitBreakerConfig {
+  maxRetriesPerAgent: number;
+  maxIterationsPerStage: number;
+  cooldownMs: number;
+  halfOpenAttempts: number;
+  failureThreshold: number;
+  successThreshold: number;
+}
+
+export interface CircuitDecision {
+  action: 'continue' | 'retry' | 'skip' | 'abort' | 'ask_user';
+  reason?: string;
+  delay?: number;
+  context?: CircuitDiagnostics;
+}
+
+export interface CircuitDiagnostics {
+  agentId: string;
+  failureCount: number;
+  iterationCount: number;
+  lastError?: string;
+  lastAttemptTime: number;
+  state: CircuitState;
+  recentErrors: Array<{ time: number; error: string }>;
+}
+
+export interface CircuitBreakerState {
+  state: CircuitState;
+  retryCounters: Map<string, number>;
+  iterationCounters: Map<string, number>;
+  failureHistory: Map<string, Array<{ time: number; error: string }>>;
+  lastStateChange: number;
+  tripReason?: string;
+}
+
+// =============================================================================
+// Multi-Model Router Types (新架构)
+// =============================================================================
+
+export type ModelProvider = 'anthropic' | 'openai' | 'deepseek' | 'glm' | 'mock';
+export type ModelStrength = 'reasoning' | 'coding' | 'speed' | 'cost' | 'vision';
+export type TaskType =
+  | 'intent_understanding'
+  | 'planning'
+  | 'synthesis'
+  | 'evaluation'
+  | 'sql_generation'
+  | 'code_analysis'
+  | 'simple_extraction'
+  | 'formatting'
+  | 'general';
+
+export interface ModelProfile {
+  id: string;
+  provider: ModelProvider;
+  model: string;
+  strengths: ModelStrength[];
+  costPerInputToken: number;
+  costPerOutputToken: number;
+  avgLatencyMs: number;
+  maxTokens: number;
+  supportsJSON: boolean;
+  supportsStreaming: boolean;
+  enabled: boolean;
+}
+
+export interface ModelRouterConfig {
+  models: ModelProfile[];
+  defaultModel: string;
+  taskModelMapping: Partial<Record<TaskType, string>>;
+  fallbackChain: string[];
+  enableEnsemble: boolean;
+  ensembleThreshold: number;
+}
+
+export interface ModelCallResult {
+  modelId: string;
+  response: string;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    totalCost: number;
+  };
+  latencyMs: number;
+  success: boolean;
+  error?: string;
+}
+
+export interface EnsembleResult {
+  responses: ModelCallResult[];
+  aggregatedResponse: string;
+  confidence: number;
+  agreementScore: number;
+  totalCost: number;
+  totalLatencyMs: number;
+}
+
+// =============================================================================
+// SubAgent Types (新架构)
+// =============================================================================
+
+export interface SubAgentConfig {
+  id: string;
+  name: string;
+  type: 'planner' | 'worker' | 'evaluator' | 'synthesizer';
+  description: string;
+  preferredModel?: TaskType;
+  tools: string[];
+  maxIterations: number;
+  confidenceThreshold: number;
+}
+
+export interface SubAgentContext {
+  sessionId: string;
+  traceId: string;
+  intent?: Intent;
+  plan?: AnalysisPlan;
+  previousResults?: StageResult[];
+  feedback?: EvaluationFeedback;
+  traceProcessor?: any;
+  traceProcessorService?: any;
+}
+
+export interface SubAgentResult {
+  agentId: string;
+  success: boolean;
+  findings: Finding[];
+  suggestions: string[];
+  data?: any;
+  confidence: number;
+  executionTimeMs: number;
+  tokensUsed?: { input: number; output: number };
+  error?: string;
+}
+
+// =============================================================================
+// Evaluator Types (新架构)
+// =============================================================================
+
+export interface Evaluation {
+  passed: boolean;
+  qualityScore: number;
+  completenessScore: number;
+  contradictions: Contradiction[];
+  feedback: EvaluationFeedback;
+  needsImprovement: boolean;
+  suggestedActions: string[];
+}
+
+export interface Contradiction {
+  finding1: string;
+  finding2: string;
+  description: string;
+  severity: 'minor' | 'major' | 'critical';
+}
+
+export interface EvaluationFeedback {
+  strengths: string[];
+  weaknesses: string[];
+  missingAspects: string[];
+  improvementSuggestions: string[];
+  priorityActions: string[];
+}
+
+export interface EvaluationCriteria {
+  minQualityScore: number;
+  minCompletenessScore: number;
+  maxContradictions: number;
+  requiredAspects: string[];
+}
+
+// =============================================================================
+// Master Orchestrator Types (新架构)
+// =============================================================================
+
+export interface MasterOrchestratorConfig {
+  stateMachineConfig: StateMachineConfig;
+  circuitBreakerConfig: CircuitBreakerConfig;
+  modelRouterConfig: ModelRouterConfig;
+  pipelineConfig: PipelineConfig;
+  evaluationCriteria: EvaluationCriteria;
+  maxTotalIterations: number;
+  enableTraceRecording: boolean;
+  streamingCallback?: (update: StreamingUpdate) => void;
+}
+
+export interface MasterOrchestratorResult {
+  sessionId: string;
+  intent: Intent;
+  plan: AnalysisPlan;
+  stageResults: StageResult[];
+  evaluation: Evaluation;
+  synthesizedAnswer: string;
+  confidence: number;
+  totalDuration: number;
+  iterationCount: number;
+  modelUsage: ModelUsageSummary;
+  canResume: boolean;
+  checkpointId?: string;
+}
+
+export interface ModelUsageSummary {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCost: number;
+  modelBreakdown: Record<string, { calls: number; tokens: number; cost: number }>;
+}
+
+// =============================================================================
+// Session & Recovery Types (新架构)
+// =============================================================================
+
+export interface SessionInfo {
+  sessionId: string;
+  traceId: string;
+  query: string;
+  phase: AgentPhase;
+  createdAt: number;
+  updatedAt: number;
+  canResume: boolean;
+  lastCheckpointId?: string;
+  error?: string;
+}
+
+export interface RecoveryOptions {
+  fromCheckpoint?: string;
+  skipFailedStage?: boolean;
+  overrideConfig?: Partial<MasterOrchestratorConfig>;
+}
+
+export interface RecoveryResult {
+  success: boolean;
+  resumedFrom: string;
+  result?: MasterOrchestratorResult;
+  error?: string;
 }
