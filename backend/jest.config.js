@@ -1,8 +1,11 @@
 module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
-  roots: ['<rootDir>/src'],
-  testMatch: ['**/__tests__/**/*.ts', '**/?(*.)+(spec|test).ts'],
+  roots: ['<rootDir>/src', '<rootDir>/tests'],
+  testMatch: [
+    '**/__tests__/**/*.ts',
+    '**/?(*.)+(spec|test|eval).ts'
+  ],
   transform: {
     '^.+\.ts$': 'ts-jest',
   },
@@ -13,4 +16,8 @@ module.exports = {
   ],
   coverageDirectory: 'coverage',
   verbose: true,
+  // Skill eval tests need longer timeout due to trace loading
+  testTimeout: 60000,
+  // Run skill-eval tests in band to avoid port conflicts
+  maxWorkers: 1,
 };
