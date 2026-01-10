@@ -431,6 +431,7 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
         const data = stepResult.data || {};
 
         // 规范化的帧数据结构，保持在嵌套位置
+        // 保留原始字段名以匹配前端 L4FrameAnalysis 组件的期望
         normalized[sessionId][frameId] = {
           stepId: `${sessionId}_${frameId}`,
           // 帧基础信息（来自 item）
@@ -442,12 +443,11 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
             start_ts: item.start_ts,
             end_ts: item.end_ts,
           },
-          // 诊断结论
-          diagnosis: data.diagnosis_summary || null,
-          // 完整分析数据
-          analysis: data.full_analysis || null,
-          // 原始 data 数组（如果是表格形式）
-          data: Array.isArray(data) ? data : null,
+          // 保留原始 data 结构，前端期望 data.diagnosis_summary 和 data.full_analysis
+          data: {
+            diagnosis_summary: data.diagnosis_summary || null,
+            full_analysis: data.full_analysis || null,
+          },
           // 显示配置
           display: stepResult.display || {
             title: `Frame ${item.frame_id || frameId}`,
