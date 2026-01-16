@@ -1,0 +1,391 @@
+# =============================================================================
+# CPU Profiling Analysis v1.0 (Deep Analysis Skill) - Phase 6
+# =============================================================================
+# L2 深入分析：CPU 性能剖析，关注 CPU 使用热点和调度效率
+#
+# 核心表：
+# - sched_slice: 调度切片
+# - cpu: CPU 信息（包含 capacity 用于大小核判断）
+# - cpu_frequency_counters: CPU 频率计数器
+# - thread: 线程信息
+# - process: 进程信息
+#
+# 分析维度：
+# - CPU 时间分布
+# - 大小核调度效率
+# - 调度延迟分析
+# - 上下文切换开销
+# =============================================================================
+
+name: cpu_profiling
+version: "1.0"
+type: composite
+
+meta:
+  display_name: "CPU 性能剖析"
+  description: "深入分析 CPU 使用效率、调度延迟、核心分布"
+  icon: "cpu"
+  tags: [cpu, profiling, scheduling, performance, deep]
+  level: 2
+
+triggers:
+  keywords:
+    zh: [CPU剖析, 调度延迟, 大小核, CPU效率, 上下文切换, 性能分析]
+    en: [cpu profiling, scheduling latency, big little, cpu efficiency, context switch]
+  patterns:
+    - ".*CPU.*剖析.*"
+    - ".*调度.*延迟.*"
+    - ".*性能.*分析.*"
+
+prerequisites:
+  modules:
+    - sched
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "应用包名（可选）"
+  - name: min_runtime_ms
+    type: number
+    required: false
+    default: 1
+    description: "最小运行时长阈值（毫秒）"
+
+steps:
+  # ========== CPU 使用概览 ==========
+  - id: cpu_usage_overview
+    type: atomic
+    name: "CPU 使用概览"
+    display:
+      level: summary
+      layer: overview
+      title: "CPU 概览"
+    sql: |
+      WITH
+      cpu_info AS (
+        SELECT
+          id as cpu_id,
+          CASE
+            WHEN capacity >= 1000 THEN 'big'
+            WHEN capacity >= 500 THEN 'medium'
+            ELSE 'little'
+          END as core_type,
+          capacity
+        FROM cpu
+      ),
+      sched_stats AS (
+        SELECT
+          ss.cpu as cpu_id,
+          SUM(ss.dur) / 1e6 as total_runtime_ms,
+          COUNT(*) as slice_count
+        FROM sched_slice ss
+        GROUP BY ss.cpu
+      )
+      SELECT
+        ci.core_type,
+        COUNT(DISTINCT ci.cpu_id) as core_count,
+        SUM(ss.total_runtime_ms) as total_runtime_ms,
+        SUM(ss.slice_count) as total_slices,
+        AVG(ci.capacity) as avg_capacity
+      FROM cpu_info ci
+      LEFT JOIN sched_stats ss ON ci.cpu_id = ss.cpu_id
+      GROUP BY ci.core_type
+      ORDER BY avg_capacity DESC
+    save_as: cpu_overview
+
+  # ========== 进程 CPU 时间分布 ==========
+  - id: process_cpu_time
+    type: atomic
+    name: "进程 CPU 时间"
+    display:
+      level: list
+      layer: list
+      title: "进程 CPU 使用排行"
+    sql: |
+      WITH
+      process_cpu AS (
+        SELECT
+          p.name as process_name,
+          p.pid,
+          SUM(ss.dur) / 1e6 as cpu_time_ms,
+          COUNT(*) as slice_count,
+          COUNT(DISTINCT ss.cpu) as cpus_used
+        FROM sched_slice ss
+        JOIN thread t ON ss.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE
+          ss.dur > ${min_runtime_ms} * 1e6
+          AND ('${package}' = '' OR p.name GLOB '${package}*')
+        GROUP BY p.upid
+      )
+      SELECT
+        process_name,
+        pid,
+        ROUND(cpu_time_ms, 2) as cpu_time_ms,
+        slice_count,
+        cpus_used,
+        ROUND(cpu_time_ms / slice_count, 2) as avg_slice_ms
+      FROM process_cpu
+      ORDER BY cpu_time_ms DESC
+      LIMIT 15
+    save_as: process_cpu_time
+
+  # ========== 线程 CPU 时间分布 ==========
+  - id: thread_cpu_time
+    type: atomic
+    name: "线程 CPU 时间"
+    display:
+      level: list
+      layer: list
+      title: "线程 CPU 使用排行"
+    sql: |
+      WITH
+      thread_cpu AS (
+        SELECT
+          t.name as thread_name,
+          t.tid,
+          p.name as process_name,
+          SUM(ss.dur) / 1e6 as cpu_time_ms,
+          COUNT(*) as slice_count,
+          AVG(ss.dur) / 1e6 as avg_slice_ms
+        FROM sched_slice ss
+        JOIN thread t ON ss.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE
+          ss.dur > ${min_runtime_ms} * 1e6
+          AND ('${package}' = '' OR p.name GLOB '${package}*')
+        GROUP BY ss.utid
+      )
+      SELECT
+        thread_name,
+        tid,
+        process_name,
+        ROUND(cpu_time_ms, 2) as cpu_time_ms,
+        slice_count,
+        ROUND(avg_slice_ms, 3) as avg_slice_ms
+      FROM thread_cpu
+      ORDER BY cpu_time_ms DESC
+      LIMIT 20
+    save_as: thread_cpu_time
+
+  # ========== 大小核分布分析 ==========
+  - id: core_distribution
+    type: atomic
+    name: "大小核分布"
+    display:
+      level: list
+      layer: list
+      title: "大小核调度分布"
+    sql: |
+      WITH
+      cpu_info AS (
+        SELECT
+          id as cpu_id,
+          CASE
+            WHEN capacity >= 1000 THEN 'big'
+            WHEN capacity >= 500 THEN 'medium'
+            ELSE 'little'
+          END as core_type
+        FROM cpu
+      ),
+      thread_core_usage AS (
+        SELECT
+          t.name as thread_name,
+          t.tid,
+          p.name as process_name,
+          ci.core_type,
+          SUM(ss.dur) / 1e6 as runtime_ms
+        FROM sched_slice ss
+        JOIN thread t ON ss.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        JOIN cpu_info ci ON ss.cpu = ci.cpu_id
+        WHERE
+          ss.dur > ${min_runtime_ms} * 1e6
+          AND ('${package}' = '' OR p.name GLOB '${package}*')
+        GROUP BY ss.utid, ci.core_type
+      ),
+      thread_totals AS (
+        SELECT
+          thread_name,
+          tid,
+          process_name,
+          SUM(runtime_ms) as total_runtime_ms,
+          SUM(CASE WHEN core_type = 'big' THEN runtime_ms ELSE 0 END) as big_core_ms,
+          SUM(CASE WHEN core_type = 'medium' THEN runtime_ms ELSE 0 END) as medium_core_ms,
+          SUM(CASE WHEN core_type = 'little' THEN runtime_ms ELSE 0 END) as little_core_ms
+        FROM thread_core_usage
+        GROUP BY tid
+      )
+      SELECT
+        thread_name,
+        tid,
+        process_name,
+        ROUND(total_runtime_ms, 2) as total_ms,
+        ROUND(big_core_ms * 100.0 / total_runtime_ms, 1) as big_core_pct,
+        ROUND(medium_core_ms * 100.0 / total_runtime_ms, 1) as medium_core_pct,
+        ROUND(little_core_ms * 100.0 / total_runtime_ms, 1) as little_core_pct
+      FROM thread_totals
+      WHERE total_runtime_ms > 10  -- 至少 10ms 运行时间
+      ORDER BY total_runtime_ms DESC
+      LIMIT 20
+    save_as: core_distribution
+
+  # ========== 调度延迟分析 ==========
+  - id: scheduling_latency
+    type: atomic
+    name: "调度延迟"
+    display:
+      level: list
+      layer: list
+      title: "调度延迟分析"
+    sql: |
+      WITH
+      runnable_slices AS (
+        SELECT
+          ts.utid,
+          ts.dur / 1e6 as latency_ms
+        FROM thread_state ts
+        WHERE
+          ts.state = 'R'  -- Runnable but not running
+          AND ts.dur > 0
+      ),
+      thread_latency AS (
+        SELECT
+          t.name as thread_name,
+          t.tid,
+          p.name as process_name,
+          COUNT(*) as runnable_count,
+          SUM(rs.latency_ms) as total_latency_ms,
+          AVG(rs.latency_ms) as avg_latency_ms,
+          MAX(rs.latency_ms) as max_latency_ms
+        FROM runnable_slices rs
+        JOIN thread t ON rs.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE '${package}' = '' OR p.name GLOB '${package}*'
+        GROUP BY rs.utid
+      )
+      SELECT
+        thread_name,
+        tid,
+        process_name,
+        runnable_count,
+        ROUND(total_latency_ms, 2) as total_latency_ms,
+        ROUND(avg_latency_ms, 3) as avg_latency_ms,
+        ROUND(max_latency_ms, 2) as max_latency_ms
+      FROM thread_latency
+      WHERE total_latency_ms > 1  -- 至少 1ms 总延迟
+      ORDER BY total_latency_ms DESC
+      LIMIT 20
+    save_as: scheduling_latency
+
+  # ========== 上下文切换分析 ==========
+  - id: context_switches
+    type: atomic
+    name: "上下文切换"
+    display:
+      level: deep
+      layer: deep
+      title: "上下文切换分析"
+    sql: |
+      WITH
+      context_switch_count AS (
+        SELECT
+          t.name as thread_name,
+          t.tid,
+          p.name as process_name,
+          COUNT(*) as switch_count,
+          SUM(ss.dur) / 1e6 as total_runtime_ms
+        FROM sched_slice ss
+        JOIN thread t ON ss.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE '${package}' = '' OR p.name GLOB '${package}*'
+        GROUP BY ss.utid
+      )
+      SELECT
+        thread_name,
+        tid,
+        process_name,
+        switch_count,
+        ROUND(total_runtime_ms, 2) as runtime_ms,
+        ROUND(switch_count * 1000.0 / NULLIF(total_runtime_ms, 0), 1) as switches_per_sec
+      FROM context_switch_count
+      WHERE switch_count > 10
+      ORDER BY switches_per_sec DESC
+      LIMIT 20
+    save_as: context_switches
+
+  # ========== CPU 时间线 ==========
+  - id: cpu_timeline
+    type: atomic
+    name: "CPU 使用时间线"
+    display:
+      level: deep
+      layer: deep
+      title: "CPU 使用趋势"
+    sql: |
+      WITH
+      time_range AS (
+        SELECT MIN(ts) as start_ts FROM sched_slice
+      ),
+      cpu_by_second AS (
+        SELECT
+          CAST((ss.ts - (SELECT start_ts FROM time_range)) / 1e9 AS INT) as second,
+          ss.cpu,
+          SUM(ss.dur) / 1e6 as runtime_ms
+        FROM sched_slice ss
+        GROUP BY CAST((ss.ts - (SELECT start_ts FROM time_range)) / 1e9 AS INT), ss.cpu
+      )
+      SELECT
+        second,
+        COUNT(DISTINCT cpu) as active_cpus,
+        SUM(runtime_ms) as total_cpu_ms,
+        ROUND(SUM(runtime_ms) / COUNT(DISTINCT cpu), 1) as avg_per_cpu_ms
+      FROM cpu_by_second
+      GROUP BY second
+      ORDER BY second
+      LIMIT 60
+    save_as: cpu_timeline
+
+  # ========== 分析结论 ==========
+  - id: profiling_conclusion
+    type: atomic
+    name: "CPU 剖析结论"
+    display:
+      level: summary
+      layer: overview
+      title: "CPU 性能分析结论"
+    sql: |
+      WITH
+      top_thread AS (
+        SELECT thread_name, cpu_time_ms FROM (${thread_cpu_time}) LIMIT 1
+      ),
+      latency_stats AS (
+        SELECT
+          AVG(avg_latency_ms) as overall_avg_latency,
+          MAX(max_latency_ms) as worst_latency
+        FROM (${scheduling_latency})
+      ),
+      big_core_usage AS (
+        SELECT AVG(big_core_pct) as avg_big_core_pct FROM (${core_distribution})
+      )
+      SELECT
+        (SELECT thread_name FROM top_thread) as top_cpu_thread,
+        (SELECT ROUND(cpu_time_ms, 1) FROM top_thread) as top_thread_cpu_ms,
+        (SELECT ROUND(overall_avg_latency, 2) FROM latency_stats) as avg_sched_latency_ms,
+        (SELECT ROUND(worst_latency, 1) FROM latency_stats) as worst_sched_latency_ms,
+        (SELECT ROUND(avg_big_core_pct, 1) FROM big_core_usage) as avg_big_core_usage_pct,
+        CASE
+          WHEN (SELECT worst_latency FROM latency_stats) > 50 THEN 'high_latency'
+          WHEN (SELECT worst_latency FROM latency_stats) > 20 THEN 'moderate_latency'
+          ELSE 'normal'
+        END as latency_severity,
+        CASE
+          WHEN (SELECT overall_avg_latency FROM latency_stats) > 10
+            THEN '调度延迟偏高，可能存在 CPU 竞争或优先级问题'
+          WHEN (SELECT avg_big_core_pct FROM big_core_usage) < 30
+            THEN '大核利用率低，关键线程可能未正确绑核'
+          WHEN (SELECT avg_big_core_pct FROM big_core_usage) > 80
+            THEN '过度使用大核，考虑部分任务迁移到小核以节省功耗'
+          ELSE 'CPU 调度和使用效率良好'
+        END as suggestion
