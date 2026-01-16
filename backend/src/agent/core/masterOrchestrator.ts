@@ -61,6 +61,16 @@ import {
   createArchitectureDetector,
   ArchitectureInfo,
 } from '../detectors';
+import {
+  expertRegistry,
+  initializeExperts,
+  parseAnalysisIntent,
+  getExpertForIntent,
+  BaseExpertInterface,
+  ExpertInput,
+  ExpertOutput,
+  AnalysisIntent,
+} from '../experts';
 
 // 默认配置
 // 注意：降低 minQualityScore 从 0.7 到 0.5，减少不必要的迭代循环
@@ -104,6 +114,7 @@ export class MasterOrchestrator extends EventEmitter {
   private emittedFindingIds: Set<string> = new Set();  // 已发送的 Finding IDs，防止重复
   private emittedDiagnosticHashes: Set<string> = new Set();  // 内容哈希去重 diagnostics
   private currentArchitecture: ArchitectureInfo | null = null;  // 当前检测到的渲染架构
+  private expertModeEnabled: boolean = false;  // 是否启用专家模式（Phase 3）
 
   constructor(config: Partial<MasterOrchestratorConfig> = {}) {
     super();
@@ -165,8 +176,23 @@ export class MasterOrchestrator extends EventEmitter {
     // 注册阶段执行器
     this.registerDefaultExecutors();
 
+    // 初始化专家系统 (Phase 3)
+    this.initializeExpertSystem();
+
     // 设置事件监听
     this.setupEventListeners();
+  }
+
+  /**
+   * 初始化专家系统
+   */
+  private initializeExpertSystem(): void {
+    try {
+      initializeExperts();
+      console.log(`[MasterOrchestrator] Expert system initialized, supported intents: ${expertRegistry.getSupportedIntents().join(', ')}`);
+    } catch (error: any) {
+      console.warn(`[MasterOrchestrator] Failed to initialize expert system: ${error.message}`);
+    }
   }
 
   // ==========================================================================
@@ -986,6 +1012,176 @@ ${findings.map(f => `- [${f.severity}] ${f.title}`).join('\n')}
    */
   getCurrentArchitecture(): ArchitectureInfo | null {
     return this.currentArchitecture;
+  }
+
+  // ==========================================================================
+  // Expert System Integration (Phase 3)
+  // ==========================================================================
+
+  /**
+   * 启用/禁用专家模式
+   * 专家模式使用决策树驱动的分析，而非传统的 LLM 规划
+   */
+  setExpertModeEnabled(enabled: boolean): void {
+    this.expertModeEnabled = enabled;
+    console.log(`[MasterOrchestrator] Expert mode ${enabled ? 'enabled' : 'disabled'}`);
+  }
+
+  /**
+   * 检查专家模式是否启用
+   */
+  isExpertModeEnabled(): boolean {
+    return this.expertModeEnabled;
+  }
+
+  /**
+   * 使用专家系统处理查询 (Phase 3 新功能)
+   *
+   * 与 handleQuery 不同，此方法直接路由到领域专家进行分析，
+   * 跳过 LLM 规划阶段，使用决策树驱动的分析流程。
+   */
+  async handleQueryWithExpert(
+    query: string,
+    traceId: string,
+    options: { traceProcessor?: any; traceProcessorService?: any } = {}
+  ): Promise<ExpertOutput> {
+    const startTime = Date.now();
+
+    try {
+      // 1. 创建会话
+      const session = await this.sessionStore.createSession(traceId, query);
+      this.currentSessionId = session.sessionId;
+
+      this.emitUpdate('progress', { phase: 'starting', message: '开始专家分析' });
+
+      // 2. 检测渲染架构
+      this.currentArchitecture = null;
+      if (options.traceProcessorService) {
+        try {
+          this.emitUpdate('progress', { phase: 'detecting_architecture', message: '检测渲染架构' });
+          this.currentArchitecture = await this.architectureDetector.detect({
+            traceId,
+            traceProcessorService: options.traceProcessorService,
+          });
+          console.log(`[MasterOrchestrator] Expert mode - Detected architecture: ${this.currentArchitecture.type}`);
+        } catch (error: any) {
+          console.warn(`[MasterOrchestrator] Architecture detection failed:`, error.message);
+        }
+      }
+
+      // 3. 解析用户意图
+      this.emitUpdate('progress', { phase: 'parsing_intent', message: '解析分析意图' });
+      const intent = parseAnalysisIntent(query);
+      console.log(`[MasterOrchestrator] Parsed intent: ${intent.category} (confidence: ${intent.confidence.toFixed(2)})`);
+
+      // 4. 路由到专家
+      const expert = getExpertForIntent(intent);
+      if (!expert) {
+        console.warn(`[MasterOrchestrator] No expert found for intent: ${intent.category}, falling back to general`);
+        // 如果没有专家，返回一个通用结果
+        return {
+          expertId: 'none',
+          domain: 'general',
+          success: false,
+          findings: [],
+          suggestions: ['请尝试更具体的查询，或使用标准分析模式'],
+          error: `没有找到处理 "${intent.category}" 意图的专家`,
+          confidence: 0,
+        };
+      }
+
+      // 5. 构建专家输入
+      this.emitUpdate('progress', {
+        phase: 'executing_expert',
+        message: `执行 ${expert.config.name}`,
+        expertId: expert.config.id,
+      });
+
+      const expertInput: ExpertInput = {
+        sessionId: session.sessionId,
+        traceId,
+        query,
+        intent,
+        architecture: this.currentArchitecture || undefined,
+        traceProcessorService: options.traceProcessorService,
+        packageName: undefined, // 可以从 trace 中提取
+        timeRange: undefined,   // 可以从 trace 中提取
+      };
+
+      // 6. 执行专家分析
+      console.log(`[MasterOrchestrator] Routing to expert: ${expert.config.name} (${expert.config.id})`);
+
+      // 监听专家事件 (experts extend EventEmitter)
+      const expertEmitter = expert as unknown as EventEmitter;
+      expertEmitter.on('analysis:start', (data: any) => {
+        this.emitUpdate('progress', { phase: 'expert_start', ...data });
+      });
+      expertEmitter.on('node:start', (data: any) => {
+        this.emitUpdate('progress', { phase: 'decision_node', ...data });
+      });
+      expertEmitter.on('node:complete', (data: any) => {
+        this.emitUpdate('progress', { phase: 'decision_node_complete', ...data });
+      });
+      expertEmitter.on('analysis:complete', (data: any) => {
+        this.emitUpdate('progress', { phase: 'expert_complete', ...data });
+      });
+
+      const expertOutput = await expert.analyze(expertInput);
+
+      // 7. 发送结果
+      this.emitUpdate('conclusion', {
+        expertId: expertOutput.expertId,
+        domain: expertOutput.domain,
+        conclusion: expertOutput.conclusion,
+        findings: expertOutput.findings,
+        confidence: expertOutput.confidence,
+      });
+
+      // 发送 findings
+      if (expertOutput.findings.length > 0) {
+        this.emitUpdate('finding', {
+          stage: 'expert_analysis',
+          findings: expertOutput.findings,
+        });
+      }
+
+      console.log(`[MasterOrchestrator] Expert analysis completed in ${Date.now() - startTime}ms`);
+      return expertOutput;
+
+    } catch (error: any) {
+      console.error(`[MasterOrchestrator] Expert analysis failed:`, error);
+      this.emitUpdate('error', { message: error.message });
+
+      return {
+        expertId: 'error',
+        domain: 'general',
+        success: false,
+        findings: [],
+        suggestions: ['分析过程中发生错误，请检查 trace 数据'],
+        error: error.message,
+        confidence: 0,
+      };
+    }
+  }
+
+  /**
+   * 获取可用的专家列表
+   */
+  listExperts(): { id: string; name: string; domain: string; intents: string[] }[] {
+    return expertRegistry.list().map((config) => ({
+      id: config.id,
+      name: config.name,
+      domain: config.domain,
+      intents: config.handlesIntents,
+    }));
+  }
+
+  /**
+   * 检查是否有专家可以处理指定的意图
+   */
+  hasExpertFor(query: string): boolean {
+    const intent = parseAnalysisIntent(query);
+    return expertRegistry.hasExpertFor(intent.category);
   }
 
   // ==========================================================================
