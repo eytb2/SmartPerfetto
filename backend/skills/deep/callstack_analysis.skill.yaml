@@ -1,0 +1,299 @@
+# =============================================================================
+# Callstack Analysis v1.0 (Deep Analysis Skill) - Phase 6
+# =============================================================================
+# L2 深入分析：分析 Running 状态下的调用栈热点
+#
+# 核心表：
+# - perf_sample: CPU 采样数据
+# - stack_profile_callsite: 调用栈位置
+# - stack_profile_frame: 栈帧信息
+# - stack_profile_symbol: 符号信息
+# - stack_profile_mapping: 映射信息（so/dex 等）
+#
+# 前提条件：
+# - trace 需要包含 CPU profiling 数据（simpleperf 或 perf）
+# =============================================================================
+
+name: callstack_analysis
+version: "1.0"
+type: composite
+
+meta:
+  display_name: "调用栈热点分析"
+  description: "分析 CPU 采样数据，找出热点函数和调用路径"
+  icon: "flame"
+  tags: [callstack, cpu, profiling, hotspot, deep]
+  level: 2
+
+triggers:
+  keywords:
+    zh: [调用栈, 热点函数, CPU采样, 函数耗时, 火焰图, profiling]
+    en: [callstack, hotspot, cpu sampling, flame graph, profiling, perf]
+  patterns:
+    - ".*调用栈.*"
+    - ".*热点.*函数.*"
+    - ".*profil.*"
+    - ".*flame.*"
+
+prerequisites:
+  modules:
+    - stack_profile
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "应用包名（可选）"
+  - name: min_samples
+    type: number
+    required: false
+    default: 10
+    description: "最小采样数阈值"
+
+steps:
+  # ========== 检查是否有采样数据 ==========
+  - id: check_samples
+    type: atomic
+    name: "检查采样数据"
+    display:
+      level: summary
+      layer: overview
+      title: "采样数据概览"
+    sql: |
+      SELECT
+        COUNT(*) as total_samples,
+        COUNT(DISTINCT callsite_id) as unique_callsites,
+        MIN(ts) as first_sample_ts,
+        MAX(ts) as last_sample_ts,
+        (MAX(ts) - MIN(ts)) / 1e9 as duration_sec
+      FROM perf_sample
+    save_as: sample_stats
+    on_empty: "未找到 CPU 采样数据，请确保 trace 包含 simpleperf/perf 数据"
+
+  # ========== 热点函数分析 ==========
+  - id: hot_functions
+    type: atomic
+    name: "热点函数 Top 20"
+    display:
+      level: list
+      layer: list
+      title: "热点函数排行"
+    sql: |
+      WITH RECURSIVE
+      -- 展开调用栈
+      callsite_tree AS (
+        SELECT
+          id,
+          parent_id,
+          frame_id,
+          depth
+        FROM stack_profile_callsite
+      ),
+      -- 统计每个栈帧的采样数
+      frame_samples AS (
+        SELECT
+          ct.frame_id,
+          COUNT(*) as sample_count
+        FROM perf_sample ps
+        JOIN callsite_tree ct ON ps.callsite_id = ct.id
+        GROUP BY ct.frame_id
+      ),
+      -- 关联符号信息
+      frame_symbols AS (
+        SELECT
+          fs.frame_id,
+          fs.sample_count,
+          COALESCE(sps.name, 'unknown') as function_name,
+          COALESCE(spm.name, 'unknown') as module_name
+        FROM frame_samples fs
+        LEFT JOIN stack_profile_frame spf ON fs.frame_id = spf.id
+        LEFT JOIN stack_profile_symbol sps ON spf.symbol_id = sps.id
+        LEFT JOIN stack_profile_mapping spm ON spf.mapping_id = spm.id
+      )
+      SELECT
+        function_name,
+        module_name,
+        sample_count,
+        ROUND(sample_count * 100.0 / (SELECT total_samples FROM (${sample_stats})), 2) as percentage
+      FROM frame_symbols
+      WHERE sample_count >= ${min_samples}
+      ORDER BY sample_count DESC
+      LIMIT 20
+    save_as: hot_functions
+
+  # ========== 按模块统计 ==========
+  - id: module_distribution
+    type: atomic
+    name: "模块采样分布"
+    display:
+      level: list
+      layer: list
+      title: "模块热度分布"
+    sql: |
+      WITH
+      frame_modules AS (
+        SELECT
+          ps.callsite_id,
+          COALESCE(spm.name, 'unknown') as module_name,
+          CASE
+            WHEN spm.name LIKE '%.so' THEN 'native'
+            WHEN spm.name LIKE '%.dex' OR spm.name LIKE '%.apk' THEN 'java'
+            WHEN spm.name LIKE '%kernel%' OR spm.name LIKE '%vmlinux%' THEN 'kernel'
+            ELSE 'other'
+          END as module_type
+        FROM perf_sample ps
+        LEFT JOIN stack_profile_callsite spc ON ps.callsite_id = spc.id
+        LEFT JOIN stack_profile_frame spf ON spc.frame_id = spf.id
+        LEFT JOIN stack_profile_mapping spm ON spf.mapping_id = spm.id
+      )
+      SELECT
+        module_name,
+        module_type,
+        COUNT(*) as sample_count,
+        ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM perf_sample), 2) as percentage
+      FROM frame_modules
+      GROUP BY module_name, module_type
+      ORDER BY sample_count DESC
+      LIMIT 15
+    save_as: module_distribution
+
+  # ========== 线程热点分析 ==========
+  - id: thread_hotspots
+    type: atomic
+    name: "线程采样分布"
+    display:
+      level: list
+      layer: list
+      title: "线程 CPU 采样分布"
+    sql: |
+      SELECT
+        t.name as thread_name,
+        t.tid,
+        p.name as process_name,
+        COUNT(*) as sample_count,
+        ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM perf_sample), 2) as percentage
+      FROM perf_sample ps
+      JOIN thread t ON ps.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE
+        '${package}' = '' OR p.name GLOB '${package}*'
+      GROUP BY t.utid
+      ORDER BY sample_count DESC
+      LIMIT 20
+    save_as: thread_hotspots
+
+  # ========== 调用路径分析（Top 热点函数的调用者）==========
+  - id: caller_analysis
+    type: atomic
+    name: "热点函数调用者分析"
+    display:
+      level: deep
+      layer: deep
+      title: "调用路径追踪"
+    sql: |
+      WITH RECURSIVE
+      -- 获取 Top 5 热点函数的 frame_id
+      top_frames AS (
+        SELECT DISTINCT
+          spf.id as frame_id,
+          sps.name as function_name
+        FROM stack_profile_frame spf
+        JOIN stack_profile_symbol sps ON spf.symbol_id = sps.id
+        WHERE sps.name IN (
+          SELECT function_name FROM (${hot_functions}) LIMIT 5
+        )
+      ),
+      -- 找到包含这些热点函数的调用栈
+      hot_callsites AS (
+        SELECT
+          spc.id as callsite_id,
+          spc.parent_id,
+          tf.function_name as hot_function
+        FROM stack_profile_callsite spc
+        JOIN top_frames tf ON spc.frame_id = tf.frame_id
+      ),
+      -- 递归向上查找调用者（最多 5 层）
+      caller_chain AS (
+        SELECT
+          hc.callsite_id,
+          hc.hot_function,
+          hc.parent_id,
+          1 as depth
+        FROM hot_callsites hc
+
+        UNION ALL
+
+        SELECT
+          cc.callsite_id,
+          cc.hot_function,
+          spc.parent_id,
+          cc.depth + 1
+        FROM caller_chain cc
+        JOIN stack_profile_callsite spc ON cc.parent_id = spc.id
+        WHERE cc.depth < 5 AND spc.parent_id IS NOT NULL
+      ),
+      -- 统计调用者
+      caller_stats AS (
+        SELECT
+          cc.hot_function,
+          cc.depth,
+          COALESCE(sps.name, 'unknown') as caller_name
+        FROM caller_chain cc
+        JOIN stack_profile_callsite spc ON cc.parent_id = spc.id
+        LEFT JOIN stack_profile_frame spf ON spc.frame_id = spf.id
+        LEFT JOIN stack_profile_symbol sps ON spf.symbol_id = sps.id
+      )
+      SELECT
+        hot_function,
+        depth as call_depth,
+        caller_name,
+        COUNT(*) as occurrence_count
+      FROM caller_stats
+      GROUP BY hot_function, depth, caller_name
+      ORDER BY hot_function, depth, occurrence_count DESC
+    save_as: caller_analysis
+
+  # ========== 分析结论 ==========
+  - id: analysis_conclusion
+    type: atomic
+    name: "分析结论"
+    display:
+      level: summary
+      layer: overview
+      title: "调用栈分析结论"
+    sql: |
+      WITH
+      sample_info AS (
+        SELECT * FROM (${sample_stats})
+      ),
+      top_func AS (
+        SELECT
+          function_name,
+          percentage
+        FROM (${hot_functions})
+        LIMIT 3
+      ),
+      top_module AS (
+        SELECT
+          module_type,
+          SUM(percentage) as total_pct
+        FROM (${module_distribution})
+        GROUP BY module_type
+        ORDER BY total_pct DESC
+        LIMIT 1
+      )
+      SELECT
+        (SELECT total_samples FROM sample_info) as total_samples,
+        (SELECT duration_sec FROM sample_info) as duration_sec,
+        (SELECT GROUP_CONCAT(function_name || ' (' || percentage || '%)' , ', ') FROM top_func) as top_hotspots,
+        (SELECT module_type || ' (' || ROUND(total_pct, 1) || '%)' FROM top_module) as dominant_module_type,
+        CASE
+          WHEN (SELECT total_pct FROM top_module) > 50 THEN
+            CASE (SELECT module_type FROM top_module)
+              WHEN 'kernel' THEN '系统调用开销较大，建议检查 IO/锁竞争'
+              WHEN 'native' THEN 'Native 代码占比高，关注 JNI 调用和 Native 库'
+              WHEN 'java' THEN 'Java 层代码占主导，建议优化业务逻辑'
+              ELSE '需要进一步分析'
+            END
+          ELSE '采样分布较均匀，无明显热点模块'
+        END as suggestion

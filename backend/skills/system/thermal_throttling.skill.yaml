@@ -1,0 +1,312 @@
+# =============================================================================
+# Thermal Throttling Analysis v1.0 (System Analysis Skill) - Phase 6
+# =============================================================================
+# 系统级分析：分析热节流和温度相关性能问题
+#
+# 核心表：
+# - counter: 系统计数器，包含温度、频率等信息
+# - cpu_counter_track: CPU 相关计数器轨道
+# - counter_track: 通用计数器轨道
+#
+# 分析维度：
+# - 温度变化趋势
+# - CPU 频率变化（可能因热节流导致降频）
+# - 温度与性能相关性
+# - 热区识别
+# =============================================================================
+
+name: thermal_throttling
+version: "1.0"
+type: composite
+
+meta:
+  display_name: "热节流分析"
+  description: "分析系统温度、热节流对性能的影响"
+  icon: "thermometer"
+  tags: [thermal, throttling, temperature, cpu, frequency, system]
+
+triggers:
+  keywords:
+    zh: [温度, 热节流, 降频, 发热, thermal, 过热]
+    en: [thermal, throttling, temperature, frequency, overheat, cooling]
+  patterns:
+    - ".*温度.*"
+    - ".*热.*"
+    - ".*thermal.*"
+    - ".*throttl.*"
+    - ".*降频.*"
+
+prerequisites:
+  modules:
+    - counters
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "应用包名（可选）"
+
+steps:
+  # ========== 温度数据概览 ==========
+  - id: thermal_overview
+    type: atomic
+    name: "温度数据概览"
+    display:
+      level: summary
+      layer: overview
+      title: "温度概览"
+    sql: |
+      SELECT
+        ct.name as sensor_name,
+        COUNT(*) as sample_count,
+        MIN(c.value) as min_temp,
+        MAX(c.value) as max_temp,
+        AVG(c.value) as avg_temp,
+        MAX(c.value) - MIN(c.value) as temp_range
+      FROM counter c
+      JOIN counter_track ct ON c.track_id = ct.id
+      WHERE
+        ct.name LIKE '%thermal%'
+        OR ct.name LIKE '%temp%'
+        OR ct.name LIKE '%temperature%'
+        OR ct.name LIKE '%tsens%'
+      GROUP BY ct.name
+      ORDER BY max_temp DESC
+    save_as: thermal_overview
+    on_empty: "未找到温度数据，请确保 trace 包含 thermal/temperature counter"
+
+  # ========== 温度时间线 ==========
+  - id: thermal_timeline
+    type: atomic
+    name: "温度变化趋势"
+    display:
+      level: list
+      layer: list
+      title: "温度时间线"
+    sql: |
+      WITH
+      time_range AS (
+        SELECT MIN(ts) as start_ts FROM counter
+      ),
+      thermal_samples AS (
+        SELECT
+          (c.ts - (SELECT start_ts FROM time_range)) / 1e9 as time_sec,
+          ct.name as sensor_name,
+          c.value as temperature
+        FROM counter c
+        JOIN counter_track ct ON c.track_id = ct.id
+        WHERE
+          ct.name LIKE '%thermal%'
+          OR ct.name LIKE '%temp%'
+          OR ct.name LIKE '%temperature%'
+      )
+      SELECT
+        CAST(time_sec AS INT) as second,
+        sensor_name,
+        AVG(temperature) as avg_temp,
+        MAX(temperature) as max_temp
+      FROM thermal_samples
+      GROUP BY CAST(time_sec AS INT), sensor_name
+      ORDER BY second, sensor_name
+      LIMIT 200
+    save_as: thermal_timeline
+
+  # ========== CPU 频率分析 ==========
+  - id: cpu_frequency_analysis
+    type: atomic
+    name: "CPU 频率变化"
+    display:
+      level: list
+      layer: list
+      title: "CPU 频率分布"
+    sql: |
+      WITH
+      freq_data AS (
+        SELECT
+          cct.cpu as cpu_id,
+          c.value / 1000 as freq_mhz,  -- 通常以 kHz 记录
+          c.ts
+        FROM counter c
+        JOIN cpu_counter_track cct ON c.track_id = cct.id
+        WHERE cct.name = 'cpufreq'
+      )
+      SELECT
+        cpu_id,
+        MIN(freq_mhz) as min_freq_mhz,
+        MAX(freq_mhz) as max_freq_mhz,
+        AVG(freq_mhz) as avg_freq_mhz,
+        COUNT(*) as sample_count,
+        CASE
+          WHEN MIN(freq_mhz) < MAX(freq_mhz) * 0.5 THEN 'significant_throttling'
+          WHEN MIN(freq_mhz) < MAX(freq_mhz) * 0.7 THEN 'moderate_throttling'
+          ELSE 'normal'
+        END as throttling_status
+      FROM freq_data
+      GROUP BY cpu_id
+      ORDER BY cpu_id
+    save_as: cpu_frequency
+    on_empty: "未找到 CPU 频率数据"
+
+  # ========== 频率降档事件 ==========
+  - id: frequency_drops
+    type: atomic
+    name: "频率降档事件"
+    display:
+      level: deep
+      layer: deep
+      title: "频率骤降事件"
+    sql: |
+      WITH
+      time_range AS (
+        SELECT MIN(ts) as start_ts FROM counter
+      ),
+      freq_changes AS (
+        SELECT
+          cct.cpu as cpu_id,
+          (c.ts - (SELECT start_ts FROM time_range)) / 1e9 as time_sec,
+          c.value / 1000 as freq_mhz,
+          LAG(c.value / 1000) OVER (PARTITION BY cct.cpu ORDER BY c.ts) as prev_freq_mhz
+        FROM counter c
+        JOIN cpu_counter_track cct ON c.track_id = cct.id
+        WHERE cct.name = 'cpufreq'
+      )
+      SELECT
+        cpu_id,
+        ROUND(time_sec, 2) as time_sec,
+        prev_freq_mhz,
+        freq_mhz as new_freq_mhz,
+        ROUND((prev_freq_mhz - freq_mhz) * 100.0 / prev_freq_mhz, 1) as drop_pct
+      FROM freq_changes
+      WHERE
+        prev_freq_mhz IS NOT NULL
+        AND freq_mhz < prev_freq_mhz * 0.7  -- 30%+ 降频
+      ORDER BY (prev_freq_mhz - freq_mhz) DESC
+      LIMIT 30
+    save_as: frequency_drops
+
+  # ========== 温度与频率相关性 ==========
+  - id: thermal_freq_correlation
+    type: atomic
+    name: "温度频率相关性"
+    display:
+      level: deep
+      layer: deep
+      title: "温度与 CPU 频率相关性"
+    sql: |
+      WITH
+      time_range AS (
+        SELECT MIN(ts) as start_ts FROM counter
+      ),
+      thermal_by_sec AS (
+        SELECT
+          CAST((c.ts - (SELECT start_ts FROM time_range)) / 1e9 AS INT) as second,
+          MAX(c.value) as max_temp
+        FROM counter c
+        JOIN counter_track ct ON c.track_id = ct.id
+        WHERE ct.name LIKE '%thermal%' OR ct.name LIKE '%temp%'
+        GROUP BY CAST((c.ts - (SELECT start_ts FROM time_range)) / 1e9 AS INT)
+      ),
+      freq_by_sec AS (
+        SELECT
+          CAST((c.ts - (SELECT start_ts FROM time_range)) / 1e9 AS INT) as second,
+          AVG(c.value / 1000) as avg_freq_mhz
+        FROM counter c
+        JOIN cpu_counter_track cct ON c.track_id = cct.id
+        WHERE cct.name = 'cpufreq'
+        GROUP BY CAST((c.ts - (SELECT start_ts FROM time_range)) / 1e9 AS INT)
+      )
+      SELECT
+        t.second,
+        t.max_temp,
+        f.avg_freq_mhz,
+        CASE
+          WHEN t.max_temp > 70 AND f.avg_freq_mhz < 1500 THEN 'thermal_throttled'
+          WHEN t.max_temp > 60 AND f.avg_freq_mhz < 2000 THEN 'moderate_throttle'
+          ELSE 'normal'
+        END as status
+      FROM thermal_by_sec t
+      JOIN freq_by_sec f ON t.second = f.second
+      ORDER BY t.second
+      LIMIT 60
+    save_as: thermal_freq_correlation
+
+  # ========== 高温警告区间 ==========
+  - id: high_temp_periods
+    type: atomic
+    name: "高温区间识别"
+    display:
+      level: list
+      layer: list
+      title: "高温警告时段"
+    sql: |
+      WITH
+      time_range AS (
+        SELECT MIN(ts) as start_ts FROM counter
+      ),
+      high_temps AS (
+        SELECT
+          (c.ts - (SELECT start_ts FROM time_range)) / 1e9 as time_sec,
+          ct.name as sensor_name,
+          c.value as temperature
+        FROM counter c
+        JOIN counter_track ct ON c.track_id = ct.id
+        WHERE
+          (ct.name LIKE '%thermal%' OR ct.name LIKE '%temp%')
+          AND c.value > 60  -- 高温阈值
+      )
+      SELECT
+        sensor_name,
+        ROUND(MIN(time_sec), 2) as start_sec,
+        ROUND(MAX(time_sec), 2) as end_sec,
+        ROUND(MAX(time_sec) - MIN(time_sec), 2) as duration_sec,
+        ROUND(MAX(temperature), 1) as peak_temp,
+        COUNT(*) as sample_count
+      FROM high_temps
+      GROUP BY sensor_name
+      HAVING COUNT(*) > 1
+      ORDER BY peak_temp DESC
+    save_as: high_temp_periods
+
+  # ========== 分析结论 ==========
+  - id: thermal_conclusion
+    type: atomic
+    name: "热节流分析结论"
+    display:
+      level: summary
+      layer: overview
+      title: "热节流分析结论"
+    sql: |
+      WITH
+      max_temps AS (
+        SELECT MAX(max_temp) as peak_temp FROM (${thermal_overview})
+      ),
+      throttle_count AS (
+        SELECT COUNT(*) as severe_drops FROM (${frequency_drops})
+        WHERE drop_pct > 30
+      ),
+      throttled_cpus AS (
+        SELECT COUNT(*) as throttled FROM (${cpu_frequency})
+        WHERE throttling_status = 'significant_throttling'
+      )
+      SELECT
+        (SELECT peak_temp FROM max_temps) as peak_temperature,
+        (SELECT severe_drops FROM throttle_count) as severe_freq_drops,
+        (SELECT throttled FROM throttled_cpus) as throttled_cpu_count,
+        CASE
+          WHEN (SELECT peak_temp FROM max_temps) > 80 THEN 'critical'
+          WHEN (SELECT peak_temp FROM max_temps) > 70 THEN 'warning'
+          WHEN (SELECT peak_temp FROM max_temps) > 60 THEN 'elevated'
+          ELSE 'normal'
+        END as thermal_severity,
+        CASE
+          WHEN (SELECT throttled FROM throttled_cpus) > 4 THEN '多核严重降频，热节流显著影响性能'
+          WHEN (SELECT severe_drops FROM throttle_count) > 10 THEN '频繁触发热节流，建议优化散热或降低负载'
+          WHEN (SELECT peak_temp FROM max_temps) > 70 THEN '温度偏高，存在热节流风险'
+          WHEN (SELECT peak_temp FROM max_temps) > 60 THEN '温度轻微升高，建议监控'
+          ELSE '温度正常，无明显热节流'
+        END as suggestion,
+        CASE
+          WHEN (SELECT throttled FROM throttled_cpus) > 0
+            THEN '考虑: 1) 减少后台任务 2) 优化 CPU 密集操作 3) 添加冷却间隔'
+          ELSE '当前热状态良好'
+        END as recommendation
