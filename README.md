@@ -1,11 +1,27 @@
-# SmartPerfetto - AI 驱动的 Perfetto 分析平台
+# SmartPerfetto
 
-AI-driven performance analysis platform for Android traces.
+AI-driven Android performance analysis platform built on [Perfetto](https://perfetto.dev/).
+
+SmartPerfetto combines Perfetto's trace visualization with an intelligent agent system that automatically analyzes performance traces, identifies root causes of jank/ANR/startup issues, and provides actionable optimization suggestions.
+
+## Features
+
+- **Intelligent Analysis** — Ask questions in natural language ("分析滑动卡顿", "why is startup slow?") and get structured, evidence-backed answers
+- **Multi-Agent Architecture** — Domain-specialized agents (Frame, CPU, Memory, Binder) collaborate to collect and synthesize evidence
+- **Strategy-Driven Pipelines** — Common scenarios (scrolling, startup) execute deterministic multi-stage analysis without LLM uncertainty
+- **Layered Results** — Analysis results from high-level overview (L1) down to per-frame root cause (L4)
+- **YAML Skill System** — 65+ analysis skills across atomic, composite, and deep categories; vendor-specific overrides for Pixel/Samsung/Xiaomi/etc.
+- **Real-time Streaming** — SSE-based progress updates as analysis progresses through stages
+- **Perfetto Integration** — Shared `trace_processor_shell` via HTTP RPC; timeline navigation from analysis results
 
 ## Quick Start
 
 ```bash
-# One command to start everything
+# Configure AI backend
+cp backend/.env.example backend/.env
+# Edit backend/.env with your API key (see "Environment" section below)
+
+# One command to start everything (builds trace_processor_shell automatically)
 ./scripts/start-dev.sh
 ```
 
@@ -13,61 +29,100 @@ Access:
 - **Perfetto UI**: http://localhost:10000
 - **Backend API**: http://localhost:3000
 
-> Configure `backend/.env` before first run (copy from `.env.example`)
+### Usage
 
-## Architecture Overview
+1. Open http://localhost:10000 in your browser
+2. Load a Perfetto trace file
+3. Open the AI Assistant panel
+4. Ask a question, e.g.:
+   - "分析滑动卡顿" (Analyze scroll jank)
+   - "启动为什么慢？" (Why is startup slow?)
+   - "CPU 调度有没有问题？" (Any CPU scheduling issues?)
+
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     MasterOrchestrator                               │
-│  • Pipeline execution with checkpoints                              │
-│  • Circuit breaker protection                                       │
-│  • Multi-model routing (Anthropic/DeepSeek/OpenAI)                 │
-│  • Evaluator-Optimizer loop                                         │
-└───────────────────────────────┬─────────────────────────────────────┘
-                                │
-        ┌───────────────────────┼───────────────────────┐
-        ▼                       ▼                       ▼
-┌───────────────┐     ┌───────────────┐     ┌───────────────┐
-│ PlannerAgent  │     │ WorkerAgents  │     │ EvaluatorAgent│
-│ (Task分解)     │     │ (专家分析)     │     │ (质量评估)     │
-└───────────────┘     └───────────────┘     └───────────────┘
-                                │
-                    ┌───────────┴───────────┐
-                    ▼                       ▼
-            ┌─────────────┐         ┌─────────────┐
-            │ Tool Layer  │         │ Skill YAML  │
-            │ (SQL/帧分析) │         │ (分析定义)   │
-            └─────────────┘         └─────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    Frontend (Perfetto UI @ :10000)               │
+│         Plugin: com.smartperfetto.AIAssistant                    │
+│         - AI Panel (ask questions, view results)                 │
+│         - Timeline integration (click-to-navigate)              │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │ SSE / HTTP
+┌───────────────────────────▼─────────────────────────────────────┐
+│                    Backend (Express @ :3000)                     │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │              AgentDrivenOrchestrator                       │   │
+│  │                                                            │   │
+│  │  Query → StrategyRegistry.match()                          │   │
+│  │           ├─ Match: Multi-Stage Pipeline (deterministic)   │   │
+│  │           └─ No Match: Hypothesis-Driven Rounds (LLM)     │   │
+│  └─────────────┬────────────────────────────────────────────┘   │
+│                │                                                  │
+│  ┌─────────────▼────────────────────────────────────────────┐   │
+│  │           Domain Agents                                    │   │
+│  │   Frame │ CPU │ Memory │ Binder │ Startup │ System        │   │
+│  └─────────────┬────────────────────────────────────────────┘   │
+│                │                                                  │
+│  ┌─────────────▼────────────────────────────────────────────┐   │
+│  │           Skill Engine (YAML Skills)                       │   │
+│  │   atomic/ │ composite/ │ deep/ │ modules/ │ vendors/      │   │
+│  └─────────────┬────────────────────────────────────────────┘   │
+│                │ SQL                                              │
+│  ┌─────────────▼────────────────────────────────────────────┐   │
+│  │        trace_processor_shell (HTTP RPC, port pool 9100-9900) │ │
+│  └──────────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Components
 
 | Component | Purpose |
 |-----------|---------|
-| **MasterOrchestrator** | Main coordinator with pipeline, state machine, circuit breaker |
-| **PipelineExecutor** | Stage execution with checkpoints for crash recovery |
-| **CircuitBreaker** | Protection against infinite loops, requests user intervention |
-| **ModelRouter** | Multi-model support with fallback chains |
-| **SessionLogger** | Per-session persistent logging for debugging |
+| **AgentDrivenOrchestrator** | Main coordinator: strategy matching + hypothesis-driven multi-round analysis |
+| **StrategyRegistry** | Matches queries to deterministic analysis strategies (scrolling, launch, etc.) |
+| **Domain Agents** | Specialized agents for Frame/CPU/Memory/Binder/Startup/System analysis |
+| **Skill Engine** | Executes YAML-defined analysis skills with SQL queries and display config |
+| **CircuitBreaker** | Protection against low-confidence loops, requests user intervention |
+| **ModelRouter** | Multi-model support (DeepSeek/OpenAI/Anthropic/GLM) with fallback chains |
 
 ## Directory Structure
 
 ```
 SmartPerfetto/
-├── perfetto/ui/              # Frontend (Mithril.js) @ :10000
 ├── backend/
 │   ├── src/
-│   │   ├── agent/            # New Agent Architecture
-│   │   │   ├── core/         # MasterOrchestrator, Pipeline, CircuitBreaker
-│   │   │   ├── agents/       # PlannerAgent, EvaluatorAgent, Workers
-│   │   │   ├── tools/        # SQL executor, frame analyzer
-│   │   │   └── state/        # Session store, checkpoints
-│   │   ├── services/         # TraceProcessor, SessionLogger
-│   │   └── routes/           # API endpoints
-│   ├── skills/v2/            # YAML analysis definitions
-│   └── logs/sessions/        # Session logs (JSONL)
-└── scripts/                  # Start/push scripts
+│   │   ├── agent/              # AI Agent system
+│   │   │   ├── core/           # Orchestrator, circuit breaker, model router
+│   │   │   ├── strategies/     # Staged analysis strategies
+│   │   │   ├── decision/       # Decision tree execution
+│   │   │   ├── agents/         # Domain agents + planner/evaluator
+│   │   │   │   ├── base/       # Agent base classes
+│   │   │   │   └── domain/     # Frame, CPU, Memory, Binder agents
+│   │   │   ├── experts/        # Cross-domain expert analysis
+│   │   │   ├── tools/          # SQL executor, skill invoker, etc.
+│   │   │   ├── detectors/      # Architecture detection (Compose/Flutter/WebView)
+│   │   │   ├── context/        # Session context & policies
+│   │   │   ├── compaction/     # Token overflow protection
+│   │   │   ├── hooks/          # Middleware (logging, timing)
+│   │   │   ├── communication/  # Agent message bus
+│   │   │   ├── state/          # Checkpoints, session store
+│   │   │   └── fork/           # Session forking
+│   │   ├── services/           # Core services
+│   │   │   └── skillEngine/    # YAML skill executor & loader
+│   │   └── routes/             # API endpoints
+│   ├── skills/                 # Analysis skills (YAML)
+│   │   ├── atomic/             # Single-step detection (17 skills)
+│   │   ├── composite/          # Multi-step analysis (28 skills)
+│   │   ├── deep/               # Deep analysis (2 skills)
+│   │   ├── modules/            # Module configs (app/framework/hardware/kernel)
+│   │   └── vendors/            # Vendor overrides (pixel/samsung/xiaomi/...)
+│   ├── data/                   # Session storage (SQLite)
+│   └── logs/sessions/          # Session logs (JSONL)
+├── perfetto/                   # Perfetto UI (submodule)
+│   └── ui/src/plugins/com.smartperfetto.AIAssistant/
+└── scripts/                    # Dev scripts
 ```
 
 ## API Endpoints
@@ -76,83 +131,87 @@ SmartPerfetto/
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/agent/analyze` | Start analysis with MasterOrchestrator |
-| GET | `/api/agent/:id/stream` | SSE for real-time updates |
+| POST | `/api/agent/analyze` | Start analysis (Strategy match → Agent orchestration) |
+| GET | `/api/agent/:id/stream` | SSE real-time updates |
 | GET | `/api/agent/:id/status` | Get analysis status |
 | POST | `/api/agent/:id/respond` | Respond to circuit breaker |
-| POST | `/api/agent/resume` | Resume from checkpoint |
+| POST | `/api/agent/scene-reconstruct` | Scene reconstruction |
 
-### Logging (for debugging)
+### Logging
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/agent/logs` | List all session logs |
-| GET | `/api/agent/logs/:sessionId` | Get logs for session |
-| GET | `/api/agent/logs/:sessionId/errors` | Get only errors/warnings |
+| GET | `/api/agent/logs/:sessionId` | Get session logs |
+| GET | `/api/agent/logs/:sessionId/errors` | Get only errors |
 
-## Development
+### Trace
 
-### Frontend (Mithril.js)
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/traces/register-rpc` | Register RPC port |
 
-```typescript
-// Component pattern
-export class MyComponent implements m.ClassComponent<Attrs> {
-  view(vnode: m.Vnode<Attrs>) {
-    return m('div', vnode.attrs.title);
-  }
-}
-```
+## Skills (YAML)
 
-Rebuild: `cd perfetto/ui && node build.js`
-
-### Backend Skills (YAML)
+Analysis logic is defined in YAML skills with SQL queries and display configuration:
 
 ```yaml
-# backend/skills/v2/composite/my_analysis.skill.yaml
-name: my_analysis
+name: scrolling_analysis
 type: composite
+inputs:
+  - name: package
+    type: string
+    required: false
+  - name: max_frames_per_session
+    type: number
+    required: false
 
 steps:
-  - id: summary_data        # Frontend data key
-    sql: "SELECT ..."
+  - id: performance_summary
+    sql: "SELECT COUNT(*) as total_frames, ..."
     display:
-      level: summary        # L1 layer
+      level: summary
+      title: "滑动性能概览"
+      columns:
+        - { name: total_frames, type: number }
+        - { name: jank_rate, type: percentage, format: percentage }
+
+  - id: diagnose_jank_frames
+    type: iterator
+    source: app_jank_frames
+    max_items: "${max_frames_per_session|8}"
+    item_skill: janky_frame_analysis
 ```
 
-### Environment Variables
+## Environment
 
-```env
+```bash
+# backend/.env
 PORT=3000
-AI_SERVICE=deepseek
+AI_SERVICE=deepseek          # deepseek | openai | anthropic | glm
 DEEPSEEK_API_KEY=sk-xxx
 DEEPSEEK_MODEL=deepseek-chat
 ```
 
 ## Debugging
 
-### View Session Logs
-
 ```bash
-# List sessions
-curl http://localhost:3000/api/agent/logs
-
-# Get logs for session
+# View session logs
 curl http://localhost:3000/api/agent/logs/{sessionId}
 
-# Get only errors
+# View only errors
 curl http://localhost:3000/api/agent/logs/{sessionId}/errors
 ```
 
-Logs are stored in `backend/logs/sessions/*.jsonl`
+Logs are stored in `backend/logs/sessions/*.jsonl`.
 
 ### Common Issues
 
 | Issue | Solution |
 |-------|----------|
-| "AI backend not connected" | Run `./scripts/start-dev.sh` to build trace_processor |
-| Empty frontend data | Check stepId matches YAML `id:` |
-| Port conflict | `pkill -f trace_processor_shell` |
-| CORS error | Clear browser cache, use incognito |
+| "AI backend not connected" | Run `./scripts/start-dev.sh` |
+| Empty analysis data | Verify trace has FrameTimeline data (Android 12+) |
+| Port conflict on 9100-9900 | `pkill -f trace_processor_shell` |
+| Debug agent behavior | Check `backend/logs/sessions/*.jsonl` |
 
 ## Perfetto Submodule
 
@@ -166,7 +225,3 @@ cd perfetto && git checkout smartperfetto && git pull fork smartperfetto
 # Push both repos
 ./scripts/push-all.sh
 ```
-
-## License
-
-MIT License

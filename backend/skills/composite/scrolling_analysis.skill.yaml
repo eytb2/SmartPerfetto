@@ -1076,7 +1076,7 @@ steps:
     type: iterator
     name: "逐帧诊断分析"
     source: app_jank_frames
-    max_items: 30
+    max_items: "${max_frames_per_session|8}"
     item_skill: janky_frame_analysis
     item_params:
       frame_ts: start_ts

@@ -51,7 +51,6 @@ steps:
         AND (process_name GLOB '${package}*' OR '${package}' = '')
         AND dur >= 1000000
       ORDER BY dur DESC
-      LIMIT 10
     save_as: monitor_contentions
     optional: true
 
@@ -91,7 +90,6 @@ steps:
              OR ts.blocked_function GLOB '*sem_*'
              OR ts.blocked_function GLOB '*cond_*')
       ORDER BY ts.dur DESC
-      LIMIT 15
     save_as: futex_waits
     optional: true
 

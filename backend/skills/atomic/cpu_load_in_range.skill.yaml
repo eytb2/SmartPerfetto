@@ -56,10 +56,11 @@ steps:
           ss.cpu,
           COALESCE(cl.cluster_type, 'little') as core_type,
           ss.utid,
-          SUM(ss.dur) as total_dur
+          -- clamp dur 到范围内，处理跨边界的 sched_slice
+          SUM(MIN(ss.ts + ss.dur, ${end_ts}) - MAX(ss.ts, ${start_ts})) as total_dur
         FROM sched_slice ss
         LEFT JOIN cpu_clusters cl ON ss.cpu = cl.cpu
-        WHERE ss.ts >= ${start_ts}
+        WHERE (ss.ts + ss.dur) > ${start_ts}
           AND ss.ts < ${end_ts}
         GROUP BY ss.cpu, ss.utid
       ),
@@ -130,25 +131,45 @@ steps:
       level: summary
       title: "线程迁移"
     sql: |
-      WITH migrations AS (
+      WITH
+      -- 动态检测 CPU 集群（与 cpu_utilization step 一致）
+      cpu_max_freq AS (
+        SELECT cpu, MAX(value) as max_freq
+        FROM counter c
+        JOIN cpu_counter_track t ON c.track_id = t.id
+        WHERE t.name = 'cpufreq'
+        GROUP BY cpu
+      ),
+      global_max AS (
+        SELECT MAX(max_freq) as val FROM cpu_max_freq
+      ),
+      cpu_clusters AS (
+        SELECT cpu,
+          CASE
+            WHEN max_freq >= (SELECT val FROM global_max) * 0.95 THEN 'prime'
+            WHEN max_freq >= (SELECT val FROM global_max) * 0.75 THEN 'big'
+            WHEN max_freq >= (SELECT val FROM global_max) * 0.50 THEN 'mid'
+            ELSE 'little'
+          END as cluster_type
+        FROM cpu_max_freq
+      ),
+      migrations AS (
         SELECT
           utid,
           cpu,
           LAG(cpu) OVER (PARTITION BY utid ORDER BY ts) as prev_cpu
         FROM sched_slice
-        WHERE ts >= ${start_ts}
+        WHERE (ts + dur) > ${start_ts}
           AND ts < ${end_ts}
       )
       SELECT
         COUNT(*) as migration_count,
-        -- 跨集群迁移现在基于动态检测的集群类型
-        -- 简化处理：仍使用频率中位数作为分界
-        SUM(CASE 
-          WHEN (prev_cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type = 'little') 
+        SUM(CASE
+          WHEN (prev_cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type = 'little')
                 AND cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type != 'little'))
-               OR (prev_cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type != 'little') 
+               OR (prev_cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type != 'little')
                    AND cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type = 'little'))
-          THEN 1 ELSE 0 
+          THEN 1 ELSE 0
         END) as cross_cluster_migrations
       FROM migrations
       WHERE prev_cpu IS NOT NULL AND cpu != prev_cpu

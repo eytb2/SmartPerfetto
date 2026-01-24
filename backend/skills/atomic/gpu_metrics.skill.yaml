@@ -56,10 +56,15 @@ steps:
       gpu_freq AS (
         SELECT
           c.ts,
-          CASE 
+          CASE
+            -- 优先使用 counter_track 的 unit 字段判断单位
+            WHEN t.unit = 'MHz' THEN c.value
+            WHEN t.unit = 'kHz' THEN c.value / 1000.0
+            WHEN t.unit = 'Hz' THEN c.value / 1000000.0
+            -- unit 为空时使用 heuristic 推断
             WHEN c.value > 1000000 THEN c.value / 1000000.0
             WHEN c.value > 1000 THEN c.value / 1000.0
-            ELSE c.value 
+            ELSE c.value
           END as freq_mhz,
           t.name as counter_name
         FROM counter c
@@ -76,7 +81,7 @@ steps:
         COUNT(*) as sample_count,
         (SELECT GROUP_CONCAT(DISTINCT counter_name) FROM gpu_freq) as freq_counters
       FROM gpu_freq
-      WHERE freq_hz > 0
+      WHERE freq_mhz > 0
     save_as: gpu_freq
     optional: true
 
@@ -161,7 +166,6 @@ steps:
       FROM gpu_slices
       GROUP BY name
       ORDER BY total_time_ms DESC
-      LIMIT 15
     save_as: gpu_render_time
     optional: true
 
@@ -185,9 +189,8 @@ steps:
         SELECT COALESCE(
           (SELECT CAST(AVG(dur) AS INTEGER)
            FROM expected_frame_timeline_slice
-           WHERE dur > 5000000 AND dur < 20000000
-           LIMIT 1000),
-          16666666
+           WHERE dur > 5000000 AND dur < 35000000),
+          8333333
         ) as vsync_period_ns
       ),
       fence_slices AS (

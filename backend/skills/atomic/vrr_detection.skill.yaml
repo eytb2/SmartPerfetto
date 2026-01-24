@@ -217,7 +217,6 @@ steps:
         AND prev_bucket IS NOT NULL
       GROUP BY prev_bucket, bucket
       ORDER BY switch_count DESC
-      LIMIT 10
     save_as: rate_switches
     optional: true
 

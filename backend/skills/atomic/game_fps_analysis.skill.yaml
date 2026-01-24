@@ -118,15 +118,21 @@ steps:
           WHEN '30fps' THEN 33333333
           WHEN '45fps' THEN 22222222
           WHEN '60fps' THEN 16666666
+          WHEN '90fps' THEN 11111111
           WHEN '120fps' THEN 8333333
-          ELSE 16666666
+          WHEN '144fps' THEN 6944444
+          WHEN '165fps' THEN 6060606
+          ELSE 8333333
         END as target_interval_ns,
         CASE (SELECT fps_bucket FROM bucket_counts LIMIT 1)
           WHEN '30fps' THEN 30
           WHEN '45fps' THEN 45
           WHEN '60fps' THEN 60
+          WHEN '90fps' THEN 90
           WHEN '120fps' THEN 120
-          ELSE 60
+          WHEN '144fps' THEN 144
+          WHEN '165fps' THEN 165
+          ELSE 120
         END as target_fps,
         (SELECT cnt FROM bucket_counts LIMIT 1) as frames_at_target,
         (SELECT SUM(cnt) FROM bucket_counts) as total_frames,

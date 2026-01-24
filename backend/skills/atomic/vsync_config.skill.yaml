@@ -56,7 +56,6 @@ steps:
         JOIN process p ON t.upid = p.upid
         WHERE (p.name = 'surfaceflinger' OR p.name LIKE '%surfaceflinger%')
           AND (s.name GLOB '*VSYNC*' OR s.name GLOB '*vsync-sf*' OR s.name GLOB '*vsync-app*')
-        LIMIT 500
       ),
       sf_vsync AS (
         SELECT
@@ -72,8 +71,7 @@ steps:
           CAST(AVG(dur) AS INTEGER) as vsync_period_ns,
           'expected_frame_dur' as source
         FROM expected_frame_timeline_slice
-        WHERE dur > 5000000 AND dur < 20000000  -- 5ms-20ms 的合理范围
-        LIMIT 1000
+        WHERE dur > 5000000 AND dur < 35000000  -- 5ms-35ms 覆盖 30Hz VRR
       ),
       -- 合并结果，按优先级选择
       combined AS (
@@ -84,27 +82,30 @@ steps:
       SELECT
         COALESCE(
           (SELECT vsync_period_ns FROM combined LIMIT 1),
-          16666666  -- 默认 60Hz
+          8333333  -- 默认 120Hz
         ) as vsync_period_ns,
         ROUND(1e9 / COALESCE(
           (SELECT vsync_period_ns FROM combined LIMIT 1),
-          16666666
+          8333333
         ), 0) as refresh_rate_hz,
         ROUND(COALESCE(
           (SELECT vsync_period_ns FROM combined LIMIT 1),
-          16666666
+          8333333
         ) / 1e6, 2) as vsync_period_ms,
         COALESCE(
           (SELECT source FROM combined LIMIT 1),
-          'default_60hz'
+          'default_120hz'
         ) as vsync_source,
         CASE
-          -- 支持更多刷新率档位
-          WHEN COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 16666666) < 6500000 THEN 165
-          WHEN COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 16666666) < 7500000 THEN 144
-          WHEN COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 16666666) < 9000000 THEN 120
-          WHEN COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 16666666) < 12000000 THEN 90
-          ELSE 60
+          -- 支持更多刷新率档位（含 240Hz 游戏模式和 48/30Hz VRR 省电模式）
+          WHEN COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 8333333) < 4500000 THEN 240
+          WHEN COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 8333333) < 6500000 THEN 165
+          WHEN COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 8333333) < 7500000 THEN 144
+          WHEN COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 8333333) < 9000000 THEN 120
+          WHEN COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 8333333) < 12000000 THEN 90
+          WHEN COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 8333333) < 18000000 THEN 60
+          WHEN COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 8333333) < 25000000 THEN 48
+          ELSE 30
         END as detected_refresh_rate
     save_as: vsync_config
 

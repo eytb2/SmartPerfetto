@@ -59,6 +59,15 @@ import {
   EnhancedSessionContext,
   sessionContextManager,
 } from '../context/enhancedSessionContext';
+import {
+  createStrategyRegistry,
+  StrategyRegistry,
+  StrategyExecutionState,
+  FocusInterval,
+  StagedAnalysisStrategy,
+  StageDefinition,
+  intervalHelpers,
+} from '../strategies';
 
 // =============================================================================
 // Types
@@ -144,28 +153,6 @@ const DEFAULT_EVIDENCE: Record<string, string[]> = {
   system: ['thermal throttling', 'io stalls', 'system_server workload'],
 };
 
-type ScrollingStage = 'overview' | 'interval_metrics' | 'frame_details';
-
-interface ScrollingFocusSession {
-  /** Session id from scrolling_analysis (per process) */
-  sessionId: number;
-  /** Target process/package name */
-  processName: string;
-  /** Range start (ns) - stored as string to preserve precision for values > 2^53 */
-  startTs: string;
-  /** Range end (ns) - stored as string to preserve precision for values > 2^53 */
-  endTs: string;
-  /** Count of detected jank frames in this session */
-  jankFrameCount: number;
-  /** Max vsync missed among detected jank frames */
-  maxVsyncMissed: number;
-}
-
-const STAGED_SCROLLING_DEFAULTS = {
-  maxFocusSessions: 2,
-  maxFramesPerSession: 8,
-} as const;
-
 export interface AnalysisResult {
   sessionId: string;
   success: boolean;
@@ -193,6 +180,7 @@ export class AgentDrivenOrchestrator extends EventEmitter {
   private messageBus: AgentMessageBus;
   private agentRegistry: DomainAgentRegistry;
   private strategyPlanner: IterationStrategyPlanner;
+  private strategyRegistry: StrategyRegistry;
   private sessionContext: EnhancedSessionContext | null = null;
   private currentRound: number = 0;
   private noProgressRounds: number = 0;
@@ -212,6 +200,7 @@ export class AgentDrivenOrchestrator extends EventEmitter {
 
     this.agentRegistry = createDomainAgentRegistry(modelRouter);
     this.strategyPlanner = createIterationStrategyPlanner(modelRouter);
+    this.strategyRegistry = createStrategyRegistry();
 
     // Register all agents with message bus
     for (const agent of this.agentRegistry.getAll()) {
@@ -274,122 +263,24 @@ export class AgentDrivenOrchestrator extends EventEmitter {
       let allFindings: Finding[] = [];
       let lastStrategy: StrategyDecision | null = null;
       let informationGaps: string[] = [];
-      let stagedConfidence: number = 0.5;
 
-      // For scrolling/jank queries, use a deterministic 3-stage pipeline:
-      // 1) Overview: locate jank intervals and jank frames
-      // 2) Interval metrics: CPU/GC/Binder within the problematic interval(s)
-      // 3) Frame details: per-jank-frame deep dive (only for the jank points)
-      const stagedScrolling = this.isScrollingOrJankQuery(query);
-      if (stagedScrolling) {
-        this.setScrollingStage(sharedContext, 'overview');
-        sharedContext.userContext = {
-          ...(sharedContext.userContext || {}),
-          focusSessions: [],
-        };
+      // Check if a staged analysis strategy matches this query
+      const matchedStrategy = this.strategyRegistry.match(query);
+
+      if (matchedStrategy) {
+        // Execute the matched strategy's staged pipeline
+        const strategyResult = await this.executeStrategy(
+          matchedStrategy, query, intent, sharedContext, allFindings, options
+        );
+        allFindings = strategyResult.findings;
+        lastStrategy = strategyResult.lastStrategy;
+        informationGaps = strategyResult.informationGaps;
       }
 
-      while (this.currentRound < this.config.maxRounds) {
+      // Generic analysis loop (only runs if no strategy was matched)
+      while (!matchedStrategy && this.currentRound < this.config.maxRounds) {
         this.currentRound++;
         this.log(`=== Round ${this.currentRound}/${this.config.maxRounds} ===`);
-
-        if (stagedScrolling) {
-          const stage = this.getScrollingStage(sharedContext);
-          const stageIndex = stage === 'overview' ? 1 : stage === 'interval_metrics' ? 2 : 3;
-          const stageMessage =
-            stage === 'overview'
-              ? '阶段 1/3：先定位掉帧区间与掉帧点'
-              : stage === 'interval_metrics'
-                ? '阶段 2/3：在掉帧区间内查看 CPU/GC/Binder'
-                : '阶段 3/3：对掉帧点做逐帧详情分析';
-
-          this.emitUpdate('progress', {
-            phase: 'round_start',
-            round: stageIndex,
-            maxRounds: 3,
-            message: stageMessage,
-          });
-
-          const tasks = this.buildStagedScrollingTasks(stage, query, intent, sharedContext, options);
-          if (tasks.length === 0) {
-            this.stopReason = 'No tasks generated for staged scrolling analysis';
-            break;
-          }
-
-          this.emitUpdate('progress', {
-            phase: 'tasks_dispatched',
-            taskCount: tasks.length,
-            agents: tasks.map(t => t.targetAgentId),
-            message: `派发 ${tasks.length} 个任务`,
-          });
-
-          const responses = await this.executeTaskGraph(tasks);
-          this.emitDataEnvelopes(responses);
-
-          const synthesis = await this.synthesizeFeedback(responses, sharedContext);
-          this.emitUpdate('progress', {
-            phase: 'synthesis_complete',
-            confirmedFindings: synthesis.confirmedFindings.length,
-            updatedHypotheses: synthesis.updatedHypotheses.length,
-            message: `综合 ${responses.length} 个 Agent 反馈`,
-          });
-
-          informationGaps = synthesis.informationGaps;
-          allFindings.push(...synthesis.newFindings);
-
-          if (synthesis.newFindings.length > 0) {
-            this.emitUpdate('finding', {
-              round: this.currentRound,
-              findings: synthesis.newFindings,
-            });
-          }
-
-          // Update staged confidence from successful responses
-          const confidences = responses.filter(r => r.success).map(r => r.confidence).filter(c => typeof c === 'number');
-          if (confidences.length > 0) {
-            const avg = confidences.reduce((s, c) => s + c, 0) / confidences.length;
-            stagedConfidence = Math.max(stagedConfidence, avg);
-          }
-
-          // Stage transitions
-          if (stage === 'overview') {
-            const focusSessions = this.extractScrollingFocusSessions(responses);
-            if (focusSessions.length === 0) {
-              this.stopReason = '未检测到可用于深入分析的掉帧区间';
-              // Conclude early: no need to run interval metrics / frame deep dive.
-              lastStrategy = { strategy: 'conclude', confidence: stagedConfidence, reasoning: this.stopReason } as any;
-              break;
-            }
-
-            sharedContext.userContext = {
-              ...(sharedContext.userContext || {}),
-              focusSessions,
-            };
-            // Keep a default focused range for compatibility with downstream tools.
-            sharedContext.focusedTimeRange = { start: focusSessions[0].startTs, end: focusSessions[0].endTs };
-
-            this.emitUpdate('progress', {
-              phase: 'progress',
-              message: `已定位 ${focusSessions.length} 个掉帧区间，进入区间指标分析`,
-            });
-            this.setScrollingStage(sharedContext, 'interval_metrics');
-            continue;
-          }
-
-          if (stage === 'interval_metrics') {
-            this.emitUpdate('progress', {
-              phase: 'progress',
-              message: '区间指标已完成，进入逐帧详情分析',
-            });
-            this.setScrollingStage(sharedContext, 'frame_details');
-            continue;
-          }
-
-          // frame_details stage completes the staged pipeline
-          this.stopReason = 'Staged scrolling analysis completed';
-          lastStrategy = { strategy: 'conclude', confidence: stagedConfidence, reasoning: this.stopReason } as any;
-          break;
-        }
 
         this.emitUpdate('progress', {
           phase: 'round_start',
@@ -504,49 +395,29 @@ export class AgentDrivenOrchestrator extends EventEmitter {
           this.log(`Strategy: deep_dive - focusing on ${lastStrategy.focusArea}`);
           sharedContext.focusedTimeRange = options.timeRange;
 
-          // Add a new hypothesis based on the focus area
-          const deepDiveHypothesis: Hypothesis = {
-            id: createHypothesisId(),
-            description: `深入分析 ${lastStrategy.focusArea} 领域`,
-            confidence: 0.6,
-            status: 'investigating',
-            supportingEvidence: [],
-            contradictingEvidence: [],
-            proposedBy: 'master_orchestrator',
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-          };
+          const deepDiveHypothesis = this.createHypothesis(
+            `深入分析 ${lastStrategy.focusArea} 领域`, 0.6
+          );
+          deepDiveHypothesis.status = 'investigating';
           this.messageBus.updateHypothesis(deepDiveHypothesis);
-
-          // Additional evidence will be picked up in the next task graph iteration
         }
 
         // Handle pivot: change analysis direction
         if (lastStrategy.strategy === 'pivot' && lastStrategy.newDirection) {
           this.log(`Strategy: pivot - changing direction to ${lastStrategy.newDirection}`);
 
-          // Mark current hypotheses as paused and create new one for new direction
+          // Reset investigating hypotheses to proposed
           for (const hypothesis of sharedContext.hypotheses.values()) {
             if (hypothesis.status === 'investigating') {
-              hypothesis.status = 'proposed'; // Reset to proposed
+              hypothesis.status = 'proposed';
               hypothesis.confidence = Math.max(0.3, hypothesis.confidence - 0.2);
               hypothesis.updatedAt = Date.now();
             }
           }
 
-          // Create hypothesis for new direction
-          const pivotHypothesis: Hypothesis = {
-            id: createHypothesisId(),
-            description: lastStrategy.newDirection,
-            confidence: 0.5,
-            status: 'proposed',
-            supportingEvidence: [],
-            contradictingEvidence: [],
-            proposedBy: 'master_orchestrator',
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-          };
-          this.messageBus.updateHypothesis(pivotHypothesis);
+          this.messageBus.updateHypothesis(
+            this.createHypothesis(lastStrategy.newDirection, 0.5)
+          );
         }
       }
 
@@ -684,66 +555,46 @@ ${this.agentRegistry.getAgentDescriptionsForLLM()}`;
     return this.generateDefaultHypotheses(query, intent);
   }
 
-  private generateDefaultHypotheses(query: string, intent: Intent): Hypothesis[] {
+  private generateDefaultHypotheses(query: string, _intent: Intent): Hypothesis[] {
     const hypotheses: Hypothesis[] = [];
     const queryLower = query.toLowerCase();
 
     if (queryLower.includes('卡顿') || queryLower.includes('jank')) {
-      hypotheses.push({
-        id: createHypothesisId(),
-        description: '帧渲染超时导致卡顿',
-        confidence: 0.6,
-        status: 'proposed',
-        supportingEvidence: [],
-        contradictingEvidence: [],
-        proposedBy: 'master_orchestrator',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      });
+      hypotheses.push(this.createHypothesis('帧渲染超时导致卡顿', 0.6));
     }
 
     if (queryLower.includes('滑动') || queryLower.includes('scroll')) {
-      hypotheses.push({
-        id: createHypothesisId(),
-        description: '滑动过程中存在帧率不稳定或掉帧现象',
-        confidence: 0.7,
-        status: 'proposed',
-        supportingEvidence: [],
-        contradictingEvidence: [],
-        proposedBy: 'master_orchestrator',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        relevantAgents: ['frame_agent'],
-      });
-      hypotheses.push({
-        id: createHypothesisId(),
-        description: 'App 自身运行时间过长（主线程或 RenderThread 耗时操作导致帧超时）',
-        confidence: 0.75,
-        status: 'proposed',
-        supportingEvidence: [],
-        contradictingEvidence: [],
-        proposedBy: 'master_orchestrator',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        relevantAgents: ['frame_agent', 'cpu_agent'],
-      });
+      hypotheses.push(
+        this.createHypothesis('滑动过程中存在帧率不稳定或掉帧现象', 0.7, ['frame_agent']),
+        this.createHypothesis('App 自身运行时间过长（主线程或 RenderThread 耗时操作导致帧超时）', 0.75, ['frame_agent', 'cpu_agent']),
+      );
     }
 
     if (hypotheses.length === 0) {
-      hypotheses.push({
-        id: createHypothesisId(),
-        description: '存在性能问题需要诊断',
-        confidence: 0.5,
-        status: 'proposed',
-        supportingEvidence: [],
-        contradictingEvidence: [],
-        proposedBy: 'master_orchestrator',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      });
+      hypotheses.push(this.createHypothesis('存在性能问题需要诊断', 0.5));
     }
 
     return hypotheses;
+  }
+
+  private createHypothesis(
+    description: string,
+    confidence: number,
+    relevantAgents?: string[]
+  ): Hypothesis {
+    const now = Date.now();
+    return {
+      id: createHypothesisId(),
+      description,
+      confidence,
+      status: 'proposed',
+      supportingEvidence: [],
+      contradictingEvidence: [],
+      proposedBy: 'master_orchestrator',
+      createdAt: now,
+      updatedAt: now,
+      ...(relevantAgents && { relevantAgents }),
+    };
   }
 
   // ==========================================================================
@@ -964,347 +815,198 @@ ${allowedDomains.join(', ')}
   }
 
   // ==========================================================================
-  // Staged Scrolling/Jank Orchestration (3-layer)
+  // Generic Strategy Execution
   // ==========================================================================
 
-  private isScrollingOrJankQuery(query: string): boolean {
-    const q = query.toLowerCase();
-    return (
-      q.includes('滑动') ||
-      q.includes('scroll') ||
-      q.includes('jank') ||
-      q.includes('掉帧') ||
-      q.includes('丢帧') ||
-      q.includes('卡顿') ||
-      q.includes('stutter') ||
-      q.includes('fps')
-    );
-  }
+  /**
+   * Execute a matched staged analysis strategy.
+   * Iterates through stages, building tasks from templates, executing them,
+   * and optionally extracting focus intervals between stages.
+   */
+  private async executeStrategy(
+    strategy: StagedAnalysisStrategy,
+    query: string,
+    intent: Intent,
+    sharedContext: SharedAgentContext,
+    existingFindings: Finding[],
+    options: any
+  ): Promise<{
+    findings: Finding[];
+    lastStrategy: StrategyDecision | null;
+    confidence: number;
+    informationGaps: string[];
+  }> {
+    const allFindings = [...existingFindings];
+    let lastStrategy: StrategyDecision | null = null;
+    let stagedConfidence = 0.5;
+    let informationGaps: string[] = [];
 
-  private getScrollingStage(sharedContext: SharedAgentContext): ScrollingStage {
-    const stage = sharedContext.userContext?.scrollingStage;
-    if (stage === 'overview' || stage === 'interval_metrics' || stage === 'frame_details') return stage;
-    return 'overview';
-  }
-
-  private setScrollingStage(sharedContext: SharedAgentContext, stage: ScrollingStage): void {
-    sharedContext.userContext = {
-      ...(sharedContext.userContext || {}),
-      scrollingStage: stage,
-    };
-  }
-
-  private isLikelyAppProcessName(name: string): boolean {
-    const n = (name || '').trim();
-    if (!n) return false;
-    if (n.startsWith('/')) return false; // e.g. /system/bin/surfaceflinger
-    if (n.includes('surfaceflinger')) return false;
-    if (n === 'system_server') return false;
-    return true;
-  }
-
-  private payloadToObjectRows(payload: any): Array<Record<string, any>> {
-    if (!payload) return [];
-
-    // Some skill internals might already provide row objects
-    if (Array.isArray(payload) && payload.length > 0 && typeof payload[0] === 'object' && !Array.isArray(payload[0])) {
-      return payload as Array<Record<string, any>>;
-    }
-
-    const columns: string[] | undefined = payload.columns;
-    const rows: any[][] | undefined = payload.rows;
-    if (!Array.isArray(columns) || !Array.isArray(rows)) return [];
-
-    return rows.map((row) => {
-      const obj: Record<string, any> = {};
-      for (let i = 0; i < columns.length; i++) {
-        obj[columns[i]] = row[i];
-      }
-      return obj;
-    });
-  }
-
-  private extractScrollingFocusSessions(
-    responses: AgentResponse[]
-  ): ScrollingFocusSession[] {
-    // Pull tables from frame_agent scrolling_analysis results
-    const frameResponses = responses.filter(r => r.agentId === 'frame_agent' && r.toolResults && r.toolResults.length > 0);
-
-    const scrollSessions: Array<Record<string, any>> = [];
-    const jankFrames: Array<Record<string, any>> = [];
-
-    for (const resp of frameResponses) {
-      for (const toolResult of resp.toolResults || []) {
-        const data = toolResult.data as any;
-        if (!data || typeof data !== 'object') continue;
-
-        if (data.scroll_sessions) {
-          scrollSessions.push(...this.payloadToObjectRows(data.scroll_sessions));
-        }
-        if (data.get_app_jank_frames) {
-          jankFrames.push(...this.payloadToObjectRows(data.get_app_jank_frames));
-        }
-      }
-    }
-
-    if (scrollSessions.length === 0 || jankFrames.length === 0) return [];
-
-    const toNumber = (v: any): number => {
-      const n = Number(v);
-      return Number.isFinite(n) ? n : 0;
+    const state: StrategyExecutionState = {
+      strategyId: strategy.id,
+      currentStageIndex: 0,
+      focusIntervals: [],
+      confidence: 0.5,
     };
 
-    // Index sessions by (process_name, session_id)
-    const sessionByKey = new Map<string, Record<string, any>>();
-    for (const s of scrollSessions) {
-      const processName = String(s.process_name ?? '');
-      const sessionId = String(s.session_id ?? '');
-      if (!processName || !sessionId) continue;
-      sessionByKey.set(`${processName}#${sessionId}`, s);
-    }
+    this.log(`Executing strategy: ${strategy.name} (${strategy.stages.length} stages)`);
 
-    // Group jank frames by (process_name, session_id)
-    const framesByKey = new Map<string, Array<Record<string, any>>>();
-    for (const f of jankFrames) {
-      const processName = String(f.process_name ?? '');
-      const sessionId = String(f.session_id ?? '');
-      if (!processName || !sessionId) continue;
-      const key = `${processName}#${sessionId}`;
-      const list = framesByKey.get(key) || [];
-      list.push(f);
-      framesByKey.set(key, list);
-    }
+    for (let i = 0; i < strategy.stages.length; i++) {
+      const stage = strategy.stages[i];
+      state.currentStageIndex = i;
+      this.currentRound++;
 
-    const focusSessions: ScrollingFocusSession[] = [];
-    for (const [key, frames] of framesByKey.entries()) {
-      const session = sessionByKey.get(key);
-      if (!session) continue;
+      // 1. Emit progress with template interpolation
+      const progressMessage = stage.progressMessageTemplate
+        .replace('{{stageIndex}}', String(i + 1))
+        .replace('{{totalStages}}', String(strategy.stages.length));
 
-      const processName = String(session.process_name ?? '');
-      if (!this.isLikelyAppProcessName(processName)) continue;
-
-      const sessionId = toNumber(session.session_id);
-      // Keep timestamps as strings to preserve precision for values > Number.MAX_SAFE_INTEGER.
-      // SQL printf('%d', ts) returns precise string representation; Number() would truncate.
-      const startTs = String(session.start_ts ?? '');
-      const endTs = String(session.end_ts ?? '');
-      if (!startTs || !endTs || startTs === '0' || endTs === '0') continue;
-      // Use BigInt for safe comparison of large nanosecond timestamps
-      try {
-        if (BigInt(endTs) <= BigInt(startTs)) continue;
-      } catch {
-        continue; // Skip if not valid integer strings
-      }
-
-      let maxVsyncMissed = 0;
-      for (const f of frames) {
-        maxVsyncMissed = Math.max(maxVsyncMissed, toNumber(f.vsync_missed));
-      }
-
-      focusSessions.push({
-        sessionId,
-        processName,
-        startTs,
-        endTs,
-        jankFrameCount: frames.length,
-        maxVsyncMissed,
+      this.emitUpdate('progress', {
+        phase: 'round_start',
+        round: i + 1,
+        maxRounds: strategy.stages.length,
+        message: progressMessage,
       });
+
+      // 2. Build tasks from stage templates
+      const tasks = this.buildStageTasks(stage, state.focusIntervals, query, intent, sharedContext, options);
+      if (tasks.length === 0) {
+        this.stopReason = `No tasks generated for strategy stage: ${stage.name}`;
+        break;
+      }
+
+      this.emitUpdate('progress', {
+        phase: 'tasks_dispatched',
+        taskCount: tasks.length,
+        agents: tasks.map(t => t.targetAgentId),
+        message: `派发 ${tasks.length} 个任务`,
+      });
+
+      // 3. Execute tasks and synthesize feedback
+      const responses = await this.executeTaskGraph(tasks);
+      this.emitDataEnvelopes(responses);
+
+      const synthesis = await this.synthesizeFeedback(responses, sharedContext);
+      this.emitUpdate('progress', {
+        phase: 'synthesis_complete',
+        confirmedFindings: synthesis.confirmedFindings.length,
+        updatedHypotheses: synthesis.updatedHypotheses.length,
+        message: `综合 ${responses.length} 个 Agent 反馈`,
+      });
+
+      informationGaps = synthesis.informationGaps;
+      allFindings.push(...synthesis.newFindings);
+
+      if (synthesis.newFindings.length > 0) {
+        this.emitUpdate('finding', {
+          round: this.currentRound,
+          findings: synthesis.newFindings,
+        });
+      }
+
+      // Update confidence from successful responses
+      const confidences = responses.filter(r => r.success).map(r => r.confidence).filter(c => typeof c === 'number');
+      if (confidences.length > 0) {
+        const avg = confidences.reduce((s, c) => s + c, 0) / confidences.length;
+        stagedConfidence = Math.max(stagedConfidence, avg);
+      }
+      state.confidence = stagedConfidence;
+
+      // 4. Extract focus intervals if this stage has an extractor
+      if (stage.extractIntervals) {
+        state.focusIntervals = stage.extractIntervals(responses, intervalHelpers);
+
+        if (state.focusIntervals.length > 0) {
+          // Set focused time range from highest-priority interval
+          sharedContext.focusedTimeRange = {
+            start: state.focusIntervals[0].startTs,
+            end: state.focusIntervals[0].endTs,
+          };
+          this.emitUpdate('progress', {
+            phase: 'progress',
+            message: `已定位 ${state.focusIntervals.length} 个分析区间`,
+          });
+        }
+      }
+
+      // 5. Check early stop condition
+      if (stage.shouldStop) {
+        const stopResult = stage.shouldStop(state.focusIntervals);
+        if (stopResult.stop) {
+          this.stopReason = stopResult.reason;
+          lastStrategy = this.concludeDecision(stagedConfidence, stopResult.reason);
+          break;
+        }
+      }
     }
 
-    focusSessions.sort((a, b) => {
-      if (b.maxVsyncMissed !== a.maxVsyncMissed) return b.maxVsyncMissed - a.maxVsyncMissed;
-      if (b.jankFrameCount !== a.jankFrameCount) return b.jankFrameCount - a.jankFrameCount;
-      // Use BigInt for safe duration comparison of large nanosecond timestamps
-      try {
-        const durA = BigInt(a.endTs) - BigInt(a.startTs);
-        const durB = BigInt(b.endTs) - BigInt(b.startTs);
-        if (durB > durA) return 1;
-        if (durB < durA) return -1;
-      } catch { /* fallback: equal */ }
-      return 0;
-    });
-
-    return focusSessions.slice(0, STAGED_SCROLLING_DEFAULTS.maxFocusSessions);
-  }
-
-  private formatNsRangeLabel(startTs: string | number, endTs: string | number): string {
-    // Use BigInt division for precision-safe conversion from ns to seconds
-    try {
-      const startBi = BigInt(String(startTs));
-      const endBi = BigInt(String(endTs));
-      const startS = Number(startBi / 1000000n) / 1000;  // ns → ms (BigInt) → s (Number, safe range)
-      const endS = Number(endBi / 1000000n) / 1000;
-      return `${startS.toFixed(2)}s–${endS.toFixed(2)}s`;
-    } catch {
-      // Fallback for non-BigInt-compatible values
-      const startS = (Number(startTs) / 1e9).toFixed(2);
-      const endS = (Number(endTs) / 1e9).toFixed(2);
-      return `${startS}s–${endS}s`;
+    // If all stages completed without early stop, mark as concluded
+    if (!lastStrategy) {
+      this.stopReason = `Strategy ${strategy.name} completed`;
+      lastStrategy = this.concludeDecision(stagedConfidence, this.stopReason);
     }
+
+    return { findings: allFindings, lastStrategy, confidence: stagedConfidence, informationGaps };
   }
 
-  private buildStagedScrollingTasks(
-    stage: ScrollingStage,
+  /**
+   * Build concrete AgentTasks from a stage definition and current focus intervals.
+   *
+   * - scope: 'global' generates one task per template
+   * - scope: 'per_interval' generates one task per (template x interval)
+   */
+  private buildStageTasks(
+    stage: StageDefinition,
+    focusIntervals: FocusInterval[],
     query: string,
     intent: Intent,
     sharedContext: SharedAgentContext,
     options: any
   ): AgentTask[] {
-    const hypotheses = Array.from(sharedContext.hypotheses.values())
-      .filter(h => h.status === 'proposed' || h.status === 'investigating');
-    const hypothesis = hypotheses[0];
+    const hypothesis = Array.from(sharedContext.hypotheses.values())
+      .find(h => h.status === 'proposed' || h.status === 'investigating');
     const relevantFindings = sharedContext.confirmedFindings.slice(-5);
+    const intentSummary = { primaryGoal: intent.primaryGoal, aspects: intent.aspects };
 
     const tasks: AgentTask[] = [];
 
-    if (stage === 'overview') {
-      tasks.push({
-        id: createTaskId(),
-        description: '阶段 1/3：先定位滑动区间与掉帧分布（输出 FPS/掉帧率/掉帧列表；不要做逐帧详情）。',
-        targetAgentId: 'frame_agent',
-        priority: 1,
-        context: {
-          query,
-          intent: { primaryGoal: intent.primaryGoal, aspects: intent.aspects },
-          hypothesis,
-          domain: 'frame',
-          evidenceNeeded: ['scroll sessions', 'fps', 'jank frames', 'jank types distribution'],
-          relevantFindings,
-          additionalData: {
-            traceProcessorService: options.traceProcessorService,
-            packageName: options.packageName,
-            scopeLabel: '阶段1 · 概览',
-            // Pass skill-specific params via generic skillParams mechanism
-            skillParams: { enable_frame_details: false },
-          },
-        },
-        dependencies: [],
-        createdAt: Date.now(),
-      });
-      return tasks;
-    }
+    for (const template of stage.tasks) {
+      const scopes = template.scope === 'global'
+        ? [{ scopeLabel: '全局' as string }]
+        : focusIntervals.map(interval => ({
+            scopeLabel: interval.label || `区间${interval.id}`,
+            timeRange: { start: interval.startTs, end: interval.endTs },
+            packageName: interval.processName,
+          }));
 
-    const focusSessions: ScrollingFocusSession[] =
-      Array.isArray(sharedContext.userContext?.focusSessions)
-        ? (sharedContext.userContext?.focusSessions as ScrollingFocusSession[])
-        : [];
-
-    if (focusSessions.length === 0) return tasks;
-
-    if (stage === 'interval_metrics') {
-      for (const fs of focusSessions) {
-        const scopeLabel = `区间${fs.sessionId} · ${this.formatNsRangeLabel(fs.startTs, fs.endTs)}`;
-        const timeRange = { start: fs.startTs, end: fs.endTs };
+      for (const scope of scopes) {
+        const description = template.descriptionTemplate
+          .replace('{{scopeLabel}}', scope.scopeLabel);
 
         tasks.push({
           id: createTaskId(),
-          description: `阶段 2/3：在 ${scopeLabel} 内分析 CPU（调度/频率/热点线程）。`,
-          targetAgentId: 'cpu_agent',
-          priority: 2,
+          description,
+          targetAgentId: template.agentId,
+          priority: template.priority || 5,
           context: {
             query,
-            intent: { primaryGoal: intent.primaryGoal, aspects: intent.aspects },
+            intent: intentSummary,
             hypothesis,
-            domain: 'cpu',
-            timeRange,
-            evidenceNeeded: DEFAULT_EVIDENCE.cpu,
+            domain: template.domain,
+            ...('timeRange' in scope && { timeRange: scope.timeRange }),
+            evidenceNeeded: template.evidenceNeeded || [],
             relevantFindings,
             additionalData: {
               traceProcessorService: options.traceProcessorService,
-              packageName: fs.processName,
-              scopeLabel,
-            },
-          },
-          dependencies: [],
-          createdAt: Date.now(),
-        });
-
-        tasks.push({
-          id: createTaskId(),
-          description: `阶段 2/3：在 ${scopeLabel} 内分析内存/GC（是否存在频繁 GC、抖动、主线程 GC 暂停）。`,
-          targetAgentId: 'memory_agent',
-          priority: 2,
-          context: {
-            query,
-            intent: { primaryGoal: intent.primaryGoal, aspects: intent.aspects },
-            hypothesis,
-            domain: 'memory',
-            timeRange,
-            evidenceNeeded: DEFAULT_EVIDENCE.memory,
-            relevantFindings,
-            additionalData: {
-              traceProcessorService: options.traceProcessorService,
-              packageName: fs.processName,
-              scopeLabel,
-            },
-          },
-          dependencies: [],
-          createdAt: Date.now(),
-        });
-
-        tasks.push({
-          id: createTaskId(),
-          description: `阶段 2/3：在 ${scopeLabel} 内分析 Binder/锁竞争（慢调用、阻塞点）。`,
-          targetAgentId: 'binder_agent',
-          priority: 3,
-          context: {
-            query,
-            intent: { primaryGoal: intent.primaryGoal, aspects: intent.aspects },
-            hypothesis,
-            domain: 'binder',
-            timeRange,
-            evidenceNeeded: DEFAULT_EVIDENCE.binder,
-            relevantFindings,
-            additionalData: {
-              traceProcessorService: options.traceProcessorService,
-              packageName: fs.processName,
-              scopeLabel,
+              packageName: ('packageName' in scope ? scope.packageName : undefined) || options.packageName,
+              scopeLabel: scope.scopeLabel,
+              ...(template.skillParams && { skillParams: template.skillParams }),
+              ...(template.focusTools && { focusTools: template.focusTools }),
             },
           },
           dependencies: [],
           createdAt: Date.now(),
         });
       }
-
-      return tasks;
-    }
-
-    if (stage === 'frame_details') {
-      for (const fs of focusSessions) {
-        const scopeLabel = `区间${fs.sessionId} · ${this.formatNsRangeLabel(fs.startTs, fs.endTs)}`;
-        const timeRange = { start: fs.startTs, end: fs.endTs };
-
-        tasks.push({
-          id: createTaskId(),
-          description: `阶段 3/3：在 ${scopeLabel} 内对最严重的掉帧帧做逐帧详情分析（仅分析卡顿点）。`,
-          targetAgentId: 'frame_agent',
-          priority: 1,
-          context: {
-            query,
-            intent: { primaryGoal: intent.primaryGoal, aspects: intent.aspects },
-            hypothesis,
-            domain: 'frame',
-            timeRange,
-            evidenceNeeded: ['jank frame details', 'main thread vs render thread', 'jank responsibility'],
-            relevantFindings,
-            additionalData: {
-              traceProcessorService: options.traceProcessorService,
-              packageName: fs.processName,
-              scopeLabel,
-              // Generic: restrict agent to specific tools for this stage
-              focusTools: ['analyze_scrolling'],
-              // Generic: skill-specific params passed through to the skill executor
-              skillParams: {
-                enable_frame_details: true,
-                max_frames_per_session: STAGED_SCROLLING_DEFAULTS.maxFramesPerSession,
-              },
-            },
-          },
-          dependencies: [],
-          createdAt: Date.now(),
-        });
-      }
-      return tasks;
     }
 
     return tasks;
@@ -1434,17 +1136,8 @@ ${allowedDomains.join(', ')}
     const failedCount = responses.filter(r => !r.success).length;
     const failureRatio = responses.length > 0 ? failedCount / responses.length : 1;
 
-    if (newFindingsCount === 0) {
-      this.noProgressRounds += 1;
-    } else {
-      this.noProgressRounds = 0;
-    }
-
-    if (failureRatio > 0.6) {
-      this.failureRounds += 1;
-    } else {
-      this.failureRounds = 0;
-    }
+    this.noProgressRounds = newFindingsCount === 0 ? this.noProgressRounds + 1 : 0;
+    this.failureRounds = failureRatio > 0.6 ? this.failureRounds + 1 : 0;
 
     if (this.noProgressRounds >= this.config.maxNoProgressRounds) {
       this.stopReason = '连续多轮没有新增证据';
@@ -1653,6 +1346,10 @@ ${sharedContext.investigationPath.map(s => `${s.stepNumber}. [${s.agentId}] ${s.
       needsImprovement: findings.length === 0,
       suggestedActions: [],
     };
+  }
+
+  private concludeDecision(confidence: number, reasoning: string): StrategyDecision {
+    return { strategy: 'conclude', confidence, reasoning };
   }
 
   private translateStrategy(strategy: string): string {
