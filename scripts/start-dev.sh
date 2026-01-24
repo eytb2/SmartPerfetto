@@ -65,11 +65,65 @@ echo "Frontend log: $FRONTEND_LOG"
 echo "Combined log: $COMBINED_LOG"
 echo "=============================================="
 
+# Perfetto's bundled tools (hermetic versions, NOT system-installed ones)
+PERFETTO_DIR="$PROJECT_ROOT/perfetto"
+PERFETTO_PNPM="$PERFETTO_DIR/tools/pnpm"
+PERFETTO_NODE="$PERFETTO_DIR/tools/node"
+UI_DIR="$PERFETTO_DIR/ui"
+
 # Environment check
 echo "Checking environment..."
-command -v node >/dev/null 2>&1 || { echo "ERROR: node is required but not installed."; exit 1; }
-command -v npm >/dev/null 2>&1 || { echo "ERROR: npm is required but not installed."; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 is required but not installed."; exit 1; }
+
+# Verify Perfetto's bundled tools exist
+if [ ! -f "$PERFETTO_PNPM" ]; then
+  echo "ERROR: Perfetto's bundled pnpm not found at $PERFETTO_PNPM"
+  echo "       Is the perfetto submodule initialized? Try: git submodule update --init"
+  exit 1
+fi
+
+# Validate UI lockfile format (must be pnpm v8 / lockfileVersion '6.0')
+validate_ui_lockfile() {
+  local lockfile="$UI_DIR/pnpm-lock.yaml"
+  if [ ! -f "$lockfile" ]; then
+    echo "ERROR: UI lockfile not found at $lockfile"
+    return 1
+  fi
+  local version
+  version=$(head -1 "$lockfile" | grep -o "'[^']*'" | tr -d "'")
+  if [ "$version" != "6.0" ]; then
+    echo "=============================================="
+    echo "ERROR: UI pnpm-lock.yaml has incompatible format!"
+    echo "  Found: lockfileVersion '$version'"
+    echo "  Expected: lockfileVersion '6.0' (pnpm v8)"
+    echo ""
+    echo "  This usually happens when you run 'pnpm install' with a"
+    echo "  system-installed pnpm (v9/v10) instead of Perfetto's bundled pnpm v8."
+    echo ""
+    echo "  Fix: git checkout -- ui/pnpm-lock.yaml"
+    echo "  Then re-run this script."
+    echo "=============================================="
+    return 1
+  fi
+  return 0
+}
+
+# Install UI node_modules using Perfetto's bundled pnpm
+install_ui_deps() {
+  echo "Installing UI dependencies with Perfetto's bundled pnpm..."
+  cd "$PERFETTO_DIR"
+  if ! tools/install-build-deps --ui 2>&1 | tee -a "$FRONTEND_LOG"; then
+    echo "=============================================="
+    echo "ERROR: UI dependency installation failed!"
+    echo ""
+    echo "Common fixes:"
+    echo "  1. Restore lockfile: git checkout -- ui/pnpm-lock.yaml"
+    echo "  2. Clean reinstall: rm -rf ui/node_modules && re-run"
+    echo "  3. NEVER use system pnpm for ui/. Always use: tools/pnpm"
+    echo "=============================================="
+    return 1
+  fi
+}
 
 # 【S2 Fix】Check and install dependencies if needed
 if [ ! -d "$PROJECT_ROOT/backend/node_modules" ]; then
@@ -128,13 +182,13 @@ pkill -f "trace_processor_shell.*httpd" 2>/dev/null || true
 sleep 1
 
 # Check and build trace_processor_shell if needed
-TRACE_PROCESSOR="$PROJECT_ROOT/perfetto/out/ui/trace_processor_shell"
+TRACE_PROCESSOR="$PERFETTO_DIR/out/ui/trace_processor_shell"
 if [ ! -f "$TRACE_PROCESSOR" ]; then
   echo "=============================================="
   echo "trace_processor_shell not found. Building..."
   echo "=============================================="
 
-  cd "$PROJECT_ROOT/perfetto"
+  cd "$PERFETTO_DIR"
 
   # Generate build config if needed
   if [ ! -f "out/ui/build.ninja" ]; then
@@ -149,7 +203,7 @@ if [ ! -f "$TRACE_PROCESSOR" ]; then
     echo "ERROR: Failed to build trace_processor_shell"
     echo ""
     echo "You can try building manually:"
-    echo "  cd $PROJECT_ROOT/perfetto"
+    echo "  cd $PERFETTO_DIR"
     echo "  tools/ninja -C out/ui trace_processor_shell"
     echo ""
     echo "Or download a pre-built binary:"
@@ -185,25 +239,43 @@ if [ "$SKIP_BUILD" = false ]; then
     exit 1
   fi
 
-  # Update UI build dependencies (needed after git sync from upstream)
-  echo "Checking UI build dependencies..."
-  cd "$PROJECT_ROOT/perfetto"
-  if ! tools/install-build-deps --ui 2>&1 | tee -a "$FRONTEND_LOG"; then
-    echo "Warning: install-build-deps failed, trying to continue..."
+  # Validate UI lockfile format before installing deps
+  echo "Validating UI lockfile format..."
+  if ! validate_ui_lockfile; then
+    exit 1
   fi
 
-  # Build frontend
+  # Install UI build dependencies (uses Perfetto's bundled pnpm v8)
+  # .last_install is a marker file created by install-build-deps containing lockfile hash
+  echo "Checking UI build dependencies..."
+  if [ ! -f "$UI_DIR/node_modules/.last_install" ]; then
+    if ! install_ui_deps; then
+      exit 1
+    fi
+  else
+    echo "UI node_modules up to date."
+  fi
+
+  # Build frontend using Perfetto's build system
   echo "Building frontend..."
-  cd "$PROJECT_ROOT/perfetto/ui"
-  node build.js 2>&1 | tee -a "$FRONTEND_LOG"
-  if [ $? -ne 0 ]; then
+  cd "$PERFETTO_DIR"
+  if ! "$PERFETTO_NODE" ui/build.js 2>&1 | tee -a "$FRONTEND_LOG"; then
+    echo "=============================================="
     echo "Frontend build failed!"
+    echo ""
+    echo "If you see 'Cannot find module' errors:"
+    echo "  rm -rf ui/node_modules"
+    echo "  Then re-run this script."
+    echo ""
+    echo "IMPORTANT: Never run 'pnpm install' directly in ui/."
+    echo "           Always use: tools/pnpm install --shamefully-hoist"
+    echo "=============================================="
     exit 1
   fi
 else
   echo "Skipping build (--quick mode)..."
   # Verify that build artifacts exist
-  if [ ! -d "$PROJECT_ROOT/perfetto/out/ui/dist" ]; then
+  if [ ! -d "$PERFETTO_DIR/out/ui/dist" ]; then
     echo "ERROR: Frontend build artifacts not found. Run without --quick first."
     exit 1
   fi
@@ -235,9 +307,9 @@ if [ "$BACKEND_READY" = false ]; then
   echo "WARNING: Backend health check failed after 30s. It may still be starting..."
 fi
 
-# Start frontend
+# Start frontend (uses Perfetto's bundled node via run-dev-server)
 echo "Starting frontend..."
-cd "$PROJECT_ROOT/perfetto/ui"
+cd "$UI_DIR"
 ./run-dev-server 2>&1 | tee "$FRONTEND_LOG" | sed 's/^/[FRONTEND] /' | tee -a "$COMBINED_LOG" &
 FRONTEND_PID=$!
 
