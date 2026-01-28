@@ -657,13 +657,23 @@ export class SessionContextManager {
 
   /**
    * Cleanup stale sessions based on maxAgeMs
+   *
+   * Note: Sessions with no turns are considered "fresh" and are not evicted,
+   * since they were just created and haven't had a chance to record activity.
    */
   cleanupStale(): number {
     const now = Date.now();
     let removed = 0;
 
     for (const [key, ctx] of Array.from(this.sessions.entries())) {
-      const lastTurn = ctx.getAllTurns().slice(-1)[0];
+      const turns = ctx.getAllTurns();
+
+      // Don't evict sessions that have no turns yet - they're brand new
+      if (turns.length === 0) {
+        continue;
+      }
+
+      const lastTurn = turns[turns.length - 1];
       const lastAccess = lastTurn?.timestamp || 0;
 
       if (now - lastAccess > this.maxAgeMs) {

@@ -6,6 +6,7 @@
  */
 
 import { DisplayResult, DiagnosticResult, DisplayLevel } from './types';
+import { DEFAULT_FRAME_TIME_DISPLAY_THRESHOLDS } from '../../config/thresholds';
 
 // =============================================================================
 // 类型定义
@@ -63,12 +64,18 @@ const METRIC_CONFIGS: Record<string, MetricConfig> = {
   avg_frame_ms: {
     label: '平均帧耗时',
     unit: 'ms',
-    threshold: { warning: 16.67, critical: 33.33 },
+    threshold: {
+      warning: DEFAULT_FRAME_TIME_DISPLAY_THRESHOLDS.avgWarningMs,
+      critical: DEFAULT_FRAME_TIME_DISPLAY_THRESHOLDS.avgCriticalMs,
+    },
   },
   max_frame_ms: {
     label: '最大帧耗时',
     unit: 'ms',
-    threshold: { warning: 33.33, critical: 100 },
+    threshold: {
+      warning: DEFAULT_FRAME_TIME_DISPLAY_THRESHOLDS.maxWarningMs,
+      critical: DEFAULT_FRAME_TIME_DISPLAY_THRESHOLDS.maxCriticalMs,
+    },
   },
   estimated_fps: {
     label: '帧率',

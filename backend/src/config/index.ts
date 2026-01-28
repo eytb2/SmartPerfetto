@@ -141,6 +141,20 @@ export const circuitBreakerConfig = {
 
   /** Maximum delay for exponential backoff (ms) */
   backoffMaxDelayMs: parseIntEnv('CB_BACKOFF_MAX_DELAY_MS', 30000),
+
+  // === User Intervention Thresholds ===
+
+  /** Timeout waiting for user response (ms) - default 5 minutes */
+  userResponseTimeoutMs: parseIntEnv('CB_USER_RESPONSE_TIMEOUT_MS', 5 * 60 * 1000),
+
+  /** Cooldown period between forceClose calls (ms) - default 30 seconds */
+  forceCloseCooldownMs: parseIntEnv('CB_FORCE_CLOSE_COOLDOWN_MS', 30000),
+
+  /** Maximum forceClose calls per session */
+  maxForceCloseCount: parseIntEnv('CB_MAX_FORCE_CLOSE_COUNT', 5),
+
+  /** Successes needed in half-open state to fully close */
+  halfOpenSuccessThreshold: parseIntEnv('CB_HALF_OPEN_SUCCESS_THRESHOLD', 3),
 } as const;
 
 // =============================================================================
@@ -280,6 +294,13 @@ export const frontendConfig = {
   /** Default Ollama URL */
   ollamaUrl: process.env.OLLAMA_URL || 'http://localhost:11434',
 } as const;
+
+// =============================================================================
+// Re-export Thresholds Configuration
+// =============================================================================
+
+// Re-export all threshold-related types and values for easy access
+export * from './thresholds';
 
 // =============================================================================
 // Export all configs as single object

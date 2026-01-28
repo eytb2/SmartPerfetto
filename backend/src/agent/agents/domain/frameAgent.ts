@@ -35,6 +35,12 @@ import {
 import { Finding } from '../../types';
 import { ModelRouter } from '../../core/modelRouter';
 import { SkillExecutionResult } from '../../../services/skillEngine';
+import {
+  DEFAULT_JANK_THRESHOLDS,
+  JANK_LIST_CRITICAL_THRESHOLD,
+  DEFAULT_RAW_FINDING_CONFIDENCE,
+  JankSeverityThresholds,
+} from '../../../config/thresholds';
 
 // =============================================================================
 // Frame Agent Configuration
@@ -108,17 +114,38 @@ function extractListRows(rawResults: Record<string, any>, keys: string[]): any[]
   return null;
 }
 
+/**
+ * Build a finding for jank detection results.
+ *
+ * Severity classification uses configurable thresholds:
+ * - Critical: rate >= criticalRate OR count >= criticalCount
+ * - Warning: rate >= warningRate OR count >= warningCount
+ * - Info: below warning thresholds
+ *
+ * @param skillId - Source skill identifier
+ * @param titlePrefix - Prefix for finding title
+ * @param jankCount - Number of jank frames
+ * @param jankRate - Jank rate as percentage
+ * @param details - Additional details to include
+ * @param thresholds - Optional custom thresholds (defaults to DEFAULT_JANK_THRESHOLDS)
+ */
 function buildJankFinding(
   skillId: string,
   titlePrefix: string,
   jankCount: number,
   jankRate: number,
-  details: Record<string, any>
+  details: Record<string, any>,
+  thresholds: JankSeverityThresholds = DEFAULT_JANK_THRESHOLDS
 ): Finding {
   const rate = jankRate > 0 ? jankRate : (jankCount > 0 ? (jankCount / Math.max(details.total_frames || 1, 1)) * 100 : 0);
   let severity: Finding['severity'] = 'info';
-  if (rate >= 15 || jankCount >= 30) severity = 'critical';
-  else if (rate >= 5 || jankCount >= 10) severity = 'warning';
+
+  // Use configurable thresholds for severity classification
+  if (rate >= thresholds.criticalRate || jankCount >= thresholds.criticalCount) {
+    severity = 'critical';
+  } else if (rate >= thresholds.warningRate || jankCount >= thresholds.warningCount) {
+    severity = 'warning';
+  }
 
   return {
     id: `${skillId}_${Date.now()}`,
@@ -128,7 +155,7 @@ function buildJankFinding(
     title: `${titlePrefix}: ${jankCount} 帧 (${rate.toFixed(1)}%)`,
     description: '滑动存在明显掉帧',
     source: skillId,
-    confidence: 0.75,
+    confidence: DEFAULT_RAW_FINDING_CONFIDENCE,
     details: { jankCount, jankRate: rate, summary: details },
   };
 }
@@ -198,11 +225,12 @@ export class FrameAgent extends BaseAgent {
         id: `${skillId}_${Date.now()}_${findings.length}`,
         category: 'frame',
         type: 'issue',
-        severity: jankList.length > 20 ? 'critical' : 'warning',
+        // Use configurable threshold for jank list severity
+        severity: jankList.length > JANK_LIST_CRITICAL_THRESHOLD ? 'critical' : 'warning',
         title: `检测到 ${jankList.length} 个卡顿帧`,
         description: '存在明显掉帧，建议进一步查看帧级详细分析',
         source: skillId,
-        confidence: 0.7,
+        confidence: DEFAULT_RAW_FINDING_CONFIDENCE,
         details: { sample: jankList.slice(0, 5) },
       });
     }

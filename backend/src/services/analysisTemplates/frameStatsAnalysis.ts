@@ -4,6 +4,7 @@
  */
 
 import { TraceProcessorService } from '../traceProcessorService';
+import { inferVsyncPeriodNs } from '../../config/thresholds';
 
 export interface FrameStatsResult {
   summary: {
@@ -35,13 +36,39 @@ export interface FrameStatsResult {
   };
 }
 
-export class FrameStatsAnalyzer {
-  // 60fps 的帧间隔是 16.67ms
-  private readonly TARGET_FRAME_TIME_MS = 16.67;
-  // 超过 2 个 vsync 算掉帧
-  private readonly JANK_THRESHOLD_MS = this.TARGET_FRAME_TIME_MS * 2;
+export interface FrameStatsAnalyzerConfig {
+  /** Target frame time in milliseconds (default: derived from 60Hz) */
+  targetFrameTimeMs?: number;
+  /** Number of VSync periods missed before counting as jank (default: 2) */
+  jankVsyncThreshold?: number;
+}
 
-  constructor(private traceProcessor: TraceProcessorService) {}
+export class FrameStatsAnalyzer {
+  /**
+   * Target frame time in milliseconds.
+   * Derived from the configured VSync period (default 60Hz = 16.67ms).
+   */
+  private readonly targetFrameTimeMs: number;
+
+  /**
+   * Jank threshold in milliseconds.
+   * Default: 2 * targetFrameTimeMs (missing 2+ VSyncs = jank).
+   */
+  private readonly jankThresholdMs: number;
+
+  constructor(
+    private traceProcessor: TraceProcessorService,
+    config?: FrameStatsAnalyzerConfig
+  ) {
+    // Use configured value or derive from centralized VSync config
+    // Default: 60Hz = 16666667ns = 16.67ms
+    const defaultVsyncMs = Number(inferVsyncPeriodNs()) / 1_000_000;
+    this.targetFrameTimeMs = config?.targetFrameTimeMs ?? defaultVsyncMs;
+
+    // Jank threshold: default 2 VSyncs missed
+    const jankVsyncThreshold = config?.jankVsyncThreshold ?? 2;
+    this.jankThresholdMs = this.targetFrameTimeMs * jankVsyncThreshold;
+  }
 
   /**
    * 执行帧率统计分析
@@ -97,11 +124,11 @@ export class FrameStatsAnalyzer {
 
     // 识别掉帧
     const jankFrames = rows
-      .filter(r => parseFloat(r.dur_ms) > this.JANK_THRESHOLD_MS)
+      .filter(r => parseFloat(r.dur_ms) > this.jankThresholdMs)
       .map(r => ({
         timestamp: parseInt(r.ts),
         durationMs: parseFloat(r.dur_ms),
-        vsyncsMissed: Math.floor(parseFloat(r.dur_ms) / this.TARGET_FRAME_TIME_MS),
+        vsyncsMissed: Math.floor(parseFloat(r.dur_ms) / this.targetFrameTimeMs),
       }))
       .slice(0, 100); // 限制返回前 100 个掉帧点
 
@@ -183,11 +210,11 @@ export class FrameStatsAnalyzer {
     const avgFps = totalFrames / totalTimeSec;
 
     const jankFrames = rows
-      .filter(r => parseFloat(r.dur_ms) > this.JANK_THRESHOLD_MS)
+      .filter(r => parseFloat(r.dur_ms) > this.jankThresholdMs)
       .map(r => ({
         timestamp: parseInt(r.ts),
         durationMs: parseFloat(r.dur_ms),
-        vsyncsMissed: Math.floor(parseFloat(r.dur_ms) / this.TARGET_FRAME_TIME_MS),
+        vsyncsMissed: Math.floor(parseFloat(r.dur_ms) / this.targetFrameTimeMs),
       }))
       .slice(0, 100);
 

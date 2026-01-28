@@ -21,6 +21,10 @@ import {
   FocusInterval,
   IntervalHelpers,
 } from './types';
+import {
+  inferVsyncPeriodNs,
+  DEFAULT_VSYNC_PERIODS_FOR_FRAME_ESTIMATION,
+} from '../../config/thresholds';
 
 // =============================================================================
 // Internal Types
@@ -246,7 +250,7 @@ function extractFrameIntervals(
 
           if (!startTs || startTs === '0') continue;
 
-          // If end_ts is not available, estimate from dur_ms or use start_ts + 2*vsync_period
+          // If end_ts is not available, estimate from dur_ms or use start_ts + N*vsync_period
           let resolvedEndTs = endTs;
           if (!resolvedEndTs || resolvedEndTs === '0') {
             const durMs = toFiniteNumber(f.dur_ms);
@@ -257,9 +261,12 @@ function extractFrameIntervals(
                 continue;
               }
             } else {
-              // Fallback: assume ~33ms (2 vsync at 60Hz)
+              // Fallback: use configurable vsync period × default multiplier
+              // This handles 60Hz/90Hz/120Hz displays dynamically
               try {
-                resolvedEndTs = String(BigInt(startTs) + 33000000n);
+                const vsyncPeriodNs = inferVsyncPeriodNs();
+                const estimatedDuration = vsyncPeriodNs * BigInt(DEFAULT_VSYNC_PERIODS_FOR_FRAME_ESTIMATION);
+                resolvedEndTs = String(BigInt(startTs) + estimatedDuration);
               } catch {
                 continue;
               }

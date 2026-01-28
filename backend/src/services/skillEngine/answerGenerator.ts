@@ -6,6 +6,7 @@
  */
 
 import { DiagnosticResult, DisplayResult } from './types';
+import { DEFAULT_FRAME_TIME_DISPLAY_THRESHOLDS } from '../../config/thresholds';
 
 // =============================================================================
 // 类型定义
@@ -548,7 +549,7 @@ export class AnswerGenerator {
       if (row.jank_rate != null && row.jank_rate > 5) {
         evidence.push(`掉帧率 ${row.jank_rate}%`);
       }
-      if (row.max_frame_ms != null && row.max_frame_ms > 33.33) {
+      if (row.max_frame_ms != null && row.max_frame_ms > DEFAULT_FRAME_TIME_DISPLAY_THRESHOLDS.maxWarningMs) {
         evidence.push(`最大帧耗时 ${Number(row.max_frame_ms).toFixed(1)}ms（超过 2 帧）`);
       }
       if (row.estimated_fps != null && row.estimated_fps < 55) {

@@ -42,19 +42,29 @@ export class CircuitBreaker extends EventEmitter {
 
   // 【P1 Fix】用户响应超时机制
   private userResponseTimeout: NodeJS.Timeout | null = null;
-  private readonly USER_RESPONSE_TIMEOUT_MS = 5 * 60 * 1000; // 5 分钟
 
   // 【P1 Fix】forceClose 冷却期跟踪
   private lastForceCloseTime: number = 0;
-  private readonly FORCE_CLOSE_COOLDOWN_MS = 30 * 1000; // 30 秒冷却期
 
   // 【P2 Fix】forceClose 次数限制 - 防止用户无限循环选择 'continue'
   private forceCloseCount: number = 0;
-  private readonly MAX_FORCE_CLOSE_COUNT = 5; // 单个会话最多允许 5 次 forceClose
 
   // 【P1 Fix】半开状态成功计数（用于渐进式恢复）
   private halfOpenSuccessCount: number = 0;
-  private readonly HALF_OPEN_SUCCESS_THRESHOLD = 3; // 需要 3 次成功才完全关闭
+
+  // Threshold getters from centralized config (支持环境变量覆盖)
+  private get USER_RESPONSE_TIMEOUT_MS(): number {
+    return cbConfig.userResponseTimeoutMs;
+  }
+  private get FORCE_CLOSE_COOLDOWN_MS(): number {
+    return cbConfig.forceCloseCooldownMs;
+  }
+  private get MAX_FORCE_CLOSE_COUNT(): number {
+    return cbConfig.maxForceCloseCount;
+  }
+  private get HALF_OPEN_SUCCESS_THRESHOLD(): number {
+    return cbConfig.halfOpenSuccessThreshold;
+  }
 
   constructor(config: Partial<CircuitBreakerConfig> = {}) {
     super();

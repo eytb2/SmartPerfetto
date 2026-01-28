@@ -1603,12 +1603,24 @@ export class SkillExecutor {
     }
 
     try {
-      // 查询 sqlite_master 检查表是否存在
-      const tablesToCheck = required_tables.map(t => `'${t}'`).join(',');
+      // Perfetto trace_processor uses virtual tables that may not appear in sqlite_master.
+      // These core tables are ALWAYS present in any valid Perfetto trace:
+      const CORE_TABLES = new Set(['thread', 'process', 'slice', 'counter', 'track', 'thread_track', 'counter_track']);
+
+      // Filter out core tables - they're guaranteed to exist
+      const tablesToCheck = required_tables.filter(t => !CORE_TABLES.has(t));
+
+      if (tablesToCheck.length === 0) {
+        // All required tables are core tables - they always exist
+        return { success: true };
+      }
+
+      // For non-core tables, query sqlite_master (include views for Perfetto's virtual tables)
+      const tableList = tablesToCheck.map(t => `'${t}'`).join(',');
       const query = `
         SELECT name
         FROM sqlite_master
-        WHERE type='table' AND name IN (${tablesToCheck})
+        WHERE type IN ('table', 'view') AND name IN (${tableList})
       `;
 
       const result = await this.traceProcessor.query(traceId, query);
@@ -1636,8 +1648,8 @@ export class SkillExecutor {
         }
       }
 
-      // 检查缺少的表
-      const missingTables = required_tables.filter(t => !existingTables.has(t));
+      // 检查缺少的表 (only check non-core tables)
+      const missingTables = tablesToCheck.filter(t => !existingTables.has(t));
 
       if (missingTables.length > 0) {
         return {
