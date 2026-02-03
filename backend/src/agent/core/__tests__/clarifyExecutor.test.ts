@@ -95,7 +95,14 @@ describe('ClarifyExecutor', () => {
       expect(result.rounds).toBe(1);
       expect(mockModelRouter.callWithFallback).toHaveBeenCalledWith(
         expect.stringContaining('为什么帧 1436069 卡顿?'),
-        'synthesis'
+        'synthesis',
+        expect.objectContaining({
+          sessionId: 'session-1',
+          traceId: 'trace-1',
+          promptId: 'agent.clarifyExecutor',
+          promptVersion: '1.0.0',
+          contractVersion: 'clarify_text@1.0.0',
+        })
       );
     });
 
@@ -117,7 +124,14 @@ describe('ClarifyExecutor', () => {
       // Verify LLM was called with frame context
       expect(mockModelRouter.callWithFallback).toHaveBeenCalledWith(
         expect.stringContaining('App Deadline Missed'),
-        'synthesis'
+        'synthesis',
+        expect.objectContaining({
+          sessionId: 'session-1',
+          traceId: 'trace-1',
+          promptId: 'agent.clarifyExecutor',
+          promptVersion: '1.0.0',
+          contractVersion: 'clarify_text@1.0.0',
+        })
       );
     });
 
@@ -139,7 +153,14 @@ describe('ClarifyExecutor', () => {
 
       expect(mockModelRouter.callWithFallback).toHaveBeenCalledWith(
         expect.stringContaining('120'),
-        'synthesis'
+        'synthesis',
+        expect.objectContaining({
+          sessionId: 'session-1',
+          traceId: 'trace-1',
+          promptId: 'agent.clarifyExecutor',
+          promptVersion: '1.0.0',
+          contractVersion: 'clarify_text@1.0.0',
+        })
       );
     });
 

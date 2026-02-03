@@ -26,3 +26,4 @@ export {
 
 export { StrategyRegistry, createStrategyRegistry } from './registry';
 export { scrollingStrategy } from './scrollingStrategy';
+export { sceneReconstructionQuickStrategy, sceneReconstructionStrategy } from './sceneReconstructionStrategy';

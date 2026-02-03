@@ -35,6 +35,7 @@ import {
 import { Finding } from '../../types';
 import { ModelRouter } from '../../core/modelRouter';
 import { SkillExecutionResult } from '../../../services/skillEngine';
+import { getAdbAgentTools } from '../tools/adbTools';
 import {
   DEFAULT_JANK_THRESHOLDS,
   JANK_LIST_CRITICAL_THRESHOLD,
@@ -48,42 +49,47 @@ import {
 
 /**
  * Skills that FrameAgent wraps as tools (lazy-loaded at executeTask time)
+ *
+ * Each skill description includes:
+ * - What it does
+ * - When to use it
+ * - What output to expect
  */
 const FRAME_SKILLS: SkillDefinitionForAgent[] = [
   {
     skillId: 'jank_frame_detail',
     toolName: 'get_frame_detail',
-    description: '获取单帧详细信息，包括每个阶段的耗时',
+    description: '【深度分析单帧】获取指定帧的完整诊断信息，包括四象限分析、Binder调用、CPU频率、主线程/RenderThread耗时操作、锁竞争、GC影响、IO阻塞等。适用于：已知帧ID/时间范围后的深度分析。输出：根因诊断+详细数据表格',
     category: 'frame',
   },
   {
     skillId: 'scrolling_analysis',
     toolName: 'analyze_scrolling',
-    description: '分析滑动性能，包括会话检测、FPS、掉帧率',
+    description: '【滑动概览分析】检测滑动会话、统计FPS和掉帧率、识别卡顿帧列表。适用于：首次分析滑动性能、获取会话列表。输出：会话列表+掉帧统计+卡顿帧列表',
     category: 'frame',
   },
   {
     skillId: 'consumer_jank_detection',
     toolName: 'detect_consumer_jank',
-    description: '检测 Consumer 侧卡顿，分析 GPU/合成层问题',
+    description: '【消费端卡顿检测】分析SurfaceFlinger合成和GPU渲染延迟导致的掉帧。适用于：App侧正常但仍有掉帧、怀疑SF/GPU问题。输出：消费端掉帧列表+原因分类',
     category: 'frame',
   },
   {
     skillId: 'sf_frame_consumption',
     toolName: 'analyze_sf_frames',
-    description: '分析 SurfaceFlinger 帧消费情况',
+    description: '【SF帧消费分析】分析SurfaceFlinger对App帧的处理情况，包括帧到达时序、合成延迟。适用于：分析系统合成层瓶颈。输出：SF处理时序数据',
     category: 'frame',
   },
   {
     skillId: 'app_frame_production',
     toolName: 'analyze_app_frames',
-    description: '分析应用帧生产情况，包括 Choreographer 回调',
+    description: '【App帧生产分析】分析应用帧生产流程，包括Choreographer回调时序、VSYNC对齐。适用于：分析App帧生产节奏问题。输出：帧生产时序+VSYNC对齐情况',
     category: 'frame',
   },
   {
     skillId: 'present_fence_timing',
     toolName: 'analyze_present_fence',
-    description: '分析 Present Fence 时序，检测显示延迟',
+    description: '【显示时序分析】分析Present Fence等待时间和显示延迟。适用于：怀疑显示端问题、GPU Fence阻塞。输出：Fence等待时序数据',
     category: 'frame',
   },
 ];
@@ -175,7 +181,7 @@ export class FrameAgent extends BaseAgent {
         name: 'Frame Analysis Agent',
         domain: 'frame',
         description: 'AI agent specialized in frame timing, jank detection, and scrolling performance analysis',
-        tools: [], // Loaded lazily via ensureToolsLoaded()
+        tools: [...getAdbAgentTools()],
         maxIterations: 3,
         confidenceThreshold: 0.7,
         canDelegate: true,

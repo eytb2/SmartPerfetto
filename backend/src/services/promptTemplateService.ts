@@ -82,7 +82,7 @@ ${PROMPTS.SQL_GENERATION.withSchema}
 Example queries:
 {examples}
 
-Respond with the SQL query wrapped in \`\`\`sql ... \`\`\` code blocks, followed by a brief explanation.`,
+Respond with ONLY one SQL query wrapped in \`\`\`sql ... \`\`\` code blocks. Do not include any explanation or additional text.`,
       user: '{question}',
       temperature: 0.3,
     });
@@ -102,7 +102,7 @@ Please FIX the SQL query and try again. Common issues:
 - Syntax errors
 - Type mismatches
 
-Generate ONE corrected SQL query wrapped in \`\`\`sql ... \`\`\` code blocks.`,
+Generate ONE corrected SQL query wrapped in \`\`\`sql ... \`\`\` code blocks. Do not include any explanation or additional text.`,
       user: '',
       temperature: 0.2,
     });
@@ -121,8 +121,10 @@ This means:
 - The data doesn't exist in this trace
 - You're looking in the wrong place
 
-Please ADJUST your approach and try a different query.`,
-      user: 'Generate a revised SQL query to find the relevant data.',
+Please ADJUST your approach and try a different query.
+
+Respond with ONLY one SQL query wrapped in \`\`\`sql ... \`\`\` code blocks. Do not include any explanation or additional text.`,
+      user: '',
       temperature: 0.4,
     });
 
@@ -153,7 +155,7 @@ Provide a final answer that directly addresses the user's question. Include spec
 
 1. SQL Execution Flow:
    - Generate ONLY ONE SQL query at a time
-   - Wrap SQL in \`\`\`sql ... \`\`\` code blocks
+   - When you need to run SQL, respond with ONLY one \`\`\`sql ... \`\`\` code block (no explanation)
    - Wait for results before generating another query
    - Each query will be executed and results sent back to you
 

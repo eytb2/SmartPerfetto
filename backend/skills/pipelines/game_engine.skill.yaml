@@ -134,12 +134,18 @@ auto_pin:
       match_by: name
       priority: 2
       reason: "游戏引擎线程 (生产)"
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的游戏引擎线程"
 
     - pattern: "^RenderThread(\\s+\\d+)?$"
       match_by: name
       priority: 3
       reason: "GPU 渲染 (传输)"
       expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的 RenderThread（部分引擎可能不使用）"
 
     - pattern: "^VSYNC-sf$"
       match_by: name

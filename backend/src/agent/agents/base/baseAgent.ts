@@ -36,6 +36,7 @@ import {
 } from '../../types/agentProtocol';
 import { Finding } from '../../types';
 import { ModelRouter } from '../../core/modelRouter';
+import { isPlainObject, isStringArray, LlmJsonSchema, parseLlmJson } from '../../../utils/llmJson';
 import {
   SkillExecutor,
   createSkillExecutor,
@@ -143,6 +144,63 @@ export interface Reflection {
   /** Questions for other agents */
   questionsForOthers: InterAgentQuestion[];
 }
+
+// =============================================================================
+// LLM JSON Schemas (Deterministic parsing)
+// =============================================================================
+
+type TaskUnderstandingPayload = Partial<TaskUnderstanding>;
+const TASK_UNDERSTANDING_JSON_SCHEMA: LlmJsonSchema<TaskUnderstandingPayload> = {
+  name: 'agent_task_understanding_json@1.0.0',
+  validate: (value: unknown): value is TaskUnderstandingPayload => {
+    if (!isPlainObject(value)) return false;
+    if ((value as any).objective !== undefined && typeof (value as any).objective !== 'string') return false;
+    if ((value as any).questions !== undefined && !isStringArray((value as any).questions)) return false;
+    if ((value as any).relevantAreas !== undefined && !isStringArray((value as any).relevantAreas)) return false;
+    if ((value as any).recommendedTools !== undefined && !isStringArray((value as any).recommendedTools)) return false;
+    if ((value as any).constraints !== undefined && !isStringArray((value as any).constraints)) return false;
+    const confidence = (value as any).confidence;
+    if (confidence !== undefined && confidence !== null && typeof confidence !== 'number') return false;
+    return true;
+  },
+};
+
+type ExecutionPlanPayload = Partial<ExecutionPlan> & { steps?: Array<Record<string, any>> };
+const EXECUTION_PLAN_JSON_SCHEMA: LlmJsonSchema<ExecutionPlanPayload> = {
+  name: 'agent_execution_plan_json@1.0.0',
+  validate: (value: unknown): value is ExecutionPlanPayload => {
+    if (!isPlainObject(value)) return false;
+    const steps = (value as any).steps;
+    if (steps !== undefined && steps !== null && !Array.isArray(steps)) return false;
+    const expectedOutcomes = (value as any).expectedOutcomes;
+    if (expectedOutcomes !== undefined && expectedOutcomes !== null && !isStringArray(expectedOutcomes)) return false;
+    const estimatedTimeMs = (value as any).estimatedTimeMs;
+    if (estimatedTimeMs !== undefined && estimatedTimeMs !== null && typeof estimatedTimeMs !== 'number') return false;
+    const confidence = (value as any).confidence;
+    if (confidence !== undefined && confidence !== null && typeof confidence !== 'number') return false;
+    return true;
+  },
+};
+
+type ReflectionPayload = Partial<Reflection>;
+const REFLECTION_JSON_SCHEMA: LlmJsonSchema<ReflectionPayload> = {
+  name: 'agent_reflection_json@1.0.0',
+  validate: (value: unknown): value is ReflectionPayload => {
+    if (!isPlainObject(value)) return false;
+    if ((value as any).insights !== undefined && !isStringArray((value as any).insights)) return false;
+    const objectivesMet = (value as any).objectivesMet;
+    if (objectivesMet !== undefined && objectivesMet !== null && typeof objectivesMet !== 'boolean') return false;
+    const findingsConfidence = (value as any).findingsConfidence;
+    if (findingsConfidence !== undefined && findingsConfidence !== null && typeof findingsConfidence !== 'number') return false;
+    if ((value as any).gaps !== undefined && !isStringArray((value as any).gaps)) return false;
+    if ((value as any).nextSteps !== undefined && !isStringArray((value as any).nextSteps)) return false;
+    const hypothesisUpdates = (value as any).hypothesisUpdates;
+    if (hypothesisUpdates !== undefined && hypothesisUpdates !== null && !Array.isArray(hypothesisUpdates)) return false;
+    const questionsForOthers = (value as any).questionsForOthers;
+    if (questionsForOthers !== undefined && questionsForOthers !== null && !Array.isArray(questionsForOthers)) return false;
+    return true;
+  },
+};
 
 // =============================================================================
 // Base Agent Abstract Class
@@ -315,21 +373,25 @@ export abstract class BaseAgent extends EventEmitter {
   protected async understand(task: AgentTask): Promise<TaskUnderstanding> {
     const prompt = this.buildUnderstandingPrompt(task);
 
-    const response = await this.modelRouter.callWithFallback(prompt, 'intent_understanding');
+    const response = await this.modelRouter.callWithFallback(prompt, 'intent_understanding', {
+      sessionId: this.sharedContext?.sessionId,
+      traceId: this.sharedContext?.traceId,
+      jsonMode: true,
+      promptId: `agent.${this.config.id}.understand`,
+      promptVersion: '1.0.0',
+      contractVersion: TASK_UNDERSTANDING_JSON_SCHEMA.name,
+    });
 
     try {
-      const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return {
-          objective: parsed.objective || task.description,
-          questions: parsed.questions || [],
-          relevantAreas: parsed.relevantAreas || [],
-          recommendedTools: parsed.recommendedTools || this.resolveToolsForTask(task.context),
-          constraints: parsed.constraints || [],
-          confidence: parsed.confidence || 0.7,
-        };
-      }
+      const parsed = parseLlmJson<TaskUnderstandingPayload>(response.response, TASK_UNDERSTANDING_JSON_SCHEMA);
+      return {
+        objective: parsed.objective || task.description,
+        questions: parsed.questions || [],
+        relevantAreas: parsed.relevantAreas || [],
+        recommendedTools: parsed.recommendedTools || this.resolveToolsForTask(task.context),
+        constraints: parsed.constraints || [],
+        confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.7,
+      };
     } catch (error) {
       console.warn(`[${this.config.id}] Failed to parse understanding response`);
     }
@@ -351,52 +413,56 @@ export abstract class BaseAgent extends EventEmitter {
   protected async plan(understanding: TaskUnderstanding, task: AgentTask): Promise<ExecutionPlan> {
     const prompt = this.buildPlanningPrompt(understanding, task);
 
-    const response = await this.modelRouter.callWithFallback(prompt, 'planning');
+    const response = await this.modelRouter.callWithFallback(prompt, 'planning', {
+      sessionId: this.sharedContext?.sessionId,
+      traceId: this.sharedContext?.traceId,
+      jsonMode: true,
+      promptId: `agent.${this.config.id}.plan`,
+      promptVersion: '1.0.0',
+      contractVersion: EXECUTION_PLAN_JSON_SCHEMA.name,
+    });
 
     try {
-      const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        const plannedSteps = (parsed.steps || [])
-          .map((s: any, i: number) => ({
-            stepNumber: i + 1,
-            toolName: s.toolName || s.tool,
-            params: s.params || {},
-            purpose: s.purpose || `Execute ${s.toolName || s.tool}`,
-            // Note: dependsOn is intentionally stripped — domain agent tools are
-            // independent analysis units. The LLM-generated dependencies cause
-            // cascade failures when tool names are filtered out, as step numbers
-            // get re-assigned but dependsOn values aren't updated.
-          }))
-          .filter((step: any) => step.toolName && this.tools.has(step.toolName));
+      const parsed = parseLlmJson<ExecutionPlanPayload>(response.response, EXECUTION_PLAN_JSON_SCHEMA);
+      const plannedSteps = (parsed.steps || [])
+        .map((s: any, i: number) => ({
+          stepNumber: i + 1,
+          toolName: s.toolName || s.tool,
+          params: s.params || {},
+          purpose: s.purpose || `Execute ${s.toolName || s.tool}`,
+          // Note: dependsOn is intentionally stripped — domain agent tools are
+          // independent analysis units. The LLM-generated dependencies cause
+          // cascade failures when tool names are filtered out, as step numbers
+          // get re-assigned but dependsOn values aren't updated.
+        }))
+        .filter((step: any) => step.toolName && this.tools.has(step.toolName));
 
-        if (plannedSteps.length === 0) {
-          const fallbackTools = understanding.recommendedTools.length > 0
-            ? understanding.recommendedTools
-            : this.resolveToolsForTask(task.context);
-          return {
-            steps: fallbackTools.map((toolName, i) => ({
-              stepNumber: i + 1,
-              toolName,
-              params: {},
-              purpose: `Execute ${toolName}`,
-            })),
-            expectedOutcomes: parsed.expectedOutcomes || [],
-            estimatedTimeMs: parsed.estimatedTimeMs || 30000,
-            confidence: parsed.confidence || 0.5,
-          };
-        }
-
+      if (plannedSteps.length === 0) {
+        const fallbackTools = understanding.recommendedTools.length > 0
+          ? understanding.recommendedTools
+          : this.resolveToolsForTask(task.context);
         return {
-          steps: plannedSteps.map((step: any, i: number) => ({
-            ...step,
+          steps: fallbackTools.map((toolName, i) => ({
             stepNumber: i + 1,
+            toolName,
+            params: {},
+            purpose: `Execute ${toolName}`,
           })),
           expectedOutcomes: parsed.expectedOutcomes || [],
-          estimatedTimeMs: parsed.estimatedTimeMs || 30000,
-          confidence: parsed.confidence || 0.7,
+          estimatedTimeMs: typeof parsed.estimatedTimeMs === 'number' ? parsed.estimatedTimeMs : 30000,
+          confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.5,
         };
       }
+
+      return {
+        steps: plannedSteps.map((step: any, i: number) => ({
+          ...step,
+          stepNumber: i + 1,
+        })),
+        expectedOutcomes: parsed.expectedOutcomes || [],
+        estimatedTimeMs: typeof parsed.estimatedTimeMs === 'number' ? parsed.estimatedTimeMs : 30000,
+        confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.7,
+      };
     } catch (error) {
       console.warn(`[${this.config.id}] Failed to parse planning response`);
     }
@@ -509,22 +575,26 @@ export abstract class BaseAgent extends EventEmitter {
   protected async reflect(result: ExecutionResult, task: AgentTask): Promise<Reflection> {
     const prompt = this.buildReflectionPrompt(result, task);
 
-    const response = await this.modelRouter.callWithFallback(prompt, 'evaluation');
+    const response = await this.modelRouter.callWithFallback(prompt, 'evaluation', {
+      sessionId: this.sharedContext?.sessionId,
+      traceId: this.sharedContext?.traceId,
+      jsonMode: true,
+      promptId: `agent.${this.config.id}.reflect`,
+      promptVersion: '1.0.0',
+      contractVersion: REFLECTION_JSON_SCHEMA.name,
+    });
 
     try {
-      const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return {
-          insights: parsed.insights || [],
-          objectivesMet: parsed.objectivesMet ?? result.success,
-          findingsConfidence: parsed.findingsConfidence || 0.5,
-          gaps: parsed.gaps || [],
-          nextSteps: parsed.nextSteps || [],
-          hypothesisUpdates: parsed.hypothesisUpdates || [],
-          questionsForOthers: parsed.questionsForOthers || [],
-        };
-      }
+      const parsed = parseLlmJson<ReflectionPayload>(response.response, REFLECTION_JSON_SCHEMA);
+      return {
+        insights: parsed.insights || [],
+        objectivesMet: parsed.objectivesMet ?? result.success,
+        findingsConfidence: typeof parsed.findingsConfidence === 'number' ? parsed.findingsConfidence : 0.5,
+        gaps: parsed.gaps || [],
+        nextSteps: parsed.nextSteps || [],
+        hypothesisUpdates: parsed.hypothesisUpdates || [],
+        questionsForOthers: parsed.questionsForOthers || [],
+      };
     } catch (error) {
       console.warn(`[${this.config.id}] Failed to parse reflection response`);
     }
@@ -962,18 +1032,31 @@ export abstract class BaseAgent extends EventEmitter {
 
   /**
    * Get the full "available tools" section for LLM prompts.
-   * Includes tool list, parameter info, and usage clarification.
+   * Includes tool list, parameter info, usage clarification, and negative examples.
    * Use this in buildUnderstandingPrompt / buildPlanningPrompt instead of raw getToolDescriptionsForLLM().
    */
   protected getToolSectionForPrompt(): string {
-    return `## 可用工具（只能使用以下工具，每个工具内置 SQL，不需要你提供查询语句）
+    return `## 可用工具（只能使用以下工具）
 ${this.getToolDescriptionsForLLM()}
 
-重要规则：
-1. 只能使用上面列出的工具，不要使用任何其他工具名称
-2. 每个工具内置了完整的 SQL 查询，不需要你提供 SQL
-3. package/start_ts/end_ts 会自动从上下文注入，params 中一般不需要填写这些
-4. params 只需填写工具特有的可选参数，留空 {} 即可使用默认行为`;
+## 工具使用规则
+
+### ✅ 正确做法
+- 只使用上方列表中的工具名称
+- params 留空 {} 使用默认行为（package/start_ts/end_ts 自动注入）
+- 如需指定可选参数，只填写工具文档中列出的参数
+
+### ❌ 禁止行为（会导致执行失败）
+- 使用未列出的工具名（如 analyze_gpu、check_memory 等不存在的工具）
+- 在 params 中写 SQL 查询（工具已内置 SQL）
+- 在 params 中填写 package/start_ts/end_ts（这些会自动注入）
+- 猜测工具名称或参数名称
+- 使用自然语言描述代替工具调用
+
+### ADB 工具特殊说明
+- adb_* 工具用于通过 ADB 获取设备信息/执行操作
+- 默认只读模式，除非 mode=full 否则不要尝试改变设备状态
+- 使用前先调用 adb_status 确认 enabled/selectedSerial`;
   }
 
   /**
@@ -983,6 +1066,17 @@ ${this.getToolDescriptionsForLLM()}
     const lines: string[] = [];
     if (task.context.domain) {
       lines.push(`- 任务领域: ${task.context.domain}`);
+    }
+    const adbContext = (task.context.additionalData as any)?.adbContext;
+    if (adbContext && typeof adbContext === 'object') {
+      const mode = adbContext.mode ?? 'auto';
+      const enabled = adbContext.enabled ? 'true' : 'false';
+      const selected = adbContext?.availability?.selectedSerial || 'none';
+      const matchStatus = adbContext?.traceMatch?.status || 'unknown';
+      const matchConfidence = typeof adbContext?.traceMatch?.confidence === 'number'
+        ? adbContext.traceMatch.confidence.toFixed(2)
+        : 'n/a';
+      lines.push(`- ADB 协同: mode=${mode}, enabled=${enabled}, serial=${selected}, match=${matchStatus}(${matchConfidence})`);
     }
     if (task.context.timeRange) {
       lines.push(`- 时间范围: ${task.context.timeRange.start} ~ ${task.context.timeRange.end}`);

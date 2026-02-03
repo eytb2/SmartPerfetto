@@ -6,14 +6,14 @@
 export const PROMPTS = {
   // SQL Generation Prompts
   SQL_GENERATION: {
-    basic: `Generate a Perfetto SQL query for: {query}
+    basic: `Generate a Perfetto SQL query for: {question}
 
 Rules:
 - Use ONLY existing Perfetto tables
-- Return ONLY the SQL query
+- Output ONLY one SQL query wrapped in \`\`\`sql ... \`\`\` (no explanation)
 - Convert timestamps: ts / 1e6 for milliseconds`,
 
-    withContext: `Generate a Perfetto SQL query for: {query}
+    withContext: `Generate a Perfetto SQL query for: {question}
 
 Context:
 - Package: {package}
@@ -21,16 +21,16 @@ Context:
 
 Rules:
 - Use ONLY existing Perfetto tables
-- Return ONLY the SQL query`,
+- Output ONLY one SQL query wrapped in \`\`\`sql ... \`\`\` (no explanation)`,
 
-    withSchema: `Generate a Perfetto SQL query for: {query}
+    withSchema: `Generate a Perfetto SQL query for: {question}
 
 Available Schema:
 {schema}
 
 Rules:
 - Use ONLY the tables listed above
-- Return ONLY the SQL query`,
+- Output ONLY one SQL query wrapped in \`\`\`sql ... \`\`\` (no explanation)`,
   },
 
   // Analysis Prompts

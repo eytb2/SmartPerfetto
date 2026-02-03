@@ -23,6 +23,36 @@ import {
   Finding,
 } from '../types';
 import { ModelRouter } from '../core/modelRouter';
+import { isPlainObject, isStringArray, LlmJsonSchema, parseLlmJson } from '../../utils/llmJson';
+
+type IterationStrategyDecisionPayload = {
+  strategy: string;
+  confidence: number;
+  reasoning: string;
+  focusArea?: string;
+  newDirection?: string;
+  additionalSkills?: string[];
+  priorityActions?: string[];
+};
+
+const ITERATION_STRATEGY_DECISION_JSON_SCHEMA: LlmJsonSchema<IterationStrategyDecisionPayload> = {
+  name: 'iteration_strategy_json@1.0.0',
+  validate: (value: unknown): value is IterationStrategyDecisionPayload => {
+    if (!isPlainObject(value)) return false;
+    if (typeof (value as any).strategy !== 'string') return false;
+    if (typeof (value as any).confidence !== 'number') return false;
+    if (typeof (value as any).reasoning !== 'string') return false;
+    const focusArea = (value as any).focusArea;
+    if (focusArea !== undefined && focusArea !== null && typeof focusArea !== 'string') return false;
+    const newDirection = (value as any).newDirection;
+    if (newDirection !== undefined && newDirection !== null && typeof newDirection !== 'string') return false;
+    const additionalSkills = (value as any).additionalSkills;
+    if (additionalSkills !== undefined && additionalSkills !== null && !isStringArray(additionalSkills)) return false;
+    const priorityActions = (value as any).priorityActions;
+    if (priorityActions !== undefined && priorityActions !== null && !isStringArray(priorityActions)) return false;
+    return true;
+  },
+};
 
 /**
  * Available iteration strategies
@@ -37,6 +67,10 @@ export type IterationStrategy =
  * Context passed to the strategy planner
  */
 export interface IterationContext {
+  /** Session ID (optional, for telemetry/logging) */
+  sessionId?: string;
+  /** Trace ID (optional, for telemetry/logging) */
+  traceId?: string;
   /** Current evaluation results */
   evaluation: Evaluation;
   /** Previous stage results */
@@ -259,14 +293,21 @@ export class IterationStrategyPlanner {
   private async getAIDecision(context: IterationContext): Promise<StrategyDecision> {
     const prompt = this.buildDecisionPrompt(context);
 
-    const response = await this.modelRouter.callWithFallback(prompt, 'planning');
+    const response = await this.modelRouter.callWithFallback(prompt, 'planning', {
+      sessionId: context.sessionId,
+      traceId: context.traceId,
+      jsonMode: true,
+      promptId: 'agent.iterationStrategyPlanner',
+      promptVersion: '1.0.0',
+      contractVersion: 'iteration_strategy_json@1.0.0',
+    });
 
     try {
-      const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return this.validateDecision(parsed, context);
-      }
+      const parsed = parseLlmJson<IterationStrategyDecisionPayload>(
+        response.response,
+        ITERATION_STRATEGY_DECISION_JSON_SCHEMA
+      );
+      return this.validateDecision(parsed, context);
     } catch (error) {
       // Parsing failed
     }

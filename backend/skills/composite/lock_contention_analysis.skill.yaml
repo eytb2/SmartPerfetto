@@ -20,6 +20,8 @@ meta:
 prerequisites:
   required_tables:
     - thread_state
+  modules:
+    - android.monitor_contention
 
 triggers:
   - pattern: "(锁|lock|contention|竞争|monitor|同步)"

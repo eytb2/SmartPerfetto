@@ -27,19 +27,63 @@ import {
 } from '../../types/agentProtocol';
 import { Finding } from '../../types';
 import { ModelRouter } from '../../core/modelRouter';
+import { getAdbAgentTools } from '../tools/adbTools';
 
 // =============================================================================
 // CPU Agent Configuration
 // =============================================================================
 
+/**
+ * CPU Agent Skills
+ *
+ * Each skill description includes:
+ * - What it does
+ * - When to use it (scenario)
+ * - What output to expect
+ */
 const CPU_SKILLS: SkillDefinitionForAgent[] = [
-  { skillId: 'cpu_analysis', toolName: 'analyze_cpu_overview', description: '分析 CPU 整体使用情况，包括各核心负载分布', category: 'cpu' },
-  { skillId: 'scheduling_analysis', toolName: 'analyze_scheduling', description: '分析线程调度情况，检测调度延迟和抢占', category: 'cpu' },
-  { skillId: 'cpu_freq_timeline', toolName: 'get_cpu_freq_timeline', description: '获取 CPU 频率时间线，分析降频情况', category: 'cpu' },
-  { skillId: 'cpu_load_in_range', toolName: 'analyze_cpu_load', description: '分析指定时间范围内的 CPU 负载', category: 'cpu' },
-  { skillId: 'cpu_slice_analysis', toolName: 'analyze_cpu_slices', description: '分析 CPU 时间片，找出 CPU 密集型操作', category: 'cpu' },
-  { skillId: 'cpu_profiling', toolName: 'profile_cpu_hotspots', description: 'CPU 热点分析，找出最耗 CPU 的函数', category: 'cpu' },
-  { skillId: 'callstack_analysis', toolName: 'analyze_callstacks', description: '分析调用栈，定位性能瓶颈', category: 'cpu' },
+  {
+    skillId: 'cpu_analysis',
+    toolName: 'analyze_cpu_overview',
+    description: '【CPU概览分析】分析全局CPU使用情况，包括各核心负载分布、大小核使用比例。适用于：首次分析CPU、获取整体负载概况。输出：核心负载分布+进程CPU占用排行',
+    category: 'cpu',
+  },
+  {
+    skillId: 'scheduling_analysis',
+    toolName: 'analyze_scheduling',
+    description: '【调度分析】分析线程调度延迟、Runnable等待时间、抢占情况。适用于：怀疑调度问题、线程等待时间长。输出：调度延迟统计+Runnable等待分析',
+    category: 'cpu',
+  },
+  {
+    skillId: 'cpu_freq_timeline',
+    toolName: 'get_cpu_freq_timeline',
+    description: '【CPU频率时间线】获取CPU频率变化历史，分析降频/升频事件。适用于：怀疑温控限频、功耗管理影响。输出：频率变化时间线+降频事件',
+    category: 'cpu',
+  },
+  {
+    skillId: 'cpu_load_in_range',
+    toolName: 'analyze_cpu_load',
+    description: '【区间CPU负载】分析指定时间范围内的CPU负载，适合与帧区间配合。适用于：分析特定卡顿区间的CPU情况。输出：区间内负载统计',
+    category: 'cpu',
+  },
+  {
+    skillId: 'cpu_slice_analysis',
+    toolName: 'analyze_cpu_slices',
+    description: '【CPU时间片分析】分析CPU密集型操作和时间片分布。适用于：找出CPU热点操作。输出：热点操作排行+时间片分布',
+    category: 'cpu',
+  },
+  {
+    skillId: 'cpu_profiling',
+    toolName: 'profile_cpu_hotspots',
+    description: '【CPU热点分析】分析最耗CPU的函数和调用路径。适用于：定位CPU瓶颈函数。输出：热点函数排行（需要trace包含perf数据）',
+    category: 'cpu',
+  },
+  {
+    skillId: 'callstack_analysis',
+    toolName: 'analyze_callstacks',
+    description: '【调用栈分析】分析采样调用栈，定位性能热点代码路径。适用于：需要函数级定位。输出：调用栈聚合分析（需要trace包含callstack数据）',
+    category: 'cpu',
+  },
 ];
 
 // =============================================================================
@@ -54,7 +98,7 @@ export class CPUAgent extends BaseAgent {
         name: 'CPU Analysis Agent',
         domain: 'cpu',
         description: 'AI agent specialized in CPU scheduling, frequency, and load analysis',
-        tools: [], // Loaded lazily via ensureToolsLoaded()
+        tools: [...getAdbAgentTools()],
         maxIterations: 3,
         confidenceThreshold: 0.7,
         canDelegate: true,

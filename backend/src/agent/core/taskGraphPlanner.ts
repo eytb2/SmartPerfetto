@@ -24,6 +24,20 @@ import {
   ProgressEmitter,
   normalizeDomain,
 } from './orchestratorTypes';
+import { isPlainObject, LlmJsonSchema, parseLlmJson } from '../../utils/llmJson';
+
+type TaskGraphJsonPayload = {
+  tasks: any[];
+};
+
+const TASK_GRAPH_JSON_SCHEMA: LlmJsonSchema<TaskGraphJsonPayload> = {
+  name: 'task_graph_json@1.0.0',
+  validate: (value: unknown): value is TaskGraphJsonPayload => {
+    if (!isPlainObject(value)) return false;
+    if (!Array.isArray((value as any).tasks)) return false;
+    return true;
+  },
+};
 
 // =============================================================================
 // Time Range Parsing
@@ -34,20 +48,23 @@ export function parseTimeRange(
   options: AnalysisOptions,
   sharedContext: SharedAgentContext
 ): { start: number | string; end: number | string } | undefined {
+  const isValidBound = (v: any): v is number | string => {
+    if (typeof v === 'number') return Number.isFinite(v);
+    if (typeof v === 'string') return v.trim() !== '';
+    return false;
+  };
+
   if (input && typeof input === 'object') {
     const start = input.start;
     const end = input.end;
-    if ((typeof start === 'number' || typeof start === 'string') &&
-        (typeof end === 'number' || typeof end === 'string') &&
-        start && end) {
+    if (isValidBound(start) && isValidBound(end)) {
       return { start, end };
     }
   }
   if (Array.isArray(input) && input.length >= 2) {
     const start = input[0];
     const end = input[1];
-    if ((typeof start === 'number' || typeof start === 'string') &&
-        (typeof end === 'number' || typeof end === 'string')) {
+    if (isValidBound(start) && isValidBound(end)) {
       return { start, end };
     }
   }
@@ -138,14 +155,19 @@ ${allowedDomains.join(', ')}
 
 注意：
 - time_range 无法确定时请返回 null。
-- 只输出 JSON。`;
+  - 只输出 JSON。`;
 
   try {
-    const response = await modelRouter.callWithFallback(prompt, 'planning');
-    const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      const tasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
+    const response = await modelRouter.callWithFallback(prompt, 'planning', {
+      sessionId: sharedContext.sessionId,
+      traceId: sharedContext.traceId,
+      jsonMode: true,
+      promptId: 'agent.taskGraphPlanner',
+      promptVersion: '1.0.0',
+      contractVersion: 'task_graph_json@1.0.0',
+    });
+    const parsed = parseLlmJson<TaskGraphJsonPayload>(response.response, TASK_GRAPH_JSON_SCHEMA);
+    const tasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
       const nodes = tasks.map((task: any, index: number): TaskGraphNode => {
         const id = String(task.id || `task_${index + 1}`);
         const domain = String(task.domain || '').toLowerCase();
@@ -173,7 +195,6 @@ ${allowedDomains.join(', ')}
 
       addMandatoryDomainsIfMissing(nodes, query, options, sharedContext);
       return { nodes };
-    }
   } catch (error) {
     emitter.log(`Failed to plan task graph: ${error}`);
     emitter.emitUpdate('degraded', { module: 'taskGraphPlanner', fallback: 'heuristic task graph' });
@@ -234,6 +255,8 @@ export function buildTasksFromGraph(
         additionalData: {
           traceProcessorService: options.traceProcessorService,
           packageName: options.packageName,
+          adb: options.adb,
+          adbContext: options.adbContext,
         },
       },
       dependencies: node.dependsOn || [],

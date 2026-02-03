@@ -1,5 +1,6 @@
 import { OpenAI } from 'openai';
 import { EventEmitter } from 'events';
+import { redactTextForLLM } from '../utils/llmPrivacy';
 
 export interface ConversationContext {
   traceId?: string;
@@ -121,6 +122,7 @@ export class AdvancedAIService extends EventEmitter {
 
     // Build context prompt
     const contextPrompt = this.buildContextPrompt(session, query);
+    const safeContextPrompt = redactTextForLLM(contextPrompt).text;
 
     // Check if OpenAI is configured
     if (!this.openai) {
@@ -129,20 +131,20 @@ export class AdvancedAIService extends EventEmitter {
 
     // Get AI response
     const completion = await this.openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
+      model: process.env.OPENAI_MODEL || 'gpt-4o',
       messages: [
         {
           role: 'system',
-          content: `You are an expert Android performance analyst specializing in Perfetto trace analysis.
+          content: redactTextForLLM(`You are an expert Android performance analyst specializing in Perfetto trace analysis.
           You have deep knowledge of:
           - Android system internals and performance patterns
           - Perfetto SQL queries and trace data interpretation
           - Common performance issues (jank, memory leaks, battery drain)
           - Best practices for performance optimization
 
-          Provide actionable insights with specific SQL queries when relevant.`,
+          Provide actionable insights with specific SQL queries when relevant.`).text,
         },
-        { role: 'user', content: contextPrompt },
+        { role: 'user', content: safeContextPrompt },
       ],
       temperature: 0.3,
       max_tokens: 1500,
@@ -319,28 +321,47 @@ export class AdvancedAIService extends EventEmitter {
       ];
     }
 
-    // Use AI to structure the insights
+    const safeAnalysis = redactTextForLLM(response).text;
+
+    // Use AI to structure the insights (strict JSON-only contract)
     const completion = await this.openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
+      model: process.env.OPENAI_MODEL || 'gpt-4o',
       messages: [
         {
           role: 'system',
-          content: 'Extract actionable insights from the following analysis. Return as JSON array.',
+          content: `Extract actionable insights from the analysis.
+
+Return ONLY a valid JSON object (no markdown, no code fences) with this schema:
+{
+  "insights": [
+    {
+      "type": "anomaly|recommendation|pattern|prediction",
+      "title": "string",
+      "description": "string",
+      "severity": "low|medium|high|critical",
+      "confidence": 0.0,
+      "actionItems": ["string"]
+    }
+  ]
+}`,
         },
         {
           role: 'user',
-          content: `Analysis: ${response}\n\nExtract insights in this format:
-          [{"type": "anomaly|recommendation|pattern|prediction", "title": "...", "description": "...",
-          "severity": "low|medium|high|critical", "confidence": 0.0-1.0, "actionItems": ["..."]}]`,
+          content: `Analysis:\n${safeAnalysis}`,
         },
       ],
-      temperature: 0.1,
+      temperature: 0,
       max_tokens: 800,
+      response_format: { type: 'json_object' },
     });
 
     try {
-      const insightsJson = JSON.parse(completion.choices[0]?.message?.content || '[]');
-      insights.push(...insightsJson);
+      const raw = completion.choices[0]?.message?.content || '{}';
+      const parsed = JSON.parse(raw);
+      const arr = Array.isArray(parsed) ? parsed : parsed?.insights;
+      if (Array.isArray(arr)) {
+        insights.push(...arr);
+      }
     } catch (error) {
       console.error('Failed to parse insights:', error);
     }

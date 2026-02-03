@@ -1,6 +1,6 @@
 # SmartPerfetto 待办事项
 
-最后更新: 2026-01-06
+最后更新: 2026-02-01
 
 ---
 
@@ -29,7 +29,7 @@
 - [x] 空结果智能诊断（自动分析 trace 内容帮助 AI 调整查询策略）
 
 ### Skill Engine V2 (YAML 驱动)
-- [x] 21+ 个分析 Skills (atomic + composite)
+- [x] 86 个分析 Skills (32 atomic + 27 composite + 25 pipeline + 2 deep)
 - [x] 8 种步骤类型 (atomic, skill, iterator, parallel, diagnostic, ai_decision, ai_summary, conditional)
 - [x] 滑动分析 Skill (Expert Edition v3.1) - 分层递进式分析
 - [x] 启动分析、ANR、内存、CPU、GPU、GC、LMK、Binder 等分析 Skills

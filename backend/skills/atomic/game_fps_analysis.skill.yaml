@@ -32,6 +32,8 @@ prerequisites:
     - process
   optional_tables:
     - expected_frame_timeline_slice
+  modules:
+    - android.frames.timeline
 
 thresholds:
   jank_rate:

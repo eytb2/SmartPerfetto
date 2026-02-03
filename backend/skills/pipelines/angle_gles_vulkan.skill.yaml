@@ -19,6 +19,11 @@ meta:
   doc_path: "rendering_pipelines/angle_gles_vulkan.md"
 
 detection:
+  required_signals:
+    # GLES-over-Vulkan 必须能看到 Vulkan present（否则更可能是 GLES-over-GL）
+    - slice_pattern: "*vkQueuePresentKHR*"
+      min_count: 1
+
   scoring_signals:
     - signal: has_angle
       slice_pattern: "*ANGLE*"
@@ -30,6 +35,11 @@ teaching:
     使用 ANGLE 库将 OpenGL ES 调用翻译为 Vulkan 命令。
     这种模式提供了更好的驱动兼容性和可能的性能提升，
     同时应用代码仍然使用熟悉的 OpenGL ES API。
+
+    经验要点:
+    - Android 生态中 ANGLE 常由 Chromium/WebView/自研内核启用（也可能被游戏引擎/应用直接集成）
+    - 该 pipeline 关注“GLES → Vulkan”的翻译链路；若仅看到 eglSwapBuffers 而缺少 vkQueuePresentKHR，
+      更可能是 GLES 原生或 ANGLE 的 OpenGL 后端
 
   mermaid: |
     sequenceDiagram
@@ -91,12 +101,18 @@ auto_pin:
       priority: 2
       reason: "应用逻辑 (生产)"
       expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的主线程"
 
-    - pattern: "^RenderThread(\\s+\\d+)?$"
+    - pattern: "^RenderThread(\\s+\\d+)?$|GLThread|ANGLE|Vulkan|Vk"
       match_by: name
       priority: 3
       reason: "ANGLE 翻译层 (传输)"
       expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的渲染/翻译线程"
 
     - pattern: "^VSYNC-sf$"
       match_by: name

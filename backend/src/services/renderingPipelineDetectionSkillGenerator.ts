@@ -12,15 +12,34 @@ const DEFAULT_DOC_PATH = 'rendering_pipelines/android_view_standard.md';
 const SCORE_THRESHOLD = 0.3;
 const MAX_CANDIDATES = 5;
 
-// Pipelines that represent orthogonal/system-level features, not the primary app rendering pipeline.
-// These should not win primary pipeline selection when other candidates exist.
-const FEATURE_ONLY_PIPELINE_IDS = new Set<string>(['VARIABLE_REFRESH_RATE', 'VIDEO_OVERLAY_HWC']);
+// Pipelines that represent orthogonal features (or implementation details) and should NOT win
+// the primary pipeline selection. They can still appear in the "features" list.
+//
+// Note: This is about *ranking*, not how we count their detection signals.
+const NON_PRIMARY_PIPELINE_IDS = new Set<string>([
+  'VARIABLE_REFRESH_RATE',
+  'VIDEO_OVERLAY_HWC',
+  'ANDROID_PIP_FREEFORM',
+  'ANDROID_VIEW_MULTI_WINDOW',
+  'ANGLE_GLES_VULKAN',
+]);
+
+// Pipelines whose detection signals often live outside the app processes (e.g. SurfaceFlinger/system_server),
+// so we should score them using global counts instead of app-filtered counts.
+const GLOBAL_SCOPE_PIPELINE_IDS = new Set<string>([
+  'VARIABLE_REFRESH_RATE',
+  'VIDEO_OVERLAY_HWC',
+  'ANDROID_PIP_FREEFORM',
+]);
 
 // Pipelines that should be surfaced in the "features" list.
 const FEATURE_PIPELINE_IDS = new Set<string>([
   'VARIABLE_REFRESH_RATE',
   'VIDEO_OVERLAY_HWC',
   'SURFACE_CONTROL_API',
+  'ANDROID_PIP_FREEFORM',
+  'ANDROID_VIEW_MULTI_WINDOW',
+  'ANGLE_GLES_VULKAN',
 ]);
 
 function sqlStringLiteral(value: string): string {
@@ -40,7 +59,7 @@ function normalizeNonNegativeInt(value: unknown, fallback = 0): number {
 }
 
 function getScopeColumn(pipelineId: string): ScopeColumn {
-  return FEATURE_ONLY_PIPELINE_IDS.has(pipelineId) ? 'global_cnt' : 'app_cnt';
+  return GLOBAL_SCOPE_PIPELINE_IDS.has(pipelineId) ? 'global_cnt' : 'app_cnt';
 }
 
 function buildCountSubquery(params: {
@@ -209,7 +228,7 @@ function buildDeterminePipelineSql(pipelines: PipelineDefinition[]): string {
   const pipelineDocsSql = buildPipelineDocsSql(pipelines);
   const signalsRowsSql = buildSignalsRowsSql(pipelines);
 
-  const primaryExcludeSql = Array.from(FEATURE_ONLY_PIPELINE_IDS)
+  const primaryExcludeSql = Array.from(NON_PRIMARY_PIPELINE_IDS)
     .map((id) => sqlStringLiteral(id))
     .join(', ');
 
@@ -620,23 +639,98 @@ function buildTraceRequirementsSql(): string {
 
 function buildActiveRenderingProcessesSql(): string {
   return `
+      WITH
+      dominant_process AS (
+        SELECT
+          p.upid,
+          p.name as process_name,
+          COUNT(*) as render_cnt
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE p.name IS NOT NULL
+          AND p.name NOT LIKE 'com.android.systemui%'
+          AND p.name NOT LIKE 'system_server%'
+          AND p.name NOT LIKE '/system/%'
+          AND s.name IS NOT NULL
+          AND (
+            (t.name = 'RenderThread' AND s.name GLOB 'DrawFrame*')
+            OR (t.name = 'main' AND s.name GLOB '*Choreographer#doFrame*')
+            OR (s.name GLOB '*lockCanvas*')
+            OR (s.name GLOB '*unlockCanvasAndPost*')
+            OR (s.name GLOB '*eglSwapBuffers*')
+            OR (s.name GLOB '*vkQueuePresentKHR*')
+            OR (s.name GLOB '*Swappy*')
+            OR (s.name GLOB '*FramePacing*')
+            OR (s.name GLOB '*FrameTimeline*')
+            OR (s.name GLOB '*updateTexImage*')
+            OR (s.name GLOB '*Rasterizer::DrawToSurfaces*')
+            OR (s.name GLOB '*Engine::BeginFrame*')
+            OR (s.name GLOB '*EntityPass*')
+          )
+        GROUP BY p.upid
+        HAVING COUNT(*) > 5
+        ORDER BY render_cnt DESC
+        LIMIT 1
+      ),
+      dominant_pkg AS (
+        SELECT
+          CASE
+            WHEN instr(process_name, ':') > 0 THEN substr(process_name, 1, instr(process_name, ':') - 1)
+            ELSE process_name
+          END as pkg
+        FROM dominant_process
+      ),
+      app_filter_upids AS (
+        SELECT p.upid
+        FROM process p
+        WHERE '\${package}' <> '' AND p.name GLOB '\${package}*'
+        UNION
+        SELECT p.upid
+        FROM process p
+        JOIN dominant_pkg dp
+        WHERE '\${package}' = ''
+          AND dp.pkg IS NOT NULL
+          AND p.name GLOB dp.pkg || '*'
+          AND p.name NOT LIKE 'com.android.systemui%'
+          AND p.name NOT LIKE 'system_server%'
+          AND p.name NOT LIKE '/system/%'
+      ),
+      marker_slices AS (
+        SELECT
+          p.upid,
+          p.name as process_name,
+          t.tid,
+          t.name as thread_name
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE p.upid IN (SELECT upid FROM app_filter_upids)
+          AND p.name IS NOT NULL
+          AND s.name IS NOT NULL
+          AND (
+            (t.name = 'RenderThread' AND s.name GLOB 'DrawFrame*')
+            OR (s.name GLOB '*eglSwapBuffers*')
+            OR (s.name GLOB '*vkQueuePresentKHR*')
+            OR (s.name GLOB '*Swappy*')
+            OR (s.name GLOB '*FramePacing*')
+            OR (s.name GLOB '*updateTexImage*')
+            OR (s.name GLOB '*Rasterizer::DrawToSurfaces*')
+            OR (s.name GLOB '*Engine::BeginFrame*')
+            OR (s.name GLOB '*EntityPass*')
+            OR (s.name GLOB '*lockCanvas*')
+            OR (s.name GLOB '*unlockCanvasAndPost*')
+          )
+      )
       SELECT
-        p.upid,
-        p.name as process_name,
+        upid,
+        process_name,
         COUNT(*) as frame_count,
-        MAX(t.tid) as render_thread_tid
-      FROM slice s
-      JOIN thread_track tt ON s.track_id = tt.id
-      JOIN thread t ON tt.utid = t.utid
-      JOIN process p ON t.upid = p.upid
-      WHERE t.name = 'RenderThread'
-        AND s.name GLOB 'DrawFrame*'
-        AND p.name IS NOT NULL
-        AND (p.name GLOB '\${package}*' OR '\${package}' = '')
-        AND p.name NOT LIKE 'com.android.systemui%'
-        AND p.name NOT LIKE '/system/%'
-        AND p.name NOT LIKE 'system_server%'
-      GROUP BY p.upid
+        MAX(CASE WHEN thread_name = 'RenderThread' THEN tid ELSE NULL END) as render_thread_tid
+      FROM marker_slices
+      GROUP BY upid
       HAVING frame_count > 5
       ORDER BY frame_count DESC
       LIMIT 10
@@ -658,7 +752,7 @@ export async function generateRenderingPipelineDetectionSkill(): Promise<SkillDe
 
   return {
     name: 'rendering_pipeline_detection',
-    version: '3.0',
+    version: '3.1',
     type: 'composite',
     category: 'rendering',
     meta: {

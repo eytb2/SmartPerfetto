@@ -8,6 +8,8 @@
 import { EventEmitter } from 'events';
 import { traceProcessorConfig } from '../config';
 
+const IS_TEST_ENV = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
+
 export interface PortAllocation {
   port: number;
   traceId: string;
@@ -39,7 +41,9 @@ export class PortPool extends EventEmitter {
       this.availablePorts.add(port);
     }
 
-    console.log(`[PortPool] Initialized with ${this.availablePorts.size} ports (${minPort}-${maxPort})`);
+    if (!IS_TEST_ENV) {
+      console.log(`[PortPool] Initialized with ${this.availablePorts.size} ports (${minPort}-${maxPort})`);
+    }
   }
 
   /**
@@ -52,7 +56,9 @@ export class PortPool extends EventEmitter {
     // Check if this trace already has a port
     const existing = this.allocations.get(traceId);
     if (existing) {
-      console.log(`[PortPool] Trace ${traceId} already has port ${existing.port}`);
+      if (!IS_TEST_ENV) {
+        console.log(`[PortPool] Trace ${traceId} already has port ${existing.port}`);
+      }
       return existing.port;
     }
 
@@ -72,7 +78,9 @@ export class PortPool extends EventEmitter {
     this.allocations.set(traceId, allocation);
     this.portToTraceId.set(port, traceId);
 
-    console.log(`[PortPool] Allocated port ${port} to trace ${traceId} (${this.availablePorts.size} available)`);
+    if (!IS_TEST_ENV) {
+      console.log(`[PortPool] Allocated port ${port} to trace ${traceId} (${this.availablePorts.size} available)`);
+    }
     this.emit('allocated', { port, traceId });
 
     return port;
@@ -86,7 +94,9 @@ export class PortPool extends EventEmitter {
   release(traceId: string): boolean {
     const allocation = this.allocations.get(traceId);
     if (!allocation) {
-      console.log(`[PortPool] Trace ${traceId} has no port to release`);
+      if (!IS_TEST_ENV) {
+        console.log(`[PortPool] Trace ${traceId} has no port to release`);
+      }
       return false;
     }
 
@@ -100,7 +110,9 @@ export class PortPool extends EventEmitter {
       this.availablePorts.add(port);
     }
 
-    console.log(`[PortPool] Released port ${port} from trace ${traceId} (${this.availablePorts.size} available)`);
+    if (!IS_TEST_ENV) {
+      console.log(`[PortPool] Released port ${port} from trace ${traceId} (${this.availablePorts.size} available)`);
+    }
     this.emit('released', { port, traceId });
 
     return true;
@@ -117,7 +129,9 @@ export class PortPool extends EventEmitter {
       // Port might not be tracked, just add it back to available
       if (port >= this.minPort && port <= this.maxPort && !this.availablePorts.has(port) && !this.blockedPorts.has(port)) {
         this.availablePorts.add(port);
-        console.log(`[PortPool] Force-released untracked port ${port}`);
+        if (!IS_TEST_ENV) {
+          console.log(`[PortPool] Force-released untracked port ${port}`);
+        }
         return true;
       }
       return false;

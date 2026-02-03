@@ -23,6 +23,58 @@ import {
 } from '../types';
 import { BaseSubAgent } from './base/baseSubAgent';
 import { ModelRouter } from '../core/modelRouter';
+import { isPlainObject, isStringArray, LlmJsonSchema, parseLlmJson } from '../../utils/llmJson';
+
+type EvaluationJsonPayload = {
+  qualityScore: number;
+  completenessScore: number;
+  contradictions: Contradiction[];
+  feedback: EvaluationFeedback;
+  passed: boolean;
+  needsImprovement: boolean;
+};
+
+const EVALUATION_JSON_SCHEMA: LlmJsonSchema<EvaluationJsonPayload> = {
+  name: 'evaluation_json@1.0.0',
+  validate: (value: unknown): value is EvaluationJsonPayload => {
+    if (!isPlainObject(value)) return false;
+    if (typeof (value as any).qualityScore !== 'number') return false;
+    if (typeof (value as any).completenessScore !== 'number') return false;
+    if (!Array.isArray((value as any).contradictions)) return false;
+    if (!isPlainObject((value as any).feedback)) return false;
+    if (typeof (value as any).passed !== 'boolean') return false;
+    if (typeof (value as any).needsImprovement !== 'boolean') return false;
+    return true;
+  },
+};
+
+const CONTRADICTIONS_JSON_SCHEMA: LlmJsonSchema<Contradiction[]> = {
+  name: 'contradictions_json@1.0.0',
+  validate: (value: unknown): value is Contradiction[] => {
+    if (!Array.isArray(value)) return false;
+    for (const item of value) {
+      if (!isPlainObject(item)) return false;
+      if (typeof (item as any).finding1 !== 'string') return false;
+      if (typeof (item as any).finding2 !== 'string') return false;
+      if (typeof (item as any).description !== 'string') return false;
+      if (!['minor', 'major', 'critical'].includes(String((item as any).severity))) return false;
+    }
+    return true;
+  },
+};
+
+const EVALUATION_FEEDBACK_JSON_SCHEMA: LlmJsonSchema<EvaluationFeedback> = {
+  name: 'evaluation_feedback_json@1.0.0',
+  validate: (value: unknown): value is EvaluationFeedback => {
+    if (!isPlainObject(value)) return false;
+    if (!isStringArray((value as any).strengths)) return false;
+    if (!isStringArray((value as any).weaknesses)) return false;
+    if (!isStringArray((value as any).missingAspects)) return false;
+    if (!isStringArray((value as any).improvementSuggestions)) return false;
+    if (!isStringArray((value as any).priorityActions)) return false;
+    return true;
+  },
+};
 
 // 默认配置
 const DEFAULT_CONFIG: SubAgentConfig = {
@@ -111,19 +163,16 @@ ${findings.map((f, i) => `${i + 1}. [${f.severity}] ${f.title}: ${f.description}
 
   protected parseResponse(response: string, _context: SubAgentContext): SubAgentResult {
     try {
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return {
-          agentId: this.config.id,
-          success: true,
-          findings: [],
-          suggestions: parsed.feedback?.improvementSuggestions || [],
-          data: { evaluation: parsed },
-          confidence: parsed.qualityScore || 0.5,
-          executionTimeMs: 0,
-        };
-      }
+      const parsed = parseLlmJson<EvaluationJsonPayload>(response, EVALUATION_JSON_SCHEMA);
+      return {
+        agentId: this.config.id,
+        success: true,
+        findings: [],
+        suggestions: parsed.feedback?.improvementSuggestions || [],
+        data: { evaluation: parsed },
+        confidence: typeof parsed.qualityScore === 'number' ? parsed.qualityScore : 0.5,
+        executionTimeMs: 0,
+      };
     } catch (error) {
       // 解析失败
     }
@@ -201,7 +250,13 @@ ${findings.map(f => `- [${f.severity}] ${f.title}: ${f.description}`).join('\n')
 请返回一个 0-1 之间的质量分数，只返回数字：`;
 
     try {
-      const response = await this.modelRouter.callWithFallback(prompt, 'evaluation');
+      const response = await this.modelRouter.callWithFallback(prompt, 'evaluation', {
+        temperature: 0,
+        maxTokens: 32,
+        promptId: 'agent.evaluatorAgent.qualityScore',
+        promptVersion: '1.0.0',
+        contractVersion: 'quality_score_number@1.0.0',
+      });
       const score = parseFloat(response.response.trim());
       if (!isNaN(score) && score >= 0 && score <= 1) {
         return score;
@@ -245,11 +300,13 @@ ${findings.map((f, i) => `${i + 1}. [${f.severity}] ${f.title}: ${f.description}
 如果没有矛盾，返回空数组: []`;
 
     try {
-      const response = await this.modelRouter.callWithFallback(prompt, 'evaluation');
-      const jsonMatch = response.response.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]) as Contradiction[];
-      }
+      const response = await this.modelRouter.callWithFallback(prompt, 'evaluation', {
+        jsonMode: true,
+        promptId: 'agent.evaluatorAgent.contradictions',
+        promptVersion: '1.0.0',
+        contractVersion: CONTRADICTIONS_JSON_SCHEMA.name,
+      });
+      return parseLlmJson<Contradiction[]>(response.response, CONTRADICTIONS_JSON_SCHEMA);
     } catch (error) {
       // 检测失败
     }
@@ -274,7 +331,13 @@ ${findings.map(f => `- ${f.title}`).join('\n')}
 请返回一个 0-1 之间的完整性分数，只返回数字：`;
 
     try {
-      const response = await this.modelRouter.callWithFallback(prompt, 'evaluation');
+      const response = await this.modelRouter.callWithFallback(prompt, 'evaluation', {
+        temperature: 0,
+        maxTokens: 32,
+        promptId: 'agent.evaluatorAgent.completenessScore',
+        promptVersion: '1.0.0',
+        contractVersion: 'completeness_score_number@1.0.0',
+      });
       const score = parseFloat(response.response.trim());
       if (!isNaN(score) && score >= 0 && score <= 1) {
         return score;
@@ -328,11 +391,13 @@ ${findings.map(f => `- [${f.severity}] ${f.title}`).join('\n')}
 }`;
 
     try {
-      const response = await this.modelRouter.callWithFallback(prompt, 'evaluation');
-      const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]) as EvaluationFeedback;
-      }
+      const response = await this.modelRouter.callWithFallback(prompt, 'evaluation', {
+        jsonMode: true,
+        promptId: 'agent.evaluatorAgent.feedback',
+        promptVersion: '1.0.0',
+        contractVersion: EVALUATION_FEEDBACK_JSON_SCHEMA.name,
+      });
+      return parseLlmJson<EvaluationFeedback>(response.response, EVALUATION_FEEDBACK_JSON_SCHEMA);
     } catch (error) {
       // 生成失败
     }

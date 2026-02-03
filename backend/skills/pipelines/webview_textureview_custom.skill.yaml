@@ -105,17 +105,31 @@ auto_pin:
       priority: 2
       reason: "UI 集成 (生产)"
       expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的宿主主线程"
 
     - pattern: "CrRendererMain|WebViewCore|UCCore|X5"
       match_by: name
       priority: 3
       reason: "定制内核渲染 (生产/传输)"
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 属于当前 app 的内核进程/线程（多 app trace 下减少噪音）"
+
+    - pattern: "SurfaceTexture|updateTexImage|onFrameAvailable"
+      match_by: name
+      priority: 3.5
+      reason: "SurfaceTexture (纹理生产-消费/出图关键)"
 
     - pattern: "^RenderThread(\\s+\\d+)?$"
       match_by: name
       priority: 4
       reason: "纹理合成 (传输)"
       expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的 RenderThread"
 
     - pattern: "^VSYNC-sf$"
       match_by: name

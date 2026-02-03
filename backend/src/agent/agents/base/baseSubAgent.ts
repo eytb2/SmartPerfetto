@@ -30,6 +30,7 @@ import {
   ToolUseEventData,
   IterationEventData,
 } from '../../hooks';
+import { isPlainObject, LlmJsonSchema, parseLlmJson } from '../../../utils/llmJson';
 
 /**
  * 工具接口
@@ -40,6 +41,13 @@ export interface AgentTool {
   execute(params: Record<string, any>, context: SubAgentContext): Promise<ToolResult>;
 }
 
+export type NextAction =
+  | string
+  | {
+      toolName: string;
+      params?: Record<string, any>;
+    };
+
 /**
  * 思考结果
  */
@@ -47,9 +55,30 @@ export interface ThinkResult {
   observation: string;
   reasoning: string;
   decision: 'continue' | 'conclude' | 'delegate';
-  nextActions: string[];
+  nextActions: NextAction[];
   confidence: number;
 }
+
+const THINK_RESULT_JSON_SCHEMA: LlmJsonSchema<ThinkResult> = {
+  name: 'think_json@1.1.0',
+  validate: (value: unknown): value is ThinkResult => {
+    if (!isPlainObject(value)) return false;
+    if (typeof (value as any).observation !== 'string') return false;
+    if (typeof (value as any).reasoning !== 'string') return false;
+    if (!['continue', 'conclude', 'delegate'].includes(String((value as any).decision))) return false;
+    const nextActions = (value as any).nextActions;
+    if (!Array.isArray(nextActions)) return false;
+    for (const action of nextActions) {
+      if (typeof action === 'string') continue;
+      if (!isPlainObject(action)) return false;
+      if (typeof (action as any).toolName !== 'string') return false;
+      const params = (action as any).params;
+      if (params !== undefined && params !== null && !isPlainObject(params)) return false;
+    }
+    if (typeof (value as any).confidence !== 'number') return false;
+    return true;
+  },
+};
 
 /**
  * SubAgent 基类
@@ -234,7 +263,14 @@ export abstract class BaseSubAgent extends EventEmitter implements StageExecutor
     const prompt = this.buildThinkPrompt(context, currentFindings);
     const taskType = this.config.preferredModel || 'general';
 
-    const response = await this.modelRouter.callWithFallback(prompt, taskType);
+    const response = await this.modelRouter.callWithFallback(prompt, taskType, {
+      sessionId: context.sessionId,
+      traceId: context.traceId,
+      jsonMode: true,
+      promptId: `agent.${this.config.id}.think`,
+      promptVersion: '1.0.0',
+      contractVersion: THINK_RESULT_JSON_SCHEMA.name,
+    });
 
     return this.parseThinkResponse(response.response);
   }
@@ -242,21 +278,64 @@ export abstract class BaseSubAgent extends EventEmitter implements StageExecutor
   /**
    * 执行动作
    */
-  protected async act(action: string, context: SubAgentContext): Promise<ToolResult | null> {
-    // 解析动作（格式：toolName:params）
-    const [toolName, paramsStr] = action.split(':');
-    const tool = this.tools.get(toolName);
+  protected async act(action: NextAction, context: SubAgentContext): Promise<ToolResult | null> {
+    const startTime = Date.now();
 
-    if (!tool) {
-      this.emit('warning', { message: `Unknown tool: ${toolName}` });
-      return null;
+    let toolName = '';
+    let params: Record<string, any> = {};
+    let parseError: string | undefined;
+
+    if (typeof action === 'string') {
+      const cleaned = (action || '').trim().replace(/^[-•*]\s*/, '').trim();
+      const colonIndex = cleaned.indexOf(':');
+      if (colonIndex < 0) {
+        toolName = cleaned;
+      } else {
+        toolName = cleaned.slice(0, colonIndex).trim();
+        const paramsText = cleaned.slice(colonIndex + 1).trim();
+        if (paramsText) {
+          try {
+            const parsedParams = parseLlmJson<any>(paramsText);
+            if (!isPlainObject(parsedParams)) {
+              throw new Error('params must be a JSON object');
+            }
+            params = parsedParams as Record<string, any>;
+          } catch (error: any) {
+            parseError = error?.message || String(error);
+          }
+        }
+      }
+    } else if (action && typeof action === 'object') {
+      toolName = String((action as any).toolName || '').trim();
+      const candidateParams = (action as any).params;
+      if (candidateParams !== undefined && candidateParams !== null) {
+        if (!isPlainObject(candidateParams)) {
+          parseError = 'params must be a JSON object';
+        } else {
+          params = candidateParams as Record<string, any>;
+        }
+      }
     }
 
-    let params: Record<string, any>;
-    try {
-      params = paramsStr ? JSON.parse(paramsStr) : {};
-    } catch {
-      params = {};
+    if (!toolName) {
+      const result: ToolResult = {
+        success: false,
+        error: 'Invalid nextActions entry: missing toolName',
+        executionTimeMs: Date.now() - startTime,
+      };
+      this.emit('warning', { message: result.error });
+      return result;
+    }
+
+    const tool = this.tools.get(toolName);
+    if (!tool) {
+      const result: ToolResult = {
+        success: false,
+        error: `Unknown tool: ${toolName}`,
+        executionTimeMs: Date.now() - startTime,
+      };
+      this.emit('warning', { message: result.error });
+      return result;
     }
 
     // === Tool Use Pre-Hook ===
@@ -264,6 +343,7 @@ export abstract class BaseSubAgent extends EventEmitter implements StageExecutor
       toolName,
       params,
       agentId: this.config.id,
+      ...(parseError ? { error: `Invalid params JSON: ${parseError}` } : {}),
     };
     const preResult = await this.hookRegistry.executePre(
       'tool:use',
@@ -282,6 +362,31 @@ export abstract class BaseSubAgent extends EventEmitter implements StageExecutor
     const finalParams = preResult.modifiedData
       ? (preResult.modifiedData as ToolUseEventData).params ?? params
       : params;
+
+    // Strict: if params cannot be parsed AND hooks didn't replace it, do not execute with silent "{}".
+    const repairedByHook =
+      !!parseError &&
+      preResult.modifiedData !== undefined &&
+      (preResult.modifiedData as ToolUseEventData).params !== params;
+
+    if (parseError && !repairedByHook) {
+      const result: ToolResult = {
+        success: false,
+        error: `Invalid tool params for ${toolName}: ${parseError}`,
+        executionTimeMs: Date.now() - startTime,
+      };
+
+      await this.hookRegistry.executePost(
+        'tool:use',
+        context.sessionId,
+        { ...toolUseData, params: finalParams, result },
+        this.hookContext || undefined
+      );
+
+      this.emit('toolCall', { toolName, params: finalParams, result });
+      this.emit('warning', { message: result.error });
+      return result;
+    }
 
     try {
       const result = await tool.execute(finalParams, context);
@@ -341,14 +446,17 @@ ${findingsSummary}
 如果已经有足够的信息，可以选择结束分析。
 如果需要更多数据，选择合适的工具并指定参数。
 
-请以 JSON 格式回复：
-{
-  "observation": "观察到的情况",
-  "reasoning": "推理过程",
-  "decision": "continue | conclude",
-  "nextActions": ["tool1:{params}", "tool2:{params}"],
-  "confidence": 0.0-1.0
-}`;
+	请以 JSON 格式回复：
+	{
+	  "observation": "观察到的情况",
+	  "reasoning": "推理过程",
+	  "decision": "continue | conclude",
+	  "nextActions": [
+	    { "toolName": "tool1", "params": { "k": "v" } },
+	    { "toolName": "tool2", "params": {} }
+	  ],
+	  "confidence": 0.0-1.0
+	}`;
   }
 
   /**
@@ -371,18 +479,14 @@ ${findingsSummary}
    */
   protected parseThinkResponse(response: string): ThinkResult {
     try {
-      // 尝试提取 JSON
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return {
-          observation: parsed.observation || '',
-          reasoning: parsed.reasoning || '',
-          decision: parsed.decision || 'continue',
-          nextActions: parsed.nextActions || [],
-          confidence: parsed.confidence || 0,
-        };
-      }
+      const parsed = parseLlmJson<ThinkResult>(response, THINK_RESULT_JSON_SCHEMA);
+      return {
+        observation: parsed.observation || '',
+        reasoning: parsed.reasoning || '',
+        decision: parsed.decision || 'continue',
+        nextActions: parsed.nextActions || [],
+        confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0,
+      };
     } catch (error) {
       // 解析失败
     }
@@ -434,7 +538,13 @@ ${findings.map(f => `- [${f.severity}] ${f.title}: ${f.description}`).join('\n')
 请直接列出建议，每条一行：`;
 
     try {
-      const response = await this.modelRouter.callWithFallback(prompt, 'synthesis');
+      const response = await this.modelRouter.callWithFallback(prompt, 'synthesis', {
+        sessionId: context.sessionId,
+        traceId: context.traceId,
+        promptId: `agent.${this.config.id}.suggestions`,
+        promptVersion: '1.0.0',
+        contractVersion: 'suggestions_text@1.0.0',
+      });
       return response.response
         .split('\n')
         .filter(line => line.trim().length > 0)

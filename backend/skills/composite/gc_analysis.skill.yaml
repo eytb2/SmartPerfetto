@@ -20,6 +20,9 @@ meta:
 prerequisites:
   required_tables:
     - slice
+  modules:
+    - android.garbage_collection
+    - android.frames
 display:
   name: "GC 分析"
   level: expert

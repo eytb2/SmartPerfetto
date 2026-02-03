@@ -116,17 +116,26 @@ auto_pin:
       priority: 2
       reason: "应用逻辑 (生产)"
       expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的主线程"
 
     - pattern: "^RenderThread(\\s+\\d+)?$|Vulkan|Vk"
       match_by: name
       priority: 3
       reason: "Vulkan 渲染线程 (传输)"
       expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的 Vulkan/渲染线程"
 
     - pattern: "Swappy|FramePacing|VkQueue"
       match_by: name
       priority: 4
       reason: "帧节拍/队列相关线程 (传输)"
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的帧节拍/队列线程"
 
     - pattern: "^VSYNC-sf$"
       match_by: name

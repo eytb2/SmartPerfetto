@@ -19,6 +19,12 @@ meta:
   doc_path: "rendering_pipelines/opengl_es.md"
 
 detection:
+  # Narrow to the typical GLSurfaceView / GLThread-driven GLES pipeline to avoid
+  # misclassifying HWUI (RenderThread) traces where eglSwapBuffers may also appear.
+  required_signals:
+    - thread_pattern: "*GLThread*"
+      min_count: 1
+
   scoring_signals:
     - signal: has_egl_swap
       slice_pattern: "*eglSwapBuffers*"
@@ -94,12 +100,18 @@ auto_pin:
       match_by: name
       priority: 2
       reason: "GL 渲染线程 (生产/传输)"
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的 GLThread"
 
     - pattern: "^RenderThread(\\s+\\d+)?$"
       match_by: name
       priority: 3
       reason: "RenderThread (如存在，用于 View 系统合成)"
       expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的 RenderThread（混合场景下可用）"
 
     - pattern: "^VSYNC-sf$"
       match_by: name

@@ -19,35 +19,28 @@ meta:
   doc_path: "rendering_pipelines/android_pip_freeform.md"
 
 detection:
-  # Required: PIP/Freeform is still Android View rendering, needs main + RenderThread
-  required_signals:
-    - thread: main
-      min_count: 1
-    - thread: RenderThread
-      min_count: 1
-
   scoring_signals:
-    - signal: has_picture_in_picture
+    # Prefer system-level markers (WindowManager / SurfaceFlinger) over app-side APIs to reduce false positives.
+    - signal: has_enter_pip_api
+      slice_pattern: "*enterPictureInPictureMode*"
+      weight: 50
+    - signal: has_pip_marker
       slice_pattern: "*PictureInPicture*"
-      weight: 45
-    - signal: has_pip_abbrev
-      slice_pattern: "*PIP*"
-      weight: 25
-    - signal: has_freeform_task
-      slice_pattern: "*FreeformTask*"
-      weight: 35
-    - signal: has_freeform
-      slice_pattern: "*Freeform*"
-      weight: 25
-    - signal: has_windowing_mode
-      slice_pattern: "*windowingMode*"
-      weight: 20
+      weight: 50
+    - signal: has_wms_resize_task
+      slice_pattern: "*WMS.resizeTask*"
+      weight: 50
 
 teaching:
   title: "Android PIP/Freeform 渲染管线"
   summary: |
     画中画 (PIP) 和自由窗口 (Freeform) 模式的渲染管线。这些窗口有特殊的
     缩放、移动和 Z-order 管理需求，需要与系统合成器紧密配合。
+
+    版本要点（以 AOSP/厂商实现为准）:
+    - Android 8.0+：PIP 能力逐步完善（具体行为依设备/ROM）
+    - Android 12+：Freeform/多窗口 Resize 链路更依赖 BLAST Sync，减少“黑边/拉伸”类竞态
+    - 新版本持续在 Shell/WM 转场、SyncId、FrameTimeline 等可观测性上演进，建议用 trace 验证
 
   mermaid: |
     sequenceDiagram
@@ -105,6 +98,15 @@ teaching:
     - name: "applyTransaction"
       thread: any
       description: "提交窗口几何/Buffer 相关 Transaction（PIP/Freeform 频繁发生）"
+    - name: "WMS.resizeTask"
+      thread: any
+      description: "Freeform resize 相关标记（不同版本/厂商可能不同）"
+    - name: "Transaction.apply"
+      thread: any
+      description: "Transaction 应用（可结合 SyncId 观察是否为同步提交）"
+    - name: "SurfaceFlinger.waitForSync"
+      thread: any
+      description: "等待同步提交（过长时常表示 App/生产侧响应慢）"
 
 auto_pin:
   instructions:
@@ -119,12 +121,18 @@ auto_pin:
       priority: 2
       reason: "PIP 控制逻辑 (生产)"
       expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的主线程（避免 pin 到系统/其他 app 的 main）"
 
     - pattern: "^RenderThread(\\s+\\d+)?$"
       match_by: name
       priority: 3
       reason: "窗口渲染 (传输)"
       expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的 RenderThread（若为纯 SurfaceView/游戏则可能为空）"
 
     - pattern: "^VSYNC-sf$"
       match_by: name

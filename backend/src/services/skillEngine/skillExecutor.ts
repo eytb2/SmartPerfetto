@@ -30,6 +30,7 @@ import {
   SkillEvent,
 } from './types';
 import logger from '../../utils/logger';
+import { redactObjectForLLM, redactTextForLLM } from '../../utils/llmPrivacy';
 import {
   DataEnvelope,
   ColumnDefinition,
@@ -2010,7 +2011,7 @@ export class SkillExecutor {
         // 常见的时间戳字段名
         const tsFields = ['ts', 'start_ts', 'timestamp', 'begin_ts'];
         for (const field of tsFields) {
-          if (firstRow[field]) {
+          if (firstRow[field] !== undefined && firstRow[field] !== null) {
             return String(firstRow[field]);
           }
         }
@@ -2038,7 +2039,13 @@ export class SkillExecutor {
       };
     }
 
-    const prompt = ExpressionEvaluator.evaluate(step.prompt, context);
+    const basePrompt = ExpressionEvaluator.evaluate(step.prompt, context);
+    const inputsPayloadRaw = this.buildAIInputsPayload(step.inputs, context);
+    const inputsPayload = inputsPayloadRaw ? (redactObjectForLLM(inputsPayloadRaw).value as any) : null;
+    const promptRaw = inputsPayload
+      ? `${basePrompt}\n\n[INPUT_DATA_JSON]\n${JSON.stringify(inputsPayload, null, 2)}\n[/INPUT_DATA_JSON]\n\n严格要求：只根据 INPUT_DATA_JSON 中提供的数据做判断；缺数据就明确说明缺口。`
+      : basePrompt;
+    const prompt = redactTextForLLM(promptRaw).text;
 
     this.emit({
       type: 'ai_thinking',
@@ -2047,7 +2054,7 @@ export class SkillExecutor {
       data: { prompt },
     });
 
-    const response = await this.callAI(prompt, context);
+    const response = await this.callAI(prompt, context, 'evaluation');
 
     this.emit({
       type: 'ai_response',
@@ -2084,7 +2091,13 @@ export class SkillExecutor {
       };
     }
 
-    const prompt = ExpressionEvaluator.evaluate(step.prompt, context);
+    const basePrompt = ExpressionEvaluator.evaluate(step.prompt, context);
+    const inputsPayloadRaw = this.buildAIInputsPayload(step.inputs, context);
+    const inputsPayload = inputsPayloadRaw ? (redactObjectForLLM(inputsPayloadRaw).value as any) : null;
+    const promptRaw = inputsPayload
+      ? `${basePrompt}\n\n[INPUT_DATA_JSON]\n${JSON.stringify(inputsPayload, null, 2)}\n[/INPUT_DATA_JSON]\n\n严格要求：只基于 INPUT_DATA_JSON 中的实际数据分析；不要编造数值。若字段不存在/为空，请明确说明无法判断，并给出下一步建议（需要补哪些表/模块/操作）。`
+      : basePrompt;
+    const prompt = redactTextForLLM(promptRaw).text;
 
     this.emit({
       type: 'ai_thinking',
@@ -2093,7 +2106,7 @@ export class SkillExecutor {
       data: { prompt },
     });
 
-    const response = await this.callAI(prompt, context);
+    const response = await this.callAI(prompt, context, 'synthesis');
 
     this.emit({
       type: 'ai_response',
@@ -2161,17 +2174,18 @@ export class SkillExecutor {
   /**
    * 调用 AI 服务
    */
-  private async callAI(prompt: string, context: SkillExecutionContext): Promise<string> {
+  private async callAI(prompt: string, _context: SkillExecutionContext, taskType: any = 'general'): Promise<string> {
     if (!this.aiService) {
       return '';
     }
 
+    const safePrompt = redactTextForLLM(prompt).text;
     try {
       if (typeof this.aiService.chat === 'function') {
-        return await this.aiService.chat(prompt);
+        return await this.aiService.chat(safePrompt);
       }
       if (typeof this.aiService.callWithFallback === 'function') {
-        const result = await this.aiService.callWithFallback(prompt, 'general');
+        const result = await this.aiService.callWithFallback(safePrompt, taskType, { temperature: 0 });
         return result?.response || result?.content || '';
       }
       throw new Error('AI service does not implement chat');
@@ -2179,6 +2193,70 @@ export class SkillExecutor {
       console.error('[SkillExecutor] AI call failed:', error.message);
       return '';
     }
+  }
+
+  /**
+   * Build a compact, deterministic payload for ai_summary/ai_decision steps.
+   *
+   * Note: step.inputs uses save_as names (preferred) or step ids.
+   * We intentionally sample rows to avoid prompt bloat.
+   */
+  private buildAIInputsPayload(
+    inputs: string[] | undefined,
+    context: SkillExecutionContext
+  ): Record<string, any> | null {
+    if (!inputs || inputs.length === 0) return null;
+
+    const payload: Record<string, any> = {};
+    const maxSampleRows = 5;
+    const maxColumns = 64;
+
+    for (const inputName of inputs) {
+      const value = context.variables[inputName] ?? context.results[inputName]?.data;
+
+      if (value === undefined) {
+        payload[inputName] = { missing: true };
+        continue;
+      }
+
+      if (Array.isArray(value)) {
+        const count = value.length;
+        const firstRow = count > 0 ? value[0] : undefined;
+        const columns =
+          firstRow && typeof firstRow === 'object' && !Array.isArray(firstRow)
+            ? Object.keys(firstRow as Record<string, any>).slice(0, maxColumns)
+            : undefined;
+
+        const sample = value.slice(0, Math.min(count, maxSampleRows)).map((row) => {
+          if (row && typeof row === 'object') return this.extractKeyFields(row);
+          return row;
+        });
+
+        payload[inputName] = {
+          type: 'array',
+          count,
+          columns,
+          sample,
+          truncated: count > maxSampleRows,
+        };
+        continue;
+      }
+
+      if (value && typeof value === 'object') {
+        payload[inputName] = {
+          type: 'object',
+          value: this.extractKeyFields(value),
+        };
+        continue;
+      }
+
+      payload[inputName] = {
+        type: typeof value,
+        value,
+      };
+    }
+
+    return payload;
   }
 
   /**

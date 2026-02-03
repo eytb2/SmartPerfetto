@@ -40,6 +40,7 @@ import { resolveFollowUp, FollowUpResolution } from './followUpHandler';
 import { CircuitBreaker } from './circuitBreaker';
 import { resolveDrillDown, DrillDownResolved } from './drillDownResolver';
 import { applyCapturedEntities } from './entityCapture';
+import { detectAdbContext } from '../../services/adb';
 
 import {
   AgentDrivenOrchestratorConfig,
@@ -126,6 +127,47 @@ export class AgentDrivenOrchestrator extends EventEmitter {
       // 1. Initialize shared context
       const sharedContext = this.messageBus.createSharedContext(sessionId, traceId);
 
+      // 1.1 Detect ADB collaboration context (best-effort; never fail analysis)
+      let adbContext: any = undefined;
+      try {
+        adbContext = await detectAdbContext(options.adb, options.traceProcessorService, traceId);
+        sharedContext.userContext = {
+          ...(sharedContext.userContext || {}),
+          adb: adbContext,
+        };
+
+        const selectedSerial = adbContext?.availability?.selectedSerial;
+        const matchStatus = adbContext?.traceMatch?.status;
+        emitter.emitUpdate('progress', {
+          phase: 'adb_context',
+          message: adbContext?.availability?.installed
+            ? (adbContext?.enabled
+              ? `检测到 ADB 设备${selectedSerial ? ` (${selectedSerial})` : ''}，已启用协同`
+              : `检测到 ADB${selectedSerial ? ` 设备 (${selectedSerial})` : ''}，但未启用协同（mode=${adbContext?.mode || 'auto'}，match=${matchStatus || 'unknown'}）`)
+            : '未检测到 ADB（已忽略）',
+          adb: {
+            mode: adbContext?.mode,
+            enabled: adbContext?.enabled,
+            installed: adbContext?.availability?.installed,
+            selectedSerial,
+            deviceCount: Array.isArray(adbContext?.availability?.devices)
+              ? adbContext.availability.devices.length
+              : 0,
+            matchStatus,
+            matchConfidence: adbContext?.traceMatch?.confidence,
+            warnings: adbContext?.warnings,
+          },
+        });
+      } catch (e: any) {
+        emitter.log(`[ADB] detectAdbContext failed: ${e?.message || 'unknown error'}`);
+      }
+
+      // Enrich options with resolved adbContext for downstream task planning/tools.
+      const effectiveOptions: AnalysisOptions = {
+        ...options,
+        ...(adbContext ? { adbContext } : {}),
+      };
+
       // 2. Understand intent WITH session context for multi-turn awareness
       emitter.emitUpdate('progress', { phase: 'understanding', message: '理解用户意图' });
       const intent = await understandIntent(query, sessionContext, this.modelRouter, emitter);
@@ -154,6 +196,7 @@ export class AgentDrivenOrchestrator extends EventEmitter {
       // Fix: 对于 drill-down follow-up，如果目标实体已在 EntityStore 中有完整分析，
       // 跳过假设生成，避免重复工作
       let initialHypotheses: Hypothesis[] = [];
+      const isClarifyFollowUp = intent.followUpType === 'clarify';
       const entityStore = sessionContext?.getEntityStore();
       const targetFrameId = intent.extractedParams?.frame_id;
       const targetSessionId = intent.extractedParams?.session_id;
@@ -170,9 +213,12 @@ export class AgentDrivenOrchestrator extends EventEmitter {
         targetSessionId &&
         entityStore?.wasSessionAnalyzed(String(targetSessionId));
 
-      const shouldSkipHypothesisGeneration = isDrillDownWithCachedFrame || isDrillDownWithCachedSession;
+      const shouldSkipHypothesisGeneration = isClarifyFollowUp || isDrillDownWithCachedFrame || isDrillDownWithCachedSession;
 
-      if (shouldSkipHypothesisGeneration) {
+      if (isClarifyFollowUp) {
+        emitter.log('[Clarify] Skipping hypothesis generation for clarification follow-up');
+        initialHypotheses = [];
+      } else if (shouldSkipHypothesisGeneration) {
         // Skip hypothesis generation for drill-down on already-analyzed entities
         const entityType = isDrillDownWithCachedFrame ? 'frame' : 'session';
         const entityId = isDrillDownWithCachedFrame ? targetFrameId : targetSessionId;
@@ -204,7 +250,9 @@ export class AgentDrivenOrchestrator extends EventEmitter {
       emitter.emitUpdate('progress', {
         phase: 'hypotheses_generated',
         message: shouldSkipHypothesisGeneration
-          ? `使用缓存数据，跳过假设生成`
+          ? (isClarifyFollowUp
+            ? '澄清请求：跳过假设生成'
+            : `使用缓存数据，跳过假设生成`)
           : `生成 ${initialHypotheses.length} 个假设`,
         hypotheses: initialHypotheses.map(h => h.description),
       });
@@ -248,7 +296,7 @@ export class AgentDrivenOrchestrator extends EventEmitter {
         initialHypotheses,
         sharedContext,
         options: {
-          ...options,
+          ...effectiveOptions,
           // Pass resolved parameters from follow-up for skill invocation
           ...(followUpResolution.resolvedParams && {
             resolvedFollowUpParams: followUpResolution.resolvedParams,
@@ -352,7 +400,11 @@ export class AgentDrivenOrchestrator extends EventEmitter {
       emitter.emitUpdate('progress', { phase: 'concluding', message: '生成分析结论' });
       const conclusion = await generateConclusion(
         sharedContext, executorResult.findings, intent,
-        this.modelRouter, emitter, executorResult.stopReason || undefined
+        this.modelRouter, emitter, executorResult.stopReason || undefined, {
+          turnCount,
+          // Provide compact dialogue summary for turn>=2 iterative mode
+          historyContext: turnCount > 0 ? sessionContext.generatePromptContext(600) : '',
+        }
       );
 
       emitter.emitUpdate('conclusion', {

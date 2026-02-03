@@ -30,7 +30,6 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 | Component | Purpose |
 |-----------|---------|
 | agentDrivenOrchestrator.ts | 主协调器 (策略匹配 → 执行器路由) |
-| strategyRegistry.ts | 策略注册与 trigger 匹配 |
 | circuitBreaker.ts | 熔断器，触发用户介入 |
 | modelRouter.ts | 多模型路由 (DeepSeek/OpenAI/Anthropic/GLM) |
 | stateMachine.ts | 状态机 (IDLE→PLANNING→HYPOTHESIS→ROUNDS→CONCLUSION) |
@@ -41,6 +40,7 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 | intentUnderstanding.ts | 意图理解 |
 | conclusionGenerator.ts | 结论综合 |
 | feedbackSynthesizer.ts | LLM 综合发现 |
+| followUpHandler.ts | 后续问题处理与上下文延续 |
 
 **Executors:** `backend/src/agent/core/executors/`
 | Executor | Mode | Trigger | Description |
@@ -51,6 +51,7 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 | clarifyExecutor.ts | Conversation | User clarification | 处理用户澄清请求 |
 | comparisonExecutor.ts | Conversation | Compare request | 对比多次分析结果 |
 | extendExecutor.ts | Conversation | Extend request | 扩展上一轮分析 |
+| directDrillDownExecutor.ts | Drill-down | Time/range navigation | 直接跳转时间戳或区间 |
 | analysisExecutor.ts | Interface | - | 执行器基类接口 |
 
 **Conversation Support:** `backend/src/agent/core/`
@@ -350,13 +351,13 @@ steps:
 ```
 
 **Location:** `backend/skills/`
-- `atomic/` - 单步检测 (29 skills)
+- `atomic/` - 单步检测 (32 skills)
 - `composite/` - 组合分析 (27 skills)
 - `deep/` - 深度分析 (2 skills)
 - `modules/` - 模块配置 (app/framework/hardware/kernel)
 - `vendors/` - 厂商适配 (pixel/samsung/xiaomi/honor/oppo/vivo/qualcomm/mtk)
 
-### Atomic Skills (29)
+### Atomic Skills (32)
 
 **Frame Analysis:**
 - app_frame_production, consumer_jank_detection, render_thread_slices
@@ -401,7 +402,7 @@ steps:
 **Meta:**
 - scene_reconstruction
 
-### Pipeline Skills (24)
+### Pipeline Skills (25)
 
 **Location:** `backend/skills/pipelines/`
 
@@ -603,5 +604,5 @@ DEEPSEEK_API_KEY=sk-xxx
 |----------|-------|
 | Agent System | ~129 source files |
 | Services | ~31 service files |
-| Skills | 80 definitions (29 atomic + 27 composite + 24 pipelines) |
+| Skills | 86 definitions (32 atomic + 27 composite + 25 pipelines + 2 deep) |
 | Routes | 16 API handlers |

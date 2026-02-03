@@ -19,6 +19,34 @@ import { ModelRouter } from './modelRouter';
 import { DomainAgentRegistry } from '../agents/domain';
 import { ProgressEmitter } from './orchestratorTypes';
 import { EnhancedSessionContext } from '../context/enhancedSessionContext';
+import { isPlainObject, isStringArray, LlmJsonSchema, parseLlmJson } from '../../utils/llmJson';
+
+type HypothesesJsonPayload = {
+  hypotheses: Array<{
+    description: string;
+    confidence?: number;
+    relevantAgents?: string[];
+  }>;
+};
+
+const HYPOTHESES_JSON_SCHEMA: LlmJsonSchema<HypothesesJsonPayload> = {
+  name: 'hypotheses_json@1.0.0',
+  validate: (value: unknown): value is HypothesesJsonPayload => {
+    if (!isPlainObject(value)) return false;
+    if (!Array.isArray((value as any).hypotheses)) return false;
+
+    for (const item of (value as any).hypotheses) {
+      if (!isPlainObject(item)) return false;
+      if (typeof (item as any).description !== 'string') return false;
+      const confidence = (item as any).confidence;
+      if (confidence !== undefined && confidence !== null && typeof confidence !== 'number') return false;
+      const relevantAgents = (item as any).relevantAgents;
+      if (relevantAgents !== undefined && relevantAgents !== null && !isStringArray(relevantAgents)) return false;
+    }
+
+    return true;
+  },
+};
 
 /**
  * Create a hypothesis with standard fields.
@@ -93,22 +121,26 @@ ${followUpContext ? `\n${followUpContext}` : ''}
   ]
 }
 
-${getHypothesisGuidelines(intent.followUpType)}
+  ${getHypothesisGuidelines(intent.followUpType)}
 
 可用的 Agent:
 ${agentRegistry.getAgentDescriptionsForLLM()}`;
 
   try {
-    const response = await modelRouter.callWithFallback(prompt, 'planning');
-    const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return (parsed.hypotheses || []).map((h: any) => createHypothesis(
-        h.description,
-        h.confidence || 0.5,
-        h.relevantAgents
-      ));
-    }
+    const response = await modelRouter.callWithFallback(prompt, 'planning', {
+      sessionId: sessionContext?.getSessionId(),
+      traceId: sessionContext?.getTraceId(),
+      jsonMode: true,
+      promptId: 'agent.hypothesisGenerator',
+      promptVersion: '1.0.0',
+      contractVersion: 'hypotheses_json@1.0.0',
+    });
+    const parsed = parseLlmJson<HypothesesJsonPayload>(response.response, HYPOTHESES_JSON_SCHEMA);
+    return (parsed.hypotheses || []).map((h) => createHypothesis(
+      h.description,
+      typeof h.confidence === 'number' ? Math.max(0, Math.min(1, h.confidence)) : 0.5,
+      h.relevantAgents
+    ));
   } catch (error) {
     emitter.log(`Failed to generate hypotheses: ${error}`);
     emitter.emitUpdate('degraded', { module: 'hypothesisGenerator', fallback: 'keyword-based defaults' });
@@ -128,11 +160,43 @@ const FOLLOW_UP_TYPE_LABELS: Record<string, string> = {
   initial: '初始分析',
 };
 
-const INITIAL_GUIDELINES = `注意：对于滑动/卡顿类问题，请务必包含以下关键假设方向：
+/**
+ * Guidelines for initial hypothesis generation.
+ * Covers all major performance issue categories for Android.
+ */
+const INITIAL_GUIDELINES = `注意：对于滑动/卡顿类问题，请务必覆盖以下关键假设方向：
+
+## App 层面
 - App 自身运行时间过长（主线程/RenderThread 耗时操作，如布局计算、绘制、业务逻辑）
-- 帧率不稳定或掉帧
-- CPU 调度不合理（被调度到小核、等待调度时间过长）
-- 系统级问题（SurfaceFlinger、GPU、Binder IPC）`;
+- 帧率不稳定或掉帧（连续掉帧、不规则掉帧）
+
+## CPU 层面
+- CPU 调度不合理（被调度到小核、等待调度时间过长、频繁迁移）
+- CPU 负载过高（后台任务争抢、密集计算）
+- CPU 限频/降频（温控、功耗管理导致性能下降）
+
+## GPU 层面
+- GPU 渲染瓶颈（Shader 编译、纹理上传、复杂绘制）
+- GPU Fence 等待（帧缓冲交换延迟）
+- 过度绘制（Overdraw）
+
+## 内存层面
+- 内存压力（频繁 GC、LMK 杀进程）
+- 内存分配热点（帧期间大量对象创建）
+
+## IO 层面
+- IO 阻塞（主线程磁盘读写、数据库操作）
+- Page Fault（内存页面错误、缺页中断）
+
+## 系统层面
+- SurfaceFlinger 合成延迟
+- Binder IPC 阻塞（同步调用超时、服务端响应慢）
+- 锁竞争（Monitor Contention）
+
+每个假设需要：
+- 明确描述问题假设
+- 指定相关的 Agent（frame_agent/cpu_agent/memory_agent/binder_agent）
+- 给出初始置信度（0.3-0.8）`;
 
 const FOLLOW_UP_GUIDELINES: Record<string, string> = {
   drill_down: `注意：这是一个深入分析请求，请生成针对特定帧/会话的详细假设：
@@ -221,24 +285,73 @@ function generateFollowUpDefaultHypotheses(query: string, intent: Intent): Hypot
 
 /**
  * Generate keyword-based default hypotheses when LLM is unavailable.
+ * Covers all major performance issue categories comprehensively.
  */
 export function generateDefaultHypotheses(query: string): Hypothesis[] {
   const hypotheses: Hypothesis[] = [];
   const queryLower = query.toLowerCase();
 
-  if (queryLower.includes('卡顿') || queryLower.includes('jank')) {
-    hypotheses.push(createHypothesis('帧渲染超时导致卡顿', 0.6));
-  }
-
-  if (queryLower.includes('滑动') || queryLower.includes('scroll')) {
+  // Jank/Stutter detection
+  if (queryLower.includes('卡顿') || queryLower.includes('jank') || queryLower.includes('掉帧')) {
     hypotheses.push(
-      createHypothesis('滑动过程中存在帧率不稳定或掉帧现象', 0.7, ['frame_agent']),
-      createHypothesis('App 自身运行时间过长（主线程或 RenderThread 耗时操作导致帧超时）', 0.75, ['frame_agent', 'cpu_agent']),
+      createHypothesis('帧渲染超时导致卡顿（主线程或 RenderThread 耗时操作）', 0.7, ['frame_agent', 'cpu_agent']),
+      createHypothesis('GPU 渲染瓶颈或 Fence 等待导致掉帧', 0.5, ['frame_agent']),
     );
   }
 
+  // Scrolling performance
+  if (queryLower.includes('滑动') || queryLower.includes('scroll') || queryLower.includes('列表')) {
+    hypotheses.push(
+      createHypothesis('滑动过程中存在帧率不稳定或掉帧现象', 0.7, ['frame_agent']),
+      createHypothesis('App 自身运行时间过长（主线程或 RenderThread 耗时操作导致帧超时）', 0.75, ['frame_agent', 'cpu_agent']),
+      createHypothesis('CPU 调度不合理（小核运行或等待调度时间长）', 0.5, ['cpu_agent']),
+    );
+  }
+
+  // CPU-related
+  if (queryLower.includes('cpu') || queryLower.includes('调度') || queryLower.includes('频率')) {
+    hypotheses.push(
+      createHypothesis('CPU 负载过高导致性能问题', 0.6, ['cpu_agent']),
+      createHypothesis('CPU 限频/降频影响性能（温控或功耗管理）', 0.5, ['cpu_agent']),
+    );
+  }
+
+  // Memory-related
+  if (queryLower.includes('内存') || queryLower.includes('memory') || queryLower.includes('gc')) {
+    hypotheses.push(
+      createHypothesis('内存压力导致性能问题（频繁 GC 或 LMK）', 0.6, ['memory_agent']),
+      createHypothesis('帧期间存在大量对象分配触发 GC', 0.5, ['memory_agent', 'frame_agent']),
+    );
+  }
+
+  // Binder/IPC
+  if (queryLower.includes('binder') || queryLower.includes('ipc') || queryLower.includes('锁')) {
+    hypotheses.push(
+      createHypothesis('Binder IPC 调用阻塞导致延迟', 0.6, ['binder_agent']),
+      createHypothesis('锁竞争导致线程阻塞', 0.5, ['binder_agent', 'cpu_agent']),
+    );
+  }
+
+  // IO-related
+  if (queryLower.includes('io') || queryLower.includes('磁盘') || queryLower.includes('文件')) {
+    hypotheses.push(
+      createHypothesis('IO 阻塞导致主线程卡顿', 0.6, ['cpu_agent', 'binder_agent']),
+    );
+  }
+
+  // GPU-related
+  if (queryLower.includes('gpu') || queryLower.includes('渲染') || queryLower.includes('绘制')) {
+    hypotheses.push(
+      createHypothesis('GPU 渲染耗时过长或存在 Shader 编译延迟', 0.6, ['frame_agent']),
+    );
+  }
+
+  // Default fallback - comprehensive hypothesis set
   if (hypotheses.length === 0) {
-    hypotheses.push(createHypothesis('存在性能问题需要诊断', 0.5));
+    hypotheses.push(
+      createHypothesis('存在性能问题需要诊断', 0.5, ['frame_agent']),
+      createHypothesis('可能存在帧渲染或调度问题', 0.4, ['frame_agent', 'cpu_agent']),
+    );
   }
 
   return hypotheses;

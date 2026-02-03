@@ -121,6 +121,9 @@ auto_pin:
       priority: 2
       reason: "HBR 控制 (生产/传输)"
       expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的主线程（避免 pin 到系统/其他 app 的 main）"
 
     - pattern: "^VSYNC-sf$"
       match_by: name

@@ -81,9 +81,12 @@
 #       expand: true                  # Optional: expand pinned track
 #       smart_filter:                 # Optional: data-driven filtering
 #         enabled: true
-#         detection_sql: |            # SQL to find active instances
+#         # NOTE: SmartPerfetto currently uses a centralized "active rendering processes" query
+#         # to power smart pinning. The per-instruction SQL fields below are kept optional for
+#         # forward compatibility (not evaluated at runtime today).
+#         detection_sql: |            # (Optional) SQL to find active instances
 #           SELECT DISTINCT process_name FROM ...
-#         fallback_sql: |             # Backup if main SQL returns empty
+#         fallback_sql: |             # (Optional) backup if main SQL returns empty
 #           SELECT DISTINCT process_name FROM ...
 #
 # analysis:

@@ -26,6 +26,8 @@ meta:
 prerequisites:
   required_tables:
     - actual_frame_timeline_slice
+  modules:
+    - android.frames.timeline
 
 inputs:
   - name: package

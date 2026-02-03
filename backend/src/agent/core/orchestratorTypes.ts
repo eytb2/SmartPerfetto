@@ -28,6 +28,7 @@ import type { AgentMessageBus } from '../communication';
 import type { CircuitBreaker } from './circuitBreaker';
 import type { ModelRouter } from './modelRouter';
 import type { FocusInterval } from '../strategies/types';
+import type { AdbCollaborationConfig, AdbContext } from '../../services/adb';
 
 // =============================================================================
 // Agent ID Constants
@@ -157,6 +158,18 @@ export interface AnalysisOptions {
   traceProcessorService?: any;
   packageName?: string;
   timeRange?: { start: number | string; end: number | string };
+  /**
+   * Optional ADB collaboration configuration.
+   * - off: do not use ADB
+   * - auto: enable read-only only when trace↔device match is confident
+   * - read_only/full: explicit opt-in regardless of match
+   */
+  adb?: AdbCollaborationConfig;
+  /**
+   * Resolved ADB context (computed at runtime, best-effort).
+   * Tools can use this for gating and device selection.
+   */
+  adbContext?: AdbContext;
 
   /**
    * Parameters resolved from follow-up queries

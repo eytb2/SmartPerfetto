@@ -33,7 +33,9 @@ export interface PipelineKeySlice {
 export interface SmartFilterConfig {
   enabled: boolean;
   description?: string;
-  detection_sql: string;
+  // NOTE: Currently SmartPerfetto uses a centralized active-process query for smart pinning.
+  // This field is kept optional for forward compatibility with per-instruction SQL filtering.
+  detection_sql?: string;
   fallback_sql?: string;
 }
 

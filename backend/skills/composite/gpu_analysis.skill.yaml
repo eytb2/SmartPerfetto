@@ -19,6 +19,10 @@ meta:
 prerequisites:
   required_tables:
     - gpu_counter_track
+  modules:
+    - android.gpu.frequency
+    - android.gpu.memory
+    - android.frames
 display:
   name: "GPU 分析"
   level: expert

@@ -100,14 +100,32 @@ auto_pin:
       priority: 1
       reason: "VSync (预览开始生产帧)"
 
-    - pattern: "CaptureSession"
+    - pattern: "^main(\\s+\\d+)?$"
       match_by: name
       priority: 2
+      reason: "相机 UI/业务逻辑 (生产)"
+      expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的主线程（避免 pin 到系统/其他 app 的 main）"
+
+    - pattern: "^RenderThread(\\s+\\d+)?$"
+      match_by: name
+      priority: 3
+      reason: "预览 UI 渲染 (传输)"
+      expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的 RenderThread（若预览走纯 SurfaceView 可能为空）"
+
+    - pattern: "CaptureSession"
+      match_by: name
+      priority: 4
       reason: "采集会话 (生产)"
 
     - pattern: "Camera"
       match_by: name
-      priority: 3
+      priority: 5
       reason: "Camera 服务 (传输)"
 
     - pattern: "^VSYNC-sf$"

@@ -8,6 +8,9 @@ import { encodeQueryArgs, decodeQueryResult } from './traceProcessorProtobuf';
 import { getPortPool } from './portPool';
 import { traceProcessorConfig } from '../config';
 import logger from '../utils/logger';
+import { getPerfettoStdlibModules, groupModulesByNamespace } from './perfettoStdlibScanner';
+
+const IS_TEST_ENV = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
 
 // Path to the trace_processor_shell binary
 // Use the locally built version from perfetto/out/ui which has the viz stdlib modules
@@ -21,7 +24,9 @@ const TRACE_PROCESSOR_PATH = process.env.TRACE_PROCESSOR_PATH ||
  * This should be called at startup to clean up processes from previous runs.
  */
 export function killOrphanProcessors(): number {
-  console.log('[TraceProcessor] Checking for orphan trace_processor_shell processes...');
+  if (!IS_TEST_ENV) {
+    console.log('[TraceProcessor] Checking for orphan trace_processor_shell processes...');
+  }
 
   try {
     // Find all trace_processor_shell processes
@@ -29,11 +34,15 @@ export function killOrphanProcessors(): number {
     const pids = result.trim().split('\n').filter(pid => pid.length > 0);
 
     if (pids.length === 0) {
-      console.log('[TraceProcessor] No orphan processes found');
+      if (!IS_TEST_ENV) {
+        console.log('[TraceProcessor] No orphan processes found');
+      }
       return 0;
     }
 
-    console.log(`[TraceProcessor] Found ${pids.length} orphan process(es): ${pids.join(', ')}`);
+    if (!IS_TEST_ENV) {
+      console.log(`[TraceProcessor] Found ${pids.length} orphan process(es): ${pids.join(', ')}`);
+    }
 
     // Kill each process
     let killed = 0;
@@ -41,16 +50,22 @@ export function killOrphanProcessors(): number {
       try {
         execSync(`kill ${pid} 2>/dev/null || true`);
         killed++;
-        console.log(`[TraceProcessor] Killed orphan process ${pid}`);
+        if (!IS_TEST_ENV) {
+          console.log(`[TraceProcessor] Killed orphan process ${pid}`);
+        }
       } catch (e) {
         // Process may already be dead
       }
     }
 
-    console.log(`[TraceProcessor] Killed ${killed} orphan process(es)`);
+    if (!IS_TEST_ENV) {
+      console.log(`[TraceProcessor] Killed ${killed} orphan process(es)`);
+    }
     return killed;
   } catch (error: any) {
-    console.log('[TraceProcessor] Error checking for orphan processes:', error.message);
+    if (!IS_TEST_ENV) {
+      console.log('[TraceProcessor] Error checking for orphan processes:', error.message);
+    }
     return 0;
   }
 }
@@ -135,6 +150,10 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
         throw new Error(`Server verification failed: ${testResult.error}`);
       }
 
+      // Preload all Perfetto stdlib modules to make views/tables available
+      // This runs after trace is loaded so modules can access trace data
+      await this.preloadAllPerfettoModules();
+
       this.status = 'ready';
       console.log(`[TraceProcessor] Processor ${this.id} ready (HTTP mode) for trace ${this.traceId}`);
       this.emit('ready');
@@ -202,7 +221,9 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
       this.process.stderr?.on('data', (data) => {
         const text = data.toString();
         stderr += text;
-        console.log(`[TraceProcessor] stderr: ${text.trim()}`);
+        if (!IS_TEST_ENV) {
+          console.log(`[TraceProcessor] stderr: ${text.trim()}`);
+        }
 
         // Also check stderr for server ready message
         if (text.includes('Starting HTTP server') || text.includes('Trace loaded')) {
@@ -244,7 +265,9 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
       });
 
       this.process.on('close', (code) => {
-        console.log(`[TraceProcessor] Process exited with code ${code}`);
+        if (!IS_TEST_ENV) {
+          console.log(`[TraceProcessor] Process exited with code ${code}`);
+        }
         this.serverReady = false;
         if (!resolved) {
           resolved = true;
@@ -358,25 +381,121 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
     });
   }
 
+  /**
+   * Preload all Perfetto stdlib modules to make their views and tables available.
+   *
+   * This method loads modules in parallel batches for efficiency. Modules that fail
+   * to load (e.g., due to missing data dependencies in the trace) are logged but
+   * don't block other modules from loading.
+   *
+   * @returns Object containing arrays of successfully loaded and failed module names
+   */
+  async preloadAllPerfettoModules(): Promise<{ loaded: string[]; failed: string[] }> {
+    const modules = getPerfettoStdlibModules();
+    const loaded: string[] = [];
+    const failed: string[] = [];
+
+    if (modules.length === 0) {
+      console.warn('[TraceProcessor] No stdlib modules found to preload');
+      return { loaded, failed };
+    }
+
+    const startTime = Date.now();
+
+    // Log module breakdown by namespace
+    const namespaceGroups = groupModulesByNamespace(modules);
+    console.log(
+      `[TraceProcessor] Preloading ${modules.length} stdlib modules:`,
+      namespaceGroups
+    );
+
+    // Load modules in parallel batches for efficiency
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < modules.length; i += BATCH_SIZE) {
+      const batch = modules.slice(i, i + BATCH_SIZE);
+
+      const results = await Promise.allSettled(
+        batch.map(async (moduleName) => {
+          const result = await this.executeHttpQuery(`INCLUDE PERFETTO MODULE ${moduleName};`);
+          if (result.error) {
+            throw new Error(result.error);
+          }
+          return moduleName;
+        })
+      );
+
+      // Classify results as loaded or failed
+      results.forEach((result, idx) => {
+        const moduleName = batch[idx];
+        if (result.status === 'fulfilled') {
+          loaded.push(moduleName);
+        } else {
+          failed.push(moduleName);
+          // Only log errors for non-trivial failures (not "module not found" which is expected
+          // when trace doesn't have the required data)
+          const errorMsg = result.reason?.message || String(result.reason);
+          if (!errorMsg.includes('not found') && !errorMsg.includes('no such')) {
+            logger.debug('TraceProcessor', `Failed to load module ${moduleName}: ${errorMsg}`);
+          }
+        }
+      });
+    }
+
+    const elapsed = Date.now() - startTime;
+    console.log(
+      `[TraceProcessor] Preloaded ${loaded.length}/${modules.length} stdlib modules in ${elapsed}ms ` +
+        `(${failed.length} failed)`
+    );
+
+    return { loaded, failed };
+  }
+
   destroy(): void {
-    console.log(`[TraceProcessor] Destroying processor ${this.id} for trace ${this.traceId}`);
+    if (!IS_TEST_ENV) {
+      console.log(`[TraceProcessor] Destroying processor ${this.id} for trace ${this.traceId}`);
+    }
     this.isDestroyed = true;
     this.serverReady = false;
     this.status = 'error';
 
     if (this.process) {
       try {
-        // Try graceful shutdown first
-        this.process.kill('SIGTERM');
+        const traceId = this.traceId;
+        const proc = this.process;
+        let released = false;
+        const releasePortOnce = (): void => {
+          if (released) return;
+          released = true;
+          getPortPool().release(traceId);
+        };
 
-        // Force kill after timeout
-        setTimeout(() => {
-          if (this.process && !this.process.killed) {
-            this.process.kill('SIGKILL');
+        // Force kill after timeout (fallback).
+        const killTimer = setTimeout(() => {
+          if (!proc.killed) {
+            try {
+              proc.kill('SIGKILL');
+            } catch {
+              // ignore
+            }
           }
-          // Release port after process is killed
-          getPortPool().release(this.traceId);
+          // Ensure port is eventually released even if close event is missed.
+          releasePortOnce();
         }, traceProcessorConfig.killTimeoutMs);
+
+        // Release the port as soon as the process actually exits.
+        // Also clears the kill timer to avoid late callbacks/noisy logs in tests.
+        proc.once('close', () => {
+          clearTimeout(killTimer);
+          releasePortOnce();
+        });
+
+        // In Jest, don't let this timer keep the event loop alive.
+        if (IS_TEST_ENV && typeof (killTimer as any).unref === 'function') {
+          (killTimer as any).unref();
+        }
+
+        // Try graceful shutdown last (after handlers are registered)
+        proc.kill('SIGTERM');
       } catch (e) {
         // Process may already be dead, still release port
         getPortPool().release(this.traceId);

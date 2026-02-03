@@ -18,7 +18,10 @@ meta:
 
 prerequisites:
   optional_tables:
-    - trackriggers:
+    - track
+  modules:
+    - android.network_packets
+
 triggers:
   - pattern: "(网络|network|流量|traffic)"
     confidence: 0.95

@@ -126,6 +126,9 @@ export interface ColumnDefinition {
 /**
  * Default column definitions based on common column name patterns
  * Used when skills don't explicitly define columns
+ *
+ * IMPORTANT: Order matters! More specific patterns should come before generic ones.
+ * The first matching pattern wins.
  */
 export const DEFAULT_COLUMN_PATTERNS: Array<{
   pattern: RegExp;
@@ -134,17 +137,37 @@ export const DEFAULT_COLUMN_PATTERNS: Array<{
   // Timestamp columns
   { pattern: /^ts$|_ts$|timestamp$|_timestamp$|start_time|end_time/i,
     definition: { type: 'timestamp', format: 'timestamp_relative', clickAction: 'navigate_timeline', unit: 'ns' } },
-  // Duration columns
-  { pattern: /^dur$|_dur$|duration$|_duration$|_ms$|_us$|_ns$|elapsed|latency/i,
+
+  // Duration columns with explicit unit suffixes (MUST be before generic duration pattern)
+  // These patterns indicate the value is ALREADY in the specified unit, not nanoseconds
+  // _ms suffix: value is already in milliseconds (e.g., vsync_period_ms = 8.33)
+  { pattern: /_ms$/i,
+    definition: { type: 'duration', format: 'duration_ms', unit: 'ms' } },
+  // _us suffix: value is already in microseconds
+  { pattern: /_us$/i,
+    definition: { type: 'duration', format: 'duration_us', unit: 'us' } },
+  // _ns suffix: value is already in nanoseconds
+  { pattern: /_ns$/i,
     definition: { type: 'duration', format: 'duration_ms', unit: 'ns' } },
-  // Percentage columns
-  { pattern: /rate$|ratio$|percent|pct$/i,
+
+  // Generic duration columns (no unit suffix - assume nanoseconds from Perfetto trace)
+  { pattern: /^dur$|_dur$|duration$|_duration$|elapsed|latency/i,
+    definition: { type: 'duration', format: 'duration_ms', unit: 'ns' } },
+
+  // Percentage columns - match rate/ratio/percent/pct but EXCLUDE refresh_rate, frame_rate, sample_rate
+  // These Hz-based rates are numbers, not percentages
+  { pattern: /(?<!refresh_|frame_|sample_)rate$|ratio$|percent|pct$/i,
     definition: { type: 'percentage', format: 'percentage' } },
+
   // Byte size columns
   { pattern: /size$|bytes$|memory$|_kb$|_mb$|_gb$/i,
     definition: { type: 'bytes', format: 'bytes_human' } },
-  // Count/ID columns
-  { pattern: /^id$|_id$|^count$|_count$|^num_|_num$|^pid$|^tid$|^upid$|^utid$|^session_id$|^frame_id$|^track_id$|^slice_id$|^arg_set_id$|_index$|^frame_index$/i,
+  // Token ID columns - large integers that should be preserved as strings (no formatting)
+  // frame_id is a display_frame_token which can exceed JavaScript's safe integer range
+  { pattern: /^frame_id$|^display_frame_token$|^surface_frame_token$/i,
+    definition: { type: 'string' } },
+  // Count/ID columns (numeric IDs that can be safely formatted)
+  { pattern: /^id$|_id$|^count$|_count$|^num_|_num$|^pid$|^tid$|^upid$|^utid$|^session_id$|^track_id$|^slice_id$|^arg_set_id$|_index$|^frame_index$/i,
     definition: { type: 'number', format: 'compact' } },
   // Boolean columns
   { pattern: /^is_|^has_|^can_|_flag$/i,

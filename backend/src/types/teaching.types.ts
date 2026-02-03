@@ -125,7 +125,9 @@ export interface RawPinInstruction {
 export interface RawSmartFilter {
   enabled: boolean;
   description?: string;
-  detection_sql: string;
+  // Optional for forward compatibility. Current smart pinning relies on a centralized
+  // active-process query rather than per-instruction SQL evaluation.
+  detection_sql?: string;
   fallback_sql?: string;
 }
 

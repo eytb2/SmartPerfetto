@@ -28,6 +28,8 @@ meta:
 prerequisites:
   required_tables:
     - expected_frame_timeline_slice
+  modules:
+    - android.frames.timeline
 
 inputs:
   - name: start_ts

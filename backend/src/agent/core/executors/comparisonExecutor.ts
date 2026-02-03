@@ -238,7 +238,13 @@ export class ComparisonExecutor implements AnalysisExecutor {
     const prompt = this.buildNarrativePrompt(query, entityType, data);
 
     try {
-      const result = await this.services.modelRouter.callWithFallback(prompt, 'synthesis');
+      const result = await this.services.modelRouter.callWithFallback(prompt, 'synthesis', {
+        sessionId: this.sessionContext.getSessionId(),
+        traceId: this.sessionContext.getTraceId(),
+        promptId: 'agent.comparisonExecutor',
+        promptVersion: '1.0.0',
+        contractVersion: 'comparison_text@1.0.0',
+      });
 
       if (result.success && result.response) {
         return result.response;
@@ -294,11 +300,25 @@ export class ComparisonExecutor implements AnalysisExecutor {
     }
 
     parts.push('## 要求');
-    parts.push('1. 分析这些实体之间的关键差异');
-    parts.push('2. 指出哪个实体表现最差/最好');
-    parts.push('3. 如果有规律性的差异，给出可能的原因');
-    parts.push('4. 使用中文回答，保持专业但易懂');
-    parts.push('5. 简洁明了，突出重点');
+    parts.push('1. 分析这些实体之间的关键差异：');
+    parts.push('   - 量化差异（使用具体数值）');
+    parts.push('   - 分类差异（卡顿类型、耗时分布）');
+    parts.push('2. 明确指出：');
+    parts.push('   - 表现最差的实体及其问题');
+    parts.push('   - 表现最好的实体（作为基准参考）');
+    parts.push('3. 如果有规律性差异，分析可能原因：');
+    parts.push('   - 是否与时间顺序相关（前期/后期）');
+    parts.push('   - 是否与特定操作相关');
+    parts.push('   - 是否有共同瓶颈');
+    parts.push('4. 给出优化建议：');
+    parts.push('   - 优先解决什么问题');
+    parts.push('   - 如何让差的向好的靠拢');
+    parts.push('5. 使用中文回答，保持专业但易懂');
+    parts.push('');
+    parts.push('## 输出格式');
+    parts.push('- 先给出 1-2 句话的总结');
+    parts.push('- 再分点详细分析');
+    parts.push('- 最后给出建议');
     parts.push('');
     parts.push('请直接给出分析，不要添加额外的格式标记。');
 

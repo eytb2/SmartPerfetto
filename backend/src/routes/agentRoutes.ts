@@ -18,12 +18,6 @@ import { sessionContextManager } from '../agent/context/enhancedSessionContext';
 import {
   registerCoreTools,
   StreamingUpdate,
-  // Scene reconstruction (separate feature)
-  createLLMClient,
-  createSceneReconstructionAgent,
-  SceneReconstructionResult,
-  DetectedScene,
-  TrackEvent,
   // Agent-Driven Architecture (Phase 2-4)
   AgentDrivenOrchestrator,
   createAgentDrivenOrchestrator,
@@ -36,6 +30,7 @@ import {
   generateEventId,
   isDataEvent,
   isLegacySkillEvent,
+  type DataEnvelope,
   validateDataEnvelope,
 } from '../types/dataContract';
 // Pipeline Teaching Services
@@ -85,6 +80,9 @@ interface AnalysisSession {
   createdAt: number;
   logger: SessionLogger;
   hypotheses: Hypothesis[];
+  // Optional scene reconstruction artifacts (unified into agent-driven sessions)
+  scenes?: DetectedScene[];
+  trackEvents?: TrackEvent[];
   agentDialogue: Array<{
     agentId: string;
     type: 'task' | 'response' | 'question';
@@ -111,18 +109,43 @@ function getModelRouter(): ModelRouter {
   return modelRouterInstance;
 }
 
-// Scene Reconstruction Sessions (separate feature)
-interface SceneReconstructionSession {
-  agent: ReturnType<typeof createSceneReconstructionAgent>;
-  sseClients: express.Response[];
-  result?: SceneReconstructionResult;
-  status: 'pending' | 'running' | 'completed' | 'failed';
-  error?: string;
-  scenes?: DetectedScene[];
-  trackEvents?: TrackEvent[];
+// =============================================================================
+// Scene Reconstruction Types (kept for backward-compatible API responses)
+// =============================================================================
+
+type SceneCategory =
+  | 'cold_start'
+  | 'warm_start'
+  | 'hot_start'
+  | 'scroll'
+  | 'navigation'
+  | 'app_switch'
+  | 'screen_unlock'
+  | 'notification'
+  | 'split_screen'
+  | 'tap'
+  | 'long_press'
+  | 'idle'
+  | 'jank_region';  // Fallback: regions with performance issues (derived from jank_events)
+
+interface DetectedScene {
+  type: SceneCategory;
+  startTs: string;
+  endTs: string;
+  durationMs: number;
+  confidence: number;
+  appPackage?: string;
+  metadata?: Record<string, any>;
 }
 
-const sceneReconstructionSessions = new Map<string, SceneReconstructionSession>();
+interface TrackEvent {
+  ts: string;
+  dur: string;
+  name: string;
+  category: 'scene' | 'action' | 'performance' | 'finding';
+  colorScheme: 'scroll' | 'tap' | 'launch' | 'system' | 'jank' | 'navigation';
+  details?: Record<string, any>;
+}
 
 // Initialize Agent tools once
 let toolsRegistered = false;
@@ -819,29 +842,60 @@ router.post('/scene-reconstruct', async (req, res) => {
     // Initialize tools
     ensureToolsRegistered();
 
-    // Create LLM client and scene reconstruction agent
-    const llm = createLLMClient();
-    const sceneAgent = createSceneReconstructionAgent(llm);
-    sceneAgent.setTraceProcessorService(traceProcessorService, traceId);
+    const deepAnalysis = options.deepAnalysis ?? true;
+    const generateTracks = options.generateTracks ?? true;
 
-    // Generate analysis ID
+    // Scene reconstruction always uses the agent-driven orchestrator (unified architecture).
+    // Use a query string that triggers the scene reconstruction strategy.
+    const query = deepAnalysis ? '场景还原' : '场景还原 仅检测';
+
+    // Generate analysis ID (also used as agent-driven sessionId for compatibility)
     const analysisId = `scene-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-    // Store session
-    sceneReconstructionSessions.set(analysisId, {
-      agent: sceneAgent,
+    const modelRouter = getModelRouter();
+    const orchestrator = createAgentDrivenOrchestrator(modelRouter, {
+      maxRounds: options.maxRounds ?? options.maxIterations ?? 5,
+      maxConcurrentTasks: options.maxConcurrentTasks || 3,
+      confidenceThreshold: options.confidenceThreshold ?? options.qualityThreshold ?? 0.7,
+      maxNoProgressRounds: options.maxNoProgressRounds ?? 2,
+      maxFailureRounds: options.maxFailureRounds ?? 2,
+      enableLogging: true,
+    });
+
+    const logger = createSessionLogger(analysisId);
+    logger.setMetadata({ traceId, query, architecture: 'agent-driven', feature: 'scene-reconstruct' });
+    logger.info('AgentRoutes', 'Scene reconstruction session created (agent-driven)', { options });
+
+    sessions.set(analysisId, {
+      orchestrator,
+      sessionId: analysisId,
       sseClients: [],
       status: 'pending',
+      traceId,
+      query,
+      createdAt: Date.now(),
+      logger,
+      hypotheses: [],
+      agentDialogue: [],
+      dataEnvelopes: [],
+      agentResponses: [],
+      scenes: [],
+      trackEvents: [],
     });
 
     // Start analysis in background
-    runSceneReconstruction(analysisId, traceId, options).catch((error) => {
-      console.error(`[AgentRoutes] Scene reconstruction error for ${analysisId}:`, error);
-      const session = sceneReconstructionSessions.get(analysisId);
+    runAgentDrivenAnalysis(analysisId, query, traceId, {
+      ...options,
+      generateTracks,
+      traceProcessorService,
+    }).catch((error) => {
+      console.error(`[AgentRoutes] Scene reconstruction (agent-driven) error for ${analysisId}:`, error);
+      const session = sessions.get(analysisId);
       if (session) {
+        session.logger.error('AgentRoutes', 'Scene reconstruction failed', error);
         session.status = 'failed';
         session.error = error.message;
-        broadcastToSceneClients(analysisId, {
+        broadcastToAgentDrivenClients(analysisId, {
           type: 'error',
           content: { message: error.message },
           timestamp: Date.now(),
@@ -852,6 +906,8 @@ router.post('/scene-reconstruct', async (req, res) => {
     res.json({
       success: true,
       analysisId,
+      sessionId: analysisId,
+      architecture: 'agent-driven',
     });
   } catch (error: any) {
     console.error('[AgentRoutes] Scene reconstruction start error:', error);
@@ -870,7 +926,7 @@ router.post('/scene-reconstruct', async (req, res) => {
 router.get('/scene-reconstruct/:analysisId/stream', (req, res) => {
   const { analysisId } = req.params;
 
-  const session = sceneReconstructionSessions.get(analysisId);
+  const session = sessions.get(analysisId);
   if (!session) {
     return res.status(404).json({
       success: false,
@@ -886,7 +942,15 @@ router.get('/scene-reconstruct/:analysisId/stream', (req, res) => {
 
   // Send initial connection message
   res.write(`event: connected\n`);
-  res.write(`data: ${JSON.stringify({ analysisId, timestamp: Date.now() })}\n\n`);
+  res.write(`data: ${JSON.stringify({
+    analysisId,
+    sessionId: analysisId,
+    status: session.status,
+    traceId: session.traceId,
+    query: session.query,
+    architecture: 'agent-driven',
+    timestamp: Date.now(),
+  })}\n\n`);
 
   // Add client to session
   session.sseClients.push(res);
@@ -894,7 +958,7 @@ router.get('/scene-reconstruct/:analysisId/stream', (req, res) => {
 
   // If analysis is already completed, send the result
   if (session.status === 'completed' && session.result) {
-    sendSceneReconstructionResult(res, session.result);
+    sendAgentDrivenResult(res, session);
     res.write(`event: end\n`);
     res.write(`data: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
     res.end();
@@ -942,7 +1006,7 @@ router.get('/scene-reconstruct/:analysisId/stream', (req, res) => {
 router.get('/scene-reconstruct/:analysisId/tracks', (req, res) => {
   const { analysisId } = req.params;
 
-  const session = sceneReconstructionSessions.get(analysisId);
+  const session = sessions.get(analysisId);
   if (!session) {
     return res.status(404).json({
       success: false,
@@ -973,7 +1037,7 @@ router.get('/scene-reconstruct/:analysisId/tracks', (req, res) => {
 router.get('/scene-reconstruct/:analysisId/status', (req, res) => {
   const { analysisId } = req.params;
 
-  const session = sceneReconstructionSessions.get(analysisId);
+  const session = sessions.get(analysisId);
   if (!session) {
     return res.status(404).json({
       success: false,
@@ -989,9 +1053,9 @@ router.get('/scene-reconstruct/:analysisId/status', (req, res) => {
 
   if (session.status === 'completed' && session.result) {
     response.result = {
-      narrative: session.result.narrative,
+      narrative: session.result.conclusion,
       confidence: session.result.confidence,
-      executionTimeMs: session.result.executionTimeMs,
+      executionTimeMs: session.result.totalDurationMs,
       scenesCount: session.scenes?.length || 0,
       tracksCount: session.trackEvents?.length || 0,
     };
@@ -1012,7 +1076,7 @@ router.get('/scene-reconstruct/:analysisId/status', (req, res) => {
 router.delete('/scene-reconstruct/:analysisId', (req, res) => {
   const { analysisId } = req.params;
 
-  const session = sceneReconstructionSessions.get(analysisId);
+  const session = sessions.get(analysisId);
   if (!session) {
     return res.status(404).json({
       success: false,
@@ -1027,10 +1091,316 @@ router.delete('/scene-reconstruct/:analysisId', (req, res) => {
     } catch {}
   });
 
-  sceneReconstructionSessions.delete(analysisId);
+  session.orchestrator.reset();
+  sessions.delete(analysisId);
 
   res.json({ success: true });
 });
+
+// ============================================================================
+// Quick Scene Detection Endpoint (Phase 1 only)
+// ============================================================================
+
+/**
+ * POST /api/agent/scene-detect-quick
+ *
+ * Quick scene detection - only runs Phase 1 (scene detection) without deep analysis.
+ * Used for scene navigation bar that auto-appears on trace load.
+ *
+ * Body:
+ * {
+ *   "traceId": "uuid-of-trace"
+ * }
+ *
+ * Response:
+ * {
+ *   "success": true,
+ *   "scenes": DetectedScene[]
+ * }
+ */
+router.post('/scene-detect-quick', async (req, res) => {
+  try {
+    const { traceId } = req.body;
+
+    if (!traceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'traceId is required',
+      });
+    }
+
+    // Verify trace exists
+    const traceProcessorService = getTraceProcessorService();
+    const trace = traceProcessorService.getTrace(traceId);
+    if (!trace) {
+      return res.status(404).json({
+        success: false,
+        error: 'Trace not found in backend',
+        hint: 'Please upload the trace to the backend first',
+        code: 'TRACE_NOT_UPLOADED',
+      });
+    }
+
+    console.log('[AgentRoutes] Quick scene detection for traceId:', traceId);
+
+    // Execute quick scene detection SQL queries directly
+    const scenes = await detectScenesQuick(traceProcessorService, traceId);
+
+    console.log('[AgentRoutes] Quick scene detection complete:', scenes.length, 'scenes');
+
+    res.json({
+      success: true,
+      scenes,
+    });
+  } catch (error: any) {
+    console.error('[AgentRoutes] Quick scene detection error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Quick scene detection failed',
+    });
+  }
+});
+
+/**
+ * Quick scene detection function - executes minimal SQL queries to detect scenes
+ * without full agent overhead
+ */
+async function detectScenesQuick(
+  traceProcessorService: ReturnType<typeof getTraceProcessorService>,
+  traceId: string
+): Promise<Array<{
+  type: string;
+  startTs: string;
+  endTs: string;
+  durationMs: number;
+  confidence: number;
+  appPackage?: string;
+  metadata?: Record<string, any>;
+}>> {
+  // =========================================================================
+  // CORE FIX: Pre-load Perfetto stdlib modules
+  // =========================================================================
+  // `android_input_events` and `android_startups` are stdlib VIEWS, not
+  // intrinsic tables. They only exist after loading the corresponding modules.
+  // The Skill executor does this automatically via prerequisites.modules,
+  // but Quick Scene Detection bypasses skills, so we must load them manually.
+  const REQUIRED_MODULES = [
+    'android.input',            // Creates android_input_events, android_key_events
+    'android.startup.startups', // Creates android_startups
+  ];
+
+  for (const module of REQUIRED_MODULES) {
+    try {
+      await traceProcessorService.query(traceId, `INCLUDE PERFETTO MODULE ${module};`);
+    } catch (e) {
+      // Module load failure is non-fatal; subsequent SQL will gracefully return empty
+      console.warn(`[QuickSceneDetect] Module not available: ${module}`, e);
+    }
+  }
+
+  const scenes: Array<{
+    type: string;
+    startTs: string;
+    endTs: string;
+    durationMs: number;
+    confidence: number;
+    appPackage?: string;
+    metadata?: Record<string, any>;
+  }> = [];
+
+  // 1. Detect App Startups
+  try {
+    const startupResult = await traceProcessorService.query(traceId, `
+      SELECT
+        ts,
+        dur,
+        package,
+        startup_type,
+        CAST(dur / 1000000 AS INT) AS dur_ms
+      FROM android_startups
+      WHERE dur > 0
+      ORDER BY ts
+    `);
+
+    if (startupResult.rows) {
+      for (const row of startupResult.rows) {
+        const [ts, dur, pkg, startupType, durMs] = row;
+        let sceneType = 'cold_start';
+        if (startupType === 'warm') sceneType = 'warm_start';
+        else if (startupType === 'hot') sceneType = 'hot_start';
+
+        scenes.push({
+          type: sceneType,
+          startTs: String(ts),
+          endTs: String(BigInt(ts) + BigInt(dur)),
+          durationMs: Number(durMs),
+          confidence: 0.95,
+          appPackage: pkg,
+          metadata: { startupType },
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('[QuickSceneDetect] Startup detection failed:', e);
+  }
+
+  // 2. Detect Scroll Sessions (simplified)
+  // Note: android_input_events is a stdlib VIEW, requires module loading above
+  try {
+    const scrollResult = await traceProcessorService.query(traceId, `
+      WITH
+      -- Existence check: short-circuit if table doesn't exist
+      input_exists AS (
+        SELECT 1 AS ok WHERE EXISTS (
+          SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = 'android_input_events'
+        )
+      ),
+      motion_events AS (
+        SELECT
+          read_time AS ts,
+          event_action
+        FROM android_input_events
+        WHERE event_type = 'MOTION'
+          AND EXISTS (SELECT ok FROM input_exists)
+      ),
+      gesture_markers AS (
+        SELECT
+          ts,
+          event_action,
+          SUM(CASE WHEN event_action = 'DOWN' THEN 1 ELSE 0 END) OVER (ORDER BY ts) AS gesture_id
+        FROM motion_events
+      ),
+      gestures AS (
+        SELECT
+          gesture_id,
+          MIN(ts) AS down_ts,
+          MAX(CASE WHEN event_action = 'UP' THEN ts ELSE NULL END) AS up_ts,
+          COUNT(*) AS event_count
+        FROM gesture_markers
+        WHERE gesture_id > 0
+        GROUP BY gesture_id
+        HAVING COUNT(*) >= 4
+      ),
+      frame_with_stats AS (
+        SELECT
+          ts,
+          dur,
+          ts + dur AS frame_end,
+          jank_type,
+          COALESCE(LEAD(ts) OVER (ORDER BY ts) - (ts + dur), 999999999) AS gap_to_next
+        FROM actual_frame_timeline_slice
+        WHERE surface_frame_token IS NOT NULL AND dur > 0
+      ),
+      scroll_sessions AS (
+        SELECT
+          g.gesture_id,
+          g.down_ts AS start_ts,
+          COALESCE(
+            (SELECT MIN(f.frame_end)
+             FROM frame_with_stats f
+             WHERE f.ts >= g.up_ts AND f.gap_to_next > 100000000),
+            g.up_ts + 500000000
+          ) AS end_ts
+        FROM gestures g
+        WHERE g.up_ts IS NOT NULL
+      )
+      SELECT
+        s.start_ts,
+        s.end_ts,
+        CAST((s.end_ts - s.start_ts) / 1000000 AS INT) AS dur_ms,
+        (SELECT COUNT(*) FROM frame_with_stats f WHERE f.ts >= s.start_ts AND f.frame_end <= s.end_ts) AS frame_count
+      FROM scroll_sessions s
+      WHERE s.end_ts > s.start_ts + 100000000
+      ORDER BY s.start_ts
+    `);
+
+    if (scrollResult.rows) {
+      for (const row of scrollResult.rows) {
+        const [startTs, endTs, durMs, frameCount] = row;
+        if (Number(frameCount) >= 3) {
+          const fps = (Number(frameCount) * 1000) / Math.max(Number(durMs), 1);
+          scenes.push({
+            type: 'scroll',
+            startTs: String(startTs),
+            endTs: String(endTs),
+            durationMs: Number(durMs),
+            confidence: 0.85,
+            metadata: {
+              frameCount: Number(frameCount),
+              averageFps: Math.round(fps * 10) / 10,
+            },
+          });
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[QuickSceneDetect] Scroll detection failed:', e);
+  }
+
+  // 3. Detect Tap/Click events (simplified)
+  // Note: android_input_events is a stdlib VIEW, requires module loading above
+  try {
+    const tapResult = await traceProcessorService.query(traceId, `
+      WITH
+      -- Existence check: short-circuit if table doesn't exist
+      input_exists AS (
+        SELECT 1 AS ok WHERE EXISTS (
+          SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = 'android_input_events'
+        )
+      ),
+      motion_events AS (
+        SELECT
+          read_time AS ts,
+          event_action
+        FROM android_input_events
+        WHERE event_type = 'MOTION'
+          AND EXISTS (SELECT ok FROM input_exists)
+      ),
+      tap_events AS (
+        SELECT
+          ts AS down_ts,
+          LEAD(ts) OVER (ORDER BY ts) AS up_ts,
+          event_action
+        FROM motion_events
+        WHERE event_action IN ('DOWN', 'UP')
+      )
+      SELECT
+        down_ts AS start_ts,
+        up_ts AS end_ts,
+        CAST((up_ts - down_ts) / 1000000 AS INT) AS dur_ms
+      FROM tap_events
+      WHERE event_action = 'DOWN'
+        AND up_ts IS NOT NULL
+        AND (up_ts - down_ts) < 300000000
+      ORDER BY down_ts
+      LIMIT 50
+    `);
+
+    if (tapResult.rows) {
+      for (const row of tapResult.rows) {
+        const [startTs, endTs, durMs] = row;
+        scenes.push({
+          type: 'tap',
+          startTs: String(startTs),
+          endTs: String(endTs),
+          durationMs: Number(durMs),
+          confidence: 0.75,
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('[QuickSceneDetect] Tap detection failed:', e);
+  }
+
+  // Sort scenes by start timestamp
+  scenes.sort((a, b) => {
+    const aTs = BigInt(a.startTs);
+    const bTs = BigInt(b.startTs);
+    return aTs < bTs ? -1 : aTs > bTs ? 1 : 0;
+  });
+
+  return scenes;
+}
 
 // ============================================================================
 // Teaching Pipeline Endpoints
@@ -1236,8 +1606,10 @@ router.post('/teaching/pipeline', async (req, res) => {
     const smartFilterConfigs = pipelineSkillLoader.getSmartFilterConfigs(primaryPipelineId);
 
     // v4 Smart Pin Enhancement: YAML-driven smart pin based on pipeline skill configuration
-    // Each pin instruction can have a smart_filter section that defines detection_sql.
-    // If smart_filter.enabled is true, we check if activeRenderingProcesses has data for that pattern.
+    // Each pin instruction can enable smart_filter to request process-filtered pinning.
+    // Today SmartPerfetto uses a centralized "active_rendering_processes" query (from
+    // rendering_pipeline_detection) and does NOT execute per-instruction detection_sql.
+    // If smart_filter.enabled is true, we attach activeProcessNames for frontend filtering.
     //
     // Decision logic per instruction:
     // 1. Check if instruction has smart_filter.enabled = true
@@ -1435,122 +1807,6 @@ router.get('/:sessionId/report', (req, res) => {
 });
 
 // ============================================================================
-// Scene Reconstruction Helper Functions
-// ============================================================================
-
-async function runSceneReconstruction(
-  analysisId: string,
-  traceId: string,
-  options: { deepAnalysis?: boolean; generateTracks?: boolean } = {}
-) {
-  const session = sceneReconstructionSessions.get(analysisId);
-  if (!session) return;
-
-  session.status = 'running';
-
-  // Set up streaming callback for real-time updates
-  const streamingCallback = (update: StreamingUpdate) => {
-    console.log(`[AgentRoutes] Scene reconstruction update for ${analysisId}:`, update.type);
-    broadcastToSceneClients(analysisId, update);
-  };
-
-  session.agent.setStreamingCallback(streamingCallback);
-
-  try {
-    // Create analysis context
-    const context = {
-      traceId,
-      package: undefined as string | undefined,
-    };
-
-    // Run scene reconstruction analysis
-    const result = await session.agent.analyze(context);
-
-    // Store results
-    session.result = result;
-    session.scenes = result.scenes;
-    session.trackEvents = result.trackEvents;
-    session.status = 'completed';
-
-    // Send final results to all clients
-    session.sseClients.forEach((client) => {
-      try {
-        sendSceneReconstructionResult(client, result);
-        client.write(`event: end\n`);
-        client.write(`data: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
-      } catch {}
-    });
-
-    console.log(`[AgentRoutes] Scene reconstruction completed for ${analysisId}`);
-    console.log(`  - Scenes detected: ${result.scenes.length}`);
-    console.log(`  - Track events: ${result.trackEvents.length}`);
-    console.log(`  - Confidence: ${result.confidence}`);
-  } catch (error: any) {
-    session.status = 'failed';
-    session.error = error.message;
-
-    broadcastToSceneClients(analysisId, {
-      type: 'error',
-      content: { message: error.message },
-      timestamp: Date.now(),
-    });
-
-    throw error;
-  }
-}
-
-function broadcastToSceneClients(analysisId: string, update: StreamingUpdate) {
-  const session = sceneReconstructionSessions.get(analysisId);
-  if (!session) return;
-
-  const eventType = update.type;
-  const eventData = JSON.stringify({
-    type: update.type,
-    data: update.content,
-    timestamp: update.timestamp,
-  });
-
-  session.sseClients.forEach((client) => {
-    try {
-      client.write(`event: ${eventType}\n`);
-      client.write(`data: ${eventData}\n\n`);
-    } catch {}
-  });
-}
-
-function sendSceneReconstructionResult(res: express.Response, result: SceneReconstructionResult) {
-  // Send scene_reconstruction_completed event with full result
-  res.write(`event: scene_reconstruction_completed\n`);
-  res.write(`data: ${JSON.stringify({
-    type: 'scene_reconstruction_completed',
-    data: {
-      narrative: result.narrative,
-      confidence: result.confidence,
-      executionTimeMs: result.executionTimeMs,
-      scenes: result.scenes.map((s) => ({
-        type: s.type,
-        startTs: s.startTs,
-        endTs: s.endTs,
-        durationMs: s.durationMs,
-        confidence: s.confidence,
-        appPackage: s.appPackage,
-      })),
-      trackEvents: result.trackEvents,
-      findings: result.findings.map((f) => ({
-        id: f.id,
-        category: f.category,
-        severity: f.severity,
-        title: f.title,
-        description: f.description,
-        timestampsNs: f.timestampsNs,
-      })),
-      suggestions: result.suggestions,
-    },
-    timestamp: Date.now(),
-  })}\n\n`);
-}
-
-// ============================================================================
 // Agent-Driven Analysis Helper Functions (Phase 2-4)
 // ============================================================================
 
@@ -1567,10 +1823,42 @@ async function runAgentDrivenAnalysis(
   session.status = 'running';
   logger.info('AgentDrivenAnalysis', 'Starting agent-driven analysis', { query, traceId });
 
+  // Track generation is a lightweight derivation step from DataEnvelopes.
+  // Enable by default (unless explicitly disabled) so `/api/agent/analyze` can
+  // also produce TrackEvent(s) when the scene reconstruction skill runs.
+  const shouldGenerateTracks = options.generateTracks !== false;
+
+  // Capture LLM call telemetry into session logs (privacy-safe: hashes + params only)
+  const modelRouter = getModelRouter();
+  const onLlmTelemetry = (event: any) => {
+    if (!event || event.sessionId !== sessionId) return;
+    logger.debug('LLM', 'llmTelemetry', event);
+  };
+  modelRouter.on('llmTelemetry', onLlmTelemetry);
+
   // Set up streaming via event listener on orchestrator
   const handleUpdate = (update: StreamingUpdate) => {
     console.log(`[AgentRoutes.AgentDriven] Received event: ${update.type}`, update.content?.phase);
     logger.debug('Stream', `Update: ${update.type}`, update.content);
+
+    // Derive TrackEvent(s) for scene reconstruction sessions from emitted DataEnvelopes.
+    // This keeps the TrackEvent feature while unifying on the agent-driven architecture.
+    if (shouldGenerateTracks && update.type === 'data') {
+      const envelopes = (Array.isArray(update.content) ? update.content : [update.content])
+        .filter((e): e is DataEnvelope => !!e && typeof e === 'object');
+      const changed = updateSceneReconstructionArtifactsFromEnvelopes(session, envelopes);
+      if (changed) {
+        broadcastToAgentDrivenClients(sessionId, {
+          type: 'track_data',
+          content: {
+            tracks: session.trackEvents || [],
+            scenes: session.scenes || [],
+          },
+          timestamp: update.timestamp,
+          id: generateEventId('track_data', sessionId),
+        });
+      }
+    }
 
     // Track agent dialogue events
     if (update.content?.phase === 'task_dispatched' || update.content?.phase === 'task_completed') {
@@ -1612,6 +1900,7 @@ async function runAgentDrivenAnalysis(
         traceProcessorService: options.traceProcessorService,
         packageName: options.packageName,
         timeRange: options.timeRange,
+        adb: options.adb,
       });
     });
     console.log('[AgentRoutes.AgentDriven] analyze completed, success:', result.success);
@@ -1619,6 +1908,11 @@ async function runAgentDrivenAnalysis(
     session.result = result;
     session.hypotheses = result.hypotheses;
     session.status = result.success ? 'completed' : 'failed';
+
+    // Ensure trackEvents/scenes are computed for completed sessions (even without SSE clients)
+    if (shouldGenerateTracks) {
+      updateSceneReconstructionArtifactsFromEnvelopes(session, session.dataEnvelopes as DataEnvelope[]);
+    }
 
     // Log completion details
     logger.info('AgentDrivenAnalysis', 'Agent-driven analysis completed', {
@@ -1694,6 +1988,8 @@ async function runAgentDrivenAnalysis(
 
     logger.close();
     throw error;
+  } finally {
+    modelRouter.off('llmTelemetry', onLlmTelemetry);
   }
 }
 
@@ -1795,6 +2091,436 @@ function broadcastToAgentDrivenClients(sessionId: string, update: StreamingUpdat
   });
 }
 
+// =============================================================================
+// Scene Reconstruction: Derive scenes + TrackEvent(s) from DataEnvelopes
+// =============================================================================
+
+const SCENE_DISPLAY_NAMES: Record<SceneCategory, string> = {
+  cold_start: '冷启动',
+  warm_start: '温启动',
+  hot_start: '热启动',
+  scroll: '滑动',
+  navigation: '跳转',
+  app_switch: '应用切换',
+  screen_unlock: '解锁屏幕',
+  notification: '通知操作',
+  split_screen: '分屏操作',
+  tap: '点击',
+  long_press: '长按',
+  idle: '空闲',
+  jank_region: '性能问题区间',
+};
+
+const SCENE_COLOR_SCHEMES: Record<SceneCategory, TrackEvent['colorScheme']> = {
+  cold_start: 'launch',
+  warm_start: 'launch',
+  hot_start: 'launch',
+  scroll: 'scroll',
+  navigation: 'navigation',
+  app_switch: 'system',
+  screen_unlock: 'system',
+  notification: 'system',
+  split_screen: 'system',
+  tap: 'tap',
+  long_press: 'tap',
+  idle: 'system',
+  jank_region: 'jank',  // Use jank color to highlight performance issues
+};
+
+function updateSceneReconstructionArtifactsFromEnvelopes(
+  session: AnalysisSession,
+  envelopes: DataEnvelope[]
+): boolean {
+  if (!Array.isArray(envelopes) || envelopes.length === 0) return false;
+
+  const extractedScenes = extractDetectedScenesFromEnvelopes(envelopes);
+  if (extractedScenes.length === 0) return false;
+
+  const mergedScenes = mergeDetectedScenes(session.scenes || [], extractedScenes);
+  const mergedTracks = buildTrackEventsFromScenes(mergedScenes);
+
+  const prevFingerprint = fingerprintTrackEvents(session.trackEvents || []);
+  const nextFingerprint = fingerprintTrackEvents(mergedTracks);
+
+  session.scenes = mergedScenes;
+  session.trackEvents = mergedTracks;
+
+  return prevFingerprint !== nextFingerprint;
+}
+
+function extractDetectedScenesFromEnvelopes(envelopes: DataEnvelope[]): DetectedScene[] {
+  const scenes: DetectedScene[] = [];
+
+  for (const env of envelopes) {
+    if (!env || env.meta?.skillId !== 'scene_reconstruction') continue;
+
+    const stepId = env.meta.stepId || '';
+    const rows = payloadToObjectRowsLocal(env.data);
+    if (rows.length === 0) continue;
+
+    // Step: app_launches (startup events)
+    if (stepId === 'app_launches') {
+      for (const row of rows) {
+        const startTs = normalizeNs(row.ts);
+        const durNs = toBigInt(row.dur);
+        if (!startTs || durNs === null) continue;
+
+        const startupType = String(row.startup_type || '').toLowerCase();
+        const type: SceneCategory =
+          startupType === 'warm' ? 'warm_start'
+          : startupType === 'hot' ? 'hot_start'
+          : 'cold_start';
+
+        const startNs = BigInt(startTs);
+        const endNs = startNs + durNs;
+        const durationMs = Number(durNs / 1_000_000n);
+
+        scenes.push({
+          type,
+          startTs: startTs,
+          endTs: endNs.toString(),
+          durationMs,
+          confidence: 0.95,
+          appPackage: typeof row.package === 'string' ? row.package : undefined,
+          metadata: {
+            source: 'scene_reconstruction:app_launches',
+            startupType: startupType || undefined,
+            event: row.event,
+          },
+        });
+      }
+      continue;
+    }
+
+    // Step: user_gestures (tap/scroll/long_press)
+    if (stepId === 'user_gestures') {
+      for (const row of rows) {
+        const startTs = normalizeNs(row.ts);
+        const durNs = toBigInt(row.dur);
+        if (!startTs || durNs === null) continue;
+
+        const gestureType = String(row.gesture_type || '').toLowerCase();
+        const type: SceneCategory =
+          gestureType === 'scroll' ? 'scroll'
+          : gestureType === 'long_press' ? 'long_press'
+          : 'tap';
+
+        const startNs = BigInt(startTs);
+        const endNs = startNs + durNs;
+        const durationMs = Number(durNs / 1_000_000n);
+
+        scenes.push({
+          type,
+          startTs: startTs,
+          endTs: endNs.toString(),
+          durationMs,
+          confidence: confidenceToScore(row.confidence),
+          appPackage: extractBracketContent(String(row.event || '')) || undefined,
+          metadata: {
+            source: 'scene_reconstruction:user_gestures',
+            moveCount: row.move_count,
+            event: row.event,
+          },
+        });
+      }
+      continue;
+    }
+
+    // Step: top_app_changes (app switches)
+    if (stepId === 'top_app_changes') {
+      for (const row of rows) {
+        const startTs = normalizeNs(row.ts);
+        const durNs = toBigInt(row.dur);
+        if (!startTs || durNs === null) continue;
+
+        const startNs = BigInt(startTs);
+        const endNs = startNs + durNs;
+        const durationMs = Number(durNs / 1_000_000n);
+
+        scenes.push({
+          type: 'app_switch',
+          startTs: startTs,
+          endTs: endNs.toString(),
+          durationMs,
+          confidence: 0.9,
+          appPackage: typeof row.app_package === 'string' ? row.app_package : undefined,
+          metadata: {
+            source: 'scene_reconstruction:top_app_changes',
+            event: row.event,
+          },
+        });
+      }
+      continue;
+    }
+
+    // Step: system_events (unlock/notification/split screen)
+    if (stepId === 'system_events') {
+      for (const row of rows) {
+        const startTs = normalizeNs(row.ts);
+        const durNs = toBigInt(row.dur);
+        if (!startTs || durNs === null) continue;
+
+        const eventText = String(row.event || '');
+        const type = mapSystemEventToSceneType(eventText);
+        if (!type) continue;
+
+        const startNs = BigInt(startTs);
+        const endNs = startNs + durNs;
+        const durationMs = Number(durNs / 1_000_000n);
+
+        scenes.push({
+          type,
+          startTs: startTs,
+          endTs: endNs.toString(),
+          durationMs,
+          confidence: 0.85,
+          metadata: {
+            source: 'scene_reconstruction:system_events',
+            event: eventText,
+          },
+        });
+      }
+      continue;
+    }
+
+    // Step: jank_events (performance issue regions) - FALLBACK
+    // When no user gestures are detected, use jank events to identify regions
+    // that need analysis. These are aggregated into intervals for deep-dive.
+    if (stepId === 'jank_events') {
+      const jankIntervals = aggregateJankFramesToIntervals(rows);
+      for (const interval of jankIntervals) {
+        // Only create scenes for regions with significant jank (3+ frames)
+        if (interval.jankCount >= 3) {
+          scenes.push({
+            type: 'jank_region',
+            startTs: interval.startTs,
+            endTs: interval.endTs,
+            durationMs: interval.durationMs,
+            confidence: 0.8,
+            metadata: {
+              source: 'scene_reconstruction:jank_events',
+              jankCount: interval.jankCount,
+              severity: interval.severity,
+            },
+          });
+        }
+      }
+      continue;
+    }
+  }
+
+  scenes.sort((a, b) => (BigInt(a.startTs) > BigInt(b.startTs) ? 1 : -1));
+  return scenes;
+}
+
+// =============================================================================
+// Jank Frame Aggregation Helper
+// =============================================================================
+
+interface JankInterval {
+  startTs: string;
+  endTs: string;
+  durationMs: number;
+  jankCount: number;
+  severity: 'severe' | 'mild';
+}
+
+/**
+ * Aggregates consecutive jank frames into intervals.
+ * Adjacent jank frames within 500ms gap are merged into one interval.
+ * This creates meaningful analysis targets from scattered jank events.
+ */
+function aggregateJankFramesToIntervals(rows: Array<Record<string, any>>): JankInterval[] {
+  if (!rows.length) return [];
+
+  const MERGE_GAP_NS = 500_000_000n; // 500ms
+  const intervals: JankInterval[] = [];
+
+  // Sort by timestamp first
+  const sortedRows = [...rows].sort((a, b) => {
+    const aTs = toBigInt(a.ts);
+    const bTs = toBigInt(b.ts);
+    if (aTs === null || bTs === null) return 0;
+    return aTs < bTs ? -1 : aTs > bTs ? 1 : 0;
+  });
+
+  let currentStart = toBigInt(sortedRows[0].ts);
+  let currentEnd = currentStart !== null
+    ? currentStart + (toBigInt(sortedRows[0].dur) || 0n)
+    : null;
+  let jankCount = 1;
+  let severities: string[] = [String(sortedRows[0].jank_severity_type || '')];
+
+  if (currentStart === null || currentEnd === null) {
+    return []; // Invalid first row
+  }
+
+  for (let i = 1; i < sortedRows.length; i++) {
+    const rowTs = toBigInt(sortedRows[i].ts);
+    const rowDur = toBigInt(sortedRows[i].dur) || 0n;
+
+    if (rowTs === null) continue;
+
+    if (rowTs - currentEnd! < MERGE_GAP_NS) {
+      // Merge into current interval
+      const rowEnd = rowTs + rowDur;
+      if (rowEnd > currentEnd!) {
+        currentEnd = rowEnd;
+      }
+      jankCount++;
+      severities.push(String(sortedRows[i].jank_severity_type || ''));
+    } else {
+      // Save current interval and start a new one
+      intervals.push({
+        startTs: currentStart!.toString(),
+        endTs: currentEnd!.toString(),
+        durationMs: Number((currentEnd! - currentStart!) / 1_000_000n),
+        jankCount,
+        severity: severities.includes('Full') ? 'severe' : 'mild',
+      });
+      currentStart = rowTs;
+      currentEnd = rowTs + rowDur;
+      jankCount = 1;
+      severities = [String(sortedRows[i].jank_severity_type || '')];
+    }
+  }
+
+  // Save the last interval
+  intervals.push({
+    startTs: currentStart!.toString(),
+    endTs: currentEnd!.toString(),
+    durationMs: Number((currentEnd! - currentStart!) / 1_000_000n),
+    jankCount,
+    severity: severities.includes('Full') ? 'severe' : 'mild',
+  });
+
+  return intervals;
+}
+
+function mergeDetectedScenes(existing: DetectedScene[], incoming: DetectedScene[]): DetectedScene[] {
+  const merged = new Map<string, DetectedScene>();
+
+  for (const s of existing) merged.set(sceneKey(s), s);
+  for (const s of incoming) merged.set(sceneKey(s), s);
+
+  const out = Array.from(merged.values());
+  out.sort((a, b) => (BigInt(a.startTs) > BigInt(b.startTs) ? 1 : -1));
+  return out;
+}
+
+function sceneKey(scene: DetectedScene): string {
+  return `${scene.type}:${scene.startTs}:${scene.endTs}:${scene.appPackage || ''}`;
+}
+
+function buildTrackEventsFromScenes(scenes: DetectedScene[]): TrackEvent[] {
+  return scenes.map((scene) => {
+    const displayName = SCENE_DISPLAY_NAMES[scene.type] || scene.type;
+    const colorScheme = SCENE_COLOR_SCHEMES[scene.type] || 'system';
+
+    const appName = scene.appPackage
+      ? scene.appPackage.replace('com.', '').replace('android.', '')
+      : '';
+
+    let name = displayName;
+    if (appName) name += ` [${appName}]`;
+    if (Number.isFinite(scene.durationMs) && scene.durationMs > 0) name += ` ${scene.durationMs}ms`;
+
+    let dur = '0';
+    try {
+      dur = (BigInt(scene.endTs) - BigInt(scene.startTs)).toString();
+    } catch {}
+
+    return {
+      ts: scene.startTs,
+      dur,
+      name,
+      category: 'scene',
+      colorScheme,
+      details: {
+        sceneType: scene.type,
+        appPackage: scene.appPackage,
+        durationMs: scene.durationMs,
+        confidence: scene.confidence,
+        ...scene.metadata,
+      },
+    };
+  });
+}
+
+function fingerprintTrackEvents(events: TrackEvent[]): string {
+  return events.map(e => `${e.ts}:${e.dur}:${e.name}:${e.colorScheme}`).join('|');
+}
+
+function payloadToObjectRowsLocal(payload: any): Array<Record<string, any>> {
+  if (!payload || typeof payload !== 'object') return [];
+  const cols = (payload as any).columns;
+  const rows = (payload as any).rows;
+  if (!Array.isArray(cols) || !Array.isArray(rows)) return [];
+
+  const out: Array<Record<string, any>> = [];
+  for (const row of rows) {
+    if (!Array.isArray(row)) continue;
+    const obj: Record<string, any> = {};
+    for (let i = 0; i < cols.length; i++) {
+      obj[String(cols[i])] = row[i];
+    }
+    out.push(obj);
+  }
+  return out;
+}
+
+function normalizeNs(value: any): string | null {
+  const n = toBigInt(value);
+  return n === null ? null : n.toString();
+}
+
+function toBigInt(value: any): bigint | null {
+  if (typeof value === 'bigint') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    try {
+      return BigInt(Math.trunc(value));
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value === 'string') {
+    const s = value.trim();
+    if (!s) return null;
+    if (!/^-?\d+$/.test(s)) return null;
+    try {
+      return BigInt(s);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function confidenceToScore(value: any): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.min(1, value));
+  const s = String(value || '').trim();
+  if (!s) return 0.85;
+  if (s === '高') return 0.9;
+  if (s === '中') return 0.7;
+  if (s === '低') return 0.5;
+  return 0.8;
+}
+
+function extractBracketContent(text: string): string | null {
+  const m = text.match(/\[([^\]]+)\]\s*$/);
+  return m ? m[1] : null;
+}
+
+function mapSystemEventToSceneType(eventText: string): SceneCategory | null {
+  const e = eventText.trim();
+  if (!e) return null;
+  if (e.includes('解锁')) return 'screen_unlock';
+  if (e.includes('通知栏') || e.includes('通知')) return 'notification';
+  if (e.includes('分屏')) return 'split_screen';
+  if (e.includes('Activity')) return 'navigation';
+  return null;
+}
+
 /**
  * Send agent-driven analysis result to SSE client
  */
@@ -1887,6 +2613,38 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
     },
     timestamp: Date.now(),
   })}\n\n`);
+
+  // Backward-compatible scene reconstruction payload (used by the legacy /scene-reconstruct clients).
+  if ((session.scenes?.length || 0) > 0 || (session.trackEvents?.length || 0) > 0) {
+    res.write(`event: scene_reconstruction_completed\n`);
+    res.write(`data: ${JSON.stringify({
+      type: 'scene_reconstruction_completed',
+      data: {
+        narrative: result.conclusion,
+        confidence: result.confidence,
+        executionTimeMs: result.totalDurationMs,
+        scenes: (session.scenes || []).map((s) => ({
+          type: s.type,
+          startTs: s.startTs,
+          endTs: s.endTs,
+          durationMs: s.durationMs,
+          confidence: s.confidence,
+          appPackage: s.appPackage,
+        })),
+        trackEvents: session.trackEvents || [],
+        findings: result.findings.map((f) => ({
+          id: f.id,
+          category: f.category,
+          severity: f.severity,
+          title: f.title,
+          description: f.description,
+          timestampsNs: f.timestampsNs,
+        })),
+        suggestions: [],
+      },
+      timestamp: Date.now(),
+    })}\n\n`);
+  }
 }
 
 // ============================================================================
@@ -2020,11 +2778,11 @@ router.post('/logs/cleanup', (req, res) => {
 // ============================================================================
 
 // Cleanup old sessions every 30 minutes
-setInterval(() => {
+const sessionCleanupInterval = setInterval(() => {
   const now = Date.now();
   const maxAge = 30 * 60 * 1000; // 30 minutes
 
-  // Clean up agent sessions
+  // Clean up stale sessions (agent-driven)
   for (const [id, session] of sessions.entries()) {
     const age = now - session.createdAt;
     if (age > maxAge && (session.status === 'completed' || session.status === 'failed')) {
@@ -2034,41 +2792,11 @@ setInterval(() => {
           client.end();
         } catch {}
       });
-      sessions.delete(id);
-    }
-  }
-
-  // Clean up agent-driven sessions (Phase 2-4)
-  for (const [id, session] of sessions.entries()) {
-    const age = now - session.createdAt;
-    if (age > maxAge && (session.status === 'completed' || session.status === 'failed')) {
-      console.log(`[AgentRoutes] Cleaning up stale agent-driven session: ${id}`);
-      session.sseClients.forEach((client) => {
-        try {
-          client.end();
-        } catch {}
-      });
       session.orchestrator.reset();
       sessions.delete(id);
     }
   }
-
-  // Clean up scene reconstruction sessions
-  for (const [id, session] of sceneReconstructionSessions.entries()) {
-    const match = id.match(/^scene-(\d+)-/);
-    if (match) {
-      const createdAt = parseInt(match[1], 10);
-      if (now - createdAt > maxAge) {
-        console.log(`[AgentRoutes] Cleaning up stale scene session: ${id}`);
-        session.sseClients.forEach((client) => {
-          try {
-            client.end();
-          } catch {}
-        });
-        sceneReconstructionSessions.delete(id);
-      }
-    }
-  }
 }, 30 * 60 * 1000);
+sessionCleanupInterval.unref?.();
 
 export default router;

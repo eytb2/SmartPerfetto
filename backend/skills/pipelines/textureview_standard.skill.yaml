@@ -143,6 +143,11 @@ auto_pin:
           ORDER BY slice_count DESC
           LIMIT 10
 
+    - pattern: "SurfaceTexture|updateTexImage|onFrameAvailable"
+      match_by: name
+      priority: 2.5
+      reason: "SurfaceTexture (纹理生产-消费/出图关键)"
+
     - pattern: "^RenderThread(\\s+\\d+)?$"
       match_by: name
       priority: 3

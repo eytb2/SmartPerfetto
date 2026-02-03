@@ -18,6 +18,8 @@ meta:
 prerequisites:
   required_tables:
     - thread_state
+  modules:
+    - linux.block_io
 
 triggers:
   - pattern: "(IO|I/O|磁盘|disk|存储|storage)"

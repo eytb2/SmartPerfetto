@@ -142,7 +142,13 @@ export class ClarifyExecutor implements AnalysisExecutor {
     const prompt = this.buildExplanationPrompt(query, context);
 
     try {
-      const result = await this.services.modelRouter.callWithFallback(prompt, 'synthesis');
+      const result = await this.services.modelRouter.callWithFallback(prompt, 'synthesis', {
+        sessionId: this.sessionContext.getSessionId(),
+        traceId: this.sessionContext.getTraceId(),
+        promptId: 'agent.clarifyExecutor',
+        promptVersion: '1.0.0',
+        contractVersion: 'clarify_text@1.0.0',
+      });
 
       if (result.success && result.response) {
         return result.response;
@@ -211,11 +217,26 @@ export class ClarifyExecutor implements AnalysisExecutor {
     }
 
     parts.push('## 要求');
-    parts.push('1. 直接回答用户的问题');
-    parts.push('2. 如果是技术概念解释，给出清晰定义和影响');
-    parts.push('3. 如果是关于特定帧/会话的问题，结合上述数据分析原因');
+    parts.push('1. 直接回答用户的问题，不要绕弯子');
+    parts.push('2. 如果是技术概念解释：');
+    parts.push('   - 先给出简明定义（1-2句话）');
+    parts.push('   - 再解释对性能的影响');
+    parts.push('   - 列出常见原因（如果适用）');
+    parts.push('3. 如果是关于特定帧/会话的问题：');
+    parts.push('   - 结合上述数据分析具体原因');
+    parts.push('   - 引用具体数值作为依据');
+    parts.push('   - 给出可能的优化方向');
     parts.push('4. 使用中文回答，保持专业但易懂');
-    parts.push('5. 如果信息不足，说明还需要什么信息');
+    parts.push('5. 如果信息不足，明确说明：');
+    parts.push('   - 当前已知什么');
+    parts.push('   - 还需要什么信息');
+    parts.push('   - 如何获取这些信息（例如"需要先运行完整分析"）');
+    parts.push('');
+    parts.push('## 常见卡顿类型说明');
+    parts.push('- App Deadline Missed: 应用侧超时，通常是主线程或RenderThread问题');
+    parts.push('- Buffer Stuffing: 帧堆积，应用产帧速度超过显示刷新率');
+    parts.push('- SurfaceFlinger Deadline Missed: 系统合成层问题');
+    parts.push('- Dropped Frame: 帧被丢弃，最严重的卡顿类型');
     parts.push('');
     parts.push('请直接给出解释，不要添加额外的格式标记。');
 
@@ -282,17 +303,85 @@ interface ClarificationContext {
 // =============================================================================
 
 /**
- * Get a brief explanation for common jank types.
+ * Get a comprehensive explanation for jank types.
+ *
+ * Provides detailed explanations including:
+ * - What the jank type means
+ * - Common causes
+ * - Where to look for more details
  */
 function getJankTypeExplanation(jankType: string): string {
   const explanations: Record<string, string> = {
-    'App Deadline Missed': '应用在规定时间内未能完成帧的渲染，通常是主线程或渲染线程工作过重导致',
-    'Buffer Stuffing': '应用产生帧的速度超过了显示刷新率，导致帧在队列中堆积',
-    'SurfaceFlinger Deadline Missed': 'SurfaceFlinger 未能及时合成帧，可能是系统负载过高',
-    'Unknown Deadline Missed': '帧未按时完成，但具体原因未知',
-    'No Jank': '该帧正常渲染，没有卡顿',
-    'Dropped Frame': '帧被丢弃，未能显示到屏幕上',
+    // App-side jank types
+    'App Deadline Missed': `应用在规定时间内未能完成帧的渲染。
+
+常见原因：
+• 主线程耗时操作（布局计算、业务逻辑、IO）
+• RenderThread 渲染耗时（复杂绘制、Shader 编译）
+• Binder 同步调用阻塞
+• GC 导致暂停
+
+诊断建议：查看四象限分析和主线程/RenderThread 耗时操作`,
+
+    'Buffer Stuffing': `应用产生帧的速度超过了显示刷新率。
+
+这通常发生在：
+• 应用连续快速提交多帧
+• 前序帧延迟导致后续帧在 Buffer 中堆积
+• 系统合成层处理不及时
+
+诊断建议：检查帧间隔是否过短，以及 SF 合成延迟`,
+
+    'SurfaceFlinger Deadline Missed': `SurfaceFlinger 未能及时完成帧合成。
+
+常见原因：
+• 系统负载过高
+• 图层数量过多
+• GPU 合成耗时
+• HWC 硬件合成问题
+
+诊断建议：检查系统 CPU 负载和 SF 帧处理时序`,
+
+    'Unknown Deadline Missed': `帧未按时完成，但系统未能明确分类原因。
+
+可能的情况：
+• 多因素共同导致
+• Trace 数据不完整
+• 边界情况
+
+诊断建议：查看帧的完整时间线和各阶段耗时`,
+
+    'No Jank': '该帧正常渲染，在 VSync 周期内完成，没有卡顿问题。',
+
+    'Dropped Frame': `帧被丢弃，未能显示到屏幕上。
+
+这是最严重的卡顿类型，用户会明显感知。通常发生在：
+• 连续多帧超时
+• 系统资源严重不足
+• GPU/SF 严重阻塞`,
+
+    // Additional jank types from Android FrameTimeline
+    'Display HAL': `显示硬件层面导致的延迟。
+
+可能原因：
+• 显示控制器问题
+• 刷新率切换
+• HDMI/DP 同步问题`,
+
+    'GPU Composition': `GPU 合成耗时过长。
+
+常见原因：
+• 过度绘制 (Overdraw)
+• 复杂的图层混合
+• GPU 频率不足`,
+
+    'Present Late': `帧在 Present 阶段延迟。
+
+可能原因：
+• GPU Fence 等待
+• Display commit 延迟
+• VSync 对齐问题`,
   };
 
-  return explanations[jankType] || `该卡顿类型 (${jankType}) 需要进一步分析具体原因`;
+  return explanations[jankType] || `该卡顿类型 (${jankType}) 需要进一步分析具体原因。建议查看帧级详细数据和四象限分析。`;
 }

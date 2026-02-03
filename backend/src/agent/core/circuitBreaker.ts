@@ -231,6 +231,7 @@ export class CircuitBreaker extends EventEmitter {
       });
       // 不自动调用 handleUserResponse，而是发出事件让上层处理
     }, this.USER_RESPONSE_TIMEOUT_MS);
+    this.userResponseTimeout.unref?.();
   }
 
   /**
@@ -282,11 +283,12 @@ export class CircuitBreaker extends EventEmitter {
    * 安排冷却后的状态转换
    */
   private scheduleCooldown(): void {
-    setTimeout(() => {
+    const cooldownTimer = setTimeout(() => {
       if (this.state.state === CircuitState.OPEN) {
         this.halfOpen();
       }
     }, this.config.cooldownMs);
+    cooldownTimer.unref?.();
   }
 
   // ==========================================================================

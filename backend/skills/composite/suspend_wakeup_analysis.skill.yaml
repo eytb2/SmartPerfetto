@@ -19,6 +19,9 @@ meta:
 prerequisites:
   required_tables:
     - sched_slice
+  modules:
+    - android.suspend
+    - android.wakeups
 display:
   name: "休眠唤醒分析"
   level: expert

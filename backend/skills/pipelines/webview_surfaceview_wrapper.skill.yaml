@@ -115,11 +115,17 @@ auto_pin:
       priority: 2
       reason: "App 控制 (生产)"
       expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的宿主主线程"
 
     - pattern: "CrRendererMain"
       match_by: name
       priority: 3
       reason: "Chromium 渲染 (生产/传输)"
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 属于当前 app 的 Chromium 渲染进程"
 
     - pattern: "MediaCodec"
       match_by: name

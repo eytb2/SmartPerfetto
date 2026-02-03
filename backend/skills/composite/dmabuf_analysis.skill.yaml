@@ -18,6 +18,8 @@ meta:
 prerequisites:
   optional_tables:
     - ion_heap_graph
+  modules:
+    - android.memory.dmabuf
 
 triggers:
   - pattern: "(DMA|dmabuf|dma buffer|图形内存)"

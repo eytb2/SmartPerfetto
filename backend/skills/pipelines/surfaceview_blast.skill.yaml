@@ -106,6 +106,9 @@ auto_pin:
       match_by: name
       priority: 2
       reason: "独立渲染线程"
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的 GLThread（避免 pin 到系统/其他应用的 GLThread）"
 
     - pattern: "^VSYNC-sf$"
       match_by: name

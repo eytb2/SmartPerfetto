@@ -141,6 +141,8 @@ export class HypothesisExecutor implements AnalysisExecutor {
 
       // 5. Decide next strategy
       const strategyContext = {
+        sessionId: ctx.sharedContext.sessionId,
+        traceId: ctx.sharedContext.traceId,
         evaluation: this.buildEvaluation(allFindings, ctx.sharedContext),
         previousResults: [],
         intent: ctx.intent,

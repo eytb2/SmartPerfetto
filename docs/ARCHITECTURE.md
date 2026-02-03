@@ -146,10 +146,10 @@ AIPanel (ai_panel.ts)
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                         Agent System (v4.0)                          │    │
+│  │                         Agent System (v6.0)                          │    │
 │  │                                                                      │    │
 │  │  ┌─────────────────────────────────────────────────────────────────┐│    │
-│  │  │                    MasterOrchestrator                           ││    │
+│  │  │                    AgentDrivenOrchestrator                           ││    │
 │  │  │                                                                 ││    │
 │  │  │  ┌──────────────────────────────────────────────────────────┐  ││    │
 │  │  │  │                     Core Components                      │  ││    │
@@ -199,7 +199,7 @@ AIPanel (ai_panel.ts)
 │  │  ┌─────────────────────────────────────────────────────────────────┐│    │
 │  │  │                    YAML Skill Definitions                       ││    │
 │  │  │                                                                 ││    │
-│  │  │  skills/v2/composite/                                           ││    │
+│  │  │  skills/composite/                                           ││    │
 │  │  │  ├── jank_frame_analysis.skill.yaml    # 卡顿帧分析             ││    │
 │  │  │  ├── scrolling_analysis.skill.yaml     # 滑动分析               ││    │
 │  │  │  ├── slow_frame_analysis.skill.yaml    # 慢帧分析               ││    │
@@ -220,16 +220,16 @@ AIPanel (ai_panel.ts)
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.1 MasterOrchestrator 核心组件关系
+### 3.1 AgentDrivenOrchestrator 核心组件关系
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                          MasterOrchestrator                                  │
+│                          AgentDrivenOrchestrator                                  │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │                         配置 & 状态                                   │    │
 │  │                                                                      │    │
-│  │  config: MasterOrchestratorConfig                                   │    │
+│  │  config: AgentDrivenOrchestratorConfig                                   │    │
 │  │  ├── maxTotalIterations: 5                                          │    │
 │  │  ├── evaluationCriteria: { minQualityScore: 0.5, ... }              │    │
 │  │  └── enableTraceRecording: true                                     │    │
@@ -638,10 +638,12 @@ AIPanel (ai_panel.ts)
 │  │  │  Event Types:                                                │   │    │
 │  │  │  ├── connected          # 连接建立                           │   │    │
 │  │  │  ├── progress           # 进度更新                           │   │    │
-│  │  │  ├── sql_generated      # SQL 生成 (PerfettoOrchestrator)    │   │    │
-│  │  │  ├── sql_executed       # SQL 执行 (PerfettoOrchestrator)    │   │    │
-│  │  │  ├── step_completed     # 步骤完成 (PerfettoOrchestrator)    │   │    │
-│  │  │  ├── skill_section      # 技能章节 (PerfettoOrchestrator)    │   │    │
+│  │  │  ├── hypothesis_generated # 假设生成                         │   │    │
+│  │  │  ├── round_start        # 新一轮开始                         │   │    │
+│  │  │  ├── stage_start        # 策略阶段开始                       │   │    │
+│  │  │  ├── agent_task_dispatched # 任务批量分派                    │   │    │
+│  │  │  ├── agent_response     # Agent 完成任务                     │   │    │
+│  │  │  ├── synthesis_complete # 综合结果                           │   │    │
 │  │  │  ├── skill_diagnostics  # 诊断结果                           │   │    │
 │  │  │  ├── skill_layered_result # 分层数据 (L1/L2/L4)              │   │    │
 │  │  │  ├── error              # 错误                               │   │    │
@@ -653,108 +655,7 @@ AIPanel (ai_panel.ts)
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 9.1 OrchestratorBridge 事件桥接架构
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    OrchestratorBridge Event Flow                            │
-│                                                                              │
-│  两套编排器统一的事件转发机制，确保前端兼容                                      │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                    PerfettoAnalysisOrchestrator                      │    │
-│  │                         (默认路径)                                    │    │
-│  │                                                                      │    │
-│  │  直接发送 SSE 事件，格式:                                             │    │
-│  │  ┌─────────────────────────────────────────────────────────────┐   │    │
-│  │  │  skill_layered_result: {                                     │   │    │
-│  │  │    result: {                                                 │   │    │
-│  │  │      layers: { overview, list, deep },                       │   │    │
-│  │  │      metadata: { skillName, ... }                            │   │    │
-│  │  │    },                                                        │   │    │
-│  │  │    summary: "..."                                            │   │    │
-│  │  │  }                                                           │   │    │
-│  │  └─────────────────────────────────────────────────────────────┘   │    │
-│  └───────────────────────────────────────────┬─────────────────────────┘    │
-│                                               │                              │
-│                                               │ 直接 SSE                     │
-│                                               ▼                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                         Frontend (AIPanel)                           │    │
-│  │                                                                      │    │
-│  │  handleSSEEvent() 统一处理，支持两种格式:                              │    │
-│  │  ┌─────────────────────────────────────────────────────────────┐   │    │
-│  │  │  case 'skill_layered_result':                                │   │    │
-│  │  │    // 兼容两种格式                                            │   │    │
-│  │  │    const layers = data.result?.layers || data.layers;        │   │    │
-│  │  │    const metadata = data.result?.metadata ||                 │   │    │
-│  │  │                     { skillName: data.skillName };           │   │    │
-│  │  └─────────────────────────────────────────────────────────────┘   │    │
-│  └───────────────────────────────────────────▲─────────────────────────┘    │
-│                                               │                              │
-│                                               │ 转换后 SSE                   │
-│                                               │                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                    OrchestratorBridge                                │    │
-│  │              (MasterOrchestrator 路径适配器)                          │    │
-│  │                                                                      │    │
-│  │  事件转换表:                                                         │    │
-│  │  ┌─────────────────────────────────────────────────────────────┐   │    │
-│  │  │  MasterOrchestrator      OrchestratorBridge      Frontend   │   │    │
-│  │  │  (EventEmitter)     ──────────────────────────►   (SSE)     │   │    │
-│  │  │  ─────────────────────────────────────────────────────────  │   │    │
-│  │  │  'progress'          → emitProgress()           → progress  │   │    │
-│  │  │  'finding'           → handleFindingUpdate()    → skill_    │   │    │
-│  │  │                                                   diagnostics│   │    │
-│  │  │  'skill_data'        → emitSkillLayeredResult() → skill_    │   │    │
-│  │  │    {skillId,                                      layered_  │   │    │
-│  │  │     skillName,                                    result    │   │    │
-│  │  │     layers,                                                 │   │    │
-│  │  │     diagnostics}                                            │   │    │
-│  │  │  'worker_thought'    → emitWorkerThought()      → progress  │   │    │
-│  │  │    {agent,skillId,      (转换为进度消息)                      │   │    │
-│  │  │     step,data}                                              │   │    │
-│  │  │  'thought'           → emitAgentThought()       → progress  │   │    │
-│  │  │    {agent,message}      (转换为进度消息)                      │   │    │
-│  │  │  'error'             → emitErrorEvent()         → error     │   │    │
-│  │  │  'conclusion'        → (在 startAnalysis 处理)   → analysis_│   │    │
-│  │  │                                                   completed │   │    │
-│  │  └─────────────────────────────────────────────────────────────┘   │    │
-│  └───────────────────────────────────────────▲─────────────────────────┘    │
-│                                               │                              │
-│                                               │ EventEmitter                 │
-│                                               │                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                    MasterOrchestrator                                │    │
-│  │                       (新架构路径)                                    │    │
-│  │                                                                      │    │
-│  │  内部事件发射，格式:                                                  │    │
-│  │  ┌─────────────────────────────────────────────────────────────┐   │    │
-│  │  │  skill_data: {                                               │   │    │
-│  │  │    skillId: "scrolling_analysis",                            │   │    │
-│  │  │    skillName: "滑动分析",                                     │   │    │
-│  │  │    layers: { overview, list, deep },                         │   │    │
-│  │  │    diagnostics: [...]                                        │   │    │
-│  │  │  }                                                           │   │    │
-│  │  │                                                              │   │    │
-│  │  │  worker_thought: {                                           │   │    │
-│  │  │    agent: "AnalysisWorker",                                  │   │    │
-│  │  │    skillId: "scrolling_analysis",                            │   │    │
-│  │  │    step: "skill_start" | "skill_complete" | ...              │   │    │
-│  │  │  }                                                           │   │    │
-│  │  └─────────────────────────────────────────────────────────────┘   │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-**关键文件:**
-| 组件 | 文件 | 职责 |
-|------|------|------|
-| OrchestratorBridge | `backend/src/services/orchestratorBridge.ts` | 事件转换与桥接 |
-| handleSSEEvent | `perfetto/ui/.../ai_panel.ts:2159` | 前端统一事件处理 |
-| StreamingUpdate | `backend/src/agent/types.ts:246` | 事件类型定义 |
-| ProgressEvent | `backend/src/types/analysis.ts:282` | SSE 事件接口 |
+### 9.1 Trace Processor HTTP RPC
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -848,14 +749,12 @@ AIPanel (ai_panel.ts)
 | SQL Result Table | `perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/sql_result_table.ts` |
 | AI Service | `perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/ai_service.ts` |
 | **Backend Routes** | |
-| Trace Analysis Routes | `backend/src/routes/traceAnalysisRoutes.ts` ⭐ 前端主入口 |
-| Agent Routes | `backend/src/routes/agentRoutes.ts` |
-| Trace Routes | `backend/src/routes/traceRoutes.ts` |
-| **Orchestrators** | |
-| OrchestratorBridge | `backend/src/services/orchestratorBridge.ts` 🆕 |
-| PerfettoAnalysisOrchestrator | `backend/src/services/perfettoAnalysisOrchestrator.ts` |
+| Agent Routes | `backend/src/routes/agentRoutes.ts` ⭐ 前端主入口 |
+| Perfetto SQL Routes | `backend/src/routes/perfettoSqlRoutes.ts` |
+| Session Routes | `backend/src/routes/sessionRoutes.ts` |
+| Export Routes | `backend/src/routes/exportRoutes.ts` |
 | **Agent Core** | |
-| MasterOrchestrator | `backend/src/agent/core/masterOrchestrator.ts` |
+| AgentDrivenOrchestrator | `backend/src/agent/core/agentDrivenOrchestrator.ts` |
 | PipelineExecutor | `backend/src/agent/core/pipelineExecutor.ts` |
 | CircuitBreaker | `backend/src/agent/core/circuitBreaker.ts` |
 | ModelRouter | `backend/src/agent/core/modelRouter.ts` |
@@ -882,6 +781,6 @@ AIPanel (ai_panel.ts)
 | TraceProcessorService | `backend/src/services/traceProcessorService.ts` |
 | SessionLogger | `backend/src/services/sessionLogger.ts` |
 | **Skills** | |
-| Skill Definitions | `backend/skills/v2/composite/*.skill.yaml` |
-| Pipeline Skills | `backend/skills/pipelines/*.skill.yaml` (24 个渲染管线) |
+| Skill Definitions | `backend/skills/composite/*.skill.yaml` |
+| Pipeline Skills | `backend/skills/pipelines/*.skill.yaml` (25 个渲染管线) |
 | PipelineSkillLoader | `backend/src/services/pipelineSkillLoader.ts` |

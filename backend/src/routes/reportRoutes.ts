@@ -16,7 +16,7 @@ export const reportStore = new Map<string, {
 }>();
 
 // Clean up old reports every 30 minutes
-setInterval(() => {
+const reportCleanupInterval = setInterval(() => {
   const now = Date.now();
   const maxAge = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -26,6 +26,7 @@ setInterval(() => {
     }
   }
 }, 30 * 60 * 1000);
+reportCleanupInterval.unref?.();
 
 /**
  * GET /api/reports/:reportId

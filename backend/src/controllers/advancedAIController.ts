@@ -18,11 +18,12 @@ function getAIService(): AdvancedAIService {
 }
 
 // Cleanup old sessions every hour
-setInterval(() => {
+const sessionCleanupInterval = setInterval(() => {
   if (aiService) {
     getAIService().cleanup();
   }
 }, 60 * 60 * 1000);
+sessionCleanupInterval.unref?.();
 
 // Start or get an analysis session
 export async function startSession(req: Request, res: Response): Promise<void> {

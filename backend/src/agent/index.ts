@@ -16,12 +16,6 @@ export {
   LLMClient,
   ScrollingExpertAgent,
   createScrollingExpertAgent,
-  SceneReconstructionExpertAgent,
-  createSceneReconstructionAgent,
-  DetectedScene,
-  TrackEvent,
-  SceneReconstructionResult,
-  SceneCategory,
 } from './agents';
 export {
   createLLMClient,

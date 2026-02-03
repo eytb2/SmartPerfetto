@@ -9,6 +9,7 @@
  */
 
 import { EventEmitter } from 'events';
+import { LLM_REDACTION_VERSION, hashSha256, redactTextForLLM } from '../../utils/llmPrivacy';
 import {
   ModelProvider,
   ModelStrength,
@@ -267,7 +268,7 @@ export class ModelRouter extends EventEmitter {
     for (const model of modelsToTry) {
       try {
         console.log(`[ModelRouter.callWithFallback] Trying model: ${model.id} (${model.provider})`);
-        const result = await this.callModel(model, prompt, options);
+        const result = await this.callModel(model, prompt, { ...options, taskType });
         if (result.success) {
           console.log(`[ModelRouter.callWithFallback] Model ${model.id} succeeded`);
           return result;
@@ -297,25 +298,36 @@ export class ModelRouter extends EventEmitter {
     options: CallOptions = {}
   ): Promise<ModelCallResult> {
     const startTime = Date.now();
+    const jsonMode = options.jsonMode ?? detectJsonModeFromPrompt(prompt);
+    const temperature = options.temperature ?? (jsonMode ? 0 : 0.3);
+    const maxTokens = options.maxTokens || model.maxTokens;
+    const finalPrompt = jsonMode ? ensureJsonOnlyInstruction(prompt) : prompt;
+    const redactedPrompt = redactTextForLLM(finalPrompt);
+    const promptHash = hashSha256(redactedPrompt.text);
+
+    const contractVersion =
+      options.contractVersion ??
+      (jsonMode ? 'llm_contract_json_only@1.0.0' : 'llm_contract_text@1.0.0');
 
     try {
       // 获取或创建 LLM 客户端
       const client = this.getOrCreateClient(model);
 
       // 调用模型
-      const response = await client.complete(prompt, {
-        maxTokens: options.maxTokens || model.maxTokens,
-        temperature: options.temperature ?? 0.3,
-        jsonMode: options.jsonMode,
+      const response = await client.complete(redactedPrompt.text, {
+        maxTokens,
+        temperature,
+        jsonMode,
       });
 
       const latencyMs = Date.now() - startTime;
 
       // 估算 token 使用（简化实现）
-      const inputTokens = Math.ceil(prompt.length / 4);
+      const inputTokens = Math.ceil(redactedPrompt.text.length / 4);
       const outputTokens = Math.ceil(response.length / 4);
       const totalCost =
         inputTokens * model.costPerInputToken + outputTokens * model.costPerOutputToken;
+      const responseHash = hashSha256(response);
 
       // 更新统计
       this.updateStats(model.id, inputTokens + outputTokens, totalCost);
@@ -333,6 +345,35 @@ export class ModelRouter extends EventEmitter {
       };
 
       this.emit('modelCall', result);
+      this.emit('llmTelemetry', {
+        schemaVersion: '1.0.0',
+        sessionId: options.sessionId,
+        traceId: options.traceId,
+        taskType: options.taskType,
+        promptId: options.promptId,
+        promptVersion: options.promptVersion,
+        contractVersion,
+        redaction: {
+          version: LLM_REDACTION_VERSION,
+          ...redactedPrompt.stats,
+        },
+        promptHash,
+        promptChars: redactedPrompt.text.length,
+        responseHash,
+        responseChars: response.length,
+        modelId: model.id,
+        provider: model.provider,
+        temperature,
+        maxTokens,
+        jsonMode,
+        latencyMs,
+        usage: {
+          inputTokens,
+          outputTokens,
+          totalCost,
+        },
+        success: true,
+      });
       return result;
     } catch (error: any) {
       const latencyMs = Date.now() - startTime;
@@ -347,6 +388,29 @@ export class ModelRouter extends EventEmitter {
       };
 
       this.recordFailure(model.id, error.message);
+      this.emit('llmTelemetry', {
+        schemaVersion: '1.0.0',
+        sessionId: options.sessionId,
+        traceId: options.traceId,
+        taskType: options.taskType,
+        promptId: options.promptId,
+        promptVersion: options.promptVersion,
+        contractVersion,
+        redaction: {
+          version: LLM_REDACTION_VERSION,
+          ...redactedPrompt.stats,
+        },
+        promptHash,
+        promptChars: redactedPrompt.text.length,
+        modelId: model.id,
+        provider: model.provider,
+        temperature,
+        maxTokens,
+        jsonMode,
+        latencyMs,
+        success: false,
+        error: error.message,
+      });
       return result;
     }
   }
@@ -628,10 +692,65 @@ interface CallOptions {
   maxTokens?: number;
   temperature?: number;
   jsonMode?: boolean;
+  // Telemetry (optional)
+  sessionId?: string;
+  traceId?: string;
+  taskType?: TaskType;
+  promptId?: string;
+  promptVersion?: string;
+  contractVersion?: string;
 }
 
 interface LLMClientInterface {
   complete(prompt: string, options?: CallOptions): Promise<string>;
+}
+
+function detectJsonModeFromPrompt(prompt: string): boolean {
+  if (!prompt) return false;
+
+  // Heuristics: only enable JSON mode when the prompt clearly asks for structured JSON output.
+  // Keep this conservative to avoid breaking free-form narrative prompts that mention JSON incidentally.
+  const p = prompt.toLowerCase();
+
+  // English signals
+  const en =
+    p.includes('respond in json') ||
+    p.includes('respond with json') ||
+    p.includes('return json') ||
+    p.includes('output json') ||
+    p.includes('json format') ||
+    p.includes('only json');
+
+  // Chinese signals
+  const zh =
+    prompt.includes('请以 JSON') ||
+    prompt.includes('以 JSON') ||
+    prompt.includes('输出格式要求：JSON') ||
+    prompt.includes('输出格式要求: JSON') ||
+    prompt.includes('只输出 JSON') ||
+    prompt.includes('只返回 JSON') ||
+    prompt.includes('只输出JSON') ||
+    prompt.includes('只返回JSON') ||
+    prompt.includes('JSON 格式返回');
+
+  // Template-style JSON object snippet is also a strong signal:
+  // e.g. "请以 JSON 格式返回：{ ... }"
+  const hasJsonObjectTemplate = /\{\s*\"[^\"]+\"\s*:\s*/.test(prompt);
+
+  return en || zh || hasJsonObjectTemplate;
+}
+
+function ensureJsonOnlyInstruction(prompt: string): string {
+  // Avoid stacking the same instruction repeatedly.
+  if (/respond\s+only\s+with\s+valid\s+json/i.test(prompt)) return prompt;
+  if (/只输出\s*json/i.test(prompt)) return prompt;
+
+  return `${prompt}
+
+IMPORTANT:
+- Respond ONLY with valid JSON.
+- Do NOT include markdown, code fences, or extra commentary.
+- 只输出合法 JSON，不要输出 Markdown/代码块/解释。`;
 }
 
 /**

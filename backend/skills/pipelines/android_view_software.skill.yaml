@@ -94,6 +94,9 @@ auto_pin:
       priority: 2
       reason: "CPU 软件渲染 (Skia)"
       expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的主线程（软件渲染通常由 lockCanvas/unlockCanvasAndPost 驱动）"
 
     - pattern: "^VSYNC-sf$"
       match_by: name

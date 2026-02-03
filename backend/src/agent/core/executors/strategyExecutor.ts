@@ -677,6 +677,8 @@ export class StrategyExecutor implements AnalysisExecutor {
             additionalData: {
               traceProcessorService: ctx.options.traceProcessorService,
               packageName: ('packageName' in scope ? scope.packageName : undefined) || ctx.options.packageName,
+              adb: ctx.options.adb,
+              adbContext: ctx.options.adbContext,
               scopeLabel: scope.scopeLabel,
               ...(template.skillParams && { skillParams: template.skillParams }),
               ...(template.focusTools && { focusTools: template.focusTools }),

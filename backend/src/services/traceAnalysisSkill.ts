@@ -14,6 +14,7 @@
 import OpenAI from 'openai';
 import { TraceProcessorService } from './traceProcessorService';
 import PromptTemplateService from './promptTemplateService';
+import { redactTextForLLM } from '../utils/llmPrivacy';
 
 // ============================================================================
 // Types
@@ -316,10 +317,17 @@ export class TraceAnalysisSkill {
 
     const model = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
 
+    const safeMessages = messages.map((m) => {
+      if (typeof (m as any).content === 'string') {
+        return { ...m, content: redactTextForLLM((m as any).content).text } as any;
+      }
+      return m;
+    });
+
     const completion = await this.openai!.chat.completions.create({
       model,
-      messages,
-      temperature: 0.3,
+      messages: safeMessages,
+      temperature: 0,
       max_tokens: 2000,
     });
 
@@ -353,9 +361,15 @@ NO = The answer is incomplete, needs more data, or is missing key information`
 
     try {
       this.ensureConfigured();
+      const safeEvalMessages = evalMessages.map((m) => {
+        if (typeof (m as any).content === 'string') {
+          return { ...m, content: redactTextForLLM((m as any).content).text } as any;
+        }
+        return m;
+      });
       const completion = await this.openai!.chat.completions.create({
         model: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
-        messages: evalMessages,
+        messages: safeEvalMessages,
         temperature: 0,
         max_tokens: 10,
       });
@@ -399,7 +413,7 @@ NO = The answer is incomplete, needs more data, or is missing key information`
 
   private extractSQL(text: string): string | null {
     // Match ```sql ... ``` code blocks
-    const match = text.match(/```sql\n([\s\S]*?)\n```/);
+    const match = text.match(/```sql\s*([\s\S]*?)```/i);
     if (match) {
       return match[1].trim();
     }

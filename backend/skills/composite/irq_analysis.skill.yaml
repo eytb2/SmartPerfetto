@@ -18,6 +18,8 @@ meta:
 prerequisites:
   required_tables:
     - irq
+  modules:
+    - linux.irqs
 display:
   name: "中断分析"
   level: expert

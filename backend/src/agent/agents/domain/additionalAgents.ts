@@ -20,6 +20,7 @@ import {
 } from '../../types/agentProtocol';
 import { Finding } from '../../types';
 import { ModelRouter } from '../../core/modelRouter';
+import { getAdbAgentTools } from '../tools/adbTools';
 
 // =============================================================================
 // Startup Agent
@@ -38,7 +39,7 @@ export class StartupAgent extends BaseAgent {
         name: 'Startup Analysis Agent',
         domain: 'startup',
         description: 'AI agent specialized in app startup and launch performance analysis',
-        tools: [], // Loaded lazily via ensureToolsLoaded()
+        tools: [...getAdbAgentTools()],
         maxIterations: 3,
         confidenceThreshold: 0.7,
         canDelegate: true,
@@ -115,7 +116,7 @@ export class InteractionAgent extends BaseAgent {
         name: 'Interaction Analysis Agent',
         domain: 'interaction',
         description: 'AI agent specialized in click response and user interaction analysis',
-        tools: [], // Loaded lazily via ensureToolsLoaded()
+        tools: [...getAdbAgentTools()],
         maxIterations: 3,
         confidenceThreshold: 0.7,
         canDelegate: true,
@@ -192,7 +193,7 @@ export class ANRAgent extends BaseAgent {
         name: 'ANR Analysis Agent',
         domain: 'anr',
         description: 'AI agent specialized in ANR detection and root cause analysis',
-        tools: [], // Loaded lazily via ensureToolsLoaded()
+        tools: [...getAdbAgentTools()],
         maxIterations: 3,
         confidenceThreshold: 0.7,
         canDelegate: true,
@@ -270,7 +271,7 @@ export class SystemAgent extends BaseAgent {
         name: 'System Analysis Agent',
         domain: 'system',
         description: 'AI agent specialized in system-level analysis: thermal, IO, suspend/wakeup',
-        tools: [], // Loaded lazily via ensureToolsLoaded()
+        tools: [...getAdbAgentTools({ includeRecorder: true })],
         maxIterations: 3,
         confidenceThreshold: 0.7,
         canDelegate: true,

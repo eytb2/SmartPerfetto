@@ -199,6 +199,9 @@ auto_pin:
       match_by: name
       priority: 3.5
       reason: "SurfaceView 渲染"
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的 SurfaceView 渲染线程"
 
     - pattern: "MediaCodec"
       match_by: name

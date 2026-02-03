@@ -115,11 +115,19 @@ auto_pin:
       priority: 3
       reason: "Flutter 光栅化 (传输)"
 
+    - pattern: "SurfaceTexture|updateTexImage|onFrameAvailable"
+      match_by: name
+      priority: 3.5
+      reason: "SurfaceTexture (PlatformView/TextureView 出图关键)"
+
     - pattern: "^RenderThread(\\s+\\d+)?$"
       match_by: name
       priority: 4
       reason: "Android 合成 (传输)"
       expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的 RenderThread（多 app trace 下减少噪音）"
 
     - pattern: "^VSYNC-sf$"
       match_by: name

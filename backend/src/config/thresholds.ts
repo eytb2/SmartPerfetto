@@ -40,6 +40,10 @@ export interface JankSeverityThresholds {
  * - criticalCount (30): ~0.5s of jank in a typical scroll session
  * - warningRate (5%): 1 in 20 frames - perceptible to sensitive users
  * - warningCount (10): ~0.17s of jank - worth investigating
+ *
+ * Note: These thresholds apply to all refresh rates. For 120Hz devices,
+ * the same rate means more absolute jank events but the user perception
+ * of jank rate (%) remains consistent.
  */
 export const DEFAULT_JANK_THRESHOLDS: JankSeverityThresholds = {
   criticalRate: 15,
@@ -47,6 +51,19 @@ export const DEFAULT_JANK_THRESHOLDS: JankSeverityThresholds = {
   warningRate: 5,
   warningCount: 10,
 };
+
+/**
+ * Get jank thresholds adjusted for game scenarios.
+ * Games typically have lower frame rates and different tolerance.
+ */
+export function getGameJankThresholds(): JankSeverityThresholds {
+  return {
+    criticalRate: 10, // Games: lower tolerance
+    criticalCount: 20,
+    warningRate: 3,
+    warningCount: 5,
+  };
+}
 
 // =============================================================================
 // VSync Period Configuration
@@ -122,6 +139,54 @@ export function inferVsyncPeriodNs(traceContext?: {
 
   // Default to 60Hz
   return DEFAULT_VSYNC_PERIOD_NS;
+}
+
+// =============================================================================
+// VRR (Variable Refresh Rate) Support
+// =============================================================================
+
+/**
+ * VRR detection indicators.
+ * Used to determine if a device is using Variable Refresh Rate.
+ */
+export interface VRRIndicators {
+  /** Whether VRR is detected */
+  isVRR: boolean;
+  /** Min observed refresh rate (Hz) */
+  minRefreshRate?: number;
+  /** Max observed refresh rate (Hz) */
+  maxRefreshRate?: number;
+  /** Dominant refresh rate (Hz) - most common during trace */
+  dominantRefreshRate?: number;
+}
+
+/**
+ * Get jank detection multiplier for VRR devices.
+ *
+ * VRR devices can dynamically adjust refresh rate, so jank detection
+ * needs to account for variable vsync periods. The multiplier adjusts
+ * the frame deadline threshold.
+ *
+ * @param vrr - VRR indicators from trace analysis
+ * @returns Multiplier for frame deadline (1.0 = no adjustment)
+ */
+export function getVRRJankMultiplier(vrr: VRRIndicators): number {
+  if (!vrr.isVRR) {
+    return 1.0; // Fixed refresh rate - no adjustment
+  }
+
+  // VRR devices: use a more lenient threshold since frame timing varies
+  // If dominant rate is known, use that as baseline
+  if (vrr.dominantRefreshRate && vrr.maxRefreshRate) {
+    // Allow more tolerance when refresh rate varies significantly
+    const variation = vrr.maxRefreshRate / vrr.dominantRefreshRate;
+    if (variation > 1.5) {
+      return 1.3; // High variation: 30% more lenient
+    }
+    return 1.15; // Moderate variation: 15% more lenient
+  }
+
+  return 1.2; // Default VRR adjustment: 20% more lenient
 }
 
 // =============================================================================
@@ -288,6 +353,70 @@ export const SQL_VSYNC_THRESHOLD_NS = 16666666;
 export const SQL_JANK_THRESHOLD_NS = SQL_VSYNC_THRESHOLD_NS * 2;
 
 // =============================================================================
+// Root Cause Analysis Thresholds
+// =============================================================================
+
+/**
+ * Thresholds used in jank_frame_detail.skill.yaml root cause analysis.
+ *
+ * These define when specific conditions trigger diagnostic rules.
+ * Priority order in the YAML determines which rule fires first.
+ *
+ * Design rationale:
+ * - sliceDur (>8ms): Half of 16.7ms vsync, significant for 60Hz
+ * - gpuFence (>3ms): Noticeable GPU blocking
+ * - schedLatency (>5ms): Severe scheduling issue
+ * - ioBlock (>2ms): IO on main thread is problematic
+ * - totalSchedLatency (>3ms): Cumulative runnable wait
+ * - q3 (>20%): Significant CPU contention
+ * - q4 (>30%): Too much blocking/sleeping
+ * - bigFreq (<1200MHz): Below typical boost frequency
+ * - bigLoadPct (>90%): CPU cluster near saturation
+ */
+export const ROOT_CAUSE_THRESHOLDS = {
+  // Priority 1: Main thread slice duration (ms)
+  sliceDurCritical: 8,
+  sliceDurWarning: 3,
+
+  // Priority 2: GPU Fence wait (ms)
+  gpuFenceCritical: 3,
+  gpuFenceWarning: 1,
+
+  // Priority 3: Single scheduling latency (ms)
+  schedLatencyCritical: 5,
+
+  // Priority 4: Runnable percentage (Q3)
+  q3CriticalPct: 20,
+
+  // Priority 5: IO blocking (ms)
+  ioBlockCritical: 2,
+
+  // Priority 6: Total scheduling latency (ms)
+  totalSchedLatencyCritical: 3,
+
+  // Priority 7: Sleep/blocking percentage (Q4)
+  q4WarningPct: 30,
+
+  // Priority 8: RenderThread Q4 percentage
+  renderQ4WarningPct: 50,
+
+  // Priority 9: Small core percentage (Q2)
+  q2WarningPct: 50,
+
+  // Priority 10: Big core frequency (MHz)
+  bigFreqWarningMhz: 1200,
+
+  // Priority 11: Big cluster load percentage
+  bigLoadCriticalPct: 90,
+  bigLoadWarningPct: 70,
+
+  // Priority 12-13: Already covered by gpuFence thresholds
+
+  // Priority 14: Lower slice duration warning
+  // Already covered by sliceDurWarning
+};
+
+// =============================================================================
 // Export All Defaults for Easy Access
 // =============================================================================
 
@@ -316,4 +445,5 @@ export const ANALYSIS_THRESHOLDS = {
     vsyncThresholdNs: SQL_VSYNC_THRESHOLD_NS,
     jankThresholdNs: SQL_JANK_THRESHOLD_NS,
   },
+  rootCause: ROOT_CAUSE_THRESHOLDS,
 };

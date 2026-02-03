@@ -25,6 +25,60 @@ import { ModelRouter } from '../core/modelRouter';
 import {
   EnhancedSessionContext,
 } from '../context/enhancedSessionContext';
+import { isPlainObject, isStringArray, LlmJsonSchema, parseLlmJson } from '../../utils/llmJson';
+
+const LEGACY_INTENT_JSON_SCHEMA: LlmJsonSchema<Intent> = {
+  name: 'intent_json@1.0.0',
+  validate: (value: unknown): value is Intent => {
+    if (!isPlainObject(value)) return false;
+    if (typeof (value as any).primaryGoal !== 'string') return false;
+    if (!isStringArray((value as any).aspects)) return false;
+    if (!['diagnosis', 'comparison', 'timeline', 'summary'].includes(String((value as any).expectedOutputType))) {
+      return false;
+    }
+    if (!['simple', 'moderate', 'complex'].includes(String((value as any).complexity))) return false;
+    return true;
+  },
+};
+
+type LegacyPlannerResponsePayload = {
+  intent?: Intent;
+  plan?: AnalysisPlan;
+  confidence?: number;
+};
+
+const LEGACY_PLANNER_RESPONSE_JSON_SCHEMA: LlmJsonSchema<LegacyPlannerResponsePayload> = {
+  name: 'legacy_planner_response_json@1.0.0',
+  validate: (value: unknown): value is LegacyPlannerResponsePayload => {
+    if (!isPlainObject(value)) return false;
+    const confidence = (value as any).confidence;
+    if (confidence !== undefined && confidence !== null && typeof confidence !== 'number') return false;
+    const intent = (value as any).intent;
+    if (intent !== undefined && intent !== null && !isPlainObject(intent)) return false;
+    const plan = (value as any).plan;
+    if (plan !== undefined && plan !== null && !isPlainObject(plan)) return false;
+    return true;
+  },
+};
+
+type AnalysisPlanPayload = {
+  tasks: any[];
+  estimatedDuration?: number;
+  parallelizable?: boolean;
+};
+
+const ANALYSIS_PLAN_JSON_SCHEMA: LlmJsonSchema<AnalysisPlanPayload> = {
+  name: 'plan_json@1.0.0',
+  validate: (value: unknown): value is AnalysisPlanPayload => {
+    if (!isPlainObject(value)) return false;
+    if (!Array.isArray((value as any).tasks)) return false;
+    const estimatedDuration = (value as any).estimatedDuration;
+    if (estimatedDuration !== undefined && estimatedDuration !== null && typeof estimatedDuration !== 'number') return false;
+    const parallelizable = (value as any).parallelizable;
+    if (parallelizable !== undefined && parallelizable !== null && typeof parallelizable !== 'boolean') return false;
+    return true;
+  },
+};
 
 // 默认配置
 const DEFAULT_CONFIG: SubAgentConfig = {
@@ -89,22 +143,19 @@ ${previousContext}`;
 
   protected parseResponse(response: string, _context: SubAgentContext): SubAgentResult {
     try {
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return {
-          agentId: this.config.id,
-          success: true,
-          findings: [],
-          suggestions: [],
-          data: {
-            intent: parsed.intent,
-            plan: parsed.plan,
-          },
-          confidence: parsed.confidence || 0.8,
-          executionTimeMs: 0,
-        };
-      }
+      const parsed = parseLlmJson<LegacyPlannerResponsePayload>(response, LEGACY_PLANNER_RESPONSE_JSON_SCHEMA);
+      return {
+        agentId: this.config.id,
+        success: true,
+        findings: [],
+        suggestions: [],
+        data: {
+          intent: parsed.intent,
+          plan: parsed.plan,
+        },
+        confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.8,
+        executionTimeMs: 0,
+      };
     } catch (error) {
       // 解析失败
     }
@@ -164,13 +215,17 @@ ${historyContext}
   "complexity": "simple | moderate | complex"
 }`;
 
-    const response = await this.modelRouter.callWithFallback(prompt, 'intent_understanding');
+    const response = await this.modelRouter.callWithFallback(prompt, 'intent_understanding', {
+      sessionId: context.sessionId,
+      traceId: context.traceId,
+      jsonMode: true,
+      promptId: 'legacy.plannerAgent.intent',
+      promptVersion: '1.0.0',
+      contractVersion: 'intent_json@1.0.0',
+    });
 
     try {
-      const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]) as Intent;
-      }
+      return parseLlmJson<Intent>(response.response, LEGACY_INTENT_JSON_SCHEMA);
     } catch (error) {
       // 解析失败
     }
@@ -236,14 +291,18 @@ ${ANALYSIS_DOMAINS.map(d => `- ${d.id}: ${d.name}`).join('\n')}
   "parallelizable": true
 }`;
 
-    const response = await this.modelRouter.callWithFallback(prompt, 'planning');
+    const response = await this.modelRouter.callWithFallback(prompt, 'planning', {
+      sessionId: context.sessionId,
+      traceId: context.traceId,
+      jsonMode: true,
+      promptId: 'legacy.plannerAgent.plan',
+      promptVersion: '1.0.0',
+      contractVersion: 'plan_json@1.0.0',
+    });
 
     try {
-      const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const plan = JSON.parse(jsonMatch[0]) as AnalysisPlan;
-        return this.validateAndEnrichPlan(plan, intent);
-      }
+      const parsed = parseLlmJson<AnalysisPlanPayload>(response.response, ANALYSIS_PLAN_JSON_SCHEMA) as any;
+      return this.validateAndEnrichPlan(parsed as AnalysisPlan, intent);
     } catch (error) {
       // 解析失败
     }

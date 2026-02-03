@@ -21,6 +21,10 @@ meta:
 detection:
   # Key signals: NDK SurfaceControl API uses ASurfaceControl/ASurfaceTransaction.
   # NOTE: Generic "*SurfaceControl*" slices may appear in other pipelines (e.g. BLAST); prefer NDK-specific markers.
+  required_signals:
+    - slice_pattern: "*ASurfaceTransaction*"
+      min_count: 1
+
   scoring_signals:
     - signal: has_asurface_control
       slice_pattern: "*ASurfaceControl*"
@@ -107,11 +111,17 @@ auto_pin:
       priority: 2
       reason: "SurfaceControl 控制 (生产)"
       expand: true  # 展开显示 Running 状态和 callstack
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程的主线程（避免 pin 到系统/其他 app 的 main）"
 
     - pattern: "Transaction"
       match_by: name
       priority: 3
       reason: "事务提交 (传输)"
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程相关的 Transaction 轨道"
 
     - pattern: "^VSYNC-sf$"
       match_by: name

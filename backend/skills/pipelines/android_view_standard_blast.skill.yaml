@@ -1,7 +1,7 @@
 # =============================================================================
 # Android View Standard (BLAST) Pipeline
 # =============================================================================
-# Android 12+ 常见的渲染管线：HWUI + BLASTBufferQueue。
+# Android 12+（部分 Android 11 设备/ROM 已可见）常见的渲染管线：HWUI + BLASTBufferQueue。
 # BLASTBufferQueue 将 Buffer 提交与 Transaction 绑定，提升原子性与同步性；
 # 对延迟/抖动的改善依赖设备实现与负载情况，建议以 trace 结果为准。
 # =============================================================================
@@ -14,7 +14,7 @@ category: rendering
 meta:
   pipeline_id: ANDROID_VIEW_STANDARD_BLAST
   display_name: "标准 Android View (BLAST)"
-  description: "Android 12+ 常见：HWUI + BLASTBufferQueue，Transaction 原子提交"
+  description: "Android 12+ 常见（部分 Android 11+ 可见）：HWUI + BLASTBufferQueue，Transaction 原子提交"
   icon: "android"
   family: hwui
   doc_path: "rendering_pipelines/android_view_standard.md"
@@ -65,6 +65,7 @@ teaching:
     但具体收益会随设备实现与负载变化，建议以 trace 为准。
 
     版本要点（以 AOSP/厂商实现为准）:
+    - Android 11+：引入 BLASTBufferQueue（不同设备/ROM 覆盖率不同）
     - Android 12+：BLASTBufferQueue/Transaction 提交流程更普遍（原子性更新）
     - 与 FrameTimeline 等帧诊断能力结合后，可更容易定位“生产慢/合成慢/显示慢”
     - 新版本持续在 Transaction 批处理、合成调度与帧诊断上演进，建议用 trace 验证实际链路

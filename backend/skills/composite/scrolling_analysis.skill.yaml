@@ -82,6 +82,7 @@ steps:
           label: "VSync 周期"
           type: duration
           format: duration_ms
+          unit: ms
         - name: vsync_source
           label: "来源"
           type: string
@@ -568,9 +569,11 @@ steps:
           label: "帧数"
           type: number
           format: compact
-        - name: duration
+        - name: duration_ms
           label: "持续时间"
           type: duration
+          format: duration_ms
+          unit: ms
         - name: avg_dur
           label: "平均帧耗时"
           type: duration
@@ -633,7 +636,10 @@ steps:
         printf('%d', MIN(ts)) as start_ts,
         printf('%d', MAX(ts + dur)) as end_ts,
         COUNT(*) as frame_count,
-        MAX(ts + dur) - MIN(ts) as duration,
+        -- duration_ms is the primary display column (already in ms)
+        ROUND((MAX(ts + dur) - MIN(ts)) / 1e6, 1) as duration_ms,
+        -- duration in ns as string to avoid 32-bit integer overflow (for downstream consumers)
+        printf('%d', MAX(ts + dur) - MIN(ts)) as duration,
         CAST(ROUND(AVG(dur)) AS INTEGER) as avg_dur,
         MAX(dur) as max_dur,
         ROUND(1e9 * COUNT(*) / NULLIF(MAX(ts + dur) - MIN(ts), 0), 1) as session_fps
@@ -832,7 +838,7 @@ steps:
       columns:
         - name: frame_id
           label: "帧 ID"
-          type: number
+          type: string
         - name: start_ts
           label: "开始时间"
           type: timestamp
@@ -1123,7 +1129,7 @@ steps:
           AND p.name NOT LIKE '/system/%'
       )
       SELECT
-        frame_id,
+        printf('%d', frame_id) as frame_id,
         printf('%d', actual_start) as start_ts,
         printf('%d', actual_end) as end_ts,
         printf('%d', COALESCE(main_start_ts, actual_start)) as main_start_ts,
@@ -1182,7 +1188,7 @@ steps:
       level: key
       layer: overview
       title: "帧诊断结果"
-    condition: "app_jank_frames.data?.length > 0 && enable_frame_details === true"
+    condition: "app_jank_frames?.data?.length > 0 && enable_frame_details === true"
 
   # ==========================================================================
   # L4: 逐帧详细分析 (Iterator)
@@ -1200,7 +1206,7 @@ steps:
       columns:
         - name: frame_id
           label: "帧 ID"
-          type: number
+          type: string
         - name: cause_type
           label: "原因类型"
           type: string

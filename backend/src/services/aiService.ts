@@ -3,6 +3,7 @@ import axios from 'axios';
 import fs from 'fs/promises';
 import { PERFETTO_TABLES_SCHEMA, PERFETTO_SQL_EXAMPLES } from '../data/perfettoSchema';
 import SQLValidator from './sqlValidator';
+import { redactTextForLLM } from '../utils/llmPrivacy';
 
 interface GenerateSqlRequest {
   query: string;
@@ -91,16 +92,18 @@ If data is missing, say what is needed.`;
       throw new Error('OpenAI not configured');
     }
 
+    const safeSystem = redactTextForLLM(systemPrompt || this.buildSqlSystemPrompt()).text;
+    const safePrompt = redactTextForLLM(prompt).text;
     const completion = await this.openai.chat.completions.create({
       model: process.env.OPENAI_MODEL || 'gpt-4',
       messages: [
         {
           role: 'system',
-          content: systemPrompt || this.buildSqlSystemPrompt(),
+          content: safeSystem,
         },
         {
           role: 'user',
-          content: prompt,
+          content: safePrompt,
         },
       ],
       temperature: 0.3,
@@ -110,21 +113,31 @@ If data is missing, say what is needed.`;
     return completion.choices[0].message.content || '';
   }
 
-  private async callClaude(prompt: string, systemPrompt?: string): Promise<string> {
+  private async callClaude(
+    prompt: string,
+    systemPrompt?: string,
+    options?: { temperature?: number; maxTokens?: number }
+  ): Promise<string> {
     if (!process.env.ANTHROPIC_API_KEY) {
       throw new Error('Claude not configured');
     }
+    if (!this.claudeUrl) {
+      throw new Error('Claude not configured');
+    }
 
-    const systemContent = systemPrompt || this.buildSqlSystemPrompt();
+    const systemContent = redactTextForLLM(systemPrompt || this.buildSqlSystemPrompt()).text;
+    const safePrompt = redactTextForLLM(prompt).text;
     const response = await axios.post(
-      this.claudeUrl!,
+      this.claudeUrl,
       {
         model: process.env.CLAUDE_MODEL || 'claude-3-5-sonnet-20241022',
-        max_tokens: 2000,
+        max_tokens: options?.maxTokens ?? 2000,
+        temperature: options?.temperature ?? 0.3,
+        system: systemContent,
         messages: [
           {
             role: 'user',
-            content: `${systemContent}\n\nUser request: ${prompt}`,
+            content: safePrompt,
           },
         ],
       },
@@ -140,25 +153,31 @@ If data is missing, say what is needed.`;
     return response.data.content[0].text;
   }
 
-  private async callDeepseek(prompt: string, systemPrompt?: string): Promise<string> {
+  private async callDeepseek(
+    prompt: string,
+    systemPrompt?: string,
+    options?: { temperature?: number; maxTokens?: number }
+  ): Promise<string> {
     if (!this.deepseek) {
       throw new Error('Deepseek not configured');
     }
 
+    const safeSystem = redactTextForLLM(systemPrompt || this.buildSqlSystemPrompt()).text;
+    const safePrompt = redactTextForLLM(prompt).text;
     const completion = await this.deepseek.chat.completions.create({
       model: process.env.DEEPSEEK_MODEL || 'deepseek-reasoner',
       messages: [
         {
           role: 'system',
-          content: systemPrompt || this.buildSqlSystemPrompt(),
+          content: safeSystem,
         },
         {
           role: 'user',
-          content: prompt,
+          content: safePrompt,
         },
       ],
-      temperature: 0.3,
-      max_tokens: 2000,
+      temperature: options?.temperature ?? 0.3,
+      max_tokens: options?.maxTokens ?? 2000,
     });
 
     return completion.choices[0].message.content || '';
@@ -188,47 +207,81 @@ If data is missing, say what is needed.`;
       return this.generateMockSQL(request.query);
     }
 
-    let prompt = `Generate a Perfetto SQL query for the following request: "${request.query}"`;
+    const systemPrompt = this.buildSqlSystemPrompt();
+    const safeSystemPrompt = redactTextForLLM(systemPrompt).text;
 
+    let prompt = `User request: "${request.query}"`;
     if (request.context) {
-      prompt += `\n\nAdditional context: ${request.context}`;
+      prompt += `\n\nAdditional context:\n${request.context}`;
     }
 
+    // Deterministic contract: structured JSON only (machine-parseable).
     prompt += `
 
-    Please provide:
-    1. The SQL query
-    2. A clear explanation of what the query does
-    3. Any important notes about the query
+Return ONLY a valid JSON object (no markdown, no code fences) with this schema:
+{
+  "sql": "ONE Perfetto SQL query string",
+  "explanation": "What the query does (concise)",
+  "notes": ["Important notes (0-3 items)"]
+}
 
-    Format your response as:
-    --- SQL ---
-    [Your SQL query here]
-    --- EXPLANATION ---
-    [Your explanation here]
-    --- NOTES ---
-    [Any important notes]
-    `;
+Rules:
+- "sql" must be executable as-is (no placeholders like <...>).
+- Use ONLY tables/columns in the provided schema; never invent names.
+- Timestamps are in nanoseconds (ns). Convert to ms with /1e6 when presenting time.
+- If the request cannot be answered with the available schema/data, still return JSON and explain the missing data in "notes".`;
 
     let response: string;
     const aiService = process.env.AI_SERVICE;
 
     if (aiService === 'claude') {
-      response = await this.callClaude(prompt);
+      response = await this.callClaude(prompt, safeSystemPrompt, { temperature: 0 });
     } else if (aiService === 'deepseek') {
-      response = await this.callDeepseek(prompt);
+      response = await this.callDeepseek(prompt, safeSystemPrompt, { temperature: 0 });
     } else {
-      response = await this.callOpenAI(prompt);
+      const safePrompt = redactTextForLLM(prompt).text;
+      // OpenAI: enable JSON mode if supported by the target model.
+      const completion = await this.openai!.chat.completions.create({
+        model: process.env.OPENAI_MODEL || 'gpt-4',
+        messages: [
+          { role: 'system', content: safeSystemPrompt },
+          { role: 'user', content: safePrompt },
+        ],
+        temperature: 0,
+        max_tokens: 2000,
+        response_format: { type: 'json_object' },
+      });
+      response = completion.choices[0]?.message?.content || '';
     }
 
-    // Parse response
-    const sqlMatch = response.match(/--- SQL ---\n([\s\S]*?)\n--- EXPLANATION ---/);
-    const explanationMatch = response.match(/--- EXPLANATION ---\n([\s\S]*?)(\n--- NOTES ---|\n$|$)/);
-    const notesMatch = response.match(/--- NOTES ---\n([\s\S]*)/);
+    // Parse JSON response (with one repair retry for robustness)
+    const parsed = await this.parseOrRepairSqlJson(response, (repairPrompt) => {
+      if (aiService === 'claude') {
+        return this.callClaude(repairPrompt, safeSystemPrompt, { temperature: 0 });
+      }
+      if (aiService === 'deepseek') {
+        return this.callDeepseek(repairPrompt, safeSystemPrompt, { temperature: 0 });
+      }
+      const safeRepairPrompt = redactTextForLLM(repairPrompt).text;
+      // OpenAI JSON mode again
+      return this.openai!.chat.completions
+        .create({
+          model: process.env.OPENAI_MODEL || 'gpt-4',
+          messages: [
+            { role: 'system', content: safeSystemPrompt },
+            { role: 'user', content: safeRepairPrompt },
+          ],
+          temperature: 0,
+          max_tokens: 2000,
+          response_format: { type: 'json_object' },
+        })
+        .then((c) => c.choices[0]?.message?.content || '');
+    });
 
-    let sql = sqlMatch ? sqlMatch[1].trim() : response;
-    const explanation = explanationMatch ? explanationMatch[1].trim() : 'Query generated successfully';
-    const notes = notesMatch ? notesMatch[1].trim() : '';
+    let sql = (parsed.sql || '').trim();
+    sql = this.stripMarkdownCodeBlock(sql);
+    const explanation = (parsed.explanation || 'Query generated successfully').trim();
+    const notes = Array.isArray(parsed.notes) ? parsed.notes.filter(Boolean).map(String) : [];
 
     // Validate the generated SQL
     const validation = this.sqlValidator.validateSQL(sql);
@@ -247,7 +300,7 @@ If data is missing, say what is needed.`;
     }
 
     // Include validation warnings in the examples
-    const examples = notes ? [notes] : [];
+    const examples = notes.length > 0 ? notes : [];
     if (validation.warnings.length > 0) {
       examples.push('⚠️ ' + validation.warnings.join('. '));
     }
@@ -260,6 +313,67 @@ If data is missing, say what is needed.`;
       explanation,
       examples,
     };
+  }
+
+  private stripMarkdownCodeBlock(content: string): string {
+    const trimmed = (content || '').trim();
+    if (!trimmed.startsWith('```')) return trimmed;
+    const match = trimmed.match(/```(?:sql|json)?\s*([\s\S]*?)```/i);
+    return match ? match[1].trim() : trimmed;
+  }
+
+  private extractJsonObjectFromText(content: string): string {
+    const text = (content || '').trim();
+    if (!text) return text;
+    if (text.startsWith('{') && text.endsWith('}')) return text;
+
+    const first = text.indexOf('{');
+    const last = text.lastIndexOf('}');
+    if (first >= 0 && last > first) {
+      return text.slice(first, last + 1);
+    }
+    return text;
+  }
+
+  private parseJsonObject<T>(content: string): T {
+    let clean = (content || '').trim();
+    clean = this.stripMarkdownCodeBlock(clean);
+    clean = this.extractJsonObjectFromText(clean);
+    return JSON.parse(clean) as T;
+  }
+
+  private async parseOrRepairSqlJson(
+    raw: string,
+    repairFn: (repairPrompt: string) => Promise<string>
+  ): Promise<{ sql: string; explanation?: string; notes?: string[] }> {
+    const tryParse = (text: string) => this.parseJsonObject<any>(text);
+
+    try {
+      const parsed = tryParse(raw);
+      if (parsed && typeof parsed.sql === 'string') return parsed;
+    } catch {
+      // fallthrough to repair
+    }
+
+    const truncated = (raw || '').slice(0, 4000);
+    const repairPrompt = `Your previous response was not a valid JSON object matching the required schema.
+
+Convert it into STRICT JSON ONLY with this schema:
+{
+  "sql": "ONE Perfetto SQL query string",
+  "explanation": "concise",
+  "notes": ["0-3 items"]
+}
+
+Previous response (truncated):
+${truncated}`;
+
+    const repaired = await repairFn(repairPrompt);
+    const parsed = tryParse(repaired);
+    if (parsed && typeof parsed.sql === 'string') return parsed;
+
+    // Last resort: return empty SQL to trigger validator fallback logic upstream.
+    return { sql: '' };
   }
 
   async analyzeTrace(request: TraceAnalysisRequest): Promise<TraceAnalysisResponse> {

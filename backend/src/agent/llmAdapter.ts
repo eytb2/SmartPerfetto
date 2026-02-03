@@ -6,6 +6,7 @@
 
 import OpenAI from 'openai';
 import { LLMClient } from './agents/baseExpertAgent';
+import { parseLlmJson } from '../utils/llmJson';
 
 export interface LLMAdapterConfig {
   provider: 'deepseek' | 'openai';
@@ -157,29 +158,8 @@ export function createLLMClient(config?: LLMAdapterConfig): LLMClient {
   }
 }
 
-function stripMarkdownCodeBlock(content: string): string {
-  if (!content.startsWith('```')) return content;
-  const match = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-  return match ? match[1].trim() : content;
-}
-
-function extractJSONFromText(content: string): string {
-  if (content.startsWith('{') || content.startsWith('[')) return content;
-  const match = content.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-  return match ? match[1] : content;
-}
-
 function parseJSONResponse<T>(content: string): T {
-  let cleanContent = content.trim();
-  cleanContent = stripMarkdownCodeBlock(cleanContent);
-  cleanContent = extractJSONFromText(cleanContent);
-
-  try {
-    return JSON.parse(cleanContent) as T;
-  } catch (error) {
-    console.error('[LLMAdapter] Failed to parse JSON:', cleanContent.substring(0, 200));
-    throw new Error(`Invalid JSON response: ${(error as Error).message}`);
-  }
+  return parseLlmJson<T>(content);
 }
 
 export default createLLMClient;

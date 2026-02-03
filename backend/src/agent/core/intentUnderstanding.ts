@@ -15,6 +15,39 @@ import { Intent, ReferencedEntity } from '../types';
 import { ModelRouter } from './modelRouter';
 import { ProgressEmitter } from './orchestratorTypes';
 import { EnhancedSessionContext } from '../context/enhancedSessionContext';
+import { isPlainObject, isStringArray, LlmJsonSchema, parseLlmJson } from '../../utils/llmJson';
+
+const INTENT_JSON_SCHEMA: LlmJsonSchema<Intent> = {
+  name: 'intent_json@1.0.0',
+  validate: (value: unknown): value is Intent => {
+    if (!isPlainObject(value)) return false;
+    if (typeof value.primaryGoal !== 'string') return false;
+    if (!isStringArray(value.aspects)) return false;
+    if (!['diagnosis', 'comparison', 'timeline', 'summary'].includes(String(value.expectedOutputType))) {
+      return false;
+    }
+    if (!['simple', 'moderate', 'complex'].includes(String(value.complexity))) return false;
+
+    const followUpType = (value as any).followUpType;
+    if (followUpType !== undefined && followUpType !== null) {
+      if (!['initial', 'drill_down', 'clarify', 'extend', 'compare'].includes(String(followUpType))) {
+        return false;
+      }
+    }
+
+    const extractedParams = (value as any).extractedParams;
+    if (extractedParams !== undefined && extractedParams !== null && !isPlainObject(extractedParams)) {
+      return false;
+    }
+
+    const referencedEntities = (value as any).referencedEntities;
+    if (referencedEntities !== undefined && referencedEntities !== null && !Array.isArray(referencedEntities)) {
+      return false;
+    }
+
+    return true;
+  },
+};
 
 /**
  * Understand user intent from a natural language query.
@@ -49,25 +82,29 @@ export async function understandIntent(
   );
 
   try {
-    const response = await modelRouter.callWithFallback(prompt, 'intent_understanding');
-    const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]) as Intent;
+    const response = await modelRouter.callWithFallback(prompt, 'intent_understanding', {
+      sessionId: sessionContext?.getSessionId(),
+      traceId: sessionContext?.getTraceId(),
+      jsonMode: true,
+      promptId: 'agent.intentUnderstanding',
+      promptVersion: '1.0.0',
+      contractVersion: 'intent_json@1.0.0',
+    });
+    const parsed = parseLlmJson<Intent>(response.response, INTENT_JSON_SCHEMA);
 
-      // Validate and normalize followUpType
-      if (parsed.followUpType && !isValidFollowUpType(parsed.followUpType)) {
-        parsed.followUpType = isFollowUp ? 'drill_down' : 'initial';
-      }
-
-      // Ensure extractedParams is an object
-      if (parsed.extractedParams && typeof parsed.extractedParams !== 'object') {
-        parsed.extractedParams = {};
-      }
-
-      emitter.log(`Intent understood: ${parsed.primaryGoal} (followUp: ${parsed.followUpType || 'initial'})`);
-
-      return parsed;
+    // Validate and normalize followUpType
+    if (parsed.followUpType && !isValidFollowUpType(parsed.followUpType)) {
+      parsed.followUpType = isFollowUp ? 'drill_down' : 'initial';
     }
+
+    // Ensure extractedParams is an object
+    if (parsed.extractedParams && typeof parsed.extractedParams !== 'object') {
+      parsed.extractedParams = {};
+    }
+
+    emitter.log(`Intent understood: ${parsed.primaryGoal} (followUp: ${parsed.followUpType || 'initial'})`);
+
+    return parsed;
   } catch (error) {
     emitter.log(`Failed to parse intent: ${error}`);
     emitter.emitUpdate('degraded', { module: 'intentUnderstanding', fallback: 'rule-based default' });
@@ -128,10 +165,15 @@ ${entitiesSection}
 - compare: 比较不同发现（如 "帧456和帧789有什么区别"）
 
 ## 实体提取规则
-- 如果用户提到 "帧123"、"frame 123"、"第123帧"，提取为 { "type": "frame", "id": 123 }
-- 如果用户提到 "会话2"、"session 2"、"第2个滑动会话"，提取为 { "type": "session", "id": 2 }
-- 如果用户提到具体进程名如 "com.example.app"，提取为 { "type": "process", "id": "com.example.app" }
-- 如果用户提到时间范围如 "从1.2秒到1.5秒"，提取为 { "type": "time_range", "value": { "start": "1.2s", "end": "1.5s" } }
+- 帧引用: "帧123"、"frame 123"、"第123帧"、"帧号123"、"frame_id=123" → { "type": "frame", "id": 123 }
+- 会话引用: "会话2"、"session 2"、"第2个滑动会话"、"scroll session 2" → { "type": "session", "id": 2 }
+- 进程引用: "com.example.app"、"包名xxx" → { "type": "process", "id": "com.example.app" }
+- 时间范围（支持多种格式）:
+  - "从1.2秒到1.5秒" → { "type": "time_range", "value": { "start": "1.2s", "end": "1.5s" } }
+  - "1.2s~1.5s"、"1.2-1.5秒" → 同上
+  - "1200ms到1500ms"、"1200~1500ms" → { "type": "time_range", "value": { "start": "1200ms", "end": "1500ms" } }
+  - "时间戳 123456789" → { "type": "timestamp", "value": "123456789" }
+- 时间点引用: "1.2秒处"、"在1500ms"、"时间点xxx" → { "type": "timestamp", "value": "1.2s" }
 
 ## extractedParams 规则
 - 将 referencedEntities 中的 id 转换为 skill 可用的参数
@@ -140,9 +182,22 @@ ${entitiesSection}
 - process 实体 → process_name 参数`;
 }
 
+/**
+ * Patterns for detecting drill-down intent from user query.
+ * Covers common expressions in both Chinese and English.
+ */
 const DRILL_DOWN_PATTERNS = [
+  // Explicit analysis requests
   /详细分析/, /看一下/, /分析[一下]?帧/, /分析[一下]?frame/,
-  /frame\s*\d+/i, /帧\s*\d+/, /session\s*\d+/i, /会话\s*\d+/,
+  /查看/, /检查/, /深入/, /具体看/,
+  // Entity references
+  /frame\s*\d+/i, /帧\s*\d+/, /帧号\s*\d+/,
+  /session\s*\d+/i, /会话\s*\d+/, /滑动会话\s*\d+/,
+  // Time range references
+  /从.*到.*秒/, /\d+\.?\d*\s*[秒s].*[到~\-].*\d+\.?\d*\s*[秒s]/i,
+  /\d+\s*ms.*[到~\-].*\d+\s*ms/i,
+  // "What happened" pattern
+  /发生了什么/, /怎么了/, /为什么/,
 ];
 
 function buildFallbackIntent(query: string, isFollowUp: boolean | null): Intent {

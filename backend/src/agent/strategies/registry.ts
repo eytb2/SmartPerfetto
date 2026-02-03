@@ -7,6 +7,7 @@
 
 import { StagedAnalysisStrategy } from './types';
 import { scrollingStrategy } from './scrollingStrategy';
+import { sceneReconstructionQuickStrategy, sceneReconstructionStrategy } from './sceneReconstructionStrategy';
 
 /**
  * Registry that holds all available staged analysis strategies.
@@ -47,6 +48,10 @@ export class StrategyRegistry {
  */
 export function createStrategyRegistry(): StrategyRegistry {
   const registry = new StrategyRegistry();
+  // Register strategies in order of specificity (more specific first)
   registry.register(scrollingStrategy);
+  registry.register(sceneReconstructionQuickStrategy);
+  // Scene reconstruction is a catch-all for overview queries
+  registry.register(sceneReconstructionStrategy);
   return registry;
 }

@@ -168,6 +168,9 @@ auto_pin:
       match_by: name
       priority: 4
       reason: "BufferQueue (传输)"
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 活跃渲染进程相关的 BufferQueue 轨道"
 
     - pattern: "^VSYNC-sf$"
       match_by: name

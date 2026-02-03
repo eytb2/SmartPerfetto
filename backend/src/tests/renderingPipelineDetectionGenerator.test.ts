@@ -16,6 +16,21 @@ describe('rendering_pipeline_detection generator', () => {
     // This ensures YAML detection is the single source of truth for scoring configuration.
     expect(determineStep.sql).toContain('has_blast_buffer_queue');
     expect(determineStep.sql).toContain('ANDROID_VIEW_STANDARD_BLAST');
+
+    // Non-primary / feature-only pipelines should not win primary selection.
+    // Keep these checks stable to prevent regressions where a backend/impl-detail pipeline
+    // becomes the primary pipeline by accident.
+    expect(determineStep.sql).toContain('ANDROID_PIP_FREEFORM');
+    expect(determineStep.sql).toContain('ANDROID_VIEW_MULTI_WINDOW');
+    expect(determineStep.sql).toContain('ANGLE_GLES_VULKAN');
+
+    const activeStep = skill.steps?.find((s) => s.id === 'active_rendering_processes') as any;
+    expect(activeStep).toBeTruthy();
+    expect(typeof activeStep.sql).toBe('string');
+
+    // Active process detection should work across HWUI/SurfaceView/OpenGL/Vulkan/Flutter.
+    expect(activeStep.sql).toContain('DrawFrame');
+    expect(activeStep.sql).toContain('eglSwapBuffers');
+    expect(activeStep.sql).toContain('vkQueuePresentKHR');
   });
 });
-

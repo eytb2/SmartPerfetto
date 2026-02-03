@@ -20,6 +20,9 @@ meta:
 prerequisites:
   required_tables:
     - android_lmk_events
+  modules:
+    - android.memory.lmk
+    - linux.memory.general
 display:
   name: "LMK 分析"
   level: expert
