@@ -383,7 +383,7 @@ ${availableModules.map(m => `- ${m.id}: ${m.desc}`).join('\n')}
     const baseConclusion = {
       category,
       component,
-      summary: this.buildSummary(criticalFindings, warningFindings),
+      summary: this.buildSummary(allFindings, criticalFindings, warningFindings),
       explanation: this.buildFindingsExplanation(allFindings),
       evidence: this.convertFindingsToEvidence(allFindings),
       suggestions: this.generateSuggestionsFromFindings(allFindings),
@@ -730,6 +730,7 @@ ${JSON.stringify(findingsSummary, null, 2)}
    * Build summary from findings
    */
   private buildSummary(
+    allFindings: ModuleFinding[],
     criticalFindings: ModuleFinding[],
     warningFindings: ModuleFinding[]
   ): string {
@@ -738,6 +739,25 @@ ${JSON.stringify(findingsSummary, null, 2)}
     }
     if (warningFindings.length > 0) {
       return `发现 ${warningFindings.length} 个潜在问题: ${warningFindings[0].title}`;
+    }
+    if (allFindings.length > 0) {
+      const issueLikeFinding = allFindings.find((f) => {
+        const text = `${f.title || ''} ${f.description || ''}`.toLowerCase();
+        return (
+          text.includes('卡顿') ||
+          text.includes('掉帧') ||
+          text.includes('缓冲') ||
+          text.includes('jank') ||
+          text.includes('stutter') ||
+          text.includes('deadline') ||
+          text.includes('block')
+        );
+      });
+
+      if (issueLikeFinding) {
+        return `检测到性能异常信号: ${issueLikeFinding.title}`;
+      }
+      return `采集到 ${allFindings.length} 条低优先级线索，暂无高置信异常`;
     }
     return '未发现明显性能问题';
   }

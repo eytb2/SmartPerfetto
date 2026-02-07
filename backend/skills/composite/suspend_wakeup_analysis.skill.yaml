@@ -24,7 +24,7 @@ prerequisites:
     - android.wakeups
 display:
   name: "休眠唤醒分析"
-  level: expert
+  level: detail
   description: "系统休眠/唤醒分析，识别唤醒源、suspend 失败原因和功耗影响"
 
 triggers:

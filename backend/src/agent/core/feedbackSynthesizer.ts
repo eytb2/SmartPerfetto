@@ -16,7 +16,10 @@ import { AgentMessageBus } from '../communication';
 import { ModelRouter } from './modelRouter';
 import { ProgressEmitter } from './orchestratorTypes';
 import type { EnhancedSessionContext } from '../context/enhancedSessionContext';
-import { isPlainObject, isStringArray, LlmJsonSchema, parseLlmJson } from '../../utils/llmJson';
+import { isPlainObject, isStringArray, LlmJsonSchema, stripOuterMarkdownCodeFence, tryParseLlmJson } from '../../utils/llmJson';
+
+const EVIDENCE_ID_PATTERN = /^ev_[0-9a-f]{12}$/;
+const EVIDENCE_ID_GLOBAL_PATTERN = /\bev_[0-9a-f]{12}\b/g;
 
 type FeedbackSynthesisJsonPayload = {
   correlatedFindings?: string[];
@@ -30,36 +33,49 @@ type FeedbackSynthesisJsonPayload = {
   informationGaps?: string[];
 };
 
+type FeedbackHypothesisUpdate = NonNullable<FeedbackSynthesisJsonPayload['hypothesisUpdates']>[number];
+
+function makeEmptyFeedbackSynthesisPayload(informationGaps: string[] = []): FeedbackSynthesisJsonPayload {
+  return {
+    correlatedFindings: [],
+    contradictions: [],
+    hypothesisUpdates: [],
+    informationGaps,
+  };
+}
+
 const FEEDBACK_SYNTHESIS_JSON_SCHEMA: LlmJsonSchema<FeedbackSynthesisJsonPayload> = {
   name: 'feedback_synthesis_json@1.0.0',
   validate: (value: unknown): value is FeedbackSynthesisJsonPayload => {
     if (!isPlainObject(value)) return false;
 
-    const correlatedFindings = (value as any).correlatedFindings;
-    if (correlatedFindings !== undefined && correlatedFindings !== null && !isStringArray(correlatedFindings)) {
-      return false;
-    }
+    const optionalStringArray = (field: unknown): boolean =>
+      field === undefined || field === null || isStringArray(field);
 
-    const contradictions = (value as any).contradictions;
-    if (contradictions !== undefined && contradictions !== null && !isStringArray(contradictions)) {
-      return false;
-    }
+    if (!optionalStringArray(value.correlatedFindings)) return false;
+    if (!optionalStringArray(value.contradictions)) return false;
+    if (!optionalStringArray(value.informationGaps)) return false;
 
-    const informationGaps = (value as any).informationGaps;
-    if (informationGaps !== undefined && informationGaps !== null && !isStringArray(informationGaps)) {
-      return false;
-    }
+    const hasAtLeastOneSignalField =
+      Object.prototype.hasOwnProperty.call(value, 'correlatedFindings')
+      || Object.prototype.hasOwnProperty.call(value, 'contradictions')
+      || Object.prototype.hasOwnProperty.call(value, 'hypothesisUpdates')
+      || Object.prototype.hasOwnProperty.call(value, 'informationGaps');
+    if (!hasAtLeastOneSignalField) return false;
 
-    const hypothesisUpdates = (value as any).hypothesisUpdates;
+    const hypothesisUpdates = value.hypothesisUpdates;
     if (hypothesisUpdates !== undefined && hypothesisUpdates !== null) {
       if (!Array.isArray(hypothesisUpdates)) return false;
+
       for (const item of hypothesisUpdates) {
         if (!isPlainObject(item)) return false;
-        if (typeof (item as any).hypothesisId !== 'string') return false;
-        if (!['support', 'weaken', 'reject'].includes(String((item as any).action))) return false;
-        const delta = (item as any).confidence_delta;
+        if (typeof item.hypothesisId !== 'string') return false;
+        if (item.action !== 'support' && item.action !== 'weaken' && item.action !== 'reject') return false;
+
+        const delta = item.confidence_delta;
         if (delta !== undefined && delta !== null && typeof delta !== 'number') return false;
-        const reason = (item as any).reason;
+
+        const reason = item.reason;
         if (reason !== undefined && reason !== null && typeof reason !== 'string') return false;
       }
     }
@@ -68,39 +84,374 @@ const FEEDBACK_SYNTHESIS_JSON_SCHEMA: LlmJsonSchema<FeedbackSynthesisJsonPayload
   },
 };
 
+const PAYLOAD_WRAPPER_KEYS = ['result', 'data', 'output', 'payload', 'response'];
+
+const CORRELATED_KEYS = ['correlatedFindings', 'correlated_findings', 'correlations', 'supportingFindings'];
+const CONTRADICTIONS_KEYS = ['contradictions', 'conflicts', 'inconsistencies'];
+const HYPOTHESIS_UPDATES_KEYS = ['hypothesisUpdates', 'hypothesis_updates', 'updates', 'hypothesisChanges'];
+const INFORMATION_GAPS_KEYS = ['informationGaps', 'information_gaps', 'gaps', 'missingData', 'missing_data'];
+
+const HYPOTHESIS_ACTION_SYNONYMS: Record<'support' | 'weaken' | 'reject', readonly string[]> = {
+  support: ['support', 'supported', 'strengthen', 'increase', 'confirm', 'confirmed', 'up', '支持', '确认'],
+  weaken: ['weaken', 'weak', 'decrease', 'lower', 'down', 'question', 'uncertain', '减弱', '降低', '质疑'],
+  reject: ['reject', 'rejected', 'deny', 'denied', '排除', '否定'],
+};
+
+function dedupePreservingOrder<T>(values: T[]): T[] {
+  const seen = new Set<T>();
+  return values.filter(value => {
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
+}
+
+function isValidEvidenceId(value: unknown): value is string {
+  return typeof value === 'string' && EVIDENCE_ID_PATTERN.test(value.trim());
+}
+
+function getFindingDetails(finding: Finding): Record<string, unknown> {
+  if (!isPlainObject(finding.details)) return {};
+  return finding.details as Record<string, unknown>;
+}
+
+function pickFirstField(obj: Record<string, unknown>, keys: string[]): unknown {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      return obj[key];
+    }
+  }
+  return undefined;
+}
+
+function normalizeTextLike(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (!isPlainObject(value)) return '';
+
+  const candidate =
+    value.text ??
+    value.statement ??
+    value.description ??
+    value.reason ??
+    value.explanation ??
+    value.title ??
+    value.summary ??
+    value.message;
+
+  if (typeof candidate === 'string') return candidate.trim();
+  if (typeof candidate === 'number' || typeof candidate === 'boolean') return String(candidate);
+  return '';
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (value === null || value === undefined) return [];
+
+  const out: string[] = [];
+  const pushLine = (line: string): void => {
+    const text = String(line || '').replace(/^\s*[-*]\s*/, '').trim();
+    if (!text) return;
+    if (!out.includes(text)) out.push(text);
+  };
+
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    if (!normalized) return [];
+    const chunks = normalized.split(/[\n;；]+/);
+    for (const chunk of chunks) pushLine(chunk);
+    return out;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const text = normalizeTextLike(item);
+      if (!text && isPlainObject(item)) {
+        const fallback = normalizeTextLike((item as Record<string, unknown>).value);
+        if (fallback) pushLine(fallback);
+      } else if (text) {
+        pushLine(text);
+      }
+    }
+    return out;
+  }
+
+  if (isPlainObject(value)) {
+    const text = normalizeTextLike(value);
+    if (text) pushLine(text);
+    return out;
+  }
+
+  return [];
+}
+
+function parseOptionalNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const n = Number(value.trim());
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+function normalizeHypothesisAction(
+  actionRaw: unknown,
+  confidenceDelta?: number
+): 'support' | 'weaken' | 'reject' | null {
+  const action = String(actionRaw ?? '').trim().toLowerCase();
+
+  if (HYPOTHESIS_ACTION_SYNONYMS.support.includes(action)) {
+    return 'support';
+  }
+  if (HYPOTHESIS_ACTION_SYNONYMS.weaken.includes(action)) {
+    return 'weaken';
+  }
+  if (HYPOTHESIS_ACTION_SYNONYMS.reject.includes(action)) {
+    return 'reject';
+  }
+
+  if (confidenceDelta !== undefined) {
+    if (confidenceDelta > 0) return 'support';
+    if (confidenceDelta < 0) return 'weaken';
+  }
+
+  return null;
+}
+
+function normalizeHypothesisUpdates(value: unknown): FeedbackHypothesisUpdate[] {
+  const updates: FeedbackHypothesisUpdate[] = [];
+  const appendUpdate = (item: unknown, fallbackId?: string): void => {
+    if (!isPlainObject(item)) return;
+
+    const hypothesisIdRaw =
+      item.hypothesisId ??
+      item.hypothesis_id ??
+      item.id ??
+      item.hypothesis ??
+      fallbackId;
+    const hypothesisId = typeof hypothesisIdRaw === 'string' ? hypothesisIdRaw.trim() : '';
+    if (!hypothesisId) return;
+
+    const confidenceDelta = parseOptionalNumber(
+      item.confidence_delta ?? item.confidenceDelta ?? item.delta
+    );
+    const action = normalizeHypothesisAction(item.action ?? item.status ?? item.update, confidenceDelta);
+    if (!action) return;
+
+    const reason = normalizeTextLike(item.reason ?? item.explanation ?? item.rationale);
+
+    updates.push({
+      hypothesisId,
+      action,
+      ...(confidenceDelta !== undefined && { confidence_delta: confidenceDelta }),
+      ...(reason && { reason }),
+    });
+  };
+
+  if (Array.isArray(value)) {
+    for (const item of value) appendUpdate(item);
+  } else if (isPlainObject(value)) {
+    for (const [key, item] of Object.entries(value)) {
+      appendUpdate(item, key);
+    }
+  }
+
+  if (updates.length === 0) return [];
+
+  const deduped = new Map<string, FeedbackHypothesisUpdate>();
+  for (const item of updates) {
+    const dedupeKey = `${item.hypothesisId}|${item.action}`;
+    if (!deduped.has(dedupeKey)) deduped.set(dedupeKey, item);
+  }
+  return Array.from(deduped.values());
+}
+
+function unwrapPayloadCandidate(value: unknown): Record<string, unknown> | null {
+  if (!isPlainObject(value)) return null;
+
+  const hasDirectSignal =
+    pickFirstField(value, CORRELATED_KEYS) !== undefined ||
+    pickFirstField(value, CONTRADICTIONS_KEYS) !== undefined ||
+    pickFirstField(value, HYPOTHESIS_UPDATES_KEYS) !== undefined ||
+    pickFirstField(value, INFORMATION_GAPS_KEYS) !== undefined;
+
+  if (hasDirectSignal) return value;
+
+  for (const key of PAYLOAD_WRAPPER_KEYS) {
+    const child = value[key];
+    if (isPlainObject(child)) {
+      const nested = unwrapPayloadCandidate(child);
+      if (nested) return nested;
+    }
+  }
+
+  return value;
+}
+
+function normalizeFeedbackSynthesisPayload(raw: unknown): FeedbackSynthesisJsonPayload {
+  const candidate = unwrapPayloadCandidate(raw);
+  if (!candidate) {
+    if (Array.isArray(raw)) {
+      return makeEmptyFeedbackSynthesisPayload(normalizeStringList(raw));
+    }
+    return makeEmptyFeedbackSynthesisPayload();
+  }
+
+  return {
+    correlatedFindings: normalizeStringList(pickFirstField(candidate, CORRELATED_KEYS)),
+    contradictions: normalizeStringList(pickFirstField(candidate, CONTRADICTIONS_KEYS)),
+    hypothesisUpdates: normalizeHypothesisUpdates(pickFirstField(candidate, HYPOTHESIS_UPDATES_KEYS)),
+    informationGaps: normalizeStringList(pickFirstField(candidate, INFORMATION_GAPS_KEYS)),
+  };
+}
+
+function parseFeedbackSynthesisPayload(
+  llmResponse: string,
+  emitter: ProgressEmitter
+): FeedbackSynthesisJsonPayload {
+  const strictParsed = tryParseLlmJson<FeedbackSynthesisJsonPayload>(llmResponse, FEEDBACK_SYNTHESIS_JSON_SCHEMA);
+  if (strictParsed.ok) {
+    return strictParsed.value;
+  }
+
+  const relaxedParsed = tryParseLlmJson<unknown>(llmResponse);
+  if (!relaxedParsed.ok) {
+    const textRecovered = parseFeedbackSynthesisFromFreeText(llmResponse);
+    if (textRecovered) {
+      emitter.log(`[feedbackSynthesizer] Recovered synthesis payload via free-text repair: ${strictParsed.error.message}`);
+      return textRecovered;
+    }
+    throw strictParsed.error;
+  }
+
+  const normalized = normalizeFeedbackSynthesisPayload(relaxedParsed.value);
+  if (!FEEDBACK_SYNTHESIS_JSON_SCHEMA.validate(normalized)) {
+    throw strictParsed.error;
+  }
+
+  emitter.log(`[feedbackSynthesizer] Recovered synthesis payload via schema repair: ${strictParsed.error.message}`);
+  return normalized;
+}
+
+function parseFeedbackSynthesisFromFreeText(rawText: string): FeedbackSynthesisJsonPayload | null {
+  const text = stripOuterMarkdownCodeFence(String(rawText || '')).trim();
+  if (!text) return null;
+
+  const lines = text
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => line.replace(/^[-*]\s*/, '').trim());
+
+  if (lines.length === 0) return null;
+
+  const correlatedFindings: string[] = [];
+  const contradictions: string[] = [];
+  const informationGaps: string[] = [];
+  const hypothesisUpdates: FeedbackHypothesisUpdate[] = [];
+
+  const dedupePush = (arr: string[], value: string): void => {
+    const line = String(value || '').trim();
+    if (!line) return;
+    if (!arr.includes(line)) arr.push(line);
+  };
+
+  let section: 'correlated' | 'contradictions' | 'gaps' | 'updates' | 'unknown' = 'unknown';
+
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    if (/^(correlated findings?|correlations?|相互印证|印证关系|支持证据)\s*[:：]?$/.test(lower)) {
+      section = 'correlated';
+      continue;
+    }
+    if (/^(contradictions?|conflicts?|inconsistencies?|矛盾|冲突|不一致)\s*[:：]?$/.test(lower)) {
+      section = 'contradictions';
+      continue;
+    }
+    if (/^(information gaps?|gaps?|missing data|信息缺口|不确定性|待确认)\s*[:：]?$/.test(lower)) {
+      section = 'gaps';
+      continue;
+    }
+    if (/^(hypothesis updates?|updates?|假设更新|假设变更)\s*[:：]?$/.test(lower)) {
+      section = 'updates';
+      continue;
+    }
+
+    const explicitHypothesisMatch = line.match(/(?:hypothesis(?:id)?|假设(?:id)?)\s*[:=]\s*([a-zA-Z0-9_-]+)/i);
+    if (explicitHypothesisMatch) {
+      const hypothesisId = explicitHypothesisMatch[1];
+      const deltaMatch = line.match(/(?:confidence[_\s-]*delta|delta|置信度变化|置信度调整)\s*[:=]?\s*([+-]?\d+(?:\.\d+)?)/i);
+      const delta = deltaMatch ? Number(deltaMatch[1]) : undefined;
+      const action = normalizeHypothesisAction(
+        (line.match(/\b(support|weaken|reject|strengthen|increase|decrease|确认|支持|减弱|否定)\b/i) || [])[1],
+        delta
+      );
+      if (action) {
+        hypothesisUpdates.push({
+          hypothesisId,
+          action,
+          ...(delta !== undefined && Number.isFinite(delta) && { confidence_delta: delta }),
+          reason: line,
+        });
+        continue;
+      }
+    }
+
+    if (section === 'correlated') {
+      dedupePush(correlatedFindings, line);
+      continue;
+    }
+    if (section === 'contradictions') {
+      dedupePush(contradictions, line);
+      continue;
+    }
+    if (section === 'gaps') {
+      dedupePush(informationGaps, line);
+      continue;
+    }
+
+    if (/矛盾|冲突|不一致|conflict|contradiction|inconsistent/i.test(line)) {
+      dedupePush(contradictions, line);
+      continue;
+    }
+    if (/缺少|缺失|待确认|需要补充|缺口|gap|missing|uncertain/i.test(line)) {
+      dedupePush(informationGaps, line);
+      continue;
+    }
+    if (/印证|支持|correlat|support/i.test(line)) {
+      dedupePush(correlatedFindings, line);
+    }
+  }
+
+  if (
+    correlatedFindings.length === 0 &&
+    contradictions.length === 0 &&
+    informationGaps.length === 0 &&
+    hypothesisUpdates.length === 0
+  ) {
+    return null;
+  }
+
+  return {
+    correlatedFindings,
+    contradictions,
+    hypothesisUpdates,
+    informationGaps,
+  };
+}
+
 /**
  * Format a finding briefly with key metrics for synthesis prompt.
  * Output: "title (metric1=val1, metric2=val2)"
  */
 function formatFindingBrief(f: Finding): string {
-  const evIds = (() => {
-    if (!Array.isArray((f as any).evidence)) return [];
-    const ids: string[] = [];
-    for (const e of (f as any).evidence) {
-      if (!e) continue;
-      if (typeof e === 'string') {
-        if (/^ev_[0-9a-f]{12}$/.test(e.trim())) ids.push(e.trim());
-        continue;
-      }
-      if (typeof e === 'object') {
-        const id = (e as any).evidenceId || (e as any).evidence_id;
-        if (typeof id === 'string' && /^ev_[0-9a-f]{12}$/.test(id.trim())) ids.push(id.trim());
-      }
-    }
-    // Dedupe while preserving order
-    const seen = new Set<string>();
-    return ids.filter(id => {
-      if (seen.has(id)) return false;
-      seen.add(id);
-      return true;
-    });
-  })();
+  const evIds = extractEvidenceIdsFromFinding(f);
   const evStr = evIds.length > 0 ? evIds.slice(0, 2).join('|') : '';
 
-  if (!f.details || typeof f.details !== 'object' || Object.keys(f.details).length === 0) {
+  const details = getFindingDetails(f);
+  if (Object.keys(details).length === 0) {
     return evStr ? `${f.title} (ev=${evStr})` : f.title;
   }
-  const entries = Object.entries(f.details).slice(0, 4);
+  const entries = Object.entries(details).slice(0, 4);
   const metrics = entries.map(([k, v]) => {
     const val = typeof v === 'object' ? JSON.stringify(v).slice(0, 50) : String(v);
     return `${k}=${val}`;
@@ -109,63 +460,59 @@ function formatFindingBrief(f: Finding): string {
 }
 
 function extractEvidenceIdsFromFinding(f: Finding): string[] {
+  const evidence = (f as Finding & { evidence?: unknown }).evidence;
+  const entries = Array.isArray(evidence) ? evidence : evidence ? [evidence] : [];
   const ids: string[] = [];
-  const ev = (f as any).evidence;
-  const arr = Array.isArray(ev) ? ev : (ev ? [ev] : []);
 
-  for (const e of arr) {
-    if (!e) continue;
-    if (typeof e === 'string') {
-      const s = e.trim();
-      if (/^ev_[0-9a-f]{12}$/.test(s)) ids.push(s);
+  for (const entry of entries) {
+    if (isValidEvidenceId(entry)) {
+      ids.push(entry.trim());
       continue;
     }
-    if (typeof e === 'object') {
-      const id = (e as any).evidenceId || (e as any).evidence_id;
-      if (typeof id === 'string' && /^ev_[0-9a-f]{12}$/.test(id.trim())) {
-        ids.push(id.trim());
-      }
+
+    if (!isPlainObject(entry)) continue;
+
+    const idCandidate = entry.evidenceId ?? entry.evidence_id;
+    if (isValidEvidenceId(idCandidate)) {
+      ids.push(idCandidate.trim());
     }
   }
 
-  const seen = new Set<string>();
-  return ids.filter(id => {
-    if (seen.has(id)) return false;
-    seen.add(id);
-    return true;
-  });
+  return dedupePreservingOrder(ids);
 }
 
 function extractSessionIdsFromFinding(f: Finding): number[] {
   const out = new Set<number>();
-  const d = (f.details && typeof f.details === 'object') ? f.details as Record<string, any> : {};
+  const details = getFindingDetails(f);
+  const scope = isPlainObject(details.scope) ? details.scope : {};
+  const sourceWindow = isPlainObject(details.sourceWindow) ? details.sourceWindow : {};
 
-  const addMaybeNumber = (v: unknown): void => {
-    const n = Number(v);
-    if (Number.isFinite(n) && n > 0) out.add(n);
+  const addMaybeNumber = (value: unknown): void => {
+    const num = Number(value);
+    if (Number.isFinite(num) && num > 0) out.add(num);
   };
 
-  addMaybeNumber(d.session_id);
-  addMaybeNumber(d.sessionId);
-  addMaybeNumber(d.scope?.session_id);
-  addMaybeNumber(d.scope?.sessionId);
+  addMaybeNumber(details.session_id);
+  addMaybeNumber(details.sessionId);
+  addMaybeNumber(scope.session_id);
+  addMaybeNumber(scope.sessionId);
 
   const sessionIdArrays = [
-    d.sourceWindow?.sessionIds,
-    d.sourceWindow?.session_ids,
-    d.scope?.sessionIds,
-    d.scope?.session_ids,
+    sourceWindow.sessionIds,
+    sourceWindow.session_ids,
+    scope.sessionIds,
+    scope.session_ids,
   ];
   for (const arr of sessionIdArrays) {
     if (!Array.isArray(arr)) continue;
     for (const v of arr) addMaybeNumber(v);
   }
 
-  const samples = Array.isArray(d.sample) ? d.sample : [];
+  const samples = Array.isArray(details.sample) ? details.sample : [];
   for (const s of samples) {
-    if (!s || typeof s !== 'object') continue;
-    addMaybeNumber((s as any).session_id);
-    addMaybeNumber((s as any).sessionId);
+    if (!isPlainObject(s)) continue;
+    addMaybeNumber(s.session_id);
+    addMaybeNumber(s.sessionId);
   }
 
   const title = String(f.title || '');
@@ -173,6 +520,75 @@ function extractSessionIdsFromFinding(f: Finding): number[] {
   if (titleMatch) addMaybeNumber(titleMatch[1]);
 
   return Array.from(out);
+}
+
+function extractIntervalIdsFromText(text: string): number[] {
+  const out = new Set<number>();
+  const re = /(?:滑动)?区间\s*(\d+)/g;
+  const input = String(text || '');
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(input)) !== null) {
+    const n = Number(match[1]);
+    if (Number.isFinite(n) && n > 0) out.add(n);
+  }
+  return Array.from(out);
+}
+
+function extractFrameCountsFromText(text: string): number[] {
+  const out = new Set<number>();
+  const re = /(\d+)\s*帧/g;
+  const input = String(text || '');
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(input)) !== null) {
+    const n = Number(match[1]);
+    if (Number.isFinite(n) && n > 0) out.add(n);
+  }
+  return Array.from(out);
+}
+
+function buildFrameCountIntervalHints(findings: Finding[]): Map<number, Set<number>> {
+  const hints = new Map<number, Set<number>>();
+
+  for (const finding of findings) {
+    const title = String(finding.title || '');
+    if (!title) continue;
+
+    const intervalIds = extractIntervalIdsFromText(title);
+    const frameCounts = extractFrameCountsFromText(title);
+    if (intervalIds.length === 0 || frameCounts.length === 0) continue;
+
+    for (const frameCount of frameCounts) {
+      const slot = hints.get(frameCount) || new Set<number>();
+      for (const intervalId of intervalIds) slot.add(intervalId);
+      hints.set(frameCount, slot);
+    }
+  }
+
+  return hints;
+}
+
+function contradictionLooksCrossInterval(
+  contradiction: string,
+  frameCountIntervalHints: Map<number, Set<number>>
+): boolean {
+  const intervalIdsInText = extractIntervalIdsFromText(contradiction);
+  if (new Set(intervalIdsInText).size >= 2) {
+    return true;
+  }
+
+  if (frameCountIntervalHints.size === 0) return false;
+
+  const frameCounts = extractFrameCountsFromText(contradiction);
+  if (frameCounts.length < 2) return false;
+
+  const inferredIntervals = new Set<number>();
+  for (const frameCount of frameCounts) {
+    const mapped = frameCountIntervalHints.get(frameCount);
+    if (!mapped) continue;
+    for (const intervalId of mapped) inferredIntervals.add(intervalId);
+  }
+
+  return inferredIntervals.size >= 2;
 }
 
 function parseTsNs(value: unknown): bigint | null {
@@ -188,16 +604,23 @@ function parseTsNs(value: unknown): bigint | null {
 }
 
 function extractTimeRangeFromFinding(f: Finding): { start?: bigint; end?: bigint } {
-  const d = (f.details && typeof f.details === 'object') ? f.details as Record<string, any> : {};
+  const details = getFindingDetails(f);
+  const sourceWindow = isPlainObject(details.sourceWindow) ? details.sourceWindow : {};
 
-  let start = parseTsNs(d.start_ts) || parseTsNs(d.startTs) || parseTsNs(d.sourceWindow?.startTsNs) || parseTsNs(d.sourceWindow?.start_ts);
-  let end = parseTsNs(d.end_ts) || parseTsNs(d.endTs) || parseTsNs(d.sourceWindow?.endTsNs) || parseTsNs(d.sourceWindow?.end_ts);
+  let start = parseTsNs(details.start_ts)
+    || parseTsNs(details.startTs)
+    || parseTsNs(sourceWindow.startTsNs)
+    || parseTsNs(sourceWindow.start_ts);
+  let end = parseTsNs(details.end_ts)
+    || parseTsNs(details.endTs)
+    || parseTsNs(sourceWindow.endTsNs)
+    || parseTsNs(sourceWindow.end_ts);
 
-  const samples = Array.isArray(d.sample) ? d.sample : [];
+  const samples = Array.isArray(details.sample) ? details.sample : [];
   for (const s of samples) {
-    if (!s || typeof s !== 'object') continue;
-    const sStart = parseTsNs((s as any).start_ts) || parseTsNs((s as any).startTs);
-    const sEnd = parseTsNs((s as any).end_ts) || parseTsNs((s as any).endTs);
+    if (!isPlainObject(s)) continue;
+    const sStart = parseTsNs(s.start_ts) || parseTsNs(s.startTs);
+    const sEnd = parseTsNs(s.end_ts) || parseTsNs(s.endTs);
     if (sStart && (!start || sStart < start)) start = sStart;
     if (sEnd && (!end || sEnd > end)) end = sEnd;
   }
@@ -238,6 +661,10 @@ function buildEvidenceIdFindingIndex(findings: Finding[]): Map<string, Finding> 
   return index;
 }
 
+function extractEvidenceIdsFromText(value: string): string[] {
+  return dedupePreservingOrder(String(value || '').match(EVIDENCE_ID_GLOBAL_PATTERN) || []);
+}
+
 function filterScopeIncompatibleContradictions(
   contradictions: string[],
   findings: Finding[],
@@ -246,11 +673,16 @@ function filterScopeIncompatibleContradictions(
   if (!Array.isArray(contradictions) || contradictions.length === 0) return [];
 
   const evidenceIndex = buildEvidenceIdFindingIndex(findings);
+  const frameCountIntervalHints = buildFrameCountIntervalHints(findings);
   const filtered: string[] = [];
 
   for (const contradiction of contradictions) {
-    const ids = Array.from(new Set(String(contradiction || '').match(/\bev_[0-9a-f]{12}\b/g) || []));
+    const ids = extractEvidenceIdsFromText(contradiction);
     if (ids.length < 2) {
+      if (contradictionLooksCrossInterval(contradiction, frameCountIntervalHints)) {
+        emitter.log(`[feedbackSynthesizer] Skip contradiction (likely cross-interval): ${contradiction}`);
+        continue;
+      }
       filtered.push(contradiction);
       continue;
     }
@@ -333,7 +765,12 @@ export async function synthesizeFeedback(
   // 2. Multiple agents supporting the same conclusion (boost confidence)
   const groupedFindings = new Map<string, Finding[]>();
   for (const finding of allFindings) {
-    const groupKey = `${finding.category || 'unknown'}:${finding.severity}`;
+    const titleKey = String(finding.title || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .slice(0, 180);
+    const groupKey = `${finding.category || 'unknown'}:${finding.severity}:${titleKey || 'untitled'}`;
     if (!groupedFindings.has(groupKey)) {
       groupedFindings.set(groupKey, []);
     }
@@ -423,7 +860,7 @@ ${Array.from(sharedContext.hypotheses.values()).map(h => `- ${h.description} (${
       promptVersion: '1.0.0',
       contractVersion: 'feedback_synthesis_json@1.0.0',
     });
-    const parsed = parseLlmJson<FeedbackSynthesisJsonPayload>(response.response, FEEDBACK_SYNTHESIS_JSON_SCHEMA);
+    const parsed = parseFeedbackSynthesisPayload(response.response, emitter);
     informationGaps = parsed.informationGaps || [];
 
     // Process contradictions - mark conflicting findings with reduced confidence
@@ -438,9 +875,7 @@ ${Array.from(sharedContext.hypotheses.values()).map(h => `- ${h.description} (${
 
       // Record contradictions into durable per-trace state (best-effort).
       for (const c of contradictions) {
-        const evidenceIds = Array.from(new Set(
-          String(c || '').match(/\bev_[0-9a-f]{12}\b/g) || []
-        ));
+        const evidenceIds = extractEvidenceIdsFromText(c);
         sessionContext?.recordTraceAgentContradiction({
           description: c,
           severity: 'major',

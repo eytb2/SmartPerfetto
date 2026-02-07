@@ -25,7 +25,7 @@ prerequisites:
     - android.frames
 display:
   name: "GPU 分析"
-  level: expert
+  level: detail
   description: "GPU 频率、内存、负载分析，关联帧渲染和 Jank 检测"
 
 triggers:

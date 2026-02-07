@@ -25,6 +25,11 @@ import {
   ModelRouter,
   Hypothesis,
 } from '../agent';
+import {
+  normalizeConclusionOutput,
+  shouldNormalizeConclusionOutput,
+} from '../agent/core/conclusionGenerator';
+import { sanitizeNarrativeForClient } from './narrativeSanitizer';
 // Agent-Driven Architecture v2.0 - Intervention & Focus
 import type { UserDecision, AnalysisDirective } from '../agent/core/interventionController';
 import type { FocusInteraction } from '../agent/context/focusStore';
@@ -430,8 +435,9 @@ router.get('/:sessionId/status', (req, res) => {
   };
 
   if (session.status === 'completed' && session.result) {
+    const conclusion = normalizeNarrativeForClient(session.result.conclusion);
     response.result = {
-      conclusion: session.result.conclusion,
+      conclusion,
       confidence: session.result.confidence,
       totalDurationMs: session.result.totalDurationMs,
       rounds: session.result.rounds,
@@ -1308,8 +1314,9 @@ router.get('/scene-reconstruct/:analysisId/status', (req, res) => {
   };
 
   if (session.status === 'completed' && session.result) {
+    const narrative = normalizeNarrativeForClient(session.result.conclusion);
     response.result = {
-      narrative: session.result.conclusion,
+      narrative,
       confidence: session.result.confidence,
       executionTimeMs: session.result.totalDurationMs,
       scenesCount: session.scenes?.length || 0,
@@ -2053,6 +2060,7 @@ router.get('/:sessionId/report', (req, res) => {
   }
 
   const result = session.result;
+  const conclusion = normalizeNarrativeForClient(result.conclusion);
   // Generate simplified report data
   const report = {
     sessionId,
@@ -2062,7 +2070,7 @@ router.get('/:sessionId/report', (req, res) => {
     completedAt: Date.now(),
 
     summary: {
-      conclusion: result.conclusion,
+      conclusion,
       confidence: result.confidence,
       totalDurationMs: result.totalDurationMs,
       rounds: result.rounds,
@@ -2642,6 +2650,8 @@ function extractDetectedScenesFromEnvelopes(envelopes: DataEnvelope[]): Detected
         const eventText = String(row.event || '');
         const type = mapSystemEventToSceneType(eventText);
         if (!type) continue;
+        // Guardrail: ignore very short unlock slices (usually render/mutex noise).
+        if (type === 'screen_unlock' && durNs < 100_000_000n) continue;
 
         const startNs = BigInt(startTs);
         const endNs = startNs + durNs;
@@ -2915,11 +2925,174 @@ function extractBracketContent(text: string): string | null {
 function mapSystemEventToSceneType(eventText: string): SceneCategory | null {
   const e = eventText.trim();
   if (!e) return null;
-  if (e.includes('解锁')) return 'screen_unlock';
+  // Keep unlock mapping strict; broad substring matching causes false positives.
+  if (e === '解锁屏幕' || e.includes('锁屏解锁')) return 'screen_unlock';
   if (e.includes('通知栏') || e.includes('通知')) return 'notification';
   if (e.includes('分屏')) return 'split_screen';
   if (e.includes('Activity')) return 'navigation';
   return null;
+}
+
+type ClientFindingPayload = {
+  id: string;
+  category?: string;
+  severity?: string;
+  title?: string;
+  description?: string;
+  timestampsNs?: any;
+  evidence?: any;
+  details?: any;
+  recommendations?: any;
+  confidence?: number;
+};
+
+function buildClientFindings(
+  findings: AgentDrivenAnalysisResult['findings'],
+  scenes: DetectedScene[]
+): ClientFindingPayload[] {
+  const base: ClientFindingPayload[] = (findings || []).map((f: any) => ({
+    id: String(f?.id || `finding_${Date.now()}`),
+    category: f?.category,
+    severity: f?.severity,
+    title: f?.title,
+    description: f?.description,
+    timestampsNs: f?.timestampsNs,
+    evidence: f?.evidence,
+    details: f?.details,
+    recommendations: f?.recommendations,
+    confidence: f?.confidence,
+  }));
+
+  const hasIssueLikeFinding = base.some((f) => {
+    const severity = String(f.severity || '').toLowerCase();
+    if (severity === 'critical' || severity === 'high' || severity === 'warning') return true;
+    return hasIssueSignalText(`${f.title || ''} ${f.description || ''}`);
+  });
+
+  const filtered = hasIssueLikeFinding
+    ? base.filter((f) => !isNoIssueText(`${f.title || ''} ${f.description || ''}`))
+    : base;
+
+  const derived = deriveSceneIssueFindings(scenes);
+  const merged = [...filtered, ...derived];
+
+  const dedup = new Map<string, ClientFindingPayload>();
+  for (const f of merged) {
+    const key = `${String(f.title || '').trim()}::${String(f.description || '').trim()}`;
+    if (!key || key === '::') {
+      dedup.set(f.id, f);
+      continue;
+    }
+    if (!dedup.has(key)) dedup.set(key, f);
+  }
+
+  return Array.from(dedup.values());
+}
+
+function deriveSceneIssueFindings(scenes: DetectedScene[]): ClientFindingPayload[] {
+  if (!Array.isArray(scenes) || scenes.length === 0) return [];
+  const scrollScenes = scenes.filter((s) => s.type === 'scroll');
+
+  const inertialCandidates = scenes
+    .filter((s) => s.type === 'inertial_scroll')
+    .map((s) => ({
+      scene: s,
+      jankFrames: Number((s.metadata as any)?.jankFrames || 0),
+    }))
+    .filter((item) => item.jankFrames > 0)
+    .sort((a, b) => b.jankFrames - a.jankFrames)
+    .slice(0, 3);
+
+  const derived: ClientFindingPayload[] = [];
+  for (const item of inertialCandidates) {
+    const s = item.scene;
+    const severity =
+      item.jankFrames >= 100 ? 'critical'
+        : item.jankFrames >= 40 ? 'warning'
+          : 'info';
+    const app = s.appPackage || 'unknown';
+    const inertialStartNs = toBigInt(s.startTs);
+    const inertialEndNs = toBigInt(s.endTs);
+    let totalScrollDurationMs = s.durationMs;
+    if (inertialStartNs !== null && inertialEndNs !== null) {
+      let parentScroll: DetectedScene | null = null;
+      let parentStartNs: bigint | null = null;
+      for (const scroll of scrollScenes) {
+        const startNs = toBigInt(scroll.startTs);
+        const endNs = toBigInt(scroll.endTs);
+        if (startNs === null || endNs === null) continue;
+        if (startNs <= inertialStartNs && endNs >= inertialStartNs) {
+          if (!parentScroll || (parentStartNs !== null && startNs > parentStartNs)) {
+            parentScroll = scroll;
+            parentStartNs = startNs;
+          }
+        }
+      }
+      if (parentStartNs !== null && inertialEndNs > parentStartNs) {
+        totalScrollDurationMs = Number((inertialEndNs - parentStartNs) / 1_000_000n);
+      }
+    }
+
+    derived.push({
+      id: `scene_inertial_${s.startTs}`,
+      category: 'scroll',
+      severity,
+      title: `惯性滑动卡顿：${item.jankFrames} 帧异常`,
+      description: `惯性 ${s.durationMs}ms，总滑动约 ${totalScrollDurationMs}ms，应用 ${app}，建议重点排查滑动后渲染路径`,
+      details: {
+        sceneType: s.type,
+        startTs: s.startTs,
+        endTs: s.endTs,
+        durationMs: s.durationMs,
+        totalScrollDurationMs,
+        jankFrames: item.jankFrames,
+        source: 'scene_reconstruction:derived',
+      },
+      confidence: 0.85,
+    });
+  }
+
+  return derived;
+}
+
+function isNoIssueText(text: string): boolean {
+  const t = String(text || '').toLowerCase();
+  return (
+    t.includes('未发现明显性能问题') ||
+    t.includes('整体流畅度良好') ||
+    t.includes('分析未发现明显问题')
+  );
+}
+
+function hasIssueSignalText(text: string): boolean {
+  const t = String(text || '').toLowerCase();
+  return (
+    t.includes('卡顿') ||
+    t.includes('掉帧') ||
+    t.includes('缓冲区积压') ||
+    t.includes('jank') ||
+    t.includes('stutter') ||
+    t.includes('deadline missed') ||
+    t.includes('renderthread') ||
+    t.includes('主线程阻塞')
+  );
+}
+
+function normalizeNarrativeForClient(narrative: string): string {
+  const raw = String(narrative || '');
+  const trimmed = raw.trim();
+  if (!trimmed) return raw;
+
+  let normalized = raw;
+  if (shouldNormalizeConclusionOutput(trimmed)) {
+    try {
+      normalized = normalizeConclusionOutput(trimmed).trim() || raw;
+    } catch {
+      normalized = raw;
+    }
+  }
+
+  return sanitizeNarrativeForClient(normalized) || normalized;
 }
 
 /**
@@ -2928,6 +3101,11 @@ function mapSystemEventToSceneType(eventText: string): SceneCategory | null {
 function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) {
   const result = session.result;
   if (!result) return;
+  const normalizedConclusion = normalizeNarrativeForClient(result.conclusion);
+  const resultForClient = normalizedConclusion === result.conclusion
+    ? result
+    : { ...result, conclusion: normalizedConclusion };
+  const clientFindings = buildClientFindings(result.findings, session.scenes || []);
 
   // Generate HTML report
   let reportUrl: string | undefined;
@@ -2941,7 +3119,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       traceId: session.traceId,
       query: session.query,
       traceStartNs: traceStartNs !== undefined && traceStartNs !== null ? String(traceStartNs) : undefined,
-      result,
+      result: resultForClient,
       hypotheses: session.hypotheses,
       dialogue: session.agentDialogue,
       dataEnvelopes: session.dataEnvelopes,
@@ -2950,7 +3128,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
     };
     console.log(`[AgentRoutes] Generating HTML report, data keys:`, {
       hasResult: !!result,
-      conclusionLength: result.conclusion?.length || 0,
+      conclusionLength: normalizedConclusion.length || 0,
       findingsCount: result.findings?.length || 0,
       hypothesesCount: session.hypotheses?.length || 0,
       dialogueCount: session.agentDialogue?.length || 0,
@@ -2984,22 +3162,11 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
     type: 'analysis_completed',
     architecture: 'agent-driven',
     data: {
-      conclusion: result.conclusion,
+      conclusion: normalizedConclusion,
       confidence: result.confidence,
       rounds: result.rounds,
       totalDurationMs: result.totalDurationMs,
-      findings: result.findings.map((f) => ({
-        id: f.id,
-        category: f.category,
-        severity: f.severity,
-        title: f.title,
-        description: f.description,
-        timestampsNs: f.timestampsNs,
-        evidence: f.evidence,
-        details: f.details,
-        recommendations: f.recommendations,
-        confidence: f.confidence,
-      })),
+      findings: clientFindings,
       hypotheses: result.hypotheses.map((h) => ({
         id: h.id,
         description: h.description,
@@ -3021,7 +3188,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
     res.write(`data: ${JSON.stringify({
       type: 'scene_reconstruction_completed',
       data: {
-        narrative: result.conclusion,
+        narrative: normalizedConclusion,
         confidence: result.confidence,
         executionTimeMs: result.totalDurationMs,
         scenes: (session.scenes || []).map((s) => ({
@@ -3033,7 +3200,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
           appPackage: s.appPackage,
         })),
         trackEvents: session.trackEvents || [],
-        findings: result.findings.map((f) => ({
+        findings: clientFindings.map((f) => ({
           id: f.id,
           category: f.category,
           severity: f.severity,

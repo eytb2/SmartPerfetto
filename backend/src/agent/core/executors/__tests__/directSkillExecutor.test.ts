@@ -573,6 +573,76 @@ describe('DirectSkillExecutor', () => {
       expect(finding.details!.frame_dur_ms).toBe(45.5);
     });
 
+    test('attaches frame mechanism record to tool metadata when root_cause exists', async () => {
+      const task = createDirectSkillTask(
+        {},
+        {
+          id: 1436069,
+          processName: 'com.example.app',
+          startTs: '100000000',
+          endTs: '116666666',
+          metadata: {
+            sessionId: 5,
+            frameIndex: 9,
+            pid: 4321,
+            jankType: 'App Deadline Missed',
+          },
+        }
+      );
+
+      mockExecute.mockResolvedValue(
+        createMockSkillResult({
+          diagnostics: [createMockDiagnostic()],
+          rawResults: {
+            root_cause: {
+              stepId: 'root_cause',
+              stepType: 'diagnostic',
+              success: true,
+              data: [
+                {
+                  cause_type: 'slice',
+                  primary_cause: '主线程 doFrame 超预算',
+                  secondary_info: 'MainThread Q3 elevated',
+                  confidence: 0.91,
+                  frame_dur_ms: 27.6,
+                  jank_type: 'App Deadline Missed',
+                  mechanism_group: 'trigger',
+                  supply_constraint: 'scheduling_delay',
+                  trigger_layer: 'app_producer',
+                  amplification_path: 'sf_consumer_backpressure',
+                },
+              ],
+              executionTimeMs: 12,
+            },
+          },
+        })
+      );
+
+      const responses = await executor.executeTasks([task], emitter);
+
+      const record = responses[0].toolResults?.[0].metadata?.frameMechanismRecord;
+      expect(record).toMatchObject({
+        frameId: '1436069',
+        sessionId: '5',
+        frameIndex: 9,
+        processName: 'com.example.app',
+        pid: 4321,
+        startTs: '100000000',
+        endTs: '116666666',
+        causeType: 'slice',
+        primaryCause: '主线程 doFrame 超预算',
+        secondaryInfo: 'MainThread Q3 elevated',
+        confidenceLevel: 0.91,
+        frameDurMs: 27.6,
+        jankType: 'App Deadline Missed',
+        mechanismGroup: 'trigger',
+        supplyConstraint: 'scheduling_delay',
+        triggerLayer: 'app_producer',
+        amplificationPath: 'sf_consumer_backpressure',
+        sourceStep: 'root_cause',
+      });
+    });
+
     test('enriches findings when root_cause is under root_cause_summary step key', async () => {
       const task = createDirectSkillTask();
       mockExecute.mockResolvedValue(
@@ -684,6 +754,7 @@ describe('DirectSkillExecutor', () => {
       // Should not throw and findings should still be present
       expect(responses[0].findings).toHaveLength(1);
       expect(responses[0].findings[0].details).toBeUndefined();
+      expect(responses[0].toolResults?.[0].metadata?.frameMechanismRecord).toBeUndefined();
     });
   });
 

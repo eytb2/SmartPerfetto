@@ -273,6 +273,53 @@ describe('scrolling_analysis skill', () => {
       expect(result.layers.deep).toBeDefined();
     }, 120000);
 
+    it('should enforce max_frames_per_session for get_app_jank_frames', async () => {
+      const sessionJank = await evaluator.executeStep('session_jank');
+      const sortedJankSessions = [...sessionJank.data].sort(
+        (a: any, b: any) => Number(b.janky_count || 0) - Number(a.janky_count || 0)
+      );
+      const target = sortedJankSessions[0];
+
+      if (!target || Number(target.janky_count || 0) < 3) {
+        console.warn('Skipping test: no session with >=3 janky frames');
+        return;
+      }
+
+      const sessions = await evaluator.executeStep('scroll_sessions');
+      const window = sessions.data.find(
+        (row: any) => Number(row.session_id) === Number(target.session_id)
+      );
+
+      if (!window?.start_ts || !window?.end_ts) {
+        console.warn('Skipping test: no valid session window for target session');
+        return;
+      }
+
+      const baseParams = {
+        package: String(window.process_name || ''),
+        start_ts: String(window.start_ts),
+        end_ts: String(window.end_ts),
+      };
+
+      const limited = await evaluator.executeStep('get_app_jank_frames', {
+        ...baseParams,
+        max_frames_per_session: 2,
+      });
+      const expanded = await evaluator.executeStep('get_app_jank_frames', {
+        ...baseParams,
+        max_frames_per_session: 20,
+      });
+
+      expect(limited.success).toBe(true);
+      expect(expanded.success).toBe(true);
+      expect(limited.data.length).toBeLessThanOrEqual(2);
+      expect(expanded.data.length).toBeGreaterThanOrEqual(limited.data.length);
+
+      if (expanded.data.length > 2) {
+        expect(limited.data.length).toBeLessThan(expanded.data.length);
+      }
+    }, 120000);
+
     it('should produce consistent normalized output', async () => {
       const result = await evaluator.executeSkill();
       const normalized = evaluator.normalizeForSnapshot(result);

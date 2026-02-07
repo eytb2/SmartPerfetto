@@ -175,7 +175,7 @@ steps:
       FROM snapped
 
     display:
-      level: overview
+      level: summary
       title: "VSync Period Detection"
       columns:
         - name: vsync_period_ns

@@ -25,7 +25,7 @@ prerequisites:
     - android.frames
 display:
   name: "GC 分析"
-  level: expert
+  level: detail
   description: "Java 垃圾回收分析，包含 GC 类型分布、耗时分解、内存回收效率和帧影响"
 
 triggers:

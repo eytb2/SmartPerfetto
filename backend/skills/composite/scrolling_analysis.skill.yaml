@@ -488,14 +488,34 @@ steps:
           type: string
     sql: |
       WITH
+      vsync_intervals AS (
+        SELECT
+          c.ts - LAG(c.ts) OVER (ORDER BY c.ts) as interval_ns
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE t.name = 'VSYNC-sf'
+          AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
+      ),
+      vsync_config AS (
+        SELECT
+          COALESCE(
+            (SELECT CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER)
+             FROM vsync_intervals
+             WHERE interval_ns > 5000000 AND interval_ns < 15000000),
+            8333333
+          ) as vsync_period_ns
+      ),
       app_frames AS (
         SELECT
           COALESCE(a.display_frame_token, a.surface_frame_token) as display_frame_token,
           a.ts,
-          a.dur,
-          a.jank_type,
+          CASE WHEN a.dur > 0 THEN a.dur ELSE 0 END as dur,
+          COALESCE(a.jank_type, 'Unknown') as jank_type,
           a.layer_name,
-          LAG(COALESCE(a.display_frame_token, a.surface_frame_token)) OVER (PARTITION BY a.layer_name ORDER BY a.ts) as prev_display_token
+          a.ts + CASE WHEN a.dur > 0 THEN a.dur ELSE 0 END as present_ts,
+          LAG(a.ts + CASE WHEN a.dur > 0 THEN a.dur ELSE 0 END)
+            OVER (PARTITION BY a.layer_name ORDER BY a.ts, COALESCE(a.display_frame_token, a.surface_frame_token)) as prev_present_ts
         FROM actual_frame_timeline_slice a
         LEFT JOIN process p ON a.upid = p.upid
         WHERE (p.name GLOB '${package}*' OR '${package}' = '')
@@ -508,23 +528,31 @@ steps:
         SELECT
           jank_type,
           dur,
-          display_frame_token - prev_display_token as token_gap,
+          present_ts - prev_present_ts as interval_ns,
           CASE
-            WHEN display_frame_token - prev_display_token > 1 THEN 1
+            WHEN prev_present_ts IS NULL THEN 1
+            WHEN present_ts - prev_present_ts > (SELECT vsync_period_ns * 6 FROM vsync_config) THEN 1
+            ELSE 0
+          END as is_session_break,
+          MAX(CAST(ROUND((present_ts - prev_present_ts) * 1.0 / (SELECT vsync_period_ns FROM vsync_config) - 1, 0) AS INTEGER), 0) as vsync_missed,
+          CASE
+            WHEN prev_present_ts IS NULL THEN 0
+            WHEN present_ts - prev_present_ts > (SELECT vsync_period_ns * 6 FROM vsync_config) THEN 0
+            WHEN present_ts - prev_present_ts > (SELECT vsync_period_ns FROM vsync_config) * 1.5 THEN 1
             ELSE 0
           END as is_consumer_jank
         FROM app_frames
-        WHERE prev_display_token IS NOT NULL
+        WHERE prev_present_ts IS NOT NULL
       )
       SELECT
         jank_type,
         COUNT(*) as count,
-        -- 实际用户感知掉帧数 (gap > 1)
+        -- 实际用户感知掉帧数（呈现间隔 > 1.5 * VSync）
         SUM(is_consumer_jank) as real_jank_count,
-        -- 假阳性数 (jank_type报告掉帧但gap=1)
+        -- 假阳性数（jank_type 报告掉帧，但消费端未跳帧）
         SUM(CASE WHEN jank_type != 'None' AND is_consumer_jank = 0 THEN 1 ELSE 0 END) as false_positive,
-        SUM(dur) as total_dur,
-        CAST(ROUND(AVG(dur)) AS INTEGER) as avg_dur,
+        CAST(SUM(CASE WHEN dur > 0 THEN dur ELSE 0 END) AS REAL) as total_dur,
+        CAST(ROUND(AVG(CASE WHEN dur > 0 THEN dur ELSE NULL END)) AS INTEGER) as avg_dur,
         CASE
           WHEN jank_type GLOB '*App*' OR jank_type = 'Self Jank' THEN '应用'
           WHEN jank_type GLOB '*SurfaceFlinger*' THEN 'SF'
@@ -533,6 +561,7 @@ steps:
           ELSE '其他'
         END as responsibility
       FROM jank_analysis
+      WHERE is_session_break = 0
       GROUP BY jank_type
       ORDER BY real_jank_count DESC, count DESC
       LIMIT 10
@@ -1154,6 +1183,11 @@ steps:
         jank_responsibility,
         ROW_NUMBER() OVER (ORDER BY session_id, actual_start) as frame_index
       FROM ranked_frames
+      WHERE rank_in_session <= CASE
+        WHEN ${max_frames_per_session} IS NULL THEN 8
+        WHEN CAST(${max_frames_per_session} AS INTEGER) <= 0 THEN 8
+        ELSE CAST(${max_frames_per_session} AS INTEGER)
+      END
       ORDER BY session_id, actual_start
     save_as: app_jank_frames
     condition: "frame_timeline.data[0]?.has_frame_timeline === 1 && typeof environment !== 'undefined' && environment.data[0]?.has_data === 1 && perf_summary.data[0]?.janky_frames > 0 && start_ts != null"
@@ -1284,17 +1318,72 @@ steps:
           type: string
     sql: |
       WITH
-      -- 从 performance_summary 获取掉帧统计
-      jank_stats AS (
+      -- 从 VSYNC-sf + BufferTX 获取真实掉帧责任（与 performance_summary 保持同口径）
+      vsync_intervals AS (
+        SELECT
+          c.ts - LAG(c.ts) OVER (ORDER BY c.ts) as interval_ns
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE t.name = 'VSYNC-sf'
+          AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
+      ),
+      vsync_config AS (
+        SELECT
+          COALESCE(
+            (SELECT CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER)
+             FROM vsync_intervals
+             WHERE interval_ns > 5000000 AND interval_ns < 15000000),
+            8333333
+          ) as vsync_period_ns
+      ),
+      vsync_events AS (
+        SELECT
+          c.ts as vsync_ts,
+          c.ts - LAG(c.ts) OVER (ORDER BY c.ts) as interval_ns
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE t.name = 'VSYNC-sf'
+          AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
+      ),
+      buffer_events AS (
+        SELECT c.ts, c.value as buffer_count
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE t.name LIKE '%BufferTX%'
+          AND (t.name LIKE '%${package}%' OR '${package}' = '')
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
+      ),
+      vsync_with_buffer AS (
+        SELECT
+          v.vsync_ts,
+          v.interval_ns,
+          (SELECT b.buffer_count
+           FROM buffer_events b
+           WHERE b.ts <= v.vsync_ts
+           ORDER BY b.ts DESC
+           LIMIT 1
+          ) as buffer_at_vsync
+        FROM vsync_events v
+        WHERE v.interval_ns IS NOT NULL
+      ),
+      vsync_jank AS (
+        SELECT
+          SUM(CASE WHEN interval_ns > (SELECT vsync_period_ns FROM vsync_config) * 1.5 THEN 1 ELSE 0 END) as total_jank_count,
+          SUM(CASE WHEN interval_ns > (SELECT vsync_period_ns FROM vsync_config) * 1.5
+                     AND buffer_at_vsync = 0 THEN 1 ELSE 0 END) as app_jank_count,
+          SUM(CASE WHEN interval_ns > (SELECT vsync_period_ns FROM vsync_config) * 1.5
+                     AND COALESCE(buffer_at_vsync, 1) > 0 THEN 1 ELSE 0 END) as sf_jank_count
+        FROM vsync_with_buffer
+        WHERE buffer_at_vsync IS NOT NULL
+      ),
+      app_frames AS (
         SELECT
           COUNT(*) as total_frames,
           SUM(CASE WHEN jank_type != 'None' THEN 1 ELSE 0 END) as app_reported_jank,
-          -- 基于 BufferTX 判断的真实责任归属（来自 get_app_jank_frames 的逻辑）
-          SUM(CASE WHEN jank_type GLOB '*App*' OR jank_type = 'Self Jank' THEN 1 ELSE 0 END) as app_jank,
-          SUM(CASE WHEN jank_type GLOB '*SurfaceFlinger*' THEN 1 ELSE 0 END) as sf_jank,
-          SUM(CASE WHEN jank_type GLOB '*Buffer*' THEN 1 ELSE 0 END) as buffer_jank,
-          AVG(dur) / 1e6 as avg_dur_ms,
-          MAX(dur) / 1e6 as max_dur_ms
+          AVG(CASE WHEN dur > 0 THEN dur ELSE NULL END) / 1e6 as avg_dur_ms,
+          MAX(CASE WHEN dur > 0 THEN dur ELSE NULL END) / 1e6 as max_dur_ms
         FROM actual_frame_timeline_slice a
         LEFT JOIN process p ON a.upid = p.upid
         WHERE (p.name GLOB '${package}*' OR '${package}' = '')
@@ -1302,6 +1391,17 @@ steps:
           AND (${start_ts} IS NULL OR a.ts >= ${start_ts})
           AND (${end_ts} IS NULL OR a.ts < ${end_ts})
           AND COALESCE(a.display_frame_token, a.surface_frame_token) IS NOT NULL
+      ),
+      jank_stats AS (
+        SELECT
+          (SELECT total_frames FROM app_frames) as total_frames,
+          (SELECT app_reported_jank FROM app_frames) as app_reported_jank,
+          COALESCE((SELECT app_jank_count FROM vsync_jank), 0) as app_jank,
+          COALESCE((SELECT sf_jank_count FROM vsync_jank), 0) as sf_jank,
+          COALESCE((SELECT sf_jank_count FROM vsync_jank), 0) as buffer_jank,
+          (SELECT avg_dur_ms FROM app_frames) as avg_dur_ms,
+          (SELECT max_dur_ms FROM app_frames) as max_dur_ms,
+          ROUND((SELECT vsync_period_ns FROM vsync_config) / 1e6, 2) as frame_budget_ms
       ),
       cpu_info AS (
         SELECT
@@ -1374,6 +1474,8 @@ steps:
           AVG(client_dur) / 1e6 as avg_dur_ms
         FROM android_binder_txns
         WHERE (client_process GLOB '${package}*' OR '${package}' = '')
+          AND (${start_ts} IS NULL OR client_ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR client_ts < ${end_ts})
       ),
       -- 综合分析
       analysis AS (
@@ -1384,6 +1486,7 @@ steps:
           (SELECT buffer_jank FROM jank_stats) as buffer_jank,
           (SELECT avg_dur_ms FROM jank_stats) as avg_dur_ms,
           (SELECT max_dur_ms FROM jank_stats) as max_dur_ms,
+          (SELECT frame_budget_ms FROM jank_stats) as frame_budget_ms,
           (SELECT q3_pct FROM main_pct) as main_q3_pct,
           (SELECT q4_pct FROM main_pct) as main_q4_pct,
           (SELECT q2_pct FROM main_pct) as main_q2_pct,
@@ -1404,7 +1507,7 @@ steps:
         -- 问题组件
         -- 注意：MAIN_THREAD_BLOCKING (休眠/阻塞) 与 MAIN_THREAD (耗时操作) 是互斥的
         -- Q4 > 30% 表示主线程大部分时间在等待，问题是"阻塞"
-        -- 只有 Q4 <= 30% 且 avg_dur > 16ms，才判定为"主线程耗时操作"
+        -- 只有 Q4 <= 30% 且 avg_dur 超过当前 VSync 预算，才判定为"主线程耗时操作"
         CASE
           WHEN (SELECT sf_jank FROM analysis) > (SELECT app_jank FROM analysis) * 2 THEN 'SURFACE_FLINGER'
           WHEN (SELECT main_q3_pct FROM analysis) > 15 THEN 'CPU_SCHEDULING'
@@ -1412,8 +1515,7 @@ steps:
           WHEN (SELECT main_q4_pct FROM analysis) > 30 THEN 'MAIN_THREAD_BLOCKING'
           WHEN (SELECT render_q4_pct FROM analysis) > 50 THEN 'RENDER_THREAD'
           WHEN (SELECT main_q2_pct FROM analysis) > 50 THEN 'CPU_AFFINITY'
-          -- 修复: 只有在 Q4 不高（主线程不是在等待）的情况下才判定为"耗时操作"
-          WHEN (SELECT avg_dur_ms FROM analysis) > 16
+          WHEN (SELECT avg_dur_ms FROM analysis) > COALESCE((SELECT frame_budget_ms FROM analysis), 8.33)
                AND COALESCE((SELECT main_q4_pct FROM analysis), 0) <= 30 THEN 'MAIN_THREAD'
           ELSE 'UNKNOWN'
         END as problem_component,

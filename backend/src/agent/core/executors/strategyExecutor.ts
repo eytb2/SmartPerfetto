@@ -46,6 +46,7 @@ import {
 } from '../entityCapture';
 import { detectTraceConfig } from './traceConfigDetector';
 import { summarizeJankCauses } from '../jankCauseSummarizer';
+import type { FrameMechanismRecord } from '../../types/jankCause';
 
 export class StrategyExecutor implements AnalysisExecutor {
   constructor(
@@ -68,6 +69,9 @@ export class StrategyExecutor implements AnalysisExecutor {
     let stopReason: string | null = null;
     let rounds = 0;
     const hardMaxRounds = Math.max(1, ctx.config.maxRounds);
+    const accumulatedFrameMechanismRecords = this.dedupeFrameMechanismRecords(
+      ctx.sharedContext.frameMechanismRecords || []
+    );
 
     // Accumulate captured entities across all stages
     const allCapturedEntities: CapturedEntities[] = [];
@@ -77,11 +81,7 @@ export class StrategyExecutor implements AnalysisExecutor {
     // Phase 1 Fix: Use prebuilt intervals from follow-up resolution if available.
     // v2.0: Fall back to incrementalScope-derived focusIntervals for incremental turns.
     // This allows multi-turn follow-ups to skip redundant discovery stages.
-    const prebuiltIntervals = (ctx.options.prebuiltIntervals && ctx.options.prebuiltIntervals.length > 0)
-      ? ctx.options.prebuiltIntervals
-      : (ctx.incrementalScope?.focusIntervals && ctx.incrementalScope.focusIntervals.length > 0)
-        ? ctx.incrementalScope.focusIntervals
-        : [];
+    const prebuiltIntervals = this.getPrebuiltIntervals(ctx);
     const hasPrebuiltContext = prebuiltIntervals.length > 0;
 
     if (hasPrebuiltContext) {
@@ -260,6 +260,21 @@ export class StrategyExecutor implements AnalysisExecutor {
       ]);
       const responses = [...agentResponses, ...directResponses];
 
+      if (stage.name === 'frame_analysis') {
+        const stageMechanismRecords = this.collectFrameMechanismRecords(responses);
+        if (stageMechanismRecords.length > 0) {
+          accumulatedFrameMechanismRecords.push(...stageMechanismRecords);
+          const uniqueRecords = this.dedupeFrameMechanismRecords(accumulatedFrameMechanismRecords);
+          accumulatedFrameMechanismRecords.length = 0;
+          accumulatedFrameMechanismRecords.push(...uniqueRecords);
+          ctx.sharedContext.frameMechanismRecords = [...uniqueRecords];
+          emitter.log(
+            `[FrameMechanism] Captured ${stageMechanismRecords.length} record(s) in stage, ` +
+            `${uniqueRecords.length} unique total`
+          );
+        }
+      }
+
       // Capture entities from responses for EntityStore
       const capturedFromResponses = captureEntitiesFromResponses(responses);
       allCapturedEntities.push(capturedFromResponses);
@@ -332,11 +347,7 @@ export class StrategyExecutor implements AnalysisExecutor {
       );
       const agentCount = agentResponses.length;
       const directCount = directResponses.length;
-      const synthesisMessage = agentCount > 0 && directCount > 0
-        ? `综合 ${agentCount} 个 Agent + ${directCount} 个 Skill 结果`
-        : directCount > 0
-          ? `综合 ${directCount} 个 Skill 执行结果`
-          : `综合 ${agentCount} 个 Agent 反馈`;
+      const synthesisMessage = this.buildSynthesisMessage(agentCount, directCount);
       emitter.emitUpdate('progress', {
         phase: 'synthesis_complete',
         confirmedFindings: synthesis.confirmedFindings.length,
@@ -355,10 +366,11 @@ export class StrategyExecutor implements AnalysisExecutor {
       }
 
       // After frame_analysis stage, compute jank cause summary for conclusion generation
-      // This aggregates cause_type from Finding.details (populated by DirectSkillExecutor)
-      if (stage.name === 'frame_analysis' && allFindings.length > 0) {
+      // Preferred source is frame mechanism records; findings remain fallback.
+      const frameMechanismRecords = ctx.sharedContext.frameMechanismRecords || [];
+      if (stage.name === 'frame_analysis' && (allFindings.length > 0 || frameMechanismRecords.length > 0)) {
         try {
-          const jankSummary = summarizeJankCauses(allFindings);
+          const jankSummary = summarizeJankCauses(allFindings, frameMechanismRecords);
           if (jankSummary.totalJankFrames > 0) {
             ctx.sharedContext.jankCauseSummary = jankSummary;
             emitter.log(
@@ -732,6 +744,159 @@ export class StrategyExecutor implements AnalysisExecutor {
     }
 
     return sections;
+  }
+
+  private collectFrameMechanismRecords(responses: AgentResponse[]): FrameMechanismRecord[] {
+    const records: FrameMechanismRecord[] = [];
+
+    for (const response of responses) {
+      const toolResults = response.toolResults || [];
+      for (const toolResult of toolResults) {
+        const candidate = toolResult?.metadata && typeof toolResult.metadata === 'object'
+          ? (toolResult.metadata as Record<string, any>).frameMechanismRecord
+          : null;
+        if (!candidate || typeof candidate !== 'object') {
+          continue;
+        }
+
+        const normalized = this.normalizeFrameMechanismRecord(candidate);
+        if (normalized) {
+          records.push(normalized);
+        }
+      }
+    }
+
+    return records;
+  }
+
+  private normalizeFrameMechanismRecord(candidate: any): FrameMechanismRecord | null {
+    const frameIdRaw = candidate.frameId ?? candidate.frame_id;
+    const startTsRaw = candidate.startTs ?? candidate.start_ts;
+    const endTsRaw = candidate.endTs ?? candidate.end_ts;
+    const causeTypeRaw = candidate.causeType ?? candidate.cause_type;
+
+    const sourceStep: 'root_cause' | 'root_cause_summary' =
+      candidate.sourceStep === 'root_cause_summary' ? 'root_cause_summary' : 'root_cause';
+
+    if (frameIdRaw === undefined || startTsRaw === undefined || endTsRaw === undefined) {
+      return null;
+    }
+    if (typeof causeTypeRaw !== 'string' || causeTypeRaw.trim().length === 0) {
+      return null;
+    }
+
+    const normalized: FrameMechanismRecord = {
+      frameId: String(frameIdRaw),
+      startTs: String(startTsRaw),
+      endTs: String(endTsRaw),
+      scopeLabel: typeof candidate.scopeLabel === 'string' && candidate.scopeLabel.trim().length > 0
+        ? candidate.scopeLabel
+        : 'unknown_scope',
+      causeType: causeTypeRaw.trim(),
+      sourceStep,
+    };
+
+    if (candidate.sessionId !== undefined || candidate.session_id !== undefined) {
+      normalized.sessionId = String(candidate.sessionId ?? candidate.session_id);
+    }
+    if (candidate.frameIndex !== undefined) {
+      const frameIndex = Number(candidate.frameIndex);
+      if (Number.isFinite(frameIndex)) normalized.frameIndex = frameIndex;
+    }
+    if (typeof candidate.processName === 'string' && candidate.processName.length > 0) {
+      normalized.processName = candidate.processName;
+    }
+    if (candidate.pid !== undefined) {
+      const pid = Number(candidate.pid);
+      if (Number.isFinite(pid)) normalized.pid = pid;
+    }
+    if (typeof candidate.primaryCause === 'string' && candidate.primaryCause.length > 0) {
+      normalized.primaryCause = candidate.primaryCause;
+    }
+    if (typeof candidate.secondaryInfo === 'string' && candidate.secondaryInfo.length > 0) {
+      normalized.secondaryInfo = candidate.secondaryInfo;
+    }
+    if (typeof candidate.confidenceLevel === 'number' || typeof candidate.confidenceLevel === 'string') {
+      normalized.confidenceLevel = candidate.confidenceLevel;
+    }
+    if (candidate.frameDurMs !== undefined) {
+      const frameDurMs = Number(candidate.frameDurMs);
+      if (Number.isFinite(frameDurMs)) normalized.frameDurMs = frameDurMs;
+    }
+    if (typeof candidate.jankType === 'string' && candidate.jankType.length > 0) {
+      normalized.jankType = candidate.jankType;
+    }
+
+    const mechanismGroup = candidate.mechanismGroup ?? candidate.mechanism_group;
+    if (typeof mechanismGroup === 'string' && mechanismGroup.length > 0) {
+      normalized.mechanismGroup = mechanismGroup;
+    }
+
+    const supplyConstraint = candidate.supplyConstraint ?? candidate.supply_constraint;
+    if (typeof supplyConstraint === 'string' && supplyConstraint.length > 0) {
+      normalized.supplyConstraint = supplyConstraint;
+    }
+
+    const triggerLayer = candidate.triggerLayer ?? candidate.trigger_layer;
+    if (typeof triggerLayer === 'string' && triggerLayer.length > 0) {
+      normalized.triggerLayer = triggerLayer;
+    }
+
+    const amplificationPath = candidate.amplificationPath ?? candidate.amplification_path;
+    if (typeof amplificationPath === 'string' && amplificationPath.length > 0) {
+      normalized.amplificationPath = amplificationPath;
+    }
+
+    return normalized;
+  }
+
+  private dedupeFrameMechanismRecords(records: FrameMechanismRecord[]): FrameMechanismRecord[] {
+    const seen = new Set<string>();
+    const deduped: FrameMechanismRecord[] = [];
+
+    for (const record of records) {
+      const key = this.buildFrameMechanismRecordKey(record);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      deduped.push(record);
+    }
+
+    return deduped;
+  }
+
+  private buildFrameMechanismRecordKey(record: FrameMechanismRecord): string {
+    return [
+      record.sessionId || 'nosession',
+      record.frameId,
+      record.startTs,
+      record.causeType,
+    ].join('|');
+  }
+
+  private getPrebuiltIntervals(ctx: ExecutionContext): FocusInterval[] {
+    const optionIntervals = ctx.options.prebuiltIntervals;
+    if (Array.isArray(optionIntervals) && optionIntervals.length > 0) {
+      return optionIntervals;
+    }
+
+    const incrementalIntervals = ctx.incrementalScope?.focusIntervals;
+    if (Array.isArray(incrementalIntervals) && incrementalIntervals.length > 0) {
+      return incrementalIntervals;
+    }
+
+    return [];
+  }
+
+  private buildSynthesisMessage(agentCount: number, directCount: number): string {
+    if (agentCount > 0 && directCount > 0) {
+      return `综合 ${agentCount} 个 Agent + ${directCount} 个 Skill 结果`;
+    }
+    if (directCount > 0) {
+      return `综合 ${directCount} 个 Skill 执行结果`;
+    }
+    return `综合 ${agentCount} 个 Agent 反馈`;
   }
 
   /**

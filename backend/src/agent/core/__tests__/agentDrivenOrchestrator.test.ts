@@ -1317,5 +1317,77 @@ describe('AgentDrivenOrchestrator', () => {
       // Result should include findings from the extend executor
       expect(result.findings).toBeDefined();
     });
+
+    test('does not merge historical findings for drill-down turns', async () => {
+      const sessionId = getUniqueSessionId();
+      const traceId = getUniqueTraceId();
+
+      // First turn produces baseline findings.
+      const mockExecutor1 = {
+        execute: jest.fn().mockResolvedValue(defaultExecutorResult),
+        setFocusStore: jest.fn(),
+      };
+      (HypothesisExecutor as jest.Mock).mockImplementation(() => mockExecutor1);
+
+      await orchestrator.analyze('分析滑动卡顿', sessionId, traceId);
+
+      // Second turn is a frame drill-down with new findings.
+      const drillDownIntent: Intent = {
+        ...defaultIntent,
+        followUpType: 'drill_down',
+        referencedEntities: [{ type: 'frame', id: 1435508 }],
+        extractedParams: { frame_id: 1435508 },
+      };
+      (understandIntent as jest.Mock).mockResolvedValue(drillDownIntent);
+
+      const drillInterval = {
+        id: 1435508,
+        processName: 'com.example.app',
+        startTs: '100',
+        endTs: '200',
+        priority: 1,
+        label: '帧 1435508',
+        metadata: {
+          sourceEntityType: 'frame',
+          sourceEntityId: 1435508,
+          frame_id: 1435508,
+        },
+      };
+
+      (resolveFollowUp as jest.Mock).mockReturnValue({
+        isFollowUp: true,
+        resolvedParams: { frame_id: 1435508, start_ts: '100', end_ts: '200' },
+        focusIntervals: [drillInterval],
+        confidence: 0.9,
+      });
+      (resolveDrillDown as jest.Mock).mockResolvedValue({
+        intervals: [drillInterval],
+        traces: [],
+      });
+
+      const drillDownFindings: Finding[] = [
+        {
+          id: 'f-drill-1',
+          severity: 'warning',
+          title: '帧级调度异常',
+          description: '该帧出现短时调度延迟',
+          source: 'test',
+        },
+      ];
+      const drillDownExecutorResult: ExecutorResult = {
+        ...defaultExecutorResult,
+        findings: drillDownFindings,
+      };
+
+      const mockDrillDownExecutor = {
+        execute: jest.fn().mockResolvedValue(drillDownExecutorResult),
+      };
+      (DirectDrillDownExecutor as jest.Mock).mockImplementation(() => mockDrillDownExecutor);
+
+      const result = await orchestrator.analyze('分析 1435508 这一帧', sessionId, traceId);
+
+      expect(result.findings).toEqual(drillDownFindings);
+      expect(result.findings.find(f => f.id === 'f-1')).toBeUndefined();
+    });
   });
 });

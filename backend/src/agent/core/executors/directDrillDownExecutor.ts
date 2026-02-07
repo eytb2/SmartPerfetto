@@ -26,9 +26,12 @@ import {
 } from '../orchestratorTypes';
 import { FollowUpResolution } from '../followUpHandler';
 import { Finding } from '../../types';
+import type { AgentResponse } from '../../types/agentProtocol';
+import type { FrameMechanismRecord } from '../../types/jankCause';
 import { FocusInterval, StageTaskTemplate } from '../../strategies/types';
 import { emitDataEnvelopes } from '../taskGraphExecutor';
 import { synthesizeFeedback } from '../feedbackSynthesizer';
+import { summarizeJankCauses } from '../jankCauseSummarizer';
 
 // =============================================================================
 // Skill Mapping
@@ -204,6 +207,7 @@ export class DirectDrillDownExecutor implements AnalysisExecutor {
       intervals,
       enrichmentSkill,
       ctx.options.traceProcessorService,
+      ctx.traceId,
       emitter
     );
 
@@ -297,6 +301,7 @@ export class DirectDrillDownExecutor implements AnalysisExecutor {
     );
 
     allFindings.push(...synthesis.newFindings);
+    this.refreshDrillDownJankContext(ctx, responses, allFindings, emitter);
 
     // Update confidence from responses
     const confidences = responses
@@ -341,6 +346,7 @@ export class DirectDrillDownExecutor implements AnalysisExecutor {
     intervals: FocusInterval[],
     skillConfig: DrillDownSkillConfig,
     traceProcessorService: any,
+    traceId: string,
     emitter: ProgressEmitter
   ): Promise<FocusInterval[]> {
     if (!traceProcessorService || !skillConfig.enrichmentQuery) {
@@ -370,7 +376,7 @@ export class DirectDrillDownExecutor implements AnalysisExecutor {
           query = query.replace('$session_id', String(entityId));
         }
 
-        const result = await traceProcessorService.executeQuery(query);
+        const result = await this.executeTraceQuery(traceProcessorService, traceId, query);
 
         if (result && result.rows && result.rows.length > 0) {
           const row = result.rows[0];
@@ -414,6 +420,185 @@ export class DirectDrillDownExecutor implements AnalysisExecutor {
     }
 
     return enrichedIntervals;
+  }
+
+  private async executeTraceQuery(
+    traceProcessorService: any,
+    traceId: string,
+    sql: string
+  ): Promise<{ columns: string[]; rows: any[][] }> {
+    if (!traceProcessorService) {
+      throw new Error('Trace processor service is unavailable');
+    }
+
+    const queryFn = traceProcessorService.query;
+    if (typeof queryFn === 'function') {
+      if (queryFn.length === 1) {
+        return await queryFn.call(traceProcessorService, sql);
+      }
+      return await queryFn.call(traceProcessorService, traceId, sql);
+    }
+
+    const executeQueryFn = traceProcessorService.executeQuery;
+    if (typeof executeQueryFn === 'function') {
+      if (executeQueryFn.length === 1) {
+        return await executeQueryFn.call(traceProcessorService, sql);
+      }
+      return await executeQueryFn.call(traceProcessorService, traceId, sql);
+    }
+
+    throw new Error('Trace processor service does not expose query/executeQuery');
+  }
+
+  private refreshDrillDownJankContext(
+    ctx: ExecutionContext,
+    responses: AgentResponse[],
+    findings: Finding[],
+    emitter: ProgressEmitter
+  ): void {
+    const frameMechanismRecords = this.dedupeFrameMechanismRecords(
+      this.collectFrameMechanismRecords(responses)
+    );
+    ctx.sharedContext.frameMechanismRecords = frameMechanismRecords;
+
+    const jankSummary = summarizeJankCauses(findings, frameMechanismRecords);
+    if (jankSummary.totalJankFrames > 0) {
+      ctx.sharedContext.jankCauseSummary = jankSummary;
+      emitter.log(
+        `[DrillDown] Refreshed jank summary: ${jankSummary.totalJankFrames} frame(s), ` +
+        `primary=${jankSummary.primaryCause?.label || 'unknown'}`
+      );
+      return;
+    }
+
+    ctx.sharedContext.jankCauseSummary = undefined;
+    emitter.log('[DrillDown] Cleared stale jank summary for current drill-down scope');
+  }
+
+  private collectFrameMechanismRecords(responses: AgentResponse[]): FrameMechanismRecord[] {
+    const records: FrameMechanismRecord[] = [];
+
+    for (const response of responses) {
+      const toolResults = response.toolResults || [];
+      for (const toolResult of toolResults) {
+        const candidate = toolResult?.metadata && typeof toolResult.metadata === 'object'
+          ? (toolResult.metadata as Record<string, any>).frameMechanismRecord
+          : null;
+        if (!candidate || typeof candidate !== 'object') {
+          continue;
+        }
+
+        const normalized = this.normalizeFrameMechanismRecord(candidate);
+        if (normalized) {
+          records.push(normalized);
+        }
+      }
+    }
+
+    return records;
+  }
+
+  private normalizeFrameMechanismRecord(candidate: any): FrameMechanismRecord | null {
+    const frameIdRaw = candidate.frameId ?? candidate.frame_id;
+    const startTsRaw = candidate.startTs ?? candidate.start_ts;
+    const endTsRaw = candidate.endTs ?? candidate.end_ts;
+    const causeTypeRaw = candidate.causeType ?? candidate.cause_type;
+
+    const sourceStep: 'root_cause' | 'root_cause_summary' =
+      candidate.sourceStep === 'root_cause_summary' ? 'root_cause_summary' : 'root_cause';
+
+    if (frameIdRaw === undefined || startTsRaw === undefined || endTsRaw === undefined) {
+      return null;
+    }
+    if (typeof causeTypeRaw !== 'string' || causeTypeRaw.trim().length === 0) {
+      return null;
+    }
+
+    const normalized: FrameMechanismRecord = {
+      frameId: String(frameIdRaw),
+      startTs: String(startTsRaw),
+      endTs: String(endTsRaw),
+      scopeLabel: typeof candidate.scopeLabel === 'string' && candidate.scopeLabel.trim().length > 0
+        ? candidate.scopeLabel
+        : 'unknown_scope',
+      causeType: causeTypeRaw.trim(),
+      sourceStep,
+    };
+
+    if (candidate.sessionId !== undefined || candidate.session_id !== undefined) {
+      normalized.sessionId = String(candidate.sessionId ?? candidate.session_id);
+    }
+    if (candidate.frameIndex !== undefined) {
+      const frameIndex = Number(candidate.frameIndex);
+      if (Number.isFinite(frameIndex)) normalized.frameIndex = frameIndex;
+    }
+    if (typeof candidate.processName === 'string' && candidate.processName.length > 0) {
+      normalized.processName = candidate.processName;
+    }
+    if (candidate.pid !== undefined) {
+      const pid = Number(candidate.pid);
+      if (Number.isFinite(pid)) normalized.pid = pid;
+    }
+    if (typeof candidate.primaryCause === 'string' && candidate.primaryCause.length > 0) {
+      normalized.primaryCause = candidate.primaryCause;
+    }
+    if (typeof candidate.secondaryInfo === 'string' && candidate.secondaryInfo.length > 0) {
+      normalized.secondaryInfo = candidate.secondaryInfo;
+    }
+    if (typeof candidate.confidenceLevel === 'number' || typeof candidate.confidenceLevel === 'string') {
+      normalized.confidenceLevel = candidate.confidenceLevel;
+    }
+    if (candidate.frameDurMs !== undefined) {
+      const frameDurMs = Number(candidate.frameDurMs);
+      if (Number.isFinite(frameDurMs)) normalized.frameDurMs = frameDurMs;
+    }
+    if (typeof candidate.jankType === 'string' && candidate.jankType.length > 0) {
+      normalized.jankType = candidate.jankType;
+    }
+
+    const mechanismGroup = candidate.mechanismGroup ?? candidate.mechanism_group;
+    if (typeof mechanismGroup === 'string' && mechanismGroup.length > 0) {
+      normalized.mechanismGroup = mechanismGroup;
+    }
+
+    const supplyConstraint = candidate.supplyConstraint ?? candidate.supply_constraint;
+    if (typeof supplyConstraint === 'string' && supplyConstraint.length > 0) {
+      normalized.supplyConstraint = supplyConstraint;
+    }
+
+    const triggerLayer = candidate.triggerLayer ?? candidate.trigger_layer;
+    if (typeof triggerLayer === 'string' && triggerLayer.length > 0) {
+      normalized.triggerLayer = triggerLayer;
+    }
+
+    const amplificationPath = candidate.amplificationPath ?? candidate.amplification_path;
+    if (typeof amplificationPath === 'string' && amplificationPath.length > 0) {
+      normalized.amplificationPath = amplificationPath;
+    }
+
+    return normalized;
+  }
+
+  private dedupeFrameMechanismRecords(records: FrameMechanismRecord[]): FrameMechanismRecord[] {
+    const seen = new Set<string>();
+    const deduped: FrameMechanismRecord[] = [];
+
+    for (const record of records) {
+      const key = [
+        record.sessionId || 'nosession',
+        record.frameId,
+        record.startTs,
+        record.causeType,
+      ].join('|');
+
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      deduped.push(record);
+    }
+
+    return deduped;
   }
 
   /**

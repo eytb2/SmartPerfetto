@@ -260,6 +260,37 @@ describe('drillDownResolver', () => {
 
         expect(result).toBeNull();
       });
+
+      test('supports trace processor query(traceId, sql) API for enrichment', async () => {
+        const intent: Intent = {
+          primaryGoal: '分析帧 1436069',
+          aspects: ['jank'],
+          expectedOutputType: 'diagnosis',
+          complexity: 'moderate',
+          followUpType: 'drill_down',
+          referencedEntities: [{ type: 'frame', id: 1436069 }],
+        };
+
+        const followUp: FollowUpResolution = {
+          isFollowUp: true,
+          resolvedParams: { frame_id: 1436069 },
+          confidence: 0.5,
+        };
+
+        const mockTps = {
+          query: jest.fn().mockResolvedValue({
+            columns: ['frame_id', 'start_ts', 'end_ts', 'dur', 'process_name', 'upid', 'jank_type', 'layer_name'],
+            rows: [
+              [1436069, '123456789000000', '123456889000000', 100000000, 'com.example.app', 123, 'App Deadline Missed', 'SurfaceView'],
+            ],
+          }),
+        };
+
+        const result = await resolveDrillDown(intent, followUp, sessionContext, mockTps, 'trace-1');
+
+        expect(result).not.toBeNull();
+        expect(mockTps.query).toHaveBeenCalledWith('trace-1', expect.stringContaining('WHERE frame_id = 1436069'));
+      });
     });
 
     describe('Multiple entities', () => {

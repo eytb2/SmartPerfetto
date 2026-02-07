@@ -52,7 +52,8 @@ export interface DrillDownResolved {
  * TraceProcessorService interface (duck-typed to avoid circular imports)
  */
 interface TraceProcessorServiceLike {
-  executeQuery(traceId: string, sql: string): Promise<{ columns: string[]; rows: any[][] }>;
+  query?: (traceId: string, sql: string) => Promise<{ columns: string[]; rows: any[][] }>;
+  executeQuery?: (...args: any[]) => Promise<{ columns: string[]; rows: any[][] }>;
 }
 
 function normalizeLooseNumericId(id: any): string | null {
@@ -69,6 +70,30 @@ function normalizeEntityLookupId(entityType: 'frame' | 'session', id: any): stri
   const numeric = normalizeLooseNumericId(id);
   if (numeric !== null) return numeric;
   return String(id);
+}
+
+async function executeTraceQuery(
+  tps: TraceProcessorServiceLike,
+  traceId: string,
+  sql: string
+): Promise<{ columns: string[]; rows: any[][] }> {
+  const queryFn = tps.query as ((...args: any[]) => Promise<{ columns: string[]; rows: any[][] }>) | undefined;
+  if (typeof queryFn === 'function') {
+    if (queryFn.length === 1) {
+      return await queryFn.call(tps, sql);
+    }
+    return await queryFn.call(tps, traceId, sql);
+  }
+
+  const executeQueryFn = tps.executeQuery as ((...args: any[]) => Promise<{ columns: string[]; rows: any[][] }>) | undefined;
+  if (typeof executeQueryFn === 'function') {
+    if (executeQueryFn.length === 1) {
+      return await executeQueryFn.call(tps, sql);
+    }
+    return await executeQueryFn.call(tps, traceId, sql);
+  }
+
+  throw new Error('TraceProcessorServiceLike does not expose query/executeQuery');
 }
 
 // =============================================================================
@@ -365,7 +390,7 @@ async function enrichFrame(
   `;
 
   try {
-    const result = await tps.executeQuery(traceId, query);
+    const result = await executeTraceQuery(tps, traceId, query);
     if (!result.rows || result.rows.length === 0) return null;
 
     const row = result.rows[0];
@@ -418,7 +443,7 @@ async function enrichSession(
   `;
 
   try {
-    const result = await tps.executeQuery(traceId, query);
+    const result = await executeTraceQuery(tps, traceId, query);
     if (!result.rows || result.rows.length === 0) return null;
 
     const row = result.rows[0];

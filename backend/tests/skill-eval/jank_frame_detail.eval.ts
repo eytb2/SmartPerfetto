@@ -335,6 +335,19 @@ describe('jank_frame_detail skill', () => {
           // Cause type classification
           expect(rootCause.cause_type).toBeDefined();
           expect(typeof rootCause.cause_type).toBe('string');
+
+          // Structured mechanism fields for trigger/supply/amplification layering
+          expect(rootCause.mechanism_group).toBeDefined();
+          expect(typeof rootCause.mechanism_group).toBe('string');
+
+          expect(rootCause.supply_constraint).toBeDefined();
+          expect(typeof rootCause.supply_constraint).toBe('string');
+
+          expect(rootCause.trigger_layer).toBeDefined();
+          expect(typeof rootCause.trigger_layer).toBe('string');
+
+          expect(rootCause.amplification_path).toBeDefined();
+          expect(typeof rootCause.amplification_path).toBe('string');
         }
       }, 30000);
     });

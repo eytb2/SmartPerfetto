@@ -24,6 +24,7 @@ import {
 import {
   inferVsyncPeriodNs,
   DEFAULT_VSYNC_PERIODS_FOR_FRAME_ESTIMATION,
+  DEFAULT_CLUSTERING_MAX_FRAMES_PER_SESSION,
 } from '../../config/thresholds';
 
 // =============================================================================
@@ -63,6 +64,37 @@ interface RawFrame {
 function toFiniteNumber(value: any): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
+}
+
+function hasValidTimeRange(startTs: string, endTs: string): boolean {
+  if (!startTs || !endTs || startTs === '0' || endTs === '0') {
+    return false;
+  }
+
+  try {
+    return BigInt(endTs) > BigInt(startTs);
+  } catch {
+    return false;
+  }
+}
+
+function resolveFrameEndTs(startTs: string, endTs: string, durMs: number): string | undefined {
+  if (hasValidTimeRange(startTs, endTs)) {
+    return endTs;
+  }
+
+  try {
+    if (durMs > 0) {
+      return String(BigInt(startTs) + BigInt(Math.round(durMs * 1e6)));
+    }
+
+    // Fallback: use configurable vsync period × default multiplier
+    const vsyncPeriodNs = inferVsyncPeriodNs();
+    const estimatedDuration = vsyncPeriodNs * BigInt(DEFAULT_VSYNC_PERIODS_FOR_FRAME_ESTIMATION);
+    return String(BigInt(startTs) + estimatedDuration);
+  } catch {
+    return undefined;
+  }
 }
 
 // =============================================================================
@@ -133,11 +165,7 @@ function extractScrollingIntervals(
     const sessionId = toFiniteNumber(session.session_id);
     const startTs = String(session.start_ts ?? '');
     const endTs = String(session.end_ts ?? '');
-    if (!startTs || !endTs || startTs === '0' || endTs === '0') continue;
-
-    try {
-      if (BigInt(endTs) <= BigInt(startTs)) continue;
-    } catch {
+    if (!hasValidTimeRange(startTs, endTs)) {
       continue;
     }
 
@@ -250,33 +278,9 @@ function extractFrameIntervals(
 
           if (!startTs || startTs === '0') continue;
 
-          // If end_ts is not available, estimate from dur_ms or use start_ts + N*vsync_period
-          let resolvedEndTs = endTs;
-          if (!resolvedEndTs || resolvedEndTs === '0') {
-            const durMs = toFiniteNumber(f.dur_ms);
-            if (durMs > 0) {
-              try {
-                resolvedEndTs = String(BigInt(startTs) + BigInt(Math.round(durMs * 1e6)));
-              } catch {
-                continue;
-              }
-            } else {
-              // Fallback: use configurable vsync period × default multiplier
-              // This handles 60Hz/90Hz/120Hz displays dynamically
-              try {
-                const vsyncPeriodNs = inferVsyncPeriodNs();
-                const estimatedDuration = vsyncPeriodNs * BigInt(DEFAULT_VSYNC_PERIODS_FOR_FRAME_ESTIMATION);
-                resolvedEndTs = String(BigInt(startTs) + estimatedDuration);
-              } catch {
-                continue;
-              }
-            }
-          }
-
-          // Validate timestamps
-          try {
-            if (BigInt(resolvedEndTs) <= BigInt(startTs)) continue;
-          } catch {
+          // If end_ts is not available/invalid, estimate from dur_ms or vsync period.
+          const resolvedEndTs = resolveFrameEndTs(startTs, endTs, durMs);
+          if (!resolvedEndTs || !hasValidTimeRange(startTs, resolvedEndTs)) {
             continue;
           }
 
@@ -420,7 +424,10 @@ const sessionOverviewStage: StageDefinition = {
       scope: 'per_interval',
       priority: 1,
       evidenceNeeded: ['session frame rate', 'jank frame count', 'jank frame list with timestamps'],
-      skillParams: { enable_frame_details: false },
+      skillParams: {
+        enable_frame_details: false,
+        max_frames_per_session: DEFAULT_CLUSTERING_MAX_FRAMES_PER_SESSION,
+      },
       descriptionTemplate: '阶段 2/3：在 {{scopeLabel}} 内统计帧率和掉帧列表（不做逐帧详情，仅需帧的时间戳列表）。',
     },
   ],

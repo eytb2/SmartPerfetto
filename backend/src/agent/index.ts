@@ -102,6 +102,7 @@ export {
   createHypothesisId,
   createMessageId,
 } from './types/agentProtocol';
+export type { FrameMechanismRecord } from './types/jankCause';
 
 // Iteration Strategy Planner (迭代策略规划器)
 export {

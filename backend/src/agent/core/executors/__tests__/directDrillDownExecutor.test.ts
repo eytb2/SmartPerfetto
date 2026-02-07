@@ -73,6 +73,30 @@ function createFollowUpResolution(): FollowUpResolution {
   };
 }
 
+function createFollowUpResolutionNeedsEnrichment(): FollowUpResolution {
+  return {
+    isFollowUp: true,
+    resolvedParams: { frame_id: 1435500 },
+    focusIntervals: [
+      {
+        id: 1435500,
+        processName: '',
+        startTs: '0',
+        endTs: '0',
+        priority: 1,
+        label: '帧 1435500',
+        metadata: {
+          sourceEntityType: 'frame',
+          sourceEntityId: 1435500,
+          frame_id: 1435500,
+          needsEnrichment: true,
+        },
+      },
+    ],
+    confidence: 0.9,
+  };
+}
+
 function createExecutionContext(query: string, aspects: string[] = []): ExecutionContext {
   return {
     query,
@@ -179,5 +203,82 @@ describe('DirectDrillDownExecutor', () => {
     const skillIds = extractSkillIdsFromTasks(tasks);
 
     expect(skillIds).toEqual(['jank_frame_detail']);
+  });
+
+  it('refreshes jank summary from current drill-down scope', async () => {
+    const responseWithMechanism = createMockResponse({
+      toolResults: [
+        {
+          success: true,
+          executionTimeMs: 8,
+          data: {},
+          metadata: {
+            frameMechanismRecord: {
+              frameId: '1435500',
+              sessionId: '7',
+              startTs: '1000000',
+              endTs: '2000000',
+              scopeLabel: '帧 1435500',
+              causeType: 'sched_latency',
+              sourceStep: 'root_cause',
+              supplyConstraint: 'scheduling_delay',
+              amplificationPath: 'sf_consumer_backpressure',
+            },
+          },
+        },
+      ],
+    });
+    mockExecuteTasks.mockResolvedValue([responseWithMechanism]);
+
+    const executor = new DirectDrillDownExecutor(createFollowUpResolution(), services);
+    const ctx = createExecutionContext('分析 1435500 这一帧的卡顿原因', ['frame']);
+    (ctx.sharedContext as any).jankCauseSummary = { totalJankFrames: 99 };
+
+    await executor.execute(ctx, emitter);
+
+    expect(ctx.sharedContext.frameMechanismRecords).toHaveLength(1);
+    expect(ctx.sharedContext.jankCauseSummary?.totalJankFrames).toBe(1);
+  });
+
+  it('clears stale jank summary when current drill-down has no frame mechanism records', async () => {
+    const executor = new DirectDrillDownExecutor(createFollowUpResolution(), services);
+    const ctx = createExecutionContext('分析 1435500 这一帧的卡顿原因', ['frame']);
+    (ctx.sharedContext as any).jankCauseSummary = { totalJankFrames: 99 };
+
+    await executor.execute(ctx, emitter);
+
+    expect(ctx.sharedContext.frameMechanismRecords).toEqual([]);
+    expect(ctx.sharedContext.jankCauseSummary).toBeUndefined();
+  });
+
+  it('uses traceProcessorService.query(traceId, sql) for interval enrichment', async () => {
+    const queryMock = jest.fn<any>().mockResolvedValue({
+      columns: ['start_ts', 'end_ts', 'process_name', 'jank_type', 'layer_name', 'vsync_missed'],
+      rows: [[
+        '123456789000000',
+        '123456889000000',
+        'com.example.app',
+        'App Deadline Missed',
+        'SurfaceView',
+        1,
+      ]],
+    });
+
+    const executor = new DirectDrillDownExecutor(createFollowUpResolutionNeedsEnrichment(), services);
+    const ctx = createExecutionContext('分析 1435500 这一帧的卡顿原因', ['frame']);
+    ctx.options.traceProcessorService = {
+      query: queryMock,
+    };
+
+    await executor.execute(ctx, emitter);
+
+    expect(queryMock).toHaveBeenCalledWith(
+      'trace-1',
+      expect.stringContaining('WHERE af.frame_id = 1435500')
+    );
+
+    const tasks = mockExecuteTasks.mock.calls[0][0] as any[];
+    expect(tasks[0].interval.startTs).toBe('123456789000000');
+    expect(tasks[0].interval.endTs).toBe('123456889000000');
   });
 });

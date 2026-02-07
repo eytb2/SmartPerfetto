@@ -30,6 +30,12 @@ import {
   displayResultToEnvelope,
 } from '../../../types/dataContract';
 import type { SkillExecutionResult } from '../../../services/skillEngine/types';
+import type { FrameMechanismRecord } from '../../types/jankCause';
+
+interface RootCauseSnapshot {
+  stepId: 'root_cause' | 'root_cause_summary';
+  data: Record<string, any>;
+}
 
 // =============================================================================
 // Configuration
@@ -297,9 +303,16 @@ export class DirectSkillExecutor {
     // Extract findings from diagnostics (taskId ensures globally unique finding IDs)
     let findings = this.extractFindings(result, template, taskId, scopeLabel);
 
+    const rootCauseSnapshot = this.extractRootCauseSnapshot(result.rawResults || {}, scopeLabel);
+
     // Enrich findings with root_cause data from rawResults (if available)
     // This populates Finding.details.cause_type for JankCauseSummarizer
-    findings = this.enrichFindingsWithRootCauseData(findings, result, scopeLabel);
+    findings = this.enrichFindingsWithRootCauseData(findings, rootCauseSnapshot?.data || null, scopeLabel);
+
+    // Persist frame-level mechanism record for aggregation that should bypass finding deduplication.
+    const frameMechanismRecord = rootCauseSnapshot
+      ? this.buildFrameMechanismRecord(rootCauseSnapshot.data, rootCauseSnapshot.stepId, interval, scopeLabel)
+      : null;
 
     // Build DataEnvelopes from displayResults
     const dataEnvelopes = result.displayResults
@@ -341,6 +354,7 @@ export class DirectSkillExecutor {
         ...(interval?.startTs && interval?.endTs && { timeRange: { start: String(interval.startTs), end: String(interval.endTs) } }),
         ...(interval?.metadata?.sourceEntityType && { sourceEntityType: interval.metadata.sourceEntityType }),
         ...(interval?.metadata?.sourceEntityId && { sourceEntityId: String(interval.metadata.sourceEntityId) }),
+        ...(frameMechanismRecord && { frameMechanismRecord }),
       },
     };
 
@@ -411,39 +425,17 @@ export class DirectSkillExecutor {
    * the conclusion generator would have to rely on LLM to infer patterns.
    *
    * @param findings - Findings extracted from diagnostics
-   * @param result - Full skill execution result containing rawResults
+   * @param rootCauseData - Extracted root cause row
    * @param scopeLabel - Scope label for logging/context
    * @returns Enriched findings with cause_type, primary_cause, etc. in details
    */
   private enrichFindingsWithRootCauseData(
     findings: Finding[],
-    result: SkillExecutionResult,
+    rootCauseData: Record<string, any> | null,
     scopeLabel: string
   ): Finding[] {
-    const rawResults = result.rawResults || {};
-    const rootCauseStep = rawResults['root_cause'] || rawResults['root_cause_summary'];
-
-    // Debug: Log available keys in rawResults
-    const availableKeys = Object.keys(rawResults);
-    if (availableKeys.length > 0 && !rootCauseStep) {
-      // Only log if there are results but root_cause is missing
-      console.log(`[DirectSkillExecutor] root_cause not found in rawResults. Available keys: ${availableKeys.join(', ')}`);
-    }
-
-    if (!rootCauseStep?.data) {
-      return findings;
-    }
-
-    // Extract root cause row (expect single row for per-frame execution)
-    const rootCauseData = this.extractRootCauseRow(rootCauseStep.data);
     if (!rootCauseData) {
-      console.log(`[DirectSkillExecutor] Failed to extract root_cause row. Data structure: ${JSON.stringify(rootCauseStep.data).slice(0, 200)}`);
       return findings;
-    }
-
-    // Debug: Log successful extraction
-    if (rootCauseData.cause_type) {
-      console.log(`[DirectSkillExecutor] Extracted cause_type="${rootCauseData.cause_type}" for ${scopeLabel}`);
     }
 
     // Enrich each finding with the root cause data
@@ -460,6 +452,155 @@ export class DirectSkillExecutor {
         scope: scopeLabel,
       },
     }));
+  }
+
+  /**
+   * Extract and normalize root cause row from raw skill results.
+   */
+  private extractRootCauseSnapshot(
+    rawResults: Record<string, any>,
+    scopeLabel: string
+  ): RootCauseSnapshot | null {
+    const stepId: 'root_cause' | 'root_cause_summary' | null = rawResults['root_cause']
+      ? 'root_cause'
+      : rawResults['root_cause_summary']
+        ? 'root_cause_summary'
+        : null;
+
+    const availableKeys = Object.keys(rawResults);
+    if (!stepId) {
+      if (availableKeys.length > 0) {
+        console.log(`[DirectSkillExecutor] root_cause not found in rawResults. Available keys: ${availableKeys.join(', ')}`);
+      }
+      return null;
+    }
+
+    const stepData = rawResults[stepId];
+    if (!stepData?.data) {
+      return null;
+    }
+
+    const rootCauseData = this.extractRootCauseRow(stepData.data);
+    if (!rootCauseData) {
+      console.log(`[DirectSkillExecutor] Failed to extract root_cause row. Data structure: ${JSON.stringify(stepData.data).slice(0, 200)}`);
+      return null;
+    }
+
+    if (rootCauseData.cause_type) {
+      console.log(`[DirectSkillExecutor] Extracted cause_type="${rootCauseData.cause_type}" for ${scopeLabel}`);
+    }
+
+    return {
+      stepId,
+      data: rootCauseData,
+    };
+  }
+
+  /**
+   * Build a per-frame mechanism record used by StrategyExecutor aggregation.
+   */
+  private buildFrameMechanismRecord(
+    rootCauseData: Record<string, any>,
+    sourceStep: 'root_cause' | 'root_cause_summary',
+    interval: FocusInterval,
+    scopeLabel: string
+  ): FrameMechanismRecord | null {
+    const causeType = typeof rootCauseData.cause_type === 'string'
+      ? rootCauseData.cause_type.trim()
+      : '';
+    if (!causeType) {
+      return null;
+    }
+
+    const meta = interval.metadata || {};
+    const frameIdRaw =
+      meta.frameId ??
+      meta.frame_id ??
+      rootCauseData.frame_id ??
+      rootCauseData.frameId ??
+      interval.id ??
+      interval.startTs;
+
+    const sessionIdRaw =
+      meta.sessionId ??
+      meta.session_id ??
+      rootCauseData.session_id ??
+      rootCauseData.sessionId;
+
+    const frameIndexRaw =
+      meta.frameIndex ??
+      meta.frame_index ??
+      rootCauseData.frame_index ??
+      rootCauseData.frameIndex;
+
+    const pidRaw = meta.pid ?? rootCauseData.pid;
+    const processNameRaw =
+      interval.processName ||
+      meta.processName ||
+      meta.process_name ||
+      rootCauseData.process_name;
+
+    const confidenceLevelRaw =
+      rootCauseData.confidence_level ??
+      rootCauseData.confidence;
+
+    const frameDurMsRaw =
+      rootCauseData.frame_dur_ms ??
+      rootCauseData.frameDurMs;
+
+    const jankTypeRaw =
+      rootCauseData.jank_type ??
+      rootCauseData.jankType ??
+      meta.jankType ??
+      meta.jank_type;
+
+    const primaryCauseRaw = rootCauseData.primary_cause;
+    const secondaryInfoRaw = rootCauseData.secondary_info;
+    const mechanismGroupRaw = rootCauseData.mechanism_group;
+    const supplyConstraintRaw = rootCauseData.supply_constraint;
+    const triggerLayerRaw = rootCauseData.trigger_layer;
+    const amplificationPathRaw = rootCauseData.amplification_path;
+
+    const record: FrameMechanismRecord = {
+      frameId: String(frameIdRaw),
+      startTs: String(interval.startTs),
+      endTs: String(interval.endTs),
+      scopeLabel,
+      causeType,
+      sourceStep,
+      ...(sessionIdRaw !== undefined && sessionIdRaw !== null ? { sessionId: String(sessionIdRaw) } : {}),
+      ...(typeof processNameRaw === 'string' && processNameRaw.length > 0 ? { processName: processNameRaw } : {}),
+      ...(typeof primaryCauseRaw === 'string' && primaryCauseRaw.length > 0 ? { primaryCause: primaryCauseRaw } : {}),
+      ...(typeof secondaryInfoRaw === 'string' && secondaryInfoRaw.length > 0 ? { secondaryInfo: secondaryInfoRaw } : {}),
+      ...(typeof confidenceLevelRaw === 'number' || typeof confidenceLevelRaw === 'string' ? { confidenceLevel: confidenceLevelRaw } : {}),
+      ...(typeof jankTypeRaw === 'string' && jankTypeRaw.length > 0 ? { jankType: jankTypeRaw } : {}),
+      ...(typeof mechanismGroupRaw === 'string' && mechanismGroupRaw.length > 0 ? { mechanismGroup: mechanismGroupRaw } : {}),
+      ...(typeof supplyConstraintRaw === 'string' && supplyConstraintRaw.length > 0 ? { supplyConstraint: supplyConstraintRaw } : {}),
+      ...(typeof triggerLayerRaw === 'string' && triggerLayerRaw.length > 0 ? { triggerLayer: triggerLayerRaw } : {}),
+      ...(typeof amplificationPathRaw === 'string' && amplificationPathRaw.length > 0 ? { amplificationPath: amplificationPathRaw } : {}),
+    };
+
+    const frameIndex = this.toOptionalNumber(frameIndexRaw);
+    if (frameIndex !== undefined) {
+      record.frameIndex = frameIndex;
+    }
+
+    const pid = this.toOptionalNumber(pidRaw);
+    if (pid !== undefined) {
+      record.pid = pid;
+    }
+
+    const frameDurMs = this.toOptionalNumber(frameDurMsRaw);
+    if (frameDurMs !== undefined) {
+      record.frameDurMs = frameDurMs;
+    }
+
+    return record;
+  }
+
+  private toOptionalNumber(value: any): number | undefined {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : undefined;
   }
 
   /**

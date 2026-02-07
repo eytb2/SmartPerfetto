@@ -4,19 +4,20 @@
 
 import { generateConclusion } from '../conclusionGenerator';
 import type { Finding, Intent } from '../../types';
+import type { SharedAgentContext } from '../../types/agentProtocol';
 import type { ProgressEmitter } from '../orchestratorTypes';
 import type { ModelRouter } from '../modelRouter';
 
 describe('conclusionGenerator', () => {
   let mockModelRouter: jest.Mocked<Partial<ModelRouter>>;
   let emitter: ProgressEmitter;
-  let emittedUpdates: Array<{ type: string; content: any }>;
+  let emittedUpdates: Array<{ type: string; content: unknown }>;
   let logs: string[];
 
-  const sharedContext = {
+  const sharedContext: SharedAgentContext = {
     sessionId: 'session-1',
     traceId: 'trace-1',
-    hypotheses: new Map<string, any>(),
+    hypotheses: new Map(),
     confirmedFindings: [],
     investigationPath: [],
   };
@@ -41,18 +42,54 @@ describe('conclusionGenerator', () => {
     },
   ];
 
+  function createMockModelResponse(response: string): {
+    success: boolean;
+    response: string;
+    modelId: string;
+    usage: { inputTokens: number; outputTokens: number; totalCost: number };
+    latencyMs: number;
+  } {
+    return {
+      success: true,
+      response,
+      modelId: 'test-model',
+      usage: { inputTokens: 100, outputTokens: 50, totalCost: 0.001 },
+      latencyMs: 500,
+    };
+  }
+
+  async function invokeGenerateConclusion(params: {
+    context?: SharedAgentContext;
+    currentFindings?: Finding[];
+    currentIntent?: Intent;
+    stopReason?: string;
+    options?: { turnCount?: number; historyContext?: string };
+  } = {}): Promise<string> {
+    const {
+      context = sharedContext,
+      currentFindings = findings,
+      currentIntent = intent,
+      stopReason,
+      options = {},
+    } = params;
+
+    return generateConclusion(
+      context,
+      currentFindings,
+      currentIntent,
+      mockModelRouter as unknown as ModelRouter,
+      emitter,
+      stopReason,
+      options
+    );
+  }
+
   beforeEach(() => {
     emittedUpdates = [];
     logs = [];
 
     mockModelRouter = {
-      callWithFallback: jest.fn().mockResolvedValue({
-        success: true,
-        response: '测试结论',
-        modelId: 'test-model',
-        usage: { inputTokens: 100, outputTokens: 50, totalCost: 0.001 },
-        latencyMs: 500,
-      }),
+      callWithFallback: jest.fn().mockResolvedValue(createMockModelResponse('测试结论')),
     };
 
     emitter = {
@@ -66,15 +103,7 @@ describe('conclusionGenerator', () => {
   });
 
   test('uses insight-first prompt for early turns', async () => {
-    const conclusion = await generateConclusion(
-      sharedContext as any,
-      findings,
-      intent,
-      mockModelRouter as unknown as ModelRouter,
-      emitter,
-      undefined,
-      { turnCount: 0 }
-    );
+    const conclusion = await invokeGenerateConclusion({ options: { turnCount: 0 } });
 
     expect(conclusion).toBe('测试结论');
     expect(mockModelRouter.callWithFallback).toHaveBeenCalledWith(
@@ -89,15 +118,11 @@ describe('conclusionGenerator', () => {
   });
 
   test('uses focused-answer prompt when turnCount >= 1', async () => {
-    const conclusion = await generateConclusion(
-      sharedContext as any,
-      findings,
-      { ...intent, followUpType: 'extend' },
-      mockModelRouter as unknown as ModelRouter,
-      emitter,
-      '连续多轮没有新增证据',
-      { turnCount: 1, historyContext: 'HISTORY_CONTEXT' }
-    );
+    const conclusion = await invokeGenerateConclusion({
+      currentIntent: { ...intent, followUpType: 'extend' },
+      stopReason: '连续多轮没有新增证据',
+      options: { turnCount: 1, historyContext: 'HISTORY_CONTEXT' },
+    });
 
     expect(conclusion).toBe('测试结论');
     expect(mockModelRouter.callWithFallback).toHaveBeenCalledWith(
@@ -115,20 +140,20 @@ describe('conclusionGenerator', () => {
     expect(calledPrompt).toContain('多轮对话');
     expect(calledPrompt).toContain('## 输出要求（必须严格遵守）');
     expect(calledPrompt).toContain('总长度尽量控制在 25 行以内');
+    expect(calledPrompt).toContain('## 根因机制拆解（触发/供给/放大）');
+    expect(calledPrompt).toContain('触发因子:');
+    expect(calledPrompt).toContain('供给约束:');
+    expect(calledPrompt).toContain('放大路径:');
   });
 
   test('insight mode falls back to 4-section markdown when LLM fails (follow-up)', async () => {
     mockModelRouter.callWithFallback = jest.fn().mockRejectedValue(new Error('LLM down'));
 
-    const conclusion = await generateConclusion(
-      sharedContext as any,
-      [],
-      { ...intent, followUpType: 'extend' },
-      mockModelRouter as unknown as ModelRouter,
-      emitter,
-      undefined,
-      { turnCount: 3, historyContext: 'HISTORY' }
-    );
+    const conclusion = await invokeGenerateConclusion({
+      currentFindings: [],
+      currentIntent: { ...intent, followUpType: 'extend' },
+      options: { turnCount: 3, historyContext: 'HISTORY' },
+    });
 
     expect(conclusion).toContain('## 结论（按可能性排序）');
     expect(conclusion).toContain('## 证据链（对应上述结论）');
@@ -140,24 +165,14 @@ describe('conclusionGenerator', () => {
   test('insight mode falls back to 4-section markdown when LLM fails (initial)', async () => {
     mockModelRouter.callWithFallback = jest.fn().mockRejectedValue(new Error('LLM down'));
 
-    const conclusion = await generateConclusion(
-      sharedContext as any,
-      findings,
-      intent,
-      mockModelRouter as unknown as ModelRouter,
-      emitter,
-      undefined,
-      { turnCount: 0 }
-    );
+    const conclusion = await invokeGenerateConclusion({ options: { turnCount: 0 } });
 
     expect(conclusion).toContain('## 结论（按可能性排序）');
     expect(conclusion).toContain('主线程阻塞导致掉帧');
   });
 
   test('injects per-conclusion evidence mapping into evidence-chain section when LLM forgets to cite', async () => {
-    mockModelRouter.callWithFallback = jest.fn().mockResolvedValue({
-      success: true,
-      response: `## 结论（按可能性排序）
+    mockModelRouter.callWithFallback = jest.fn().mockResolvedValue(createMockModelResponse(`## 结论（按可能性排序）
 1. 主线程阻塞（置信度: 80%）
 
 ## 证据链（对应上述结论）
@@ -167,11 +182,8 @@ describe('conclusionGenerator', () => {
 - 仍需排除 RenderThread/GPU 的影响
 
 ## 下一步（最高信息增益）
-- 针对关键帧做 drill-down`,
-      modelId: 'test-model',
-      usage: { inputTokens: 100, outputTokens: 50, totalCost: 0.001 },
-      latencyMs: 500,
-    });
+- 针对关键帧做 drill-down`
+    ));
 
     const findingsWithEvidence: Finding[] = [
       {
@@ -180,17 +192,528 @@ describe('conclusionGenerator', () => {
       },
     ];
 
-    const conclusion = await generateConclusion(
-      sharedContext as any,
-      findingsWithEvidence,
-      { ...intent, followUpType: 'extend' },
-      mockModelRouter as unknown as ModelRouter,
-      emitter,
-      undefined,
-      { turnCount: 2, historyContext: 'HISTORY' }
-    );
+    const conclusion = await invokeGenerateConclusion({
+      currentFindings: findingsWithEvidence,
+      currentIntent: { ...intent, followUpType: 'extend' },
+      options: { turnCount: 2, historyContext: 'HISTORY' },
+    });
 
     expect(conclusion).toContain('C1（自动补全）');
     expect(conclusion).toContain('ev_0123456789ab');
+  });
+
+  test('normalizes json-like section output into markdown conclusion blocks', async () => {
+    mockModelRouter.callWithFallback = jest.fn().mockResolvedValue(createMockModelResponse(`conclusion:
+{"statement":"应用在惯性滚动期间存在严重的渲染性能问题，导致大量掉帧和卡顿","confidence":90}
+{"statement":"主线程可能被阻塞，无法及时处理UI更新，特别是在滑动后的惯性滚动阶段","confidence":75}
+evidence_chain:
+{"conclusion_id":"C1","evidence":["- C1: 第一次惯性滚动期间85帧卡顿（ev_a26a983279b7）"]}
+uncertainties:
+无法确定具体是哪个组件或代码路径导致主线程阻塞
+next_steps:
+深入分析主线程的CPU使用情况，查找可能的阻塞点`
+    ));
+
+    const conclusion = await invokeGenerateConclusion({ options: { turnCount: 0 } });
+
+    expect(conclusion).toContain('## 结论（按可能性排序）');
+    expect(conclusion).toContain('## 证据链（对应上述结论）');
+    expect(conclusion).toContain('## 不确定性与反例');
+    expect(conclusion).toContain('## 下一步（最高信息增益）');
+    expect(conclusion).toContain('应用在惯性滚动期间存在严重的渲染性能问题');
+    expect(conclusion).not.toContain('\nconclusion:');
+  });
+
+  test('normalizes json-like output with uncertainty_and_counterexamples objects', async () => {
+    mockModelRouter.callWithFallback = jest.fn().mockResolvedValue(createMockModelResponse(`conclusion:
+{"statement":"应用在滑动期间存在严重性能问题，表现为频繁掉帧和缓冲区积压","confidence":85}
+evidence_chain:
+{"conclusion":"应用在滑动期间存在严重性能问题","evidence":["- C1: 第一次滑动期间出现严重掉帧（ev_6ee3e5cfa057）"]}
+uncertainty_and_counterexamples:
+{"point":"性能问题的具体归因证据不足","explanation":"当前证据无法确认是 APP 侧还是 SF/GPU 侧瓶颈。"}
+next_steps:
+{"action":"补充掉帧归因数据","reason":"当前证据不足以形成单侧归因。"}
+`
+    ));
+
+    const conclusion = await invokeGenerateConclusion({ options: { turnCount: 0 } });
+
+    expect(conclusion).toContain('## 结论（按可能性排序）');
+    expect(conclusion).toContain('## 证据链（对应上述结论）');
+    expect(conclusion).toContain('## 不确定性与反例');
+    expect(conclusion).toContain('性能问题的具体归因证据不足：当前证据无法确认是 APP 侧还是 SF/GPU 侧瓶颈。');
+    expect(conclusion).toContain('补充掉帧归因数据（原因：当前证据不足以形成单侧归因。）');
+    expect(conclusion).not.toContain('\nuncertainty_and_counterexamples:');
+  });
+
+  test('keeps json-like evidence auditable when evidence field is string id', async () => {
+    mockModelRouter.callWithFallback = jest.fn().mockResolvedValue(createMockModelResponse(`conclusion:
+{"statement":"存在滑动掉帧问题","confidence":82}
+evidence_chain:
+{"conclusion_id":"C1","evidence":"ev_111111111111","data":"逐帧统计显示主线程耗时占比 65%（41/63 帧）","source":"jank_frame_detail"}
+uncertainties:
+- 暂无
+next_steps:
+- 继续分析`
+    ));
+
+    const conclusion = await invokeGenerateConclusion({ options: { turnCount: 0 } });
+
+    expect(conclusion).toContain('## 证据链（对应上述结论）');
+    expect(conclusion).toContain('- C1: 逐帧统计显示主线程耗时占比 65%（41/63 帧）（来源: jank_frame_detail）');
+    expect(conclusion).not.toContain('原始证据项缺少可展示文本');
+  });
+
+  test('adds metric-definition hint for contradiction uncertainties without context', async () => {
+    mockModelRouter.callWithFallback = jest.fn().mockResolvedValue(createMockModelResponse(`conclusion:
+{"statement":"存在归因冲突","confidence":70}
+evidence_chain:
+{"conclusion_id":"C1","evidence":["- C1: 责任分布显示 SF 100%"]}
+uncertainties:
+主线程占用帧时间109.8%与休眠/阻塞时间78.5%矛盾
+next_steps:
+统一统计口径`
+    ));
+
+    const conclusion = await invokeGenerateConclusion({ options: { turnCount: 0 } });
+
+    expect(conclusion).toContain('主线程占用帧时间109.8%与休眠/阻塞时间78.5%矛盾（可能由统计口径/分母差异导致，需统一时间窗与分母定义后再比较）');
+  });
+
+  test('normalizes english json-like section headers to chinese headings and avoids redundant data-backfill next steps', async () => {
+    mockModelRouter.callWithFallback = jest.fn().mockResolvedValue(createMockModelResponse(`conclusion:
+负载主导簇: K1（22帧, 34.9%）
+{"confidence":85,"trigger":"主线程耗时操作（65%）","supply":"阻塞等待（57.1%）","amplification":"SF消费端背压（SF 100%，消费端 6.0%）"}
+jank_clusters:
+{"rank":1,"cluster":"K1: 主线程耗时操作/负载主导/SF消费端背压","frames":22,"percentage":34.9}
+{"rank":2,"cluster":"K2: 主线程阻塞(Binder/锁)/阻塞等待/SF消费端背压","frames":22,"percentage":34.9}
+evidence_chain:
+{"conclusion":"C1: 主线程耗时操作是主要触发因子","evidence":"- C1: 逐帧根因显示主线程耗时操作占比65%"}
+uncertainties:
+主线程休眠占比与占用时间的矛盾（如帧1436259休眠88.2%但占用76.5%）
+next_steps:
+补充主线程休眠占比与占用时间的矛盾数据
+analysis_metadata:
+置信度: 83%
+分析轮次: 3`
+    ));
+
+    const conclusion = await invokeGenerateConclusion({ options: { turnCount: 0 } });
+
+    expect(conclusion).toContain('## 结论（按可能性排序）');
+    expect(conclusion).toContain('## 掉帧聚类（先看大头）');
+    expect(conclusion).toContain('## 证据链（对应上述结论）');
+    expect(conclusion).toContain('## 下一步（最高信息增益）');
+    expect(conclusion).toContain('## 分析元数据');
+    expect(conclusion).toContain('触发因子: 主线程耗时操作（65%）；供给约束: 阻塞等待（57.1%）；放大路径: SF消费端背压（SF 100%，消费端 6.0%）');
+    expect(conclusion).toContain('- K1: 主线程耗时操作/负载主导/SF消费端背压（22帧, 34.9%）');
+    expect(conclusion).toContain('在同一帧同一时间窗统一统计口径，复核主线程休眠占比与占用时间的分母与计算方式');
+    expect(conclusion).not.toContain('\njank_clusters:');
+    expect(conclusion).not.toContain('\nanalysis_metadata:');
+  });
+
+  test('normalizes chinese key-style sections and keeps conclusion heading order', async () => {
+    mockModelRouter.callWithFallback = jest.fn().mockResolvedValue(createMockModelResponse(`负载主导簇: K1（22帧, 34.9%），该簇以 APP 侧工作负载触发为主。
+结论:
+{"触发因子":"主线程耗时操作（65%）","供给约束":"阻塞等待（57.1%）","放大路径":"SF消费端背压"}
+掉帧聚类:
+{"聚类":"K1","帧数":22,"占比":"34.9%","描述":"主线程耗时操作/负载主导/SF消费端背压"}
+证据链:
+- C1: 逐帧根因显示主线程耗时操作占比65%（证据ID: ）
+不确定性与反例:
+同一区间1的滑动卡顿检测数据存在不一致：第一次报告25帧（7.6%），第二次报告38帧（12.2%）
+下一步:
+补充主线程休眠占比与占用时间的矛盾数据
+分析元数据:
+置信度: 83%
+分析轮次: 3`
+    ));
+
+    const conclusion = await invokeGenerateConclusion({ options: { turnCount: 0 } });
+
+    expect(conclusion.trim().startsWith('## 结论（按可能性排序）')).toBe(true);
+    expect(conclusion).toContain('## 掉帧聚类（先看大头）');
+    expect(conclusion).toContain('## 分析元数据');
+    expect(conclusion).toContain('主线程耗时操作（65%）');
+    expect(conclusion).toContain('阻塞等待（57.1%）');
+    expect(conclusion).toContain('SF消费端背压');
+    expect(conclusion).toContain('在同一帧同一时间窗统一统计口径，复核主线程休眠占比与占用时间的分母与计算方式');
+    expect(conclusion).not.toContain('\n结论:');
+    expect(conclusion).not.toContain('\n掉帧聚类:');
+  });
+
+  test('marks workload-dominant cluster explicitly in conclusion section', async () => {
+    mockModelRouter.callWithFallback = jest.fn().mockResolvedValue(createMockModelResponse(`## 结论（按可能性排序）
+1. 存在主线程相关卡顿（置信度: 80%）
+
+## 掉帧聚类（先看大头）
+- K1: 主线程耗时操作 / 负载主导（供给约束弱） / SF消费端背压（22帧, 34.9%）
+
+## 证据链（对应上述结论）
+- C1: 逐帧统计显示主线程相关占比更高
+
+## 不确定性与反例
+- 仍需补充更细粒度调用栈
+
+## 下一步（最高信息增益）
+- 针对 K1 代表帧做下钻`
+    ));
+
+    const contextWithWorkloadCluster = {
+      ...sharedContext,
+      jankCauseSummary: {
+        totalJankFrames: 63,
+        primaryCause: {
+          causeType: 'slice',
+          label: '主线程耗时操作',
+          frameCount: 41,
+          percentage: 65.1,
+          severity: 'critical',
+          exampleCauses: ['主线程耗时操作'],
+        },
+        secondaryCauses: [],
+        allCauses: [
+          {
+            causeType: 'slice',
+            label: '主线程耗时操作',
+            frameCount: 41,
+            percentage: 65.1,
+            severity: 'critical',
+            exampleCauses: ['主线程耗时操作'],
+          },
+        ],
+        clusters: [
+          {
+            clusterId: 'K1',
+            frameCount: 22,
+            percentage: 34.9,
+            triggerFactor: '主线程耗时操作',
+            supplyConstraint: '负载主导（供给约束弱）',
+            amplificationPath: 'SF 消费端背压',
+            causeType: 'slice',
+            representativeFrames: ['1435500'],
+            samplePrimaryCauses: ['主线程耗时操作'],
+          },
+        ],
+        summaryText: 'K1 为负载主导簇',
+      },
+    };
+
+    const conclusion = await invokeGenerateConclusion({
+      context: contextWithWorkloadCluster as SharedAgentContext,
+      options: { turnCount: 0 },
+    });
+
+    expect(conclusion).toContain('负载主导簇: K1（22帧, 34.9%）');
+    expect(conclusion).toContain('代表帧: 1435500');
+    expect(conclusion).toContain('关键切片: 主线程耗时操作');
+  });
+
+  test('keeps SF attribution guardrail when only SF-dominant signal exists', async () => {
+    const sfOnlyFindings: Finding[] = [
+      {
+        id: 'f-sf',
+        severity: 'warning',
+        title: '洞见摘要 · 滑动性能分析',
+        description: '- 责任归属分布: SF 25 (100%)',
+        source: 'scrolling_analysis',
+        confidence: 0.8,
+      },
+    ];
+
+    await invokeGenerateConclusion({
+      currentFindings: sfOnlyFindings,
+      options: { turnCount: 0 },
+    });
+
+    const calledPrompt = (mockModelRouter.callWithFallback as jest.Mock).mock.calls[0][0] as string;
+    expect(calledPrompt).toContain('## 归因护栏');
+    expect(calledPrompt).toContain('不要直接给出“主线程/Choreographer 是主要根因”的高置信度结论');
+  });
+
+  test('suppresses SF guardrail when frame-level main-thread root cause is dominant', async () => {
+    const mixedFindings: Finding[] = [
+      {
+        id: 'f-sf',
+        severity: 'warning',
+        title: '洞见摘要 · 滑动性能分析',
+        description: '- 责任归属分布: SF 25 (100%)',
+        source: 'scrolling_analysis',
+        confidence: 0.8,
+        evidence: [{ evidenceId: 'ev_111111111111', title: '[frame_agent] analyze_scrolling', kind: 'skill' }],
+      },
+      {
+        id: 'f-main',
+        severity: 'critical',
+        title: '[区间1 · 帧1435500] 主线程耗时操作 "Choreographer#doFrame" 占用 13.92ms',
+        description: '逐帧分析显示主线程明显超预算',
+        source: 'direct_skill:jank_frame_detail',
+        confidence: 0.9,
+        details: {
+          cause_type: 'slice',
+          primary_cause: '主线程耗时操作 "Choreographer#doFrame"',
+        },
+        evidence: [{ evidenceId: 'ev_222222222222', title: '[frame_agent] jank_frame_detail', kind: 'skill' }],
+      },
+    ];
+
+    const contextWithJankSummary = {
+      ...sharedContext,
+      jankCauseSummary: {
+        totalJankFrames: 3,
+        primaryCause: {
+          causeType: 'slice',
+          label: '主线程耗时操作',
+          frameCount: 3,
+          percentage: 100,
+          severity: 'critical',
+          exampleCauses: ['主线程耗时操作 "Choreographer#doFrame"'],
+        },
+        secondaryCauses: [],
+        allCauses: [
+          {
+            causeType: 'slice',
+            label: '主线程耗时操作',
+            frameCount: 3,
+            percentage: 100,
+            severity: 'critical',
+            exampleCauses: ['主线程耗时操作 "Choreographer#doFrame"'],
+          },
+        ],
+        clusters: [],
+        summaryText: '主线程耗时操作 3 帧 (100%)',
+      },
+    };
+
+    await invokeGenerateConclusion({
+      context: contextWithJankSummary as SharedAgentContext,
+      currentFindings: mixedFindings,
+      options: { turnCount: 0 },
+    });
+
+    const calledPrompt = (mockModelRouter.callWithFallback as jest.Mock).mock.calls[0][0] as string;
+    expect(calledPrompt).toContain('## 掉帧归因裁决（规则预判）');
+    expect(calledPrompt).toContain('逐帧根因显示主线程/APP 侧耗时信号占主导');
+    expect(calledPrompt).not.toContain('不要直接给出“主线程/Choreographer 是主要根因”的高置信度结论');
+  });
+
+  test('replaces contradictory LLM conclusion with attribution-safe fallback', async () => {
+    mockModelRouter.callWithFallback = jest.fn().mockResolvedValue(createMockModelResponse(`## 结论（按可能性排序）
+1. 滑动性能问题主要由SF层消费端掉帧导致（82.1%），而非App主线程操作（置信度: 85%）
+
+## 证据链（对应上述结论）
+- C1: 责任归属分布 SF 100%
+
+## 不确定性与反例
+- 无
+
+## 下一步（最高信息增益）
+- 补充更多 SF 数据`
+    ));
+
+    const contradictoryFindings: Finding[] = [
+      {
+        id: 'f-sf',
+        severity: 'warning',
+        title: '洞见摘要 · 滑动性能分析',
+        description: '- 责任归属分布: SF 25 (100%)',
+        source: 'scrolling_analysis',
+        confidence: 0.8,
+        evidence: [{ evidenceId: 'ev_333333333333', title: '[frame_agent] analyze_scrolling', kind: 'skill' }],
+      },
+      {
+        id: 'f-main',
+        severity: 'critical',
+        title: '[区间1 · 帧1435500] 主线程耗时操作 "Choreographer#doFrame" 占用 13.92ms',
+        description: '逐帧分析显示主线程明显超预算',
+        source: 'direct_skill:jank_frame_detail',
+        confidence: 0.95,
+        details: {
+          cause_type: 'slice',
+          primary_cause: '主线程耗时操作 "Choreographer#doFrame"',
+        },
+        evidence: [{ evidenceId: 'ev_444444444444', title: '[frame_agent] jank_frame_detail', kind: 'skill' }],
+      },
+    ];
+
+    const contextWithJankSummary = {
+      ...sharedContext,
+      jankCauseSummary: {
+        totalJankFrames: 3,
+        primaryCause: {
+          causeType: 'slice',
+          label: '主线程耗时操作',
+          frameCount: 3,
+          percentage: 100,
+          severity: 'critical',
+          exampleCauses: ['主线程耗时操作 "Choreographer#doFrame"'],
+        },
+        secondaryCauses: [],
+        allCauses: [
+          {
+            causeType: 'slice',
+            label: '主线程耗时操作',
+            frameCount: 3,
+            percentage: 100,
+            severity: 'critical',
+            exampleCauses: ['主线程耗时操作 "Choreographer#doFrame"'],
+          },
+        ],
+        clusters: [],
+        summaryText: '主线程耗时操作 3 帧 (100%)',
+      },
+    };
+
+    const conclusion = await invokeGenerateConclusion({
+      context: contextWithJankSummary as SharedAgentContext,
+      currentFindings: contradictoryFindings,
+      options: { turnCount: 0 },
+    });
+
+    expect(conclusion).toContain('## 结论（按可能性排序）');
+    expect(conclusion).toContain('混合型掉帧');
+    expect(conclusion).toContain('触发因子:');
+    expect(conclusion).toContain('供给约束:');
+    expect(conclusion).toContain('放大路径:');
+    expect(conclusion).not.toContain('而非App主线程操作');
+    expect(conclusion).not.toContain('（自动补全）');
+    expect((conclusion.match(/^- C1\b/gm) || []).length).toBe(1);
+    expect(conclusion).toMatch(/ev_[0-9a-f]{12}/);
+    expect(emittedUpdates.some(u =>
+      u.type === 'degraded' &&
+      (u.content as { fallback?: string } | undefined)?.fallback === 'rule-based attribution-safe conclusion'
+    )).toBe(true);
+  });
+
+  test('fallback mechanism triad classifies supply constraints into frequency and core placement', async () => {
+    mockModelRouter.callWithFallback = jest.fn().mockRejectedValue(new Error('LLM down'));
+
+    const findingsWithEvidence: Finding[] = [
+      {
+        id: 'f-main',
+        severity: 'critical',
+        title: '[区间1 · 帧1435517] 主线程耗时 10.24ms',
+        description: '逐帧分析显示主线程超预算，且存在大核频率与小核运行信号',
+        source: 'direct_skill:jank_frame_detail',
+        confidence: 0.92,
+        details: {
+          cause_type: 'slice',
+          primary_cause: '主线程耗时操作',
+        },
+        evidence: [{ evidenceId: 'ev_555555555555', title: '[frame_agent] jank_frame_detail', kind: 'skill' }],
+      },
+      {
+        id: 'f-sf',
+        severity: 'warning',
+        title: '洞见摘要 · 滑动性能分析',
+        description: '- 责任归属分布: SF 20 (80%)',
+        source: 'scrolling_analysis',
+        confidence: 0.8,
+      },
+    ];
+
+    const contextWithJankSummary = {
+      ...sharedContext,
+      jankCauseSummary: {
+        totalJankFrames: 10,
+        primaryCause: {
+          causeType: 'slice',
+          label: '主线程耗时操作',
+          frameCount: 4,
+          percentage: 40,
+          severity: 'critical',
+          exampleCauses: ['主线程耗时操作'],
+        },
+        secondaryCauses: [
+          {
+            causeType: 'freq_limit',
+            label: 'CPU 限频',
+            frameCount: 3,
+            percentage: 30,
+            severity: 'warning',
+            exampleCauses: ['大核频率偏低'],
+          },
+          {
+            causeType: 'small_core',
+            label: '小核运行',
+            frameCount: 2,
+            percentage: 20,
+            severity: 'warning',
+            exampleCauses: ['RenderThread 大核占比偏低'],
+          },
+        ],
+        allCauses: [
+          {
+            causeType: 'slice',
+            label: '主线程耗时操作',
+            frameCount: 4,
+            percentage: 40,
+            severity: 'critical',
+            exampleCauses: ['主线程耗时操作'],
+          },
+          {
+            causeType: 'freq_limit',
+            label: 'CPU 限频',
+            frameCount: 3,
+            percentage: 30,
+            severity: 'warning',
+            exampleCauses: ['大核频率偏低'],
+          },
+          {
+            causeType: 'small_core',
+            label: '小核运行',
+            frameCount: 2,
+            percentage: 20,
+            severity: 'warning',
+            exampleCauses: ['RenderThread 大核占比偏低'],
+          },
+          {
+            causeType: 'gpu_fence',
+            label: 'GPU Fence 等待',
+            frameCount: 1,
+            percentage: 10,
+            severity: 'warning',
+            exampleCauses: ['GPU fence wait'],
+          },
+        ],
+        clusters: [
+          {
+            clusterId: 'K1',
+            frameCount: 6,
+            percentage: 60,
+            triggerFactor: '主线程耗时操作',
+            supplyConstraint: '频率不足',
+            amplificationPath: 'SF 消费端背压',
+            causeType: 'slice',
+            representativeFrames: ['1435517'],
+            samplePrimaryCauses: ['主线程耗时操作'],
+          },
+          {
+            clusterId: 'K2',
+            frameCount: 4,
+            percentage: 40,
+            triggerFactor: '调度延迟',
+            supplyConstraint: '核心摆放偏小核',
+            amplificationPath: 'APP 截止超时',
+            causeType: 'sched_latency',
+            representativeFrames: ['1435500'],
+            samplePrimaryCauses: ['Runnable 等待'],
+          },
+        ],
+        summaryText: '主线程 40%，限频 30%，小核 20%，GPU fence 10%',
+      },
+    };
+
+    const conclusion = await invokeGenerateConclusion({
+      context: contextWithJankSummary as SharedAgentContext,
+      currentFindings: findingsWithEvidence,
+      options: { turnCount: 0 },
+    });
+
+    expect(conclusion).toContain('供给约束:');
+    expect(conclusion).toContain('频率不足');
+    expect(conclusion).toContain('核心摆放偏小核');
+    expect(conclusion).toContain('## 掉帧聚类（先看大头）');
+    expect(conclusion).toContain('K1:');
   });
 });

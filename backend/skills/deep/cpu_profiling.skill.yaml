@@ -101,7 +101,7 @@ steps:
     type: atomic
     name: "进程 CPU 时间"
     display:
-      level: list
+      level: detail
       layer: list
       title: "进程 CPU 使用排行"
     sql: |
@@ -138,7 +138,7 @@ steps:
     type: atomic
     name: "线程 CPU 时间"
     display:
-      level: list
+      level: detail
       layer: list
       title: "线程 CPU 使用排行"
     sql: |
@@ -176,7 +176,7 @@ steps:
     type: atomic
     name: "大小核分布"
     display:
-      level: list
+      level: detail
       layer: list
       title: "大小核调度分布"
     sql: |
@@ -238,7 +238,7 @@ steps:
     type: atomic
     name: "调度延迟"
     display:
-      level: list
+      level: detail
       layer: list
       title: "调度延迟分析"
     sql: |
@@ -286,7 +286,7 @@ steps:
     type: atomic
     name: "上下文切换"
     display:
-      level: deep
+      level: detail
       layer: deep
       title: "上下文切换分析"
     sql: |
@@ -322,7 +322,7 @@ steps:
     type: atomic
     name: "CPU 使用时间线"
     display:
-      level: deep
+      level: detail
       layer: deep
       title: "CPU 使用趋势"
     sql: |

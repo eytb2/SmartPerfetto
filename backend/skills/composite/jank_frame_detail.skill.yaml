@@ -880,6 +880,18 @@ steps:
         - name: cause_type
           label: "原因类型"
           type: enum
+        - name: mechanism_group
+          label: "机制分组"
+          type: enum
+        - name: supply_constraint
+          label: "供给约束"
+          type: enum
+        - name: trigger_layer
+          label: "触发层"
+          type: enum
+        - name: amplification_path
+          label: "放大路径"
+          type: enum
         - name: frame_dur_ms
           label: "帧耗时"
           type: duration
@@ -890,7 +902,7 @@ steps:
     sql: |
       -- 根因分析: 综合四象限、CPU频率、耗时操作等数据，输出明确的根因结论
       WITH
-      -- 0. 估算当前帧窗口的 VSync 周期（缺失时回退 16.67ms）
+      -- 0. 估算当前帧窗口的 VSync 周期（缺失时回退 8.33ms）
       vsync_ticks AS (
         SELECT
           c.ts,
@@ -909,7 +921,7 @@ steps:
               FROM vsync_ticks
               WHERE interval_ns > 4000000 AND interval_ns < 50000000
             ),
-            16666667
+            8333333
           ) AS INTEGER) as vsync_period_ns
       ),
       -- 1. 获取目标线程
@@ -1072,94 +1084,148 @@ steps:
           ROUND(MAX(((SELECT vsync_period_ns FROM vsync_config) / 1e6) * 0.18, 2.0), 2) as total_sched_critical_ms,
           ROUND(MAX(((SELECT vsync_period_ns FROM vsync_config) / 1e6) * 0.12, 1.5), 2) as io_block_critical_ms
       )
+      , base_result AS (
+        SELECT
+          CASE
+            -- 优先级1: 主线程有明确耗时操作（相对帧预算）
+            WHEN slice_dur > slice_critical_ms THEN
+              '主线程耗时操作 "' || slice_name || '" 占用 ' || slice_dur || 'ms (帧预算 ' || frame_budget_ms || 'ms)'
+            -- 优先级2: GPU Fence 等待（相对帧预算）
+            WHEN fence_ms > gpu_fence_critical_ms THEN
+              'GPU Fence 等待 ' || ROUND(fence_ms, 1) || 'ms，GPU 繁忙无法及时完成渲染'
+            -- 优先级3: 严重调度延迟（相对帧预算）
+            WHEN max_sched_ms > sched_max_critical_ms THEN
+              '主线程调度延迟严重: 最大等待 ' || ROUND(max_sched_ms, 1) || 'ms'
+            -- 优先级4: 主线程大量等待调度 (Q3 > 20%)
+            WHEN main_q3 > 20 THEN
+              '主线程 CPU 争抢严重 (' || main_q3 || '% 时间在等待调度)'
+            -- 优先级5: 主线程 IO 阻塞（相对帧预算）
+            WHEN io_block_ms > io_block_critical_ms THEN
+              '主线程 IO 阻塞 ' || ROUND(io_block_ms, 1) || 'ms (D 状态)'
+            -- 优先级6: 总调度延迟（相对帧预算）
+            WHEN total_sched_ms > total_sched_critical_ms THEN
+              '主线程 Runnable 累计等待 ' || ROUND(total_sched_ms, 1) || 'ms'
+            -- 优先级7: 主线程被阻塞 (Q4 > 30%)
+            WHEN main_q4 > 30 THEN
+              '主线程阻塞等待 (Binder/IO/锁)，休眠占比 ' || main_q4 || '%'
+            -- 优先级8: RenderThread 休眠 (Q4 > 50%)
+            WHEN render_q4 > 50 THEN
+              'RenderThread 长时间休眠 (' || render_q4 || '%)，等待主线程或 GPU'
+            -- 优先级9: 主线程在小核运行 (Q2 > 50%)
+            WHEN main_q2 > 50 THEN
+              '主线程被调度到小核 (' || main_q2 || '%)，CPU 能力不足'
+            -- 优先级10: CPU 频率问题
+            WHEN big_freq < 1200 AND big_freq > 0 THEN
+              '大核频率过低 (' || big_freq || 'MHz)，可能触发温控限频'
+            -- 优先级11: 大核簇负载过高 (>90%)
+            WHEN big_load_pct > 90 THEN
+              '大核簇负载 ' || ROUND(big_load_pct, 0) || '%，CPU 资源严重不足'
+            -- 优先级12: GPU Fence 中等延迟（相对帧预算）
+            WHEN fence_ms > gpu_fence_warning_ms THEN
+              'GPU Fence 等待 ' || ROUND(fence_ms, 1) || 'ms'
+            -- 优先级13: CPU 整体负载高
+            WHEN big_load_pct > 70 AND little_load_pct > 70 THEN
+              'CPU 整体负载高 (大核 ' || ROUND(big_load_pct, 0) || '%, 小核 ' || ROUND(little_load_pct, 0) || '%)'
+            -- 优先级14: 有中等耗时操作（相对帧预算）
+            WHEN slice_dur > slice_warning_ms THEN
+              '主线程操作 "' || slice_name || '" 耗时 ' || slice_dur || 'ms'
+            -- 默认
+            ELSE '帧耗时 ${dur_ms}ms 超过 VSync 周期(' || frame_budget_ms || 'ms)'
+          END as primary_cause,
+          CASE
+            WHEN fence_ms > gpu_fence_warning_ms THEN 'GPU Fence 等待 ' || ROUND(fence_ms, 1) || 'ms'
+            WHEN total_sched_ms > (total_sched_critical_ms * 0.5) THEN '调度等待累计 ' || ROUND(total_sched_ms, 1) || 'ms'
+            WHEN big_load_pct > 70 THEN '大核负载 ' || ROUND(big_load_pct, 0) || '%'
+            WHEN big_freq > 0 AND big_freq < 1500 THEN '大核频率 ' || big_freq || 'MHz'
+            WHEN main_q2 > 30 THEN '小核运行占比 ' || main_q2 || '%'
+            ELSE NULL
+          END as secondary_info,
+          CASE
+            WHEN slice_dur > slice_critical_ms THEN '高'
+            WHEN fence_ms > gpu_fence_critical_ms THEN '高'
+            WHEN max_sched_ms > sched_max_critical_ms THEN '高'
+            WHEN main_q3 > 20 THEN '高'
+            WHEN io_block_ms > io_block_critical_ms THEN '高'
+            WHEN total_sched_ms > total_sched_critical_ms THEN '高'
+            WHEN big_load_pct > 90 THEN '高'
+            WHEN main_q4 > 30 THEN '中'
+            WHEN fence_ms > gpu_fence_warning_ms THEN '中'
+            WHEN big_load_pct > 70 AND little_load_pct > 70 THEN '中'
+            WHEN slice_dur > slice_warning_ms THEN '中'
+            ELSE '低'
+          END as confidence,
+          CASE
+            WHEN slice_dur > slice_critical_ms THEN 'slice'
+            WHEN fence_ms > gpu_fence_critical_ms THEN 'gpu_fence'
+            WHEN max_sched_ms > sched_max_critical_ms THEN 'sched_latency'
+            WHEN main_q3 > 20 THEN 'cpu_contention'
+            WHEN io_block_ms > io_block_critical_ms THEN 'io_blocking'
+            WHEN total_sched_ms > total_sched_critical_ms THEN 'sched_latency'
+            WHEN main_q4 > 30 THEN 'blocking'
+            WHEN render_q4 > 50 THEN 'render_wait'
+            WHEN main_q2 > 50 THEN 'small_core'
+            WHEN big_freq < 1200 AND big_freq > 0 THEN 'freq_limit'
+            WHEN big_load_pct > 90 THEN 'cpu_overload'
+            WHEN fence_ms > gpu_fence_warning_ms THEN 'gpu_fence'
+            WHEN big_load_pct > 70 AND little_load_pct > 70 THEN 'cpu_overload'
+            ELSE 'unknown'
+          END as cause_type,
+          ${dur_ms} as frame_dur_ms,
+          '${jank_type}' as jank_type,
+          '${jank_responsibility}' as jank_responsibility,
+          max_sched_ms,
+          total_sched_ms,
+          main_q2,
+          main_q3,
+          main_q4,
+          big_freq,
+          big_load_pct,
+          little_load_pct,
+          io_block_ms,
+          sched_max_critical_ms,
+          total_sched_critical_ms,
+          io_block_critical_ms
+        FROM analysis
+      )
       SELECT
+        primary_cause,
+        secondary_info,
+        confidence,
+        cause_type,
+        frame_dur_ms,
+        jank_type,
         CASE
-          -- 优先级1: 主线程有明确耗时操作（相对帧预算）
-          WHEN slice_dur > slice_critical_ms THEN
-            '主线程耗时操作 "' || slice_name || '" 占用 ' || slice_dur || 'ms (帧预算 ' || frame_budget_ms || 'ms)'
-          -- 优先级2: GPU Fence 等待（相对帧预算）
-          WHEN fence_ms > gpu_fence_critical_ms THEN
-            'GPU Fence 等待 ' || ROUND(fence_ms, 1) || 'ms，GPU 繁忙无法及时完成渲染'
-          -- 优先级3: 严重调度延迟（相对帧预算）
-          WHEN max_sched_ms > sched_max_critical_ms THEN
-            '主线程调度延迟严重: 最大等待 ' || ROUND(max_sched_ms, 1) || 'ms'
-          -- 优先级4: 主线程大量等待调度 (Q3 > 20%)
-          WHEN main_q3 > 20 THEN
-            '主线程 CPU 争抢严重 (' || main_q3 || '% 时间在等待调度)'
-          -- 优先级5: 主线程 IO 阻塞（相对帧预算）
-          WHEN io_block_ms > io_block_critical_ms THEN
-            '主线程 IO 阻塞 ' || ROUND(io_block_ms, 1) || 'ms (D 状态)'
-          -- 优先级6: 总调度延迟（相对帧预算）
-          WHEN total_sched_ms > total_sched_critical_ms THEN
-            '主线程 Runnable 累计等待 ' || ROUND(total_sched_ms, 1) || 'ms'
-          -- 优先级7: 主线程被阻塞 (Q4 > 30%)
-          WHEN main_q4 > 30 THEN
-            '主线程阻塞等待 (Binder/IO/锁)，休眠占比 ' || main_q4 || '%'
-          -- 优先级8: RenderThread 休眠 (Q4 > 50%)
-          WHEN render_q4 > 50 THEN
-            'RenderThread 长时间休眠 (' || render_q4 || '%)，等待主线程或 GPU'
-          -- 优先级9: 主线程在小核运行 (Q2 > 50%)
-          WHEN main_q2 > 50 THEN
-            '主线程被调度到小核 (' || main_q2 || '%)，CPU 能力不足'
-          -- 优先级10: CPU 频率问题
-          WHEN big_freq < 1200 AND big_freq > 0 THEN
-            '大核频率过低 (' || big_freq || 'MHz)，可能触发温控限频'
-          -- 优先级11: 大核簇负载过高 (>90%)
-          WHEN big_load_pct > 90 THEN
-            '大核簇负载 ' || ROUND(big_load_pct, 0) || '%，CPU 资源严重不足'
-          -- 优先级12: GPU Fence 中等延迟（相对帧预算）
-          WHEN fence_ms > gpu_fence_warning_ms THEN
-            'GPU Fence 等待 ' || ROUND(fence_ms, 1) || 'ms'
-          -- 优先级13: CPU 整体负载高
-          WHEN big_load_pct > 70 AND little_load_pct > 70 THEN
-            'CPU 整体负载高 (大核 ' || ROUND(big_load_pct, 0) || '%, 小核 ' || ROUND(little_load_pct, 0) || '%)'
-          -- 优先级14: 有中等耗时操作（相对帧预算）
-          WHEN slice_dur > slice_warning_ms THEN
-            '主线程操作 "' || slice_name || '" 耗时 ' || slice_dur || 'ms'
-          -- 默认
-          ELSE '帧耗时 ${dur_ms}ms 超过 VSync 周期(' || frame_budget_ms || 'ms)'
-        END as primary_cause,
-        CASE
-          WHEN fence_ms > gpu_fence_warning_ms THEN 'GPU Fence 等待 ' || ROUND(fence_ms, 1) || 'ms'
-          WHEN total_sched_ms > (total_sched_critical_ms * 0.5) THEN '调度等待累计 ' || ROUND(total_sched_ms, 1) || 'ms'
-          WHEN big_load_pct > 70 THEN '大核负载 ' || ROUND(big_load_pct, 0) || '%'
-          WHEN big_freq > 0 AND big_freq < 1500 THEN '大核频率 ' || big_freq || 'MHz'
-          WHEN main_q2 > 30 THEN '小核运行占比 ' || main_q2 || '%'
-          ELSE NULL
-        END as secondary_info,
-        CASE
-          WHEN slice_dur > slice_critical_ms THEN '高'
-          WHEN fence_ms > gpu_fence_critical_ms THEN '高'
-          WHEN max_sched_ms > sched_max_critical_ms THEN '高'
-          WHEN main_q3 > 20 THEN '高'
-          WHEN io_block_ms > io_block_critical_ms THEN '高'
-          WHEN total_sched_ms > total_sched_critical_ms THEN '高'
-          WHEN big_load_pct > 90 THEN '高'
-          WHEN main_q4 > 30 THEN '中'
-          WHEN fence_ms > gpu_fence_warning_ms THEN '中'
-          WHEN big_load_pct > 70 AND little_load_pct > 70 THEN '中'
-          WHEN slice_dur > slice_warning_ms THEN '中'
-          ELSE '低'
-        END as confidence,
-        CASE
-          WHEN slice_dur > slice_critical_ms THEN 'slice'
-          WHEN fence_ms > gpu_fence_critical_ms THEN 'gpu_fence'
-          WHEN max_sched_ms > sched_max_critical_ms THEN 'sched_latency'
-          WHEN main_q3 > 20 THEN 'cpu_contention'
-          WHEN io_block_ms > io_block_critical_ms THEN 'io_blocking'
-          WHEN total_sched_ms > total_sched_critical_ms THEN 'sched_latency'
-          WHEN main_q4 > 30 THEN 'blocking'
-          WHEN render_q4 > 50 THEN 'render_wait'
-          WHEN main_q2 > 50 THEN 'small_core'
-          WHEN big_freq < 1200 AND big_freq > 0 THEN 'freq_limit'
-          WHEN big_load_pct > 90 THEN 'cpu_overload'
-          WHEN fence_ms > gpu_fence_warning_ms THEN 'gpu_fence'
-          WHEN big_load_pct > 70 AND little_load_pct > 70 THEN 'cpu_overload'
+          WHEN cause_type IN ('slice', 'blocking', 'io_blocking') THEN 'trigger'
+          WHEN cause_type IN ('sched_latency', 'cpu_contention', 'small_core', 'freq_limit', 'cpu_overload') THEN 'supply'
+          WHEN cause_type IN ('gpu_fence', 'render_wait') THEN 'amplification'
           ELSE 'unknown'
-        END as cause_type,
-        ${dur_ms} as frame_dur_ms,
-        '${jank_type}' as jank_type
-      FROM analysis
+        END as mechanism_group,
+        CASE
+          WHEN io_block_ms > io_block_critical_ms OR main_q4 > 30 THEN 'blocking_wait'
+          WHEN big_freq < 1200 AND big_freq > 0 THEN 'frequency_insufficient'
+          WHEN main_q2 > 50 THEN 'core_placement'
+          WHEN max_sched_ms > sched_max_critical_ms OR total_sched_ms > total_sched_critical_ms OR main_q3 > 20 THEN 'scheduling_delay'
+          WHEN big_load_pct > 90 OR (big_load_pct > 70 AND little_load_pct > 70) THEN 'load_high'
+          WHEN cause_type = 'freq_limit' THEN 'frequency_insufficient'
+          WHEN cause_type = 'small_core' THEN 'core_placement'
+          WHEN cause_type IN ('sched_latency', 'cpu_contention') THEN 'scheduling_delay'
+          WHEN cause_type = 'cpu_overload' THEN 'load_high'
+          WHEN cause_type IN ('blocking', 'io_blocking') THEN 'blocking_wait'
+          ELSE 'none'
+        END as supply_constraint,
+        CASE
+          WHEN cause_type IN ('slice', 'blocking', 'io_blocking', 'sched_latency', 'cpu_contention', 'small_core', 'freq_limit', 'cpu_overload') THEN 'app_producer'
+          WHEN cause_type IN ('gpu_fence', 'render_wait') THEN 'sf_consumer'
+          ELSE 'unknown'
+        END as trigger_layer,
+        CASE
+          WHEN cause_type = 'gpu_fence' THEN 'gpu_fence_wait'
+          WHEN cause_type = 'render_wait' THEN 'render_pipeline_wait'
+          WHEN jank_responsibility = 'SF' THEN 'sf_consumer_backpressure'
+          WHEN jank_responsibility = 'APP' THEN 'app_deadline_miss'
+          ELSE 'unknown'
+        END as amplification_path
+      FROM base_result
     save_as: root_cause
     optional: true
 

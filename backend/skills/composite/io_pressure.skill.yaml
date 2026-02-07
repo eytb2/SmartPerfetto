@@ -98,7 +98,7 @@ steps:
     type: atomic
     name: "进程 IO Wait 分布"
     display:
-      level: list
+      level: detail
       layer: list
       title: "进程 IO 等待排行"
     sql: |
@@ -144,7 +144,7 @@ steps:
     type: atomic
     name: "阻塞函数热点"
     display:
-      level: list
+      level: detail
       layer: list
       title: "IO 阻塞函数排行"
     sql: |
@@ -170,7 +170,7 @@ steps:
     type: atomic
     name: "线程 IO Wait 详情"
     display:
-      level: list
+      level: detail
       layer: list
       title: "线程级 IO 等待"
     sql: |
@@ -202,7 +202,7 @@ steps:
     type: atomic
     name: "IO Wait 时间线"
     display:
-      level: deep
+      level: detail
       layer: deep
       title: "IO 等待时间分布"
     sql: |
@@ -239,7 +239,7 @@ steps:
     type: atomic
     name: "长 IO Wait 事件"
     display:
-      level: deep
+      level: detail
       layer: deep
       title: "长时间 IO 阻塞事件"
     sql: |

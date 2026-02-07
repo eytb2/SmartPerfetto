@@ -133,11 +133,6 @@ steps:
           SELECT 1 FROM sqlite_master WHERE type='table' AND name='android_input_events'
         )
       ),
-      battery_check AS (
-        SELECT 1 AS dummy WHERE EXISTS (
-          SELECT 1 FROM sqlite_master WHERE type='table' AND name='android_battery_stats_event_slices'
-        )
-      ),
       startup_check AS (
         SELECT 1 AS dummy WHERE EXISTS (
           SELECT 1 FROM sqlite_master WHERE type='table' AND name='android_startups'
@@ -147,15 +142,6 @@ steps:
         SELECT 1 AS dummy WHERE EXISTS (
           SELECT 1 FROM sqlite_master WHERE type='table' AND name='actual_frame_timeline_slice'
         )
-      ),
-      top_app_spans AS (
-        SELECT
-          ts AS start_ts,
-          ts + safe_dur AS end_ts,
-          str_value AS app_package
-        FROM android_battery_stats_event_slices
-        WHERE track_name = 'battery_stats.top'
-          AND safe_dur > 0
       ),
       startup_spans AS (
         SELECT
@@ -202,6 +188,7 @@ steps:
           MIN(ts) AS ts,
           MAX(ts) AS end_ts,
           MAX(ts) - MIN(ts) AS dur,
+          MAX(CASE WHEN event_action = 'UP' THEN ts END) AS up_ts,
           COUNT(*) AS event_count,
           COUNT(CASE WHEN event_action = 'MOVE' THEN 1 END) AS move_count,
           MAX(process_name) AS raw_process_name
@@ -212,6 +199,7 @@ steps:
       gesture_with_app AS (
         SELECT
           g.*,
+          (SELECT MIN(g2.ts) FROM gestures g2 WHERE g2.ts > g.ts) AS next_gesture_ts,
           CASE
             WHEN g.raw_process_name GLOB 'com.*'
               OR g.raw_process_name GLOB 'org.*'
@@ -219,11 +207,6 @@ steps:
               OR g.raw_process_name GLOB 'net.*'
             THEN g.raw_process_name
             ELSE COALESCE(
-              (SELECT t.app_package
-               FROM top_app_spans t
-               WHERE g.ts BETWEEN t.start_ts AND t.end_ts
-               ORDER BY t.start_ts DESC
-               LIMIT 1),
               (SELECT f.app_package
                FROM frame_apps f
                WHERE f.app_package IS NOT NULL
@@ -245,12 +228,58 @@ steps:
             )
           END AS app_package
         FROM gestures g
+      ),
+      gesture_with_window AS (
+        SELECT
+          g.*,
+          CASE
+            WHEN g.up_ts IS NOT NULL THEN
+              MIN(
+                COALESCE(g.next_gesture_ts, g.up_ts + 3000000000),
+                g.up_ts + 3000000000
+              )
+            ELSE g.end_ts
+          END AS scroll_window_end
+        FROM gesture_with_app g
+      ),
+      gesture_with_duration AS (
+        SELECT
+          g.*,
+          CASE
+            -- For scroll gestures, extend duration to the last rendered frame after UP
+            -- (bounded by next gesture or 3s) to match user-perceived scroll length.
+            WHEN g.move_count >= 3 AND g.up_ts IS NOT NULL THEN
+              MAX(
+                g.dur,
+                COALESCE(
+                  (SELECT MAX(f.end_ts)
+                   FROM frame_apps f
+                   WHERE f.ts >= g.up_ts
+                     AND f.ts < g.scroll_window_end
+                     AND (
+                       g.app_package IS NULL
+                       OR g.app_package = ''
+                       OR f.app_package = g.app_package
+                     )),
+                  (SELECT MAX(f.end_ts)
+                   FROM frame_apps f
+                   WHERE f.ts >= g.up_ts
+                     AND f.ts < g.scroll_window_end),
+                  MIN(
+                    COALESCE(g.next_gesture_ts, g.up_ts + 1800000000),
+                    g.up_ts + 1800000000
+                  )
+                ) - g.ts
+              )
+            ELSE g.dur
+          END AS scene_dur
+        FROM gesture_with_window g
       )
       SELECT
         printf('%d', ts) AS ts,
-        printf('%d', dur) AS dur,
+        printf('%d', scene_dur) AS dur,
         CASE
-          WHEN move_count >= 3 THEN '滑动 (' || move_count || '次移动, ' || CAST(dur / 1000000 AS INT) || 'ms)'
+          WHEN move_count >= 3 THEN '滑动 (' || move_count || '次移动, ' || CAST(scene_dur / 1000000 AS INT) || 'ms)'
           WHEN dur > 500000000 AND move_count <= 2 THEN '长按 (' || CAST(dur / 1000000 AS INT) || 'ms)'
           ELSE '点击'
         END ||
@@ -273,7 +302,7 @@ steps:
         move_count,
         app_package,
         'gesture' AS category
-      FROM gesture_with_app
+      FROM gesture_with_duration
       WHERE event_count >= 2
       ORDER BY ts
       LIMIT 200
@@ -303,11 +332,11 @@ steps:
           event_action,
           read_time AS ts,
           process_name,
-          -- 为每个 DOWN 事件分配一个 gesture_id
           SUM(CASE WHEN event_action = 'DOWN' THEN 1 ELSE 0 END)
             OVER (ORDER BY read_time) AS gesture_id
         FROM android_input_events
         WHERE event_type = 'MOTION'
+          AND event_action IN ('DOWN', 'MOVE', 'UP')
       ),
       motion_with_seq AS (
         SELECT
@@ -315,21 +344,24 @@ steps:
           ts,
           process_name,
           gesture_id,
-          -- 在每个手势内部的事件序号
-          ROW_NUMBER() OVER (
-            PARTITION BY gesture_id
-            ORDER BY ts
-          ) AS event_seq
+          SUM(CASE WHEN event_action = 'MOVE' THEN 1 ELSE 0 END)
+            OVER (
+              PARTITION BY gesture_id
+              ORDER BY ts
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS move_seq
         FROM motion_base
       ),
       scroll_starts AS (
         SELECT
-          ts AS scroll_start_ts,
+          MIN(ts) AS scroll_start_ts,
           gesture_id,
-          process_name AS app
+          MAX(process_name) AS app
         FROM motion_with_seq
-        -- 第 3 个事件 = DOWN + 2 MOVE = 滑动启动点
-        WHERE event_seq = 3 AND event_action = 'MOVE'
+        WHERE event_action = 'MOVE'
+          AND move_seq >= 2
+          AND gesture_id > 0
+        GROUP BY gesture_id
       )
       SELECT
         printf('%d', scroll_start_ts) AS ts,
@@ -370,19 +402,24 @@ steps:
           SELECT 1 FROM sqlite_master WHERE type='table' AND name='actual_frame_timeline_slice'
         )
       ),
-      battery_check AS (
-        SELECT 1 AS dummy WHERE EXISTS (
-          SELECT 1 FROM sqlite_master WHERE type='table' AND name='android_battery_stats_event_slices'
-        )
-      ),
-      top_app_spans AS (
+      frame_apps AS (
         SELECT
-          ts AS start_ts,
-          ts + safe_dur AS end_ts,
-          str_value AS app_package
-        FROM android_battery_stats_event_slices
-        WHERE track_name = 'battery_stats.top'
-          AND safe_dur > 0
+          a.ts,
+          a.dur,
+          a.ts + a.dur AS end_ts,
+          a.jank_type,
+          COALESCE(
+            NULLIF(p.name, ''),
+            CASE
+              WHEN a.layer_name IS NOT NULL AND instr(a.layer_name, '/') > 1
+              THEN substr(a.layer_name, 1, instr(a.layer_name, '/') - 1)
+              ELSE NULL
+            END
+          ) AS app_package
+        FROM actual_frame_timeline_slice a
+        LEFT JOIN process p ON p.upid = a.upid
+        WHERE a.dur > 0
+          AND a.surface_frame_token IS NOT NULL
       ),
       motion_base AS (
         SELECT
@@ -413,9 +450,9 @@ steps:
           g.down_ts,
           g.up_ts AS inertial_start,
           MIN(
-            COALESCE(LEAD(g.down_ts) OVER (ORDER BY g.down_ts), g.up_ts + 1500000000),
-            g.up_ts + 1200000000
-          ) AS inertial_end,
+            COALESCE(LEAD(g.down_ts) OVER (ORDER BY g.down_ts), g.up_ts + 3000000000),
+            g.up_ts + 3000000000
+          ) AS inertial_window_end,
           g.raw_process_name
         FROM gesture_stats g
         WHERE g.up_ts IS NOT NULL
@@ -430,10 +467,17 @@ steps:
               OR w.raw_process_name GLOB 'net.*'
             THEN w.raw_process_name
             ELSE COALESCE(
-              (SELECT t.app_package
-               FROM top_app_spans t
-               WHERE w.inertial_start BETWEEN t.start_ts AND t.end_ts
-               ORDER BY t.start_ts DESC
+              (SELECT f.app_package
+               FROM frame_apps f
+               WHERE f.app_package IS NOT NULL
+                 AND f.app_package != ''
+                 AND f.app_package NOT GLOB 'surfaceflinger*'
+                 AND f.app_package NOT GLOB 'system_server*'
+                 AND f.app_package NOT GLOB 'com.android.systemui*'
+                 AND f.ts >= w.down_ts - 300000000
+                 AND f.end_ts <= w.inertial_window_end + 800000000
+               GROUP BY f.app_package
+               ORDER BY COUNT(*) DESC
                LIMIT 1),
               w.raw_process_name
             )
@@ -444,23 +488,66 @@ steps:
         SELECT
           w.gesture_id,
           w.inertial_start,
-          w.inertial_end,
+          w.inertial_window_end,
           w.app_package,
-          COUNT(f.ts) AS frame_count,
+          MAX(CASE
+            WHEN f.ts IS NOT NULL
+              AND (w.app_package IS NULL OR w.app_package = '' OR f.app_package = w.app_package)
+            THEN f.end_ts
+            ELSE NULL
+          END) AS matched_inertial_end,
+          MAX(f.end_ts) AS fallback_inertial_end,
+          SUM(CASE
+            WHEN f.ts IS NOT NULL
+              AND (w.app_package IS NULL OR w.app_package = '' OR f.app_package = w.app_package)
+            THEN 1 ELSE 0 END
+          ) AS matched_frame_count,
+          COUNT(f.ts) AS fallback_frame_count,
+          SUM(CASE
+            WHEN f.ts IS NOT NULL
+              AND (w.app_package IS NULL OR w.app_package = '' OR f.app_package = w.app_package)
+              AND f.jank_type IS NOT NULL
+              AND f.jank_type != 'None'
+              AND f.jank_type != ''
+            THEN 1 ELSE 0 END
+          ) AS matched_jank_frames,
           SUM(CASE
             WHEN f.jank_type IS NOT NULL
               AND f.jank_type != 'None'
               AND f.jank_type != ''
             THEN 1 ELSE 0 END
-          ) AS jank_frames
+          ) AS fallback_jank_frames
         FROM resolved_windows w
-        LEFT JOIN actual_frame_timeline_slice f
+        LEFT JOIN frame_apps f
           ON f.ts >= w.inertial_start
-         AND f.ts < w.inertial_end
-         AND f.surface_frame_token IS NOT NULL
-         AND f.dur > 0
-        WHERE w.inertial_end > w.inertial_start + 80000000
-        GROUP BY w.gesture_id, w.inertial_start, w.inertial_end, w.app_package
+         AND f.ts < w.inertial_window_end
+        WHERE w.inertial_window_end > w.inertial_start + 80000000
+        GROUP BY w.gesture_id, w.inertial_start, w.inertial_window_end, w.app_package
+      ),
+      resolved_inertial AS (
+        SELECT
+          gesture_id,
+          inertial_start,
+          MIN(
+            COALESCE(
+              CASE
+                WHEN matched_frame_count >= 4 THEN matched_inertial_end
+                ELSE fallback_inertial_end
+              END,
+              inertial_window_end
+            ),
+            inertial_window_end
+          ) AS inertial_end,
+          app_package,
+          CASE
+            WHEN matched_frame_count >= 4 THEN matched_frame_count
+            ELSE fallback_frame_count
+          END AS frame_count,
+          CASE
+            WHEN matched_frame_count >= 4 THEN matched_jank_frames
+            ELSE fallback_jank_frames
+          END AS jank_frames
+        FROM inertial_frames
       )
       SELECT
         printf('%d', inertial_start) AS ts,
@@ -476,8 +563,9 @@ steps:
         jank_frames,
         app_package,
         'inertial_scroll' AS category
-      FROM inertial_frames
+      FROM resolved_inertial
       WHERE frame_count >= 4
+        AND inertial_end > inertial_start + 80000000
       ORDER BY inertial_start
       LIMIT 100
     save_as: inertial_scrolls
@@ -503,13 +591,6 @@ steps:
         UNION ALL
 
         SELECT ts
-        FROM android_battery_stats_event_slices
-        WHERE track_name = 'battery_stats.top'
-          AND safe_dur > 0
-
-        UNION ALL
-
-        SELECT ts
         FROM android_startups
         WHERE dur > 0
 
@@ -517,14 +598,21 @@ steps:
 
         SELECT ts
         FROM slice
-        WHERE (
-          name GLOB '*Keyguard*dismiss*'
-          OR name GLOB '*unlock*'
-          OR name GLOB '*NotificationPanel*expand*'
-          OR name GLOB '*NotificationPanel*collapse*'
-          OR name GLOB '*SplitScreen*'
-        )
-          AND dur > 0
+        WHERE dur > 0
+          AND (
+            -- Screen unlock signals: keep lock-screen related patterns only.
+            -- Avoid generic '*unlock*' to prevent false positives (e.g. render/mutex unlock slices).
+            LOWER(name) LIKE '%keyguard%dismiss%'
+            OR LOWER(name) LIKE '%keyguard%unlock%'
+            OR LOWER(name) LIKE '%lockscreen%unlock%'
+            OR LOWER(name) LIKE '%unlock%screen%'
+            OR LOWER(name) LIKE '%notificationpanel%expand%'
+            OR LOWER(name) LIKE '%notificationpanel%collapse%'
+            OR LOWER(name) LIKE '%splitscreen%'
+          )
+          AND LOWER(name) NOT LIKE '%unlockcanvasandpost%'
+          AND LOWER(name) NOT LIKE '%unlockandpost%'
+          AND LOWER(name) != 'unlock'
       ),
       ordered_events AS (
         SELECT
@@ -609,28 +697,39 @@ steps:
         printf('%d', ts) AS ts,
         printf('%d', dur) AS dur,
         CASE
-          WHEN name GLOB '*Keyguard*dismiss*' OR name GLOB '*unlock*' THEN '解锁屏幕'
-          WHEN name GLOB '*NotificationPanel*expand*' THEN '下拉通知栏'
-          WHEN name GLOB '*NotificationPanel*collapse*' THEN '收起通知栏'
-          WHEN name GLOB '*SplitScreen*' THEN '分屏操作'
-          WHEN name GLOB '*enterPictureInPicture*' THEN '进入画中画'
-          WHEN name GLOB '*exitPictureInPicture*' THEN '退出画中画'
-          WHEN name GLOB '*LaunchActivity*' THEN '启动 Activity'
-          WHEN name GLOB '*activityResume*' THEN 'Activity 恢复'
+          WHEN LOWER(name) LIKE '%keyguard%dismiss%'
+            OR LOWER(name) LIKE '%keyguard%unlock%'
+            OR LOWER(name) LIKE '%lockscreen%unlock%'
+            OR LOWER(name) LIKE '%unlock%screen%'
+            THEN '解锁屏幕'
+          WHEN LOWER(name) LIKE '%notificationpanel%expand%' THEN '下拉通知栏'
+          WHEN LOWER(name) LIKE '%notificationpanel%collapse%' THEN '收起通知栏'
+          WHEN LOWER(name) LIKE '%splitscreen%' THEN '分屏操作'
+          WHEN LOWER(name) LIKE '%enterpictureinpicture%' THEN '进入画中画'
+          WHEN LOWER(name) LIKE '%exitpictureinpicture%' THEN '退出画中画'
+          WHEN LOWER(name) LIKE '%launchactivity%' THEN '启动 Activity'
+          WHEN LOWER(name) LIKE '%activityresume%' THEN 'Activity 恢复'
           ELSE NULL
         END AS event,
         'system' AS category
       FROM slice
-      WHERE (
-        name GLOB '*Keyguard*dismiss*'
-        OR name GLOB '*unlock*'
-        OR name GLOB '*NotificationPanel*expand*'
-        OR name GLOB '*NotificationPanel*collapse*'
-        OR name GLOB '*SplitScreen*'
-        OR name GLOB '*enterPictureInPicture*'
-        OR name GLOB '*exitPictureInPicture*'
-      )
-      AND dur > 0
+      WHERE dur > 0
+        AND (
+          LOWER(name) LIKE '%keyguard%dismiss%'
+          OR LOWER(name) LIKE '%keyguard%unlock%'
+          OR LOWER(name) LIKE '%lockscreen%unlock%'
+          OR LOWER(name) LIKE '%unlock%screen%'
+          OR LOWER(name) LIKE '%notificationpanel%expand%'
+          OR LOWER(name) LIKE '%notificationpanel%collapse%'
+          OR LOWER(name) LIKE '%splitscreen%'
+          OR LOWER(name) LIKE '%enterpictureinpicture%'
+          OR LOWER(name) LIKE '%exitpictureinpicture%'
+          OR LOWER(name) LIKE '%launchactivity%'
+          OR LOWER(name) LIKE '%activityresume%'
+        )
+        AND LOWER(name) NOT LIKE '%unlockcanvasandpost%'
+        AND LOWER(name) NOT LIKE '%unlockandpost%'
+        AND LOWER(name) != 'unlock'
       ORDER BY ts
       LIMIT 100
     save_as: sys_events

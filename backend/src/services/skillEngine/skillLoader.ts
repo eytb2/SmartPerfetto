@@ -14,6 +14,7 @@ import path from 'path';
 import yaml from 'js-yaml';
 import { SkillDefinition, ModuleLayer, DialogueCapability, SkillStep } from './types';
 import { generateRenderingPipelineDetectionSkill } from '../renderingPipelineDetectionSkillGenerator';
+import logger from '../../utils/logger';
 import {
   VALID_DISPLAY_LAYERS,
   VALID_DISPLAY_LEVELS,
@@ -531,7 +532,7 @@ class SkillRegistry {
   async loadSkills(skillsDir: string): Promise<void> {
     if (this.initialized) return;
 
-    console.log(`[SkillLoader] Loading skills from: ${skillsDir}`);
+    logger.info('SkillLoader', `Loading skills from: ${skillsDir}`);
 
     // 加载原子 skills
     const atomicDir = path.join(skillsDir, 'atomic');
@@ -572,7 +573,7 @@ class SkillRegistry {
     }
 
     this.initialized = true;
-    console.log(`[SkillLoader] Loaded ${this.skills.size} skills (${this.moduleSkills.size} module experts)`);
+    logger.info('SkillLoader', `Loaded ${this.skills.size} skills (${this.moduleSkills.size} module experts)`);
   }
 
   /**
@@ -601,7 +602,10 @@ class SkillRegistry {
               // Validate display configurations
               const warnings = validateSkillDisplayConfig(skill);
               for (const warn of warnings) {
-                console.warn(`[SkillLoader] Validation warning in ${skill.name}${warn.stepId ? `.${warn.stepId}` : ''}: ${warn.field} - ${warn.message} (value: ${warn.value})`);
+                logger.warn(
+                  'SkillLoader',
+                  `Validation warning in ${skill.name}${warn.stepId ? `.${warn.stepId}` : ''}: ${warn.field} - ${warn.message} (value: ${warn.value})`
+                );
               }
 
               this.skills.set(skill.name, skill);
@@ -609,13 +613,13 @@ class SkillRegistry {
             // Track module skills separately for efficient lookup
             if (skill.module) {
               this.moduleSkills.set(skill.name, skill);
-              console.log(`[SkillLoader] Loaded module skill: ${skill.name} (${skill.module.layer}/${skill.module.component})`);
+              logger.debug('SkillLoader', `Loaded module skill: ${skill.name} (${skill.module.layer}/${skill.module.component})`);
             } else {
-              console.log(`[SkillLoader] Loaded skill: ${skill.name} (${skill.type})`);
+              logger.debug('SkillLoader', `Loaded skill: ${skill.name} (${skill.type})`);
             }
           }
         } catch (error: any) {
-          console.error(`[SkillLoader] Failed to load ${fullPath}:`, error.message);
+          logger.error('SkillLoader', `Failed to load ${fullPath}:`, error.message);
         }
       }
     }
@@ -641,10 +645,10 @@ class SkillRegistry {
         if (skill && skill.name && skill.type === 'pipeline_definition') {
           // Register pipeline skills with a special prefix for discoverability
           this.skills.set(skill.name, skill);
-          console.log(`[SkillLoader] Loaded pipeline skill: ${skill.name}`);
+          logger.debug('SkillLoader', `Loaded pipeline skill: ${skill.name}`);
         }
       } catch (error: any) {
-        console.error(`[SkillLoader] Failed to load pipeline ${file}:`, error.message);
+        logger.error('SkillLoader', `Failed to load pipeline ${file}:`, error.message);
       }
     }
   }
@@ -670,14 +674,17 @@ class SkillRegistry {
           // Validate display configurations
           const warnings = validateSkillDisplayConfig(skill);
           for (const warn of warnings) {
-            console.warn(`[SkillLoader] Validation warning in ${skill.name}${warn.stepId ? `.${warn.stepId}` : ''}: ${warn.field} - ${warn.message} (value: ${warn.value})`);
+            logger.warn(
+              'SkillLoader',
+              `Validation warning in ${skill.name}${warn.stepId ? `.${warn.stepId}` : ''}: ${warn.field} - ${warn.message} (value: ${warn.value})`
+            );
           }
 
           this.skills.set(skill.name, skill);
-          console.log(`[SkillLoader] Loaded skill: ${skill.name} (${skill.type})`);
+          logger.debug('SkillLoader', `Loaded skill: ${skill.name} (${skill.type})`);
         }
       } catch (error: any) {
-        console.error(`[SkillLoader] Failed to load ${file}:`, error.message);
+        logger.error('SkillLoader', `Failed to load ${file}:`, error.message);
       }
     }
   }
@@ -880,9 +887,12 @@ export async function ensureSkillRegistryInitialized(): Promise<void> {
     try {
       const generated = await generateRenderingPipelineDetectionSkill();
       skillRegistry.upsertSkill(generated);
-      console.log(`[SkillLoader] Overrode skill with YAML-driven generator: ${generated.name} (v${generated.version})`);
+      logger.debug('SkillLoader', `Overrode skill with YAML-driven generator: ${generated.name} (v${generated.version})`);
     } catch (error: any) {
-      console.warn('[SkillLoader] Failed to generate YAML-driven rendering pipeline detection skill:', error?.message || error);
+      logger.warn(
+        'SkillLoader',
+        `Failed to generate YAML-driven rendering pipeline detection skill: ${error?.message || error}`
+      );
     }
   })();
 

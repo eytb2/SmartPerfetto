@@ -76,7 +76,7 @@ steps:
     type: atomic
     name: "热点函数 Top 20"
     display:
-      level: list
+      level: detail
       layer: list
       title: "热点函数排行"
     sql: |
@@ -127,7 +127,7 @@ steps:
     type: atomic
     name: "模块采样分布"
     display:
-      level: list
+      level: detail
       layer: list
       title: "模块热度分布"
     sql: |
@@ -163,7 +163,7 @@ steps:
     type: atomic
     name: "线程采样分布"
     display:
-      level: list
+      level: detail
       layer: list
       title: "线程 CPU 采样分布"
     sql: |
@@ -188,7 +188,7 @@ steps:
     type: atomic
     name: "热点函数调用者分析"
     display:
-      level: deep
+      level: detail
       layer: deep
       title: "调用路径追踪"
     sql: |

@@ -10,6 +10,7 @@
 
 import { summarizeJankCauses, formatJankSummaryForPrompt, CAUSE_TYPE_LABELS } from '../jankCauseSummarizer';
 import { Finding } from '../../types';
+import type { FrameMechanismRecord } from '../../types/jankCause';
 
 describe('JankCauseSummarizer', () => {
   // Helper to create test findings
@@ -32,6 +33,25 @@ describe('JankCauseSummarizer', () => {
     };
   }
 
+  function createRecord(
+    frameId: string,
+    causeType: string,
+    primaryCause: string,
+    overrides: Partial<FrameMechanismRecord> = {}
+  ): FrameMechanismRecord {
+    return {
+      frameId,
+      sessionId: '1',
+      startTs: `1000${frameId}`,
+      endTs: `1100${frameId}`,
+      scopeLabel: `frame-${frameId}`,
+      causeType,
+      primaryCause,
+      sourceStep: 'root_cause',
+      ...overrides,
+    };
+  }
+
   describe('summarizeJankCauses', () => {
     it('should return empty summary when no findings have cause_type', () => {
       const findings: Finding[] = [
@@ -45,6 +65,7 @@ describe('JankCauseSummarizer', () => {
       expect(summary.primaryCause).toBeNull();
       expect(summary.secondaryCauses).toHaveLength(0);
       expect(summary.allCauses).toHaveLength(0);
+      expect(summary.clusters).toHaveLength(0);
       expect(summary.summaryText).toBe('未检测到可分类的根因数据');
     });
 
@@ -164,6 +185,101 @@ describe('JankCauseSummarizer', () => {
       // gpu_fence only has info
       expect(summary.allCauses.find(c => c.causeType === 'gpu_fence')!.severity).toBe('info');
     });
+
+    it('should prefer frame mechanism records when provided', () => {
+      const findings = [
+        createFinding('1', 'slice', 'Finding slice 1', 'warning'),
+        createFinding('2', 'slice', 'Finding slice 2', 'warning'),
+      ];
+
+      const records: FrameMechanismRecord[] = [
+        createRecord('1', 'gpu_fence', 'GPU fence wait'),
+        createRecord('2', 'gpu_fence', 'GPU fence wait'),
+        createRecord('3', 'gpu_fence', 'GPU fence wait'),
+        createRecord('4', 'gpu_fence', 'GPU fence wait'),
+        createRecord('5', 'gpu_fence', 'GPU fence wait'),
+        createRecord('6', 'gpu_fence', 'GPU fence wait'),
+        createRecord('7', 'gpu_fence', 'GPU fence wait'),
+        createRecord('8', 'gpu_fence', 'GPU fence wait'),
+        createRecord('9', 'sched_latency', 'Runnable wait'),
+        createRecord('10', 'sched_latency', 'Runnable wait'),
+      ];
+
+      const summary = summarizeJankCauses(findings, records);
+
+      expect(summary.totalJankFrames).toBe(10);
+      expect(summary.primaryCause?.causeType).toBe('gpu_fence');
+      expect(summary.primaryCause?.percentage).toBe(80);
+      expect(summary.allCauses).toHaveLength(2);
+      expect(summary.clusters).toHaveLength(2);
+      expect(summary.clusters[0].clusterId).toBe('K1');
+    });
+
+    it('should dedupe duplicate frame mechanism records', () => {
+      const records: FrameMechanismRecord[] = [
+        createRecord('1', 'slice', 'doFrame'),
+        createRecord('1', 'slice', 'doFrame'),
+        createRecord('2', 'slice', 'measure'),
+      ];
+
+      const summary = summarizeJankCauses([], records);
+
+      expect(summary.totalJankFrames).toBe(2);
+      expect(summary.primaryCause?.causeType).toBe('slice');
+      expect(summary.primaryCause?.frameCount).toBe(2);
+    });
+
+    it('should split clusters by supply/amplification signature', () => {
+      const records: FrameMechanismRecord[] = [
+        createRecord('1', 'slice', 'doFrame', {
+          supplyConstraint: 'frequency_insufficient',
+          amplificationPath: 'sf_consumer_backpressure',
+        }),
+        createRecord('2', 'slice', 'doFrame', {
+          supplyConstraint: 'frequency_insufficient',
+          amplificationPath: 'sf_consumer_backpressure',
+        }),
+        createRecord('3', 'slice', 'doFrame', {
+          supplyConstraint: 'scheduling_delay',
+          amplificationPath: 'app_deadline_miss',
+        }),
+      ];
+
+      const summary = summarizeJankCauses([], records);
+
+      expect(summary.clusters).toHaveLength(2);
+      expect(summary.clusters[0].frameCount).toBe(2);
+      expect(summary.clusters[0].supplyConstraint).toBe('频率不足');
+      expect(summary.clusters[1].frameCount).toBe(1);
+      expect(summary.clusters[1].supplyConstraint).toBe('调度延迟');
+    });
+
+    it('should derive record severity from findings when available', () => {
+      const findings = [
+        createFinding('f1', 'slice', 'from finding', 'critical'),
+      ];
+      const records: FrameMechanismRecord[] = [
+        createRecord('1', 'slice', 'doFrame'),
+      ];
+
+      const summary = summarizeJankCauses(findings, records);
+
+      expect(summary.primaryCause?.severity).toBe('critical');
+    });
+
+    it('should label slice+none clusters as workload-dominant', () => {
+      const records: FrameMechanismRecord[] = [
+        createRecord('1', 'slice', 'doFrame', {
+          supplyConstraint: 'none',
+          amplificationPath: 'sf_consumer_backpressure',
+        }),
+      ];
+
+      const summary = summarizeJankCauses([], records);
+
+      expect(summary.clusters).toHaveLength(1);
+      expect(summary.clusters[0].supplyConstraint).toBe('负载主导（供给约束弱）');
+    });
   });
 
   describe('formatJankSummaryForPrompt', () => {
@@ -188,6 +304,8 @@ describe('JankCauseSummarizer', () => {
 
       expect(formatted).toContain('## 掉帧根因汇总（自动统计）');
       expect(formatted).toContain('3 帧');
+      expect(formatted).toContain('掉帧聚类');
+      expect(formatted).toContain('K1');
       expect(formatted).toContain('首要原因');
     });
   });

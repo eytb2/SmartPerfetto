@@ -22,7 +22,7 @@ prerequisites:
     - linux.irqs
 display:
   name: "中断分析"
-  level: expert
+  level: detail
   description: "Linux 硬中断和软中断分析，识别中断负载和潜在性能问题"
 
 triggers:

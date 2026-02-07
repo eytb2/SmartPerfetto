@@ -269,7 +269,7 @@ steps:
         (SELECT end_ts - start_ts FROM params) / 1000000.0 AS range_duration_ms
 
     display:
-      level: deep
+      level: detail
       title: "Memory Pressure Analysis"
       columns:
         - name: pressure_level

@@ -5,11 +5,13 @@
  * Uses LLM for intelligent root-cause synthesis, with markdown fallback.
  */
 
-import { Intent, Finding } from '../types';
+import { Finding, Intent } from '../types';
+import type { FrameMechanismRecord } from '../types/jankCause';
 import { SharedAgentContext } from '../types/agentProtocol';
 import { ModelRouter } from './modelRouter';
 import { ProgressEmitter } from './orchestratorTypes';
 import { formatJankSummaryForPrompt } from './jankCauseSummarizer';
+import type { CauseTypeStats, JankCauseSummary, JankCluster } from './jankCauseSummarizer';
 
 export interface ConclusionGenerationOptions {
   /**
@@ -25,19 +27,72 @@ export interface ConclusionGenerationOptions {
 
 type ConclusionOutputMode = 'initial_report' | 'focused_answer' | 'need_input';
 
-function isInsightConclusionEnabled(options: ConclusionGenerationOptions): boolean {
+const DISABLED_FLAG_VALUES = new Set(['0', 'false', 'off', 'no']);
+const ENABLED_FLAG_VALUES = new Set(['1', 'true', 'on', 'yes']);
+
+type EvidenceObject = {
+  evidenceId?: unknown;
+  evidence_id?: unknown;
+  title?: unknown;
+  kind?: unknown;
+  description?: unknown;
+  summary?: unknown;
+};
+
+type FindingWithEvidence = Finding & {
+  evidence?: unknown;
+};
+
+function toEvidenceArray(evidence: unknown): unknown[] {
+  if (Array.isArray(evidence)) {
+    return evidence;
+  }
+
+  return evidence ? [evidence] : [];
+}
+
+function asEvidenceObject(value: unknown): EvidenceObject | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  return value as EvidenceObject;
+}
+
+function stringifyValue(value: unknown, maxLength: number): string {
+  if (value && typeof value === 'object') {
+    return JSON.stringify(value).slice(0, maxLength);
+  }
+
+  return String(value);
+}
+
+function normalizeOptionalFlagValue(value: unknown): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function isFollowUpConclusionTurn(turnCount: number, intent: Intent): boolean {
+  return turnCount >= 1 || Boolean(intent.followUpType && intent.followUpType !== 'initial');
+}
+
+function isInsightConclusionEnabled(): boolean {
   // Default ON (per user request). Allow disabling for rollback.
   const override =
     process.env.SMARTPERFETTO_CONCLUSION_V2 ??
     process.env.SMARTPERFETTO_INSIGHT_CONCLUSION;
 
-  if (override === undefined || override === null || String(override).trim() === '') {
+  const normalized = normalizeOptionalFlagValue(override);
+  if (!normalized) {
     return true;
   }
 
-  const v = String(override).trim().toLowerCase();
-  if (['0', 'false', 'off', 'no'].includes(v)) return false;
-  if (['1', 'true', 'on', 'yes'].includes(v)) return true;
+  if (DISABLED_FLAG_VALUES.has(normalized)) return false;
+  if (ENABLED_FLAG_VALUES.has(normalized)) return true;
   return true;
 }
 
@@ -48,8 +103,15 @@ function selectConclusionOutputMode(params: {
   confirmedHypothesesCount: number;
   hasJankSummary: boolean;
 }): ConclusionOutputMode {
-  const isFollowUp = params.turnCount >= 1 || (params.intent.followUpType && params.intent.followUpType !== 'initial');
-  const hasAnyEvidence = params.findingsCount > 0 || params.confirmedHypothesesCount > 0 || params.hasJankSummary;
+  const {
+    turnCount,
+    intent,
+    findingsCount,
+    confirmedHypothesesCount,
+    hasJankSummary,
+  } = params;
+  const isFollowUp = isFollowUpConclusionTurn(turnCount, intent);
+  const hasAnyEvidence = findingsCount > 0 || confirmedHypothesesCount > 0 || hasJankSummary;
 
   if (!hasAnyEvidence) {
     return 'need_input';
@@ -60,6 +122,36 @@ function selectConclusionOutputMode(params: {
   }
 
   return 'focused_answer';
+}
+
+function resolveConclusionOutputMode(params: {
+  insightEnabled: boolean;
+  turnCount: number;
+  intent: Intent;
+  findingsCount: number;
+  confirmedHypothesesCount: number;
+  hasJankSummary: boolean;
+}): ConclusionOutputMode {
+  const {
+    insightEnabled,
+    turnCount,
+    intent,
+    findingsCount,
+    confirmedHypothesesCount,
+    hasJankSummary,
+  } = params;
+
+  if (!insightEnabled) {
+    return isFollowUpConclusionTurn(turnCount, intent) ? 'focused_answer' : 'initial_report';
+  }
+
+  return selectConclusionOutputMode({
+    turnCount,
+    intent,
+    findingsCount,
+    confirmedHypothesesCount,
+    hasJankSummary,
+  });
 }
 
 /**
@@ -80,15 +172,13 @@ function formatFindingWithEvidence(f: Finding): string {
   if (f.details && typeof f.details === 'object' && Object.keys(f.details).length > 0) {
     // Priority fields that should be preserved in full
     const priorityFields = ['root_cause', 'primary_cause', 'cause_type', 'confidence', 'jank_type'];
-    const details = f.details as Record<string, any>;
+    const details = f.details as Record<string, unknown>;
 
     // First, output priority fields without truncation
     const priorityEntries: string[] = [];
     for (const field of priorityFields) {
       if (details[field] !== undefined) {
-        const val = typeof details[field] === 'object'
-          ? JSON.stringify(details[field]).slice(0, 200) // Allow more for structured data
-          : String(details[field]);
+        const val = stringifyValue(details[field], 200);
         priorityEntries.push(`${field}: ${val}`);
       }
     }
@@ -97,10 +187,7 @@ function formatFindingWithEvidence(f: Finding): string {
     const otherEntries = Object.entries(details)
       .filter(([k]) => !priorityFields.includes(k))
       .slice(0, 12)
-      .map(([k, v]) => {
-        const val = typeof v === 'object' ? JSON.stringify(v).slice(0, 150) : String(v);
-        return `${k}: ${val}`;
-      });
+      .map(([k, v]) => `${k}: ${stringifyValue(v, 150)}`);
 
     const allEntries = [...priorityEntries, ...otherEntries];
     if (allEntries.length > 0) {
@@ -110,52 +197,780 @@ function formatFindingWithEvidence(f: Finding): string {
 
   // Preserve evidence with reasonable limits (8 items, 200 chars each)
   if (f.evidence && Array.isArray(f.evidence) && f.evidence.length > 0) {
-    const evidenceStr = f.evidence.slice(0, 8).map(e =>
-      typeof e === 'object' ? JSON.stringify(e).slice(0, 200) : String(e)
-    ).join('; ');
+    const evidenceStr = f.evidence.slice(0, 8).map(e => stringifyValue(e, 200)).join('; ');
     result += `\n  证据: ${evidenceStr}`;
   }
 
   return result;
 }
 
-function deriveAttributionSignals(findings: Finding[]): {
-  sfDominant: boolean;
-  appJankZero: boolean;
-} {
-  let sfDominant = false;
-  let appJankZero = false;
+type AttributionVerdict = 'APP_TRIGGER' | 'SF_CONSUMER' | 'MIXED' | 'INSUFFICIENT';
 
-  for (const f of findings) {
-    const title = String(f.title || '');
-    const description = String(f.description || '');
-    const text = `${title}\n${description}`;
+interface AttributionAssessment {
+  verdict: AttributionVerdict;
+  confidence: number;
+  frameSample: number;
+  appLikePct: number;
+  sfLikePct: number;
+  sfRespSample: number;
+  sfRespPct: number;
+  appRespSample: number;
+  appRespPct: number;
+  consumerFrames: number;
+  consumerRate: number;
+  rationale: string[];
+}
 
-    if (/责任归属分布:\s*SF\s+\d+\s*\(100%\)/i.test(text)) {
-      sfDominant = true;
+interface MechanismTriad {
+  trigger: string;
+  supply: string;
+  amplification: string;
+  triggerEvidence: string;
+  supplyEvidence: string;
+  amplificationEvidence: string;
+}
+
+const APP_LIKE_CAUSE_TYPES = new Set([
+  'slice',
+  'blocking',
+  'io_blocking',
+  'cpu_contention',
+  'cpu_overload',
+  'sched_latency',
+  'small_core',
+  'freq_limit',
+]);
+
+const SF_LIKE_CAUSE_TYPES = new Set([
+  'gpu_fence',
+  'render_wait',
+]);
+
+const TRIGGER_CAUSE_TYPES = new Set([
+  'slice',
+  'blocking',
+  'io_blocking',
+]);
+
+const SUPPLY_CAUSE_TYPES = new Set([
+  'cpu_overload',
+  'freq_limit',
+  'sched_latency',
+  'small_core',
+  'cpu_contention',
+]);
+
+const AMPLIFICATION_CAUSE_TYPES = new Set([
+  'gpu_fence',
+  'render_wait',
+]);
+
+function toFiniteNumber(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function collectFindingTextSources(finding: Finding): string {
+  const textParts: string[] = [
+    String(finding.title || ''),
+    String(finding.description || ''),
+  ];
+
+  const evidence = (finding as FindingWithEvidence).evidence;
+  const evidenceItems = Array.isArray(evidence) ? evidence : (evidence ? [evidence] : []);
+  for (const item of evidenceItems) {
+    if (typeof item === 'string') {
+      textParts.push(item);
+      continue;
     }
 
-    const d = (f.details && typeof f.details === 'object') ? f.details as Record<string, any> : {};
-    const appCount = Number(
-      d.app_janky_count ??
-      d.appJankyCount ??
-      d.summary?.app_janky_count ??
-      d.summary?.appJankyCount
-    );
-    const appRate = Number(
-      d.app_jank_rate ??
-      d.appJankRate ??
-      d.summary?.app_jank_rate ??
-      d.summary?.appJankRate
-    );
-
-    if ((Number.isFinite(appCount) && appCount === 0) ||
-        (Number.isFinite(appRate) && appRate === 0)) {
-      appJankZero = true;
+    if (item && typeof item === 'object') {
+      textParts.push(JSON.stringify(item).slice(0, 500));
     }
   }
 
-  return { sfDominant, appJankZero };
+  return textParts.join('\n');
+}
+
+function extractResponsibilityDistributionFromFindings(findings: Finding[]): {
+  sfCount: number;
+  sfPct: number;
+  appCount: number;
+  appPct: number;
+} {
+  let sfCount = 0;
+  let sfPct = 0;
+  let appCount = 0;
+  let appPct = 0;
+
+  const pairRe = /(SF|APP)\s+(\d+)\s*\((\d+(?:\.\d+)?)%\)/ig;
+
+  for (const f of findings) {
+    const text = collectFindingTextSources(f);
+    for (const m of text.matchAll(pairRe)) {
+      const side = String(m[1] || '').toUpperCase();
+      const count = toFiniteNumber(m[2]);
+      const pct = toFiniteNumber(m[3]);
+
+      if (side === 'SF') {
+        if (count > sfCount || (count === sfCount && pct > sfPct)) {
+          sfCount = count;
+          sfPct = pct;
+        }
+      } else if (side === 'APP') {
+        if (count > appCount || (count === appCount && pct > appPct)) {
+          appCount = count;
+          appPct = pct;
+        }
+      }
+    }
+  }
+
+  return { sfCount, sfPct, appCount, appPct };
+}
+
+function extractConsumerStatsFromFindings(findings: Finding[]): { frames: number; rate: number } {
+  let frames = 0;
+  let rate = 0;
+
+  const textRe = /消费端\s*[:：]\s*(\d+)\s*帧\s*\((\d+(?:\.\d+)?)%\)/ig;
+
+  for (const f of findings) {
+    const details = (f.details && typeof f.details === 'object') ? f.details as Record<string, unknown> : {};
+    const allSources = (details.allSources && typeof details.allSources === 'object')
+      ? details.allSources as Record<string, unknown>
+      : {};
+    const consumer = allSources.consumer && typeof allSources.consumer === 'object'
+      ? allSources.consumer as Record<string, unknown>
+      : {};
+    if (consumer.count !== undefined || consumer.rate !== undefined) {
+      const c = toFiniteNumber(consumer.count);
+      const r = toFiniteNumber(consumer.rate);
+      if (c > frames || (c === frames && r > rate)) {
+        frames = c;
+        rate = r;
+      }
+    }
+
+    const text = collectFindingTextSources(f);
+    for (const m of text.matchAll(textRe)) {
+      const c = toFiniteNumber(m[1]);
+      const r = toFiniteNumber(m[2]);
+      if (c > frames || (c === frames && r > rate)) {
+        frames = c;
+        rate = r;
+      }
+    }
+  }
+
+  return { frames, rate };
+}
+
+function deriveAttributionAssessment(
+  findings: Finding[],
+  jankSummary?: JankCauseSummary
+): AttributionAssessment {
+  const rationale: string[] = [];
+
+  const frameSample = toFiniteNumber(jankSummary?.totalJankFrames);
+  const allCauses = Array.isArray(jankSummary?.allCauses) ? jankSummary!.allCauses : [];
+
+  let appLikePct = 0;
+  let sfLikePct = 0;
+  for (const c of allCauses) {
+    const ct = String(c.causeType || '').toLowerCase();
+    const pct = toFiniteNumber(c.percentage);
+    if (APP_LIKE_CAUSE_TYPES.has(ct)) appLikePct += pct;
+    if (SF_LIKE_CAUSE_TYPES.has(ct)) sfLikePct += pct;
+  }
+
+  const resp = extractResponsibilityDistributionFromFindings(findings);
+  const consumer = extractConsumerStatsFromFindings(findings);
+
+  let appScore = 0;
+  let sfScore = 0;
+
+  if (frameSample >= 3) {
+    if (appLikePct >= 70) {
+      appScore += 4;
+      rationale.push(`逐帧根因中 APP/主线程侧占比 ${appLikePct.toFixed(1)}%`);
+    } else if (appLikePct >= 50) {
+      appScore += 3;
+      rationale.push(`逐帧根因中 APP/主线程侧占比 ${appLikePct.toFixed(1)}%`);
+    } else if (appLikePct > 0) {
+      appScore += 1;
+    }
+
+    if (sfLikePct >= 70) {
+      sfScore += 4;
+      rationale.push(`逐帧根因中 SF/GPU 侧占比 ${sfLikePct.toFixed(1)}%`);
+    } else if (sfLikePct >= 50) {
+      sfScore += 3;
+      rationale.push(`逐帧根因中 SF/GPU 侧占比 ${sfLikePct.toFixed(1)}%`);
+    } else if (sfLikePct > 0) {
+      sfScore += 1;
+    }
+
+    if (frameSample >= 10) {
+      appScore += 1;
+      sfScore += 1;
+    } else {
+      rationale.push(`逐帧样本量偏小（${frameSample} 帧）`);
+    }
+  } else if (frameSample > 0) {
+    rationale.push(`逐帧样本不足（${frameSample} 帧）`);
+  }
+
+  if (resp.sfCount >= 20 && resp.sfPct >= 80) {
+    sfScore += 2;
+    rationale.push(`责任分布显示 SF ${resp.sfCount} 帧 (${resp.sfPct.toFixed(1)}%)`);
+  } else if (resp.sfCount > 0) {
+    rationale.push(`责任分布样本较小（SF ${resp.sfCount} 帧）`);
+  }
+
+  if (resp.appCount >= 5 && resp.appPct >= 30) {
+    appScore += 1;
+  }
+
+  if (consumer.frames >= 100 && consumer.rate >= 50) {
+    sfScore += 1;
+    rationale.push(`全局消费端掉帧 ${consumer.frames} 帧 (${consumer.rate.toFixed(1)}%)`);
+  } else if (consumer.frames > 0) {
+    rationale.push(`消费端统计样本 ${consumer.frames} 帧 (${consumer.rate.toFixed(1)}%)`);
+  }
+
+  let verdict: AttributionVerdict = 'INSUFFICIENT';
+  if (frameSample === 0 && resp.sfCount === 0 && consumer.frames === 0) {
+    verdict = 'INSUFFICIENT';
+  } else if (
+    frameSample >= 3 &&
+    appLikePct >= 60 &&
+    (resp.sfPct >= 70 || consumer.rate >= 50)
+  ) {
+    verdict = 'MIXED';
+  } else if (appScore >= sfScore + 2) {
+    verdict = 'APP_TRIGGER';
+  } else if (sfScore >= appScore + 2) {
+    verdict = 'SF_CONSUMER';
+  } else if (appScore > 0 && sfScore > 0) {
+    verdict = 'MIXED';
+  } else {
+    verdict = 'INSUFFICIENT';
+  }
+
+  let confidence = 0.35;
+  if (verdict !== 'INSUFFICIENT') {
+    const sampleBoost = frameSample >= 10 ? 0.15 : frameSample >= 3 ? 0.08 : 0;
+    const respBoost = resp.sfCount >= 20 ? 0.08 : 0;
+    const consumerBoost = consumer.frames >= 100 ? 0.05 : 0;
+    const scoreGapBoost = Math.min(0.15, Math.abs(appScore - sfScore) * 0.03);
+    confidence = Math.min(0.9, 0.5 + sampleBoost + respBoost + consumerBoost + scoreGapBoost);
+  }
+
+  return {
+    verdict,
+    confidence,
+    frameSample,
+    appLikePct,
+    sfLikePct,
+    sfRespSample: resp.sfCount,
+    sfRespPct: resp.sfPct,
+    appRespSample: resp.appCount,
+    appRespPct: resp.appPct,
+    consumerFrames: consumer.frames,
+    consumerRate: consumer.rate,
+    rationale,
+  };
+}
+
+function getAllCauses(
+  jankSummary?: JankCauseSummary
+): Array<{ causeType: string; label: string; percentage: number; frameCount: number }> {
+  if (!jankSummary || !Array.isArray(jankSummary.allCauses)) {
+    return [];
+  }
+  return jankSummary.allCauses.map(c => ({
+    causeType: String(c.causeType || '').toLowerCase(),
+    label: String(c.label || c.causeType || 'unknown'),
+    percentage: toFiniteNumber(c.percentage),
+    frameCount: toFiniteNumber(c.frameCount),
+  }));
+}
+
+function getCausePercentage(
+  allCauses: Array<{ causeType: string; percentage: number }>,
+  causeType: string
+): number {
+  const row = allCauses.find(c => c.causeType === causeType);
+  return row ? row.percentage : 0;
+}
+
+function getTopCauseByGroup(
+  allCauses: Array<{ causeType: string; label: string; percentage: number; frameCount: number }>,
+  group: Set<string>
+): { causeType: string; label: string; percentage: number; frameCount: number } | null {
+  const candidates = allCauses.filter(c => group.has(c.causeType));
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.percentage - a.percentage);
+  return candidates[0];
+}
+
+function getTopClusterHints(
+  jankSummary?: JankCauseSummary
+): string[] {
+  const clusters = jankSummary?.clusters;
+  if (!Array.isArray(clusters) || clusters.length === 0) {
+    return [];
+  }
+
+  return clusters.slice(0, 3).map((cluster: JankCluster) => {
+    const id = String(cluster.clusterId || 'K?');
+    const trigger = String(cluster.triggerFactor || 'unknown');
+    const supply = String(cluster.supplyConstraint || 'unknown');
+    const amp = String(cluster.amplificationPath || 'unknown');
+    const count = toFiniteNumber(cluster.frameCount);
+    const pct = toFiniteNumber(cluster.percentage).toFixed(1);
+    return `${id}: ${trigger} / ${supply} / ${amp}（${count}帧, ${pct}%）`;
+  });
+}
+
+function getWorkloadDominantCluster(
+  jankSummary?: JankCauseSummary
+): {
+  clusterId: string;
+  frameCount: number;
+  percentage: number;
+  representativeFrames: string[];
+  samplePrimaryCauses: string[];
+} | null {
+  const clusters = jankSummary?.clusters;
+  if (!Array.isArray(clusters) || clusters.length === 0) {
+    return null;
+  }
+
+  const dominant = clusters.find((cluster: JankCluster) => {
+    const supply = String(cluster?.supplyConstraint || '');
+    return supply.includes('负载主导');
+  });
+
+  if (!dominant) {
+    return null;
+  }
+
+  return {
+    clusterId: String(dominant.clusterId || 'K?'),
+    frameCount: toFiniteNumber(dominant.frameCount),
+    percentage: toFiniteNumber(dominant.percentage),
+    representativeFrames: Array.isArray(dominant.representativeFrames)
+      ? dominant.representativeFrames.map((v: unknown) => String(v)).filter(Boolean).slice(0, 3)
+      : [],
+    samplePrimaryCauses: Array.isArray(dominant.samplePrimaryCauses)
+      ? dominant.samplePrimaryCauses.map((v: unknown) => String(v)).filter(Boolean).slice(0, 2)
+      : [],
+  };
+}
+
+function injectWorkloadDominantClusterMarker(
+  markdown: string,
+  jankSummary?: JankCauseSummary
+): string {
+  const cluster = getWorkloadDominantCluster(jankSummary);
+  if (!cluster) {
+    return markdown;
+  }
+
+  if (/负载主导簇:/.test(markdown)) {
+    return markdown;
+  }
+
+  const repFramesText = cluster.representativeFrames.length > 0
+    ? `；代表帧: ${cluster.representativeFrames.join(' / ')}`
+    : '';
+  const sampleCauseText = cluster.samplePrimaryCauses.length > 0
+    ? `；关键切片: ${cluster.samplePrimaryCauses.join('；')}`
+    : '';
+  const marker = `- 负载主导簇: ${cluster.clusterId}（${cluster.frameCount}帧, ${cluster.percentage.toFixed(1)}%），该簇以 APP 侧工作负载触发为主，供给约束信号较弱${repFramesText}${sampleCauseText}。`;
+  const lines = String(markdown || '').split('\n');
+
+  const headingPatterns = [
+    /^##\s*结论（按可能性排序）\s*$/,
+    /^##\s*结论\s*$/,
+    /^结论\s*[:：]\s*$/,
+    /^\*\*conclusion:\*\*\s*$/i,
+    /^conclusion\s*:\s*$/i,
+  ];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    if (headingPatterns.some(re => re.test(lines[i] || ''))) {
+      let insertAt = i + 1;
+      while (insertAt < lines.length && (lines[insertAt] || '').trim() === '') {
+        insertAt += 1;
+      }
+      lines.splice(insertAt, 0, marker);
+      return lines.join('\n');
+    }
+  }
+
+  return markdown;
+}
+
+function summarizeSupplyConstraintsFromRecords(
+  frameMechanismRecords: FrameMechanismRecord[]
+): {
+  breakdown: Array<{ constraint: string; count: number; percentage: number }>;
+  totalFrames: number;
+  constrainedFrames: number;
+} {
+  if (!Array.isArray(frameMechanismRecords) || frameMechanismRecords.length === 0) {
+    return {
+      breakdown: [],
+      totalFrames: 0,
+      constrainedFrames: 0,
+    };
+  }
+
+  const counter = new Map<string, number>();
+  const totalFrames = frameMechanismRecords.length;
+  for (const record of frameMechanismRecords) {
+    const raw = typeof record.supplyConstraint === 'string' ? record.supplyConstraint.trim() : '';
+    if (!raw || raw === 'none') continue;
+    counter.set(raw, (counter.get(raw) || 0) + 1);
+  }
+
+  const constrainedFrames = Array.from(counter.values()).reduce((sum, v) => sum + v, 0);
+  if (constrainedFrames === 0) {
+    return {
+      breakdown: [],
+      totalFrames,
+      constrainedFrames,
+    };
+  }
+
+  return {
+    breakdown: Array.from(counter.entries())
+      .map(([constraint, count]) => ({
+        constraint,
+        count,
+        percentage: Math.round((count / totalFrames) * 1000) / 10,
+      }))
+      .sort((a, b) => b.count - a.count),
+    totalFrames,
+    constrainedFrames,
+  };
+}
+
+function supplyConstraintLabel(constraint: string): string {
+  switch (constraint) {
+    case 'load_high': return '负载偏高';
+    case 'frequency_insufficient': return '频率不足';
+    case 'scheduling_delay': return '调度延迟';
+    case 'core_placement': return '核心摆放偏小核';
+    case 'blocking_wait': return '阻塞等待';
+    default: return constraint;
+  }
+}
+
+function buildSupplyEvidence(params: {
+  recordSupplyParts: string[];
+  supplyFromRecords: {
+    totalFrames: number;
+    constrainedFrames: number;
+  };
+  supplyParts: string[];
+  supplyTop: { causeType: string; percentage: number } | null;
+  frameSample: number;
+}): string {
+  const {
+    recordSupplyParts,
+    supplyFromRecords,
+    supplyParts,
+    supplyTop,
+    frameSample,
+  } = params;
+
+  if (recordSupplyParts.length > 0) {
+    return `逐帧结构化供给约束: ${recordSupplyParts.join('；')}（命中 ${supplyFromRecords.constrainedFrames}/${supplyFromRecords.totalFrames} 帧）`;
+  }
+
+  if (supplyFromRecords.totalFrames > 0) {
+    return `逐帧结构化供给约束命中较低（${supplyFromRecords.constrainedFrames}/${supplyFromRecords.totalFrames} 帧）`;
+  }
+
+  if (supplyParts.length > 0) {
+    return `供给约束信号: ${supplyParts.join('；')}`;
+  }
+
+  if (supplyTop) {
+    return `逐帧供给约束主因=${supplyTop.causeType}，占比 ${supplyTop.percentage.toFixed(1)}%`;
+  }
+
+  return `供给约束样本不足（逐帧样本 ${frameSample}）`;
+}
+
+function deriveMechanismTriad(
+  assessment: AttributionAssessment,
+  jankSummary?: JankCauseSummary,
+  frameMechanismRecords: FrameMechanismRecord[] = []
+): MechanismTriad {
+  const allCauses = getAllCauses(jankSummary);
+  const triggerTop = getTopCauseByGroup(allCauses, TRIGGER_CAUSE_TYPES);
+  const supplyTop = getTopCauseByGroup(allCauses, SUPPLY_CAUSE_TYPES);
+  const amplificationTop = getTopCauseByGroup(allCauses, AMPLIFICATION_CAUSE_TYPES);
+  const supplyFromRecords = summarizeSupplyConstraintsFromRecords(frameMechanismRecords);
+
+  const freqPct = getCausePercentage(allCauses, 'freq_limit');
+  const smallCorePct = getCausePercentage(allCauses, 'small_core');
+  const schedPct = getCausePercentage(allCauses, 'sched_latency');
+  const contentionPct = getCausePercentage(allCauses, 'cpu_contention');
+  const overloadPct = getCausePercentage(allCauses, 'cpu_overload');
+
+  let trigger = '未形成稳定触发证据';
+  if (triggerTop) {
+    trigger = `${triggerTop.label}（占比 ${triggerTop.percentage.toFixed(1)}%）`;
+  } else if (assessment.appLikePct >= 30) {
+    trigger = `APP/主线程侧信号存在（占比 ${assessment.appLikePct.toFixed(1)}%）`;
+  }
+
+  const supplyParts: string[] = [];
+  if (overloadPct >= 10) supplyParts.push(`负载偏高 ${overloadPct.toFixed(1)}%`);
+  if (freqPct >= 10) supplyParts.push(`频率不足 ${freqPct.toFixed(1)}%`);
+  if (schedPct >= 10) supplyParts.push(`调度延迟 ${schedPct.toFixed(1)}%`);
+  if (smallCorePct >= 10) supplyParts.push(`核心摆放偏小核 ${smallCorePct.toFixed(1)}%`);
+  if (contentionPct >= 10) supplyParts.push(`CPU 争抢 ${contentionPct.toFixed(1)}%`);
+  const recordSupplyParts = supplyFromRecords.breakdown.slice(0, 2)
+    .map(s => `${supplyConstraintLabel(s.constraint)} ${s.percentage.toFixed(1)}%`);
+  let supply = '暂无供给约束证据';
+  if (recordSupplyParts.length > 0) {
+    supply = recordSupplyParts.join('；');
+    if (supplyFromRecords.constrainedFrames < supplyFromRecords.totalFrames) {
+      supply += `（覆盖 ${supplyFromRecords.constrainedFrames}/${supplyFromRecords.totalFrames} 帧）`;
+    }
+  } else if (supplyFromRecords.totalFrames > 0) {
+    supply = `供给约束不明显（命中 ${supplyFromRecords.constrainedFrames}/${supplyFromRecords.totalFrames} 帧）`;
+  } else if (supplyParts.length > 0) {
+    supply = supplyParts.join('；');
+  } else if (supplyTop) {
+    supply = `${supplyTop.label}（占比 ${supplyTop.percentage.toFixed(1)}%）`;
+  } else if (assessment.frameSample > 0) {
+    supply = '供给约束信号较弱或样本不足';
+  }
+
+  let amplification = '未观察到稳定放大路径证据';
+  if (amplificationTop) {
+    amplification = `${amplificationTop.label}（逐帧占比 ${amplificationTop.percentage.toFixed(1)}%）`;
+  } else if (assessment.sfRespPct >= 50 || assessment.consumerRate >= 30) {
+    amplification = `SF/消费端放大信号存在（责任分布 SF ${assessment.sfRespPct.toFixed(1)}%，消费端 ${assessment.consumerRate.toFixed(1)}%）`;
+  }
+
+  const triggerEvidence = triggerTop
+    ? `逐帧 cause_type=${triggerTop.causeType}，样本占比 ${triggerTop.percentage.toFixed(1)}%`
+    : `逐帧 APP/主线程侧累计占比 ${assessment.appLikePct.toFixed(1)}%`;
+
+  const supplyEvidence = buildSupplyEvidence({
+    recordSupplyParts,
+    supplyFromRecords,
+    supplyParts,
+    supplyTop,
+    frameSample: assessment.frameSample,
+  });
+
+  const amplificationEvidence = amplificationTop
+    ? `逐帧放大路径主因=${amplificationTop.causeType}，占比 ${amplificationTop.percentage.toFixed(1)}%`
+    : `责任分布 SF ${assessment.sfRespSample} 帧 (${assessment.sfRespPct.toFixed(1)}%)，消费端 ${assessment.consumerFrames} 帧 (${assessment.consumerRate.toFixed(1)}%)`;
+
+  return {
+    trigger,
+    supply,
+    amplification,
+    triggerEvidence,
+    supplyEvidence,
+    amplificationEvidence,
+  };
+}
+
+function buildMechanismTriadPromptSection(
+  assessment: AttributionAssessment,
+  jankSummary?: JankCauseSummary,
+  frameMechanismRecords: FrameMechanismRecord[] = []
+): string {
+  const triad = deriveMechanismTriad(assessment, jankSummary, frameMechanismRecords);
+  const clusterHints = getTopClusterHints(jankSummary);
+  const lines: string[] = [];
+
+  lines.push('## 根因机制拆解（触发/供给/放大）');
+  lines.push(`- 触发因子: ${triad.trigger}`);
+  lines.push(`- 供给约束: ${triad.supply}`);
+  lines.push(`- 放大路径: ${triad.amplification}`);
+  if (clusterHints.length > 0) {
+    lines.push('- 聚类优先级（先治大头）:');
+    for (const hint of clusterHints) {
+      lines.push(`  - ${hint}`);
+    }
+  }
+  lines.push('- 回答要求: 明确区分“APP 触发层”与“SF 消费放大层”，不要只给“主线程100%”结论。');
+
+  return lines.join('\n');
+}
+
+function verdictToChinese(verdict: AttributionVerdict): string {
+  switch (verdict) {
+    case 'APP_TRIGGER': return 'APP/主线程触发主导';
+    case 'SF_CONSUMER': return 'SF/消费端主导';
+    case 'MIXED': return '混合型（APP 触发 + SF 放大）';
+    default: return '证据不足';
+  }
+}
+
+function buildAttributionAssessmentPromptSection(a: AttributionAssessment): string {
+  const lines: string[] = [];
+  lines.push('## 掉帧归因裁决（规则预判）');
+  lines.push(`- 预判结论: ${verdictToChinese(a.verdict)}（置信度 ${Math.round(a.confidence * 100)}%）`);
+  lines.push(`- 逐帧根因样本: ${a.frameSample} 帧，APP/主线程侧 ${a.appLikePct.toFixed(1)}%，SF/GPU 侧 ${a.sfLikePct.toFixed(1)}%`);
+  lines.push(`- 责任分布样本: SF ${a.sfRespSample} 帧 (${a.sfRespPct.toFixed(1)}%)，APP ${a.appRespSample} 帧 (${a.appRespPct.toFixed(1)}%)`);
+  lines.push(`- 消费端统计: ${a.consumerFrames} 帧 (${a.consumerRate.toFixed(1)}%)`);
+  if (a.rationale.length > 0) {
+    for (const r of a.rationale.slice(0, 4)) lines.push(`- 依据: ${r}`);
+  }
+  lines.push('- 结论约束: 必须与预判一致；若存在冲突，优先保守表述为“混合型/证据不足”。');
+  return lines.join('\n');
+}
+
+function isConclusionContradictingAttributionVerdict(
+  conclusion: string,
+  assessment: AttributionAssessment
+): boolean {
+  const t = String(conclusion || '');
+  if (!t.trim()) return false;
+
+  const sfOverclaimPatterns = [
+    /主要由\s*SF.*导致.*而非\s*App主线程/i,
+    /主要由\s*SurfaceFlinger.*导致.*而非\s*App主线程/i,
+    /问题主要在\s*SurfaceFlinger.*而非\s*App/i,
+    /非\s*App主线程.*根因/i,
+  ];
+
+  const appOverclaimPatterns = [
+    /主要由\s*主线程.*导致/i,
+    /主线程.*是主要根因/i,
+    /APP.*主因.*占主导/i,
+  ];
+
+  if (assessment.verdict === 'APP_TRIGGER' || assessment.verdict === 'MIXED') {
+    return sfOverclaimPatterns.some(re => re.test(t));
+  }
+
+  if (assessment.verdict === 'SF_CONSUMER') {
+    return appOverclaimPatterns.some(re => re.test(t));
+  }
+
+  return false;
+}
+
+function generateAttributionSafeFallback(
+  assessment: AttributionAssessment,
+  findings: Finding[],
+  contradictionReasons: string[],
+  stopReason?: string,
+  jankSummary?: JankCauseSummary,
+  frameMechanismRecords: FrameMechanismRecord[] = []
+): string {
+  const usableFindings = findings.filter(f => !f.details?._contradicted);
+  const evidenceCandidates = usableFindings
+    .map(f => ({ finding: f, evIds: extractEvidenceIdsFromFinding(f) }))
+    .filter(c => c.evIds.length > 0);
+  const usedEv = new Set<string>();
+  const takeEvidenceTag = (preferredIndex: number): string => {
+    if (evidenceCandidates.length === 0) return '';
+    const ordered = [
+      preferredIndex,
+      ...evidenceCandidates.map((_, i) => i).filter(i => i !== preferredIndex),
+    ].filter(i => i >= 0 && i < evidenceCandidates.length);
+
+    for (const idx of ordered) {
+      const c = evidenceCandidates[idx];
+      if (!c) continue;
+      const fresh = c.evIds.filter(id => !usedEv.has(id)).slice(0, 2);
+      const finalIds = fresh.length > 0 ? fresh : c.evIds.slice(0, 1);
+      if (finalIds.length > 0) {
+        for (const id of finalIds) usedEv.add(id);
+        return `（${finalIds.join('|')}）`;
+      }
+    }
+    return '';
+  };
+  const c1EvTag = takeEvidenceTag(0);
+  const c2EvTag = takeEvidenceTag(1);
+  const c3EvTag = takeEvidenceTag(2);
+  const mechanismTriad = deriveMechanismTriad(assessment, jankSummary, frameMechanismRecords);
+  const clusterHints = getTopClusterHints(jankSummary);
+
+  const lines: string[] = [];
+  const topFinding = usableFindings[0] || findings[0];
+  const topTitle = topFinding?.title ? String(topFinding.title) : '当前证据摘要';
+
+  lines.push('## 结论（按可能性排序）');
+  if (assessment.verdict === 'APP_TRIGGER') {
+    lines.push(`1. 更可能是 APP/主线程侧触发掉帧，消费端表现为放大层（置信度: ${Math.round(assessment.confidence * 100)}%）。`);
+    lines.push('2. SF/消费端异常仍可能参与，但当前不是唯一主因（置信度: 55%）。');
+  } else if (assessment.verdict === 'SF_CONSUMER') {
+    lines.push(`1. 更可能是 SF/消费端侧主导，APP 侧证据不足以证明主因（置信度: ${Math.round(assessment.confidence * 100)}%）。`);
+    lines.push('2. 仍需排查少量 APP 侧长耗时帧是否触发了局部异常（置信度: 45%）。');
+  } else if (assessment.verdict === 'MIXED') {
+    lines.push(`1. 这是混合型掉帧：APP/主线程触发与 SF/消费端放大同时存在（置信度: ${Math.round(assessment.confidence * 100)}%）。`);
+    lines.push('2. 不能仅用“SF 主因”或“APP 主因”单侧表述覆盖全链路（置信度: 60%）。');
+  } else {
+    lines.push('1. 当前证据不足以给出单一主因结论（置信度: 35%）。');
+  }
+  lines.push(`- 触发因子: ${mechanismTriad.trigger}`);
+  lines.push(`- 供给约束: ${mechanismTriad.supply}`);
+  lines.push(`- 放大路径: ${mechanismTriad.amplification}`);
+  lines.push('');
+
+  lines.push('## 掉帧聚类（先看大头）');
+  if (clusterHints.length > 0) {
+    for (const hint of clusterHints) {
+      lines.push(`- ${hint}`);
+    }
+  } else {
+    lines.push('- 当前缺少可用聚类结果，建议先补足逐帧样本（>=20 帧）。');
+  }
+  lines.push('');
+
+  lines.push('## 证据链（对应上述结论）');
+  lines.push(`- C1: 触发层证据：${mechanismTriad.triggerEvidence}${c1EvTag ? ` ${c1EvTag}` : ''}`);
+  lines.push(`- C2: 供给层证据：${mechanismTriad.supplyEvidence}${c2EvTag ? ` ${c2EvTag}` : ''}`);
+  lines.push(`- C3: 放大层证据：${mechanismTriad.amplificationEvidence}；Finding=${topTitle}${c3EvTag ? ` ${c3EvTag}` : ''}`);
+  lines.push('');
+
+  lines.push('## 不确定性与反例');
+  if (assessment.rationale.length > 0) {
+    for (const r of assessment.rationale.slice(0, 3)) lines.push(`- ${r}`);
+  } else {
+    lines.push('- 当前缺少同口径、同时间窗的补充证据。');
+  }
+  if (contradictionReasons.length > 0) {
+    lines.push(`- 检测到矛盾: ${contradictionReasons.slice(0, 2).join('；')}`);
+  }
+  if (stopReason) {
+    lines.push(`- 备注：本轮提前结束（${stopReason}）。`);
+  }
+  lines.push('');
+
+  lines.push('## 下一步（最高信息增益）');
+  lines.push('- 在同一时间窗扩大逐帧样本（建议 >= 20 帧），重新计算 cause_type 占比。');
+  lines.push('- 对主线程长耗时帧与消费端 token_gap/vsync_missed 做时间重叠验证。');
+
+  return lines.join('\n');
+}
+
+function finalizeConclusionMarkdown(
+  markdown: string,
+  findings: Finding[],
+  jankSummary?: JankCauseSummary
+): string {
+  const withPerConclusionMapping = injectPerConclusionEvidenceMapping(markdown, findings);
+  const withEvidenceIndex = injectEvidenceIndexIntoEvidenceChain(withPerConclusionMapping, findings);
+  return injectWorkloadDominantClusterMarker(withEvidenceIndex, jankSummary);
 }
 
 /**
@@ -176,6 +991,7 @@ export async function generateConclusion(
 
   const turnCount = Number.isFinite(options.turnCount) ? Number(options.turnCount) : 0;
   const historyContext = options.historyContext || '';
+  const frameMechanismRecords = sharedContext.frameMechanismRecords || [];
 
   // Collect contradicted findings for explicit mention in prompt
   // Instead of filtering them out, we let LLM resolve contradictions with guidance
@@ -193,17 +1009,20 @@ export async function generateConclusion(
   const finalFindings = findingsForPrompt.length > 0
     ? findingsForPrompt
     : sortedFindings.slice(0, 5);
+  const attributionAssessment = deriveAttributionAssessment(
+    finalFindings,
+    sharedContext.jankCauseSummary
+  );
 
-  const insightEnabled = isInsightConclusionEnabled(options);
-  const outputMode: ConclusionOutputMode = insightEnabled
-    ? selectConclusionOutputMode({
-        turnCount,
-        intent,
-        findingsCount: sortedFindings.length,
-        confirmedHypothesesCount: confirmedHypotheses.length,
-        hasJankSummary: !!(sharedContext.jankCauseSummary && sharedContext.jankCauseSummary.totalJankFrames > 0),
-      })
-    : (turnCount >= 1 ? 'focused_answer' : 'initial_report');
+  const insightEnabled = isInsightConclusionEnabled();
+  const outputMode = resolveConclusionOutputMode({
+    insightEnabled,
+    turnCount,
+    intent,
+    findingsCount: sortedFindings.length,
+    confirmedHypothesesCount: confirmedHypotheses.length,
+    hasJankSummary: Boolean(sharedContext.jankCauseSummary && sharedContext.jankCauseSummary.totalJankFrames > 0),
+  });
 
   // Build contradiction section for prompt if any exist
   const contradictionSection = contradictionReasons.length > 0
@@ -212,6 +1031,12 @@ export async function generateConclusion(
 
   // Build structured jank summary section (from per-frame analysis)
   const jankSummarySection = formatJankSummaryForPrompt(sharedContext.jankCauseSummary);
+  const attributionAssessmentSection = buildAttributionAssessmentPromptSection(attributionAssessment);
+  const mechanismTriadSection = buildMechanismTriadPromptSection(
+    attributionAssessment,
+    sharedContext.jankCauseSummary,
+    frameMechanismRecords
+  );
 
   // Debug: Log whether jank summary is being included
   if (sharedContext.jankCauseSummary) {
@@ -233,9 +1058,10 @@ export async function generateConclusion(
           status: h.status,
         })),
         findings: finalFindings,
-        allFindingsSorted: sortedFindings,
         contradictionSection,
         jankSummary: sharedContext.jankCauseSummary,
+        frameMechanismRecords,
+        attributionAssessment,
         traceConfig: sharedContext.traceConfig,
         investigationPath: sharedContext.investigationPath,
       })
@@ -244,6 +1070,8 @@ export async function generateConclusion(
 用户目标: ${intent.primaryGoal}
 ${stopReason ? `提前终止原因: ${stopReason}` : ''}
 ${jankSummarySection}
+${attributionAssessmentSection}
+${mechanismTriadSection}
 已确认的假设:
 ${confirmedHypotheses.map(h => `- ${h.description} (confidence: ${h.confidence.toFixed(2)})`).join('\n') || '无'}
 
@@ -258,12 +1086,16 @@ ${sharedContext.investigationPath.map(s => `${s.stepNumber}. [${s.agentId}] ${s.
 2. 证据支撑（每个结论的依据）
 3. 置信度评估
 4. 下一步最有信息增益的分析动作（不是优化建议）
+5. 机制分层说明：触发因子 / 供给约束 / 放大路径
+6. 掉帧聚类 Top3（按帧数降序，先给 K1 大头）
 
 重要约束：
 - 只基于上述提供的数据和证据得出结论，不要推测未提供的信息
 - 如果数据不足以得出某个结论，明确标注"证据不足"
 - 每个结论必须引用具体的数据来源（Finding 的标题或数据值）
 - 不要给出优化建议，只需要指出问题所在
+- 明确回答“供给约束”属于哪类：负载高 / 频率不足 / 调度延迟 / 核心摆放 / 阻塞等待
+- 必须输出聚类信息（K1/K2/K3），并给出每类的帧数和占比
 
 ## 刷新率与帧预算
 ${sharedContext.traceConfig ? (sharedContext.traceConfig.isVRR
@@ -339,17 +1171,33 @@ ${sharedContext.traceConfig ? (sharedContext.traceConfig.isVRR
 
     let conclusion = response.response;
 
-    // Detect if LLM returned JSON/code-block despite format instructions
+    // Detect and normalize JSON / JSON-like text outputs.
     const trimmed = conclusion.trim();
-    if (trimmed.startsWith('{') || trimmed.startsWith('[') || trimmed.startsWith('```')) {
-      emitter.log('[conclusionGenerator] LLM returned JSON/code-block, converting to Markdown');
-      conclusion = convertJsonToMarkdown(conclusion);
+    if (shouldNormalizeConclusionOutput(trimmed)) {
+      emitter.log('[conclusionGenerator] LLM returned structured non-markdown output, normalizing to Markdown');
+      conclusion = normalizeConclusionOutput(conclusion);
     }
 
     // Ensure evidence IDs appear in the evidence-chain section when available.
     // This makes the output auditable even if the LLM forgets to cite.
-    conclusion = injectPerConclusionEvidenceMapping(conclusion, finalFindings);
-    conclusion = injectEvidenceIndexIntoEvidenceChain(conclusion, finalFindings);
+    conclusion = finalizeConclusionMarkdown(conclusion, finalFindings, sharedContext.jankCauseSummary);
+
+    if (isConclusionContradictingAttributionVerdict(conclusion, attributionAssessment)) {
+      emitter.log('[conclusionGenerator] LLM conclusion contradicts attribution verdict, switching to rule-based safe fallback');
+      emitter.emitUpdate('degraded', {
+        module: 'conclusionGenerator',
+        fallback: 'rule-based attribution-safe conclusion',
+      });
+      const safeFallback = generateAttributionSafeFallback(
+        attributionAssessment,
+        finalFindings,
+        contradictionReasons,
+        stopReason,
+        sharedContext.jankCauseSummary,
+        frameMechanismRecords
+      );
+      return finalizeConclusionMarkdown(safeFallback, finalFindings, sharedContext.jankCauseSummary);
+    }
 
     return conclusion;
   } catch (error) {
@@ -361,17 +1209,26 @@ ${sharedContext.traceConfig ? (sharedContext.traceConfig.isVRR
   }
 
   if (insightEnabled) {
-    const fallback = generateInsightFallback(
-      outputMode,
-      sortedFindings,
-      confirmedHypotheses.map(h => h.description),
-      intent,
-      stopReason,
-      historyContext,
-      contradictionReasons
-    );
-    const withPerConclusion = injectPerConclusionEvidenceMapping(fallback, sortedFindings);
-    return injectEvidenceIndexIntoEvidenceChain(withPerConclusion, sortedFindings);
+    const fallbackEvidenceFindings = outputMode === 'need_input' ? sortedFindings : finalFindings;
+    const fallback = outputMode === 'need_input'
+      ? generateInsightFallback(
+          outputMode,
+          sortedFindings,
+          confirmedHypotheses.map(h => h.description),
+          intent,
+          stopReason,
+          historyContext,
+          contradictionReasons
+        )
+      : generateAttributionSafeFallback(
+          attributionAssessment,
+          finalFindings,
+          contradictionReasons,
+          stopReason,
+          sharedContext.jankCauseSummary,
+          frameMechanismRecords
+        );
+    return finalizeConclusionMarkdown(fallback, fallbackEvidenceFindings, sharedContext.jankCauseSummary);
   }
 
   return turnCount >= 1
@@ -423,10 +1280,11 @@ function buildInsightFirstPrompt(params: {
   stopReason?: string;
   confirmedHypotheses: Array<{ description: string; confidence: number; status: string }>;
   findings: Finding[];
-  allFindingsSorted: Finding[];
   contradictionSection: string;
-  jankSummary?: import('./jankCauseSummarizer').JankCauseSummary;
-  traceConfig?: any;
+  jankSummary?: JankCauseSummary;
+  frameMechanismRecords: FrameMechanismRecord[];
+  attributionAssessment: AttributionAssessment;
+  traceConfig?: SharedAgentContext['traceConfig'];
   investigationPath: Array<{ stepNumber: number; agentId: string; summary: string }>;
 }): string {
   const parts: string[] = [];
@@ -510,19 +1368,33 @@ function buildInsightFirstPrompt(params: {
     parts.push('');
   }
 
-  const attributionSignals = deriveAttributionSignals(
-    params.allFindingsSorted.length > 0 ? params.allFindingsSorted : params.findings
-  );
-  if (attributionSignals.sfDominant || attributionSignals.appJankZero) {
+  parts.push(buildAttributionAssessmentPromptSection(params.attributionAssessment));
+  parts.push('');
+
+  parts.push(buildMechanismTriadPromptSection(
+    params.attributionAssessment,
+    params.jankSummary,
+    params.frameMechanismRecords
+  ));
+  parts.push('');
+
+  if (params.attributionAssessment.verdict === 'APP_TRIGGER' || params.attributionAssessment.verdict === 'MIXED') {
+    parts.push('## 归因提示');
+    parts.push('- 逐帧根因显示主线程/APP 侧耗时信号占主导（例如 cause_type=slice）。');
+    parts.push('- 若同时看到“消费端掉帧”，请区分：消费端是症状层，主线程长耗时是潜在触发层。');
+    parts.push('');
+  }
+
+  if (params.attributionAssessment.verdict === 'SF_CONSUMER') {
     parts.push('## 归因护栏');
-    if (attributionSignals.sfDominant) {
-      parts.push('- 当前证据显示 SF/消费端责任占主导（含 SF 100% 责任分布信号）。');
-    }
-    if (attributionSignals.appJankZero) {
-      parts.push('- 当前口径存在 app_janky_count 或 app_jank_rate 为 0 的信号。');
-    }
+    parts.push('- 当前证据显示 SF/消费端责任占主导。');
     parts.push('- 在该前提下，不要直接给出“主线程/Choreographer 是主要根因”的高置信度结论。');
     parts.push('- 若判定 App 主因，必须引用同一时间窗/同一帧的直接证据链（App Deadline Missed + 主线程耗时切片）。');
+    parts.push('');
+  } else if (params.attributionAssessment.verdict === 'INSUFFICIENT') {
+    parts.push('## 归因护栏');
+    parts.push('- 当前证据不足以形成单侧归因，禁止输出“唯一根因”式结论。');
+    parts.push('- 若需要给出方向，必须明确“证据不足”并说明待补数据。');
     parts.push('');
   }
 
@@ -532,9 +1404,18 @@ function buildInsightFirstPrompt(params: {
   parts.push('- 允许给出“下一步分析动作/要补充的数据”，但不要给出“优化代码/改架构”的建议。');
   parts.push('- 必须包含以下 4 个模块（标题必须一致）：');
   parts.push('  1) ## 结论（按可能性排序）');
-  parts.push('  2) ## 证据链（对应上述结论）');
-  parts.push('  3) ## 不确定性与反例');
-  parts.push('  4) ## 下一步（最高信息增益）');
+  parts.push('  2) ## 掉帧聚类（先看大头）');
+  parts.push('  3) ## 证据链（对应上述结论）');
+  parts.push('  4) ## 不确定性与反例');
+  parts.push('  5) ## 下一步（最高信息增益）');
+  parts.push('- 标题必须使用中文模块名；不要输出 "conclusion:"/"jank_clusters:"/"next_steps:" 这类英文键名标题。');
+  parts.push('- “下一步”优先给出口径对齐、聚类下钻、同窗验证动作；若指标已存在逐帧数据，禁止写“补充XXX数据”。');
+  parts.push('- 在“## 结论（按可能性排序）”中，必须明确给出以下三行（可带补充说明）：');
+  parts.push('  - 触发因子: ...');
+  parts.push('  - 供给约束: ...');
+  parts.push('  - 放大路径: ...');
+  parts.push('- “供给约束”必须优先判别属于哪类：负载高 / 频率不足 / 调度延迟 / 核心摆放 / 阻塞等待。');
+  parts.push('- “## 掉帧聚类（先看大头）”必须按帧数降序列出 Top3 聚类（K1/K2/K3），并标注帧数与占比。');
   parts.push('- 结论最多列 3 条，每条给出置信度百分比（例如：85%）。');
   parts.push('- “证据链”必须按 C1/C2/C3 对齐（C1=结论1）：每行以 "- C1:"/"- C2:"/"- C3:" 开头，并包含至少 1 个 evidence id（ev_xxxxxxxxxxxx）；同一行补充对应 Finding 标题/关键数据。');
 
@@ -624,22 +1505,30 @@ function generateInsightFallback(
   return lines.join('\n');
 }
 
+const EVIDENCE_ID_RE = /^ev_[0-9a-f]{12}$/;
+
+function readEvidenceId(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return EVIDENCE_ID_RE.test(trimmed) ? trimmed : null;
+}
+
 function extractEvidenceIdsFromFinding(f: Finding): string[] {
   const ids: string[] = [];
-  const ev = (f as any)?.evidence;
-  const arr = Array.isArray(ev) ? ev : (ev ? [ev] : []);
+  const arr = toEvidenceArray((f as FindingWithEvidence).evidence);
   for (const e of arr) {
     if (!e) continue;
     if (typeof e === 'string') {
-      const s = e.trim();
-      if (/^ev_[0-9a-f]{12}$/.test(s)) ids.push(s);
+      const id = readEvidenceId(e);
+      if (id) ids.push(id);
       continue;
     }
-    if (typeof e === 'object') {
-      const id = (e as any).evidenceId || (e as any).evidence_id;
-      if (typeof id === 'string' && /^ev_[0-9a-f]{12}$/.test(id.trim())) {
-        ids.push(id.trim());
-      }
+    const evidenceObject = asEvidenceObject(e);
+    if (evidenceObject) {
+      const id = readEvidenceId(evidenceObject.evidenceId || evidenceObject.evidence_id);
+      if (id) ids.push(id);
     }
   }
   const seen = new Set<string>();
@@ -655,27 +1544,24 @@ function extractEvidenceRefsFromFindings(findings: Finding[]): Array<{ evidenceI
   const seen = new Set<string>();
 
   for (const f of findings) {
-    const ev = (f as any)?.evidence;
-    const arr = Array.isArray(ev) ? ev : (ev ? [ev] : []);
+    const arr = toEvidenceArray((f as FindingWithEvidence).evidence);
     for (const e of arr) {
       if (!e) continue;
-      if (typeof e === 'object') {
-        const id = (e as any).evidenceId || (e as any).evidence_id;
-        if (typeof id === 'string' && /^ev_[0-9a-f]{12}$/.test(id.trim())) {
-          const evidenceId = id.trim();
-          if (seen.has(evidenceId)) continue;
-          seen.add(evidenceId);
-          out.push({
-            evidenceId,
-            title: typeof (e as any).title === 'string' ? String((e as any).title) : undefined,
-            kind: typeof (e as any).kind === 'string' ? String((e as any).kind) : undefined,
-          });
-        }
+      const evidenceObject = asEvidenceObject(e);
+      if (evidenceObject) {
+        const evidenceId = readEvidenceId(evidenceObject.evidenceId || evidenceObject.evidence_id);
+        if (!evidenceId || seen.has(evidenceId)) continue;
+        seen.add(evidenceId);
+        out.push({
+          evidenceId,
+          title: typeof evidenceObject.title === 'string' ? String(evidenceObject.title) : undefined,
+          kind: typeof evidenceObject.kind === 'string' ? String(evidenceObject.kind) : undefined,
+        });
       } else if (typeof e === 'string') {
-        const s = e.trim();
-        if (/^ev_[0-9a-f]{12}$/.test(s) && !seen.has(s)) {
-          seen.add(s);
-          out.push({ evidenceId: s });
+        const evidenceId = readEvidenceId(e);
+        if (evidenceId && !seen.has(evidenceId)) {
+          seen.add(evidenceId);
+          out.push({ evidenceId });
         }
       }
     }
@@ -892,7 +1778,7 @@ function buildDialogueModePrompt(params: {
   stopReason?: string;
   confirmedHypotheses: Array<{ description: string; confidence: number; status: string }>;
   findings: Finding[];
-  jankSummary?: import('./jankCauseSummarizer').JankCauseSummary;
+  jankSummary?: JankCauseSummary;
 }): string {
   const parts: string[] = [];
 
@@ -984,6 +1870,457 @@ function generateDialogueFallback(
   return lines.join('\n');
 }
 
+export function shouldNormalizeConclusionOutput(text: string): boolean {
+  const t = String(text || '').trim();
+  if (!t) return false;
+
+  if (t.startsWith('{') || t.startsWith('[') || t.startsWith('```')) {
+    return true;
+  }
+
+  const sectioned = parseJsonLikeSections(t);
+  if (sectioned) {
+    const signalCount =
+      sectioned.conclusion.length +
+      sectioned.evidence_chain.length +
+      sectioned.uncertainties.length +
+      sectioned.next_steps.length;
+    if (signalCount > 0) return true;
+  }
+
+  return false;
+}
+
+export function normalizeConclusionOutput(rawText: string): string {
+  const converted = convertJsonToMarkdown(rawText);
+  if (looksLikeMarkdownConclusion(converted)) {
+    return converted;
+  }
+
+  const fromJsonLike = convertJsonLikeSectionsToMarkdown(rawText);
+  if (fromJsonLike) return fromJsonLike;
+
+  return converted;
+}
+
+function looksLikeMarkdownConclusion(text: string): boolean {
+  const t = String(text || '');
+  return /^##\s*结论/m.test(t) || /^##\s*分析结论/m.test(t);
+}
+
+function convertJsonLikeSectionsToMarkdown(rawText: string): string | null {
+  const sections = parseJsonLikeSections(rawText);
+  if (!sections) return null;
+
+  const lines: string[] = [];
+  const conclusions: Array<{ statement: string; confidence?: number }> = [];
+  const clusterLines: string[] = [];
+  const evidenceLines: string[] = [];
+  const uncertainties: string[] = [];
+  const nextSteps: string[] = [];
+  const metadataLines: string[] = [];
+
+  for (const line of sections.conclusion) {
+    const obj = parseJsonLine(line);
+    if (obj && typeof obj.statement === 'string') {
+      const confidence = Number(obj.confidence);
+      conclusions.push({
+        statement: obj.statement.trim(),
+        confidence: Number.isFinite(confidence) ? confidence : undefined,
+      });
+      continue;
+    }
+    if (obj) {
+      const trigger = stripBulletPrefix(String(obj.trigger || obj.trigger_factor || '').trim());
+      const supply = stripBulletPrefix(String(obj.supply || obj.supply_constraint || '').trim());
+      const amp = stripBulletPrefix(String(obj.amplification || obj.amplification_path || '').trim());
+      const confidence = Number(obj.confidence);
+      if (trigger || supply || amp) {
+        const parts: string[] = [];
+        if (trigger) parts.push(`触发因子: ${trigger}`);
+        if (supply) parts.push(`供给约束: ${supply}`);
+        if (amp) parts.push(`放大路径: ${amp}`);
+        conclusions.push({
+          statement: parts.join('；'),
+          confidence: Number.isFinite(confidence) ? confidence : undefined,
+        });
+        continue;
+      }
+    }
+    const plain = stripBulletPrefix(line.trim());
+    if (plain) conclusions.push({ statement: plain });
+  }
+
+  for (const line of sections.clusters) {
+    const obj = parseJsonLine(line);
+    if (obj) {
+      const formatted = formatClusterLineFromJsonLikeObject(obj);
+      if (formatted) {
+        clusterLines.push(formatted);
+        continue;
+      }
+    }
+
+    const plain = stripBulletPrefix(line.trim());
+    if (plain) clusterLines.push(`- ${plain}`);
+  }
+
+  for (const line of sections.evidence_chain) {
+    const obj = parseJsonLine(line);
+    if (obj) {
+      const cid =
+        String(obj.conclusion_id || '').trim() ||
+        String(obj.conclusion || '').trim() ||
+        'C1';
+      const evidenceTexts = extractEvidenceTextsFromJsonLikeObject(obj);
+      for (const evText of evidenceTexts) {
+        if (/^C\d+[:：]/i.test(evText)) {
+          evidenceLines.push(`- ${evText}`);
+        } else {
+          evidenceLines.push(`- ${cid}: ${evText}`);
+        }
+      }
+      if (evidenceTexts.length === 0) {
+        evidenceLines.push(`- ${cid}: 原始证据项缺少可展示文本（需补充数据说明）`);
+      }
+      continue;
+    }
+
+    const plain = stripBulletPrefix(line.trim());
+    if (plain) evidenceLines.push(`- ${plain}`);
+  }
+
+  for (const line of sections.uncertainties) {
+    const obj = parseJsonLine(line);
+    if (obj) {
+      const point = stripBulletPrefix(String(obj.point || obj.title || obj.statement || '').trim());
+      const explanation = stripBulletPrefix(String(obj.explanation || obj.reason || '').trim());
+      if (point && explanation) {
+        uncertainties.push(normalizeUncertaintyWording(`${point}：${explanation}`));
+        continue;
+      }
+      if (point) {
+        uncertainties.push(normalizeUncertaintyWording(point));
+        continue;
+      }
+      if (explanation) {
+        uncertainties.push(normalizeUncertaintyWording(explanation));
+        continue;
+      }
+    }
+
+    const plain = stripBulletPrefix(line.trim());
+    if (plain) uncertainties.push(normalizeUncertaintyWording(plain));
+  }
+
+  for (const line of sections.next_steps) {
+    const obj = parseJsonLine(line);
+    if (obj) {
+      const action = stripBulletPrefix(String(obj.action || obj.step || obj.title || '').trim());
+      const reason = stripBulletPrefix(String(obj.reason || obj.explanation || '').trim());
+      if (action && reason) {
+        nextSteps.push(normalizeNextStepWording(`${action}（原因：${reason}）`));
+        continue;
+      }
+      if (action) {
+        nextSteps.push(normalizeNextStepWording(action));
+        continue;
+      }
+      if (reason) {
+        nextSteps.push(normalizeNextStepWording(reason));
+        continue;
+      }
+    }
+
+    const plain = stripBulletPrefix(line.trim());
+    if (plain) nextSteps.push(normalizeNextStepWording(plain));
+  }
+
+  for (const line of sections.metadata) {
+    const obj = parseJsonLine(line);
+    if (obj) {
+      const confidence = Number(obj.confidence ?? obj.overall_confidence);
+      if (Number.isFinite(confidence)) {
+        metadataLines.push(`- 置信度: ${Math.round(confidence)}%`);
+      }
+      const rounds = Number(obj.rounds ?? obj.analysis_rounds ?? obj.iterations);
+      if (Number.isFinite(rounds) && rounds > 0) {
+        metadataLines.push(`- 分析轮次: ${Math.round(rounds)}`);
+      }
+      continue;
+    }
+
+    const plain = stripBulletPrefix(line.trim());
+    if (plain) metadataLines.push(`- ${plain}`);
+  }
+
+  const normalizedNextSteps = [...new Set(nextSteps.filter(Boolean))];
+
+  lines.push('## 结论（按可能性排序）');
+  if (conclusions.length === 0) {
+    lines.push('1. 结论信息缺失（置信度: 40%）');
+  } else {
+    conclusions.slice(0, 3).forEach((item, idx) => {
+      const conf = Number.isFinite(item.confidence) ? `（置信度: ${Math.round(item.confidence!)}%）` : '';
+      lines.push(`${idx + 1}. ${item.statement}${conf}`);
+    });
+  }
+  lines.push('');
+
+  lines.push('## 掉帧聚类（先看大头）');
+  if (clusterLines.length === 0) {
+    lines.push('- 暂无');
+  } else {
+    lines.push(...clusterLines.slice(0, 5));
+  }
+  lines.push('');
+
+  lines.push('## 证据链（对应上述结论）');
+  if (evidenceLines.length === 0) {
+    lines.push('- 证据链信息缺失');
+  } else {
+    lines.push(...evidenceLines);
+  }
+  lines.push('');
+
+  lines.push('## 不确定性与反例');
+  if (uncertainties.length === 0) {
+    lines.push('- 暂无');
+  } else {
+    uncertainties.forEach((item) => lines.push(`- ${item}`));
+  }
+  lines.push('');
+
+  lines.push('## 下一步（最高信息增益）');
+  if (normalizedNextSteps.length === 0) {
+    lines.push('- 暂无');
+  } else {
+    normalizedNextSteps.forEach((item) => lines.push(`- ${item}`));
+  }
+
+  if (metadataLines.length > 0) {
+    lines.push('');
+    lines.push('## 分析元数据');
+    lines.push(...metadataLines);
+  }
+
+  return lines.join('\n');
+}
+
+type JsonLikeSection = 'conclusion' | 'clusters' | 'evidence_chain' | 'uncertainties' | 'next_steps' | 'metadata';
+
+function parseJsonLikeSections(rawText: string): Record<JsonLikeSection, string[]> | null {
+  const sectionAlias: Record<string, JsonLikeSection> = {
+    conclusion: 'conclusion',
+    结论: 'conclusion',
+    jank_clusters: 'clusters',
+    jank_cluster: 'clusters',
+    clusters: 'clusters',
+    cluster: 'clusters',
+    掉帧聚类: 'clusters',
+    聚类: 'clusters',
+    evidence_chain: 'evidence_chain',
+    证据链: 'evidence_chain',
+    uncertainties: 'uncertainties',
+    uncertainty: 'uncertainties',
+    uncertainty_and_counterexamples: 'uncertainties',
+    uncertainty_and_counterexample: 'uncertainties',
+    不确定性与反例: 'uncertainties',
+    不确定性: 'uncertainties',
+    反例: 'uncertainties',
+    next_steps: 'next_steps',
+    next_step: 'next_steps',
+    下一步: 'next_steps',
+    analysis_metadata: 'metadata',
+    analysis_meta: 'metadata',
+    metadata: 'metadata',
+    meta: 'metadata',
+    分析元数据: 'metadata',
+    元数据: 'metadata',
+  };
+
+  const out = {
+    conclusion: [] as string[],
+    clusters: [] as string[],
+    evidence_chain: [] as string[],
+    uncertainties: [] as string[],
+    next_steps: [] as string[],
+    metadata: [] as string[],
+  };
+
+  let current: keyof typeof out | null = null;
+  let hitHeader = false;
+  for (const rawLine of String(rawText || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const headerMatch = line.match(/^([A-Za-z_\u4e00-\u9fa5]+)\s*[:：]\s*(.*)$/);
+    if (headerMatch) {
+      const mapped = sectionAlias[String(headerMatch[1] || '').toLowerCase()];
+      if (mapped) {
+        current = mapped;
+        hitHeader = true;
+        const inlineContent = String(headerMatch[2] || '').trim();
+        if (inlineContent) out[current].push(inlineContent);
+        continue;
+      }
+      if (current && line) {
+        out[current].push(line);
+      }
+      continue;
+    }
+    if (/^#{1,6}\s+/.test(line)) {
+      current = null;
+      continue;
+    }
+    if (!current) continue;
+    if (line) out[current].push(line);
+  }
+
+  if (!hitHeader) return null;
+
+  const hasSignal =
+    out.conclusion.length > 0 ||
+    out.clusters.length > 0 ||
+    out.evidence_chain.length > 0 ||
+    out.uncertainties.length > 0 ||
+    out.next_steps.length > 0 ||
+    out.metadata.length > 0;
+  return hasSignal ? out : null;
+}
+
+function parseJsonLine(line: string): Record<string, unknown> | null {
+  const s = String(line || '')
+    .trim()
+    .replace(/[·。]\s*$/, '')
+    .replace(/,\s*$/, '');
+  if (!(s.startsWith('{') && s.endsWith('}'))) return null;
+  try {
+    const parsed = JSON.parse(s);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function extractEvidenceTextsFromJsonLikeObject(obj: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const pushIfUseful = (raw: unknown) => {
+    const text = stripBulletPrefix(String(raw || '').trim())
+      .replace(/[（(]\s*证据\s*[:：]\s*[）)]/g, '')
+      .replace(/[（(]\s*证据\s*ID\s*[:：]\s*[）)]/gi, '')
+      .replace(/证据\s*ID\s*[:：]\s*和\s*$/gi, '')
+      .trim();
+    if (!text) return;
+    if (/^ev_[0-9a-f]{12}$/i.test(text)) return;
+    if (!out.includes(text)) out.push(text);
+  };
+
+  const preferredFields = ['data', 'description', 'detail', 'statement', 'observation', 'metric', 'reason'];
+  for (const key of preferredFields) {
+    pushIfUseful(obj[key]);
+  }
+
+  const evidence = obj.evidence;
+  if (Array.isArray(evidence)) {
+    for (const item of evidence) {
+      if (typeof item === 'string') {
+        pushIfUseful(item);
+        continue;
+      }
+      const evidenceObject = asEvidenceObject(item);
+      if (evidenceObject) {
+        pushIfUseful(evidenceObject.title);
+        pushIfUseful(evidenceObject.description);
+        pushIfUseful(evidenceObject.summary);
+      }
+    }
+  } else if (typeof evidence === 'string') {
+    pushIfUseful(evidence);
+  }
+
+  const source = stripBulletPrefix(String(obj.source || obj.skill || '').trim());
+  if (source && out.length > 0) {
+    const last = out[out.length - 1];
+    if (!last.includes('来源:')) {
+      out[out.length - 1] = `${last}（来源: ${source}）`;
+    }
+  }
+
+  return out.slice(0, 4);
+}
+
+function normalizeUncertaintyWording(text: string): string {
+  const line = String(text || '').trim();
+  if (!line) return line;
+
+  const isContradiction = /矛盾|不一致|冲突/.test(line);
+  const hasPercentSignals = /\d+(?:\.\d+)?%/.test(line);
+  const hasDefinitionContext = /口径|分母|定义|时间窗|统计方式/.test(line);
+  if (isContradiction && hasPercentSignals && !hasDefinitionContext) {
+    return `${line}（可能由统计口径/分母差异导致，需统一时间窗与分母定义后再比较）`;
+  }
+
+  return line;
+}
+
+function normalizeNextStepWording(text: string): string {
+  const line = String(text || '').trim();
+  if (!line) return line;
+
+  const asksMoreData = /补充/.test(line) && /数据/.test(line);
+  const mentionsContradiction = /矛盾|冲突|不一致/.test(line);
+  if (asksMoreData && mentionsContradiction) {
+    const subject = line
+      .replace(/^补充/, '')
+      .replace(/的?矛盾数据.*/, '')
+      .replace(/矛盾数据.*/, '')
+      .replace(/数据.*/, '')
+      .trim();
+    if (subject) {
+      return `在同一帧同一时间窗统一统计口径，复核${subject}的分母与计算方式`;
+    }
+    return '在同一帧同一时间窗统一统计口径，复核矛盾指标的分母与计算方式';
+  }
+
+  return line;
+}
+
+function formatClusterLineFromJsonLikeObject(obj: Record<string, unknown>): string | null {
+  const clusterRaw = stripBulletPrefix(String(obj.cluster || obj.name || obj.pattern || '').trim());
+  const rankNum = Number(obj.rank);
+  const rankPrefix = Number.isFinite(rankNum) && rankNum > 0 ? `K${Math.round(rankNum)}` : '';
+
+  let clusterLabel = clusterRaw;
+  if (rankPrefix) {
+    if (!clusterLabel) {
+      clusterLabel = rankPrefix;
+    } else if (!new RegExp(`^${rankPrefix}\\b`, 'i').test(clusterLabel)) {
+      clusterLabel = `${rankPrefix}: ${clusterLabel}`;
+    }
+  }
+  if (!clusterLabel) {
+    return null;
+  }
+
+  const frames = Number(obj.frames ?? obj.frameCount);
+  const percentage = Number(obj.percentage ?? obj.pct);
+  const metrics: string[] = [];
+  if (Number.isFinite(frames) && frames > 0) {
+    metrics.push(`${Math.round(frames)}帧`);
+  }
+  if (Number.isFinite(percentage)) {
+    metrics.push(`${percentage.toFixed(1)}%`);
+  }
+
+  return `- ${clusterLabel}${metrics.length > 0 ? `（${metrics.join(', ')}）` : ''}`;
+}
+
+function stripBulletPrefix(text: string): string {
+  return String(text || '').replace(/^\s*-\s*/, '').trim();
+}
+
 /**
  * Convert JSON response to Markdown when LLM ignores format instructions.
  * This is a fallback to ensure human-readable output.
@@ -1064,7 +2401,7 @@ function convertJsonToMarkdown(jsonStr: string): string {
 /**
  * Format an arbitrary object as Markdown list.
  */
-function formatObjectAsMarkdown(obj: Record<string, any>, indent = ''): string {
+function formatObjectAsMarkdown(obj: Record<string, unknown>, indent = ''): string {
   const lines: string[] = [];
 
   for (const [key, value] of Object.entries(obj)) {
@@ -1081,7 +2418,7 @@ function formatObjectAsMarkdown(obj: Record<string, any>, indent = ''): string {
       }
     } else if (typeof value === 'object') {
       lines.push(`${indent}**${key}:**`);
-      lines.push(formatObjectAsMarkdown(value, indent + '  '));
+      lines.push(formatObjectAsMarkdown(value as Record<string, unknown>, indent + '  '));
     } else {
       lines.push(`${indent}- **${key}:** ${value}`);
     }

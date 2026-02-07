@@ -325,6 +325,7 @@ describe('StrategyExecutor', () => {
       primaryCause: null,
       secondaryCauses: [],
       allCauses: [],
+      clusters: [],
       summaryText: '',
     });
   });
@@ -1171,7 +1172,16 @@ describe('StrategyExecutor', () => {
 
   describe('Jank Cause Summary', () => {
     it('computes jank cause summary after frame_analysis stage', async () => {
-      const frameIntervals = [createMockFocusInterval({ id: 1 })];
+      const frameIntervals = [
+        createMockFocusInterval({
+          id: 1,
+          metadata: {
+            sourceEntityType: 'frame',
+            frameId: 1001,
+            sessionId: 7,
+          },
+        }),
+      ];
 
       const stage0 = createOverviewStageDefinition(
         () => frameIntervals,
@@ -1191,7 +1201,25 @@ describe('StrategyExecutor', () => {
 
       const mockDirectExecutor = {
         executeTasks: jest.fn<() => Promise<AgentResponse[]>>().mockResolvedValue([
-          createMockAgentResponse({ findings: [finding] }),
+          createMockAgentResponse({
+            findings: [finding],
+            toolResults: [{
+              success: true,
+              executionTimeMs: 10,
+              data: {},
+              metadata: {
+                frameMechanismRecord: {
+                  frameId: '1001',
+                  sessionId: '7',
+                  startTs: '1000000',
+                  endTs: '1016666',
+                  scopeLabel: '区间7 · 帧1001',
+                  causeType: 'slice',
+                  sourceStep: 'root_cause',
+                },
+              },
+            }],
+          }),
         ]),
       };
       (DirectSkillExecutor as jest.MockedClass<typeof DirectSkillExecutor>).mockImplementation(() => mockDirectExecutor as any);
@@ -1215,6 +1243,7 @@ describe('StrategyExecutor', () => {
         },
         secondaryCauses: [],
         allCauses: [],
+        clusters: [],
         summaryText: '1 frame with MainThread issue',
       });
 
@@ -1224,9 +1253,153 @@ describe('StrategyExecutor', () => {
 
       await executor.execute(ctx, mockEmitter);
 
-      expect(summarizeJankCauses).toHaveBeenCalled();
+      expect(summarizeJankCauses).toHaveBeenCalledWith(
+        expect.any(Array),
+        expect.arrayContaining([
+          expect.objectContaining({ frameId: '1001', causeType: 'slice' }),
+        ])
+      );
       expect(ctx.sharedContext.jankCauseSummary).toBeDefined();
       expect(ctx.sharedContext.jankCauseSummary?.totalJankFrames).toBe(1);
+    });
+  });
+
+  describe('Frame Mechanism Records', () => {
+    it('stores frame mechanism records from frame_analysis tool metadata', async () => {
+      const frameIntervals = [
+        createMockFocusInterval({
+          id: 1,
+          startTs: '1000000',
+          endTs: '1016666',
+          metadata: {
+            sourceEntityType: 'frame',
+            frameId: 1001,
+            sessionId: 7,
+          },
+        }),
+      ];
+
+      const stage0 = createOverviewStageDefinition(
+        () => frameIntervals,
+        () => ({ stop: false, reason: '' })
+      );
+      const stage1 = createFrameAnalysisStageDefinition();
+
+      const directResponse = createMockAgentResponse({
+        findings: [],
+        toolResults: [{
+          success: true,
+          executionTimeMs: 15,
+          data: {},
+          metadata: {
+            frameMechanismRecord: {
+              frameId: '1001',
+              sessionId: '7',
+              startTs: '1000000',
+              endTs: '1016666',
+              scopeLabel: '区间7 · 帧1001',
+              causeType: 'slice',
+              primaryCause: '主线程 doFrame 超预算',
+              mechanismGroup: 'trigger',
+              supplyConstraint: 'scheduling_delay',
+              triggerLayer: 'app_producer',
+              amplificationPath: 'sf_consumer_backpressure',
+              sourceStep: 'root_cause',
+            },
+          },
+        }],
+      });
+
+      const mockDirectExecutor = {
+        executeTasks: jest.fn<() => Promise<AgentResponse[]>>().mockResolvedValue([directResponse]),
+      };
+      (DirectSkillExecutor as jest.MockedClass<typeof DirectSkillExecutor>).mockImplementation(() => mockDirectExecutor as any);
+
+      (synthesizeFeedback as jest.MockedFunction<typeof synthesizeFeedback>).mockResolvedValue({
+        confirmedFindings: [],
+        updatedHypotheses: [],
+        newFindings: [],
+        informationGaps: [],
+      });
+
+      const strategy = createMockStrategy([stage0, stage1]);
+      const executor = new StrategyExecutor(strategy, mockServices);
+      const ctx = createMockExecutionContext();
+
+      await executor.execute(ctx, mockEmitter);
+
+      expect(ctx.sharedContext.frameMechanismRecords).toBeDefined();
+      expect(ctx.sharedContext.frameMechanismRecords).toHaveLength(1);
+      expect(ctx.sharedContext.frameMechanismRecords?.[0]).toMatchObject({
+        frameId: '1001',
+        sessionId: '7',
+        causeType: 'slice',
+        mechanismGroup: 'trigger',
+        supplyConstraint: 'scheduling_delay',
+        triggerLayer: 'app_producer',
+        amplificationPath: 'sf_consumer_backpressure',
+        sourceStep: 'root_cause',
+      });
+    });
+
+    it('deduplicates duplicate frame mechanism records by key fields', async () => {
+      const frameIntervals = [
+        createMockFocusInterval({
+          id: 1,
+          metadata: { sourceEntityType: 'frame', frameId: 1001, sessionId: 7 },
+        }),
+        createMockFocusInterval({
+          id: 2,
+          metadata: { sourceEntityType: 'frame', frameId: 1002, sessionId: 7 },
+        }),
+      ];
+
+      const stage0 = createOverviewStageDefinition(
+        () => frameIntervals,
+        () => ({ stop: false, reason: '' })
+      );
+      const stage1 = createFrameAnalysisStageDefinition();
+
+      const duplicateRecord = {
+        frameId: '1001',
+        sessionId: '7',
+        startTs: '1000000',
+        endTs: '1016666',
+        scopeLabel: '区间7 · 帧1001',
+        causeType: 'slice',
+        sourceStep: 'root_cause',
+      };
+
+      const mockDirectExecutor = {
+        executeTasks: jest.fn<() => Promise<AgentResponse[]>>().mockResolvedValue([
+          createMockAgentResponse({
+            toolResults: [{
+              success: true,
+              executionTimeMs: 10,
+              data: {},
+              metadata: { frameMechanismRecord: duplicateRecord },
+            }],
+          }),
+          createMockAgentResponse({
+            toolResults: [{
+              success: true,
+              executionTimeMs: 10,
+              data: {},
+              metadata: { frameMechanismRecord: duplicateRecord },
+            }],
+          }),
+        ]),
+      };
+      (DirectSkillExecutor as jest.MockedClass<typeof DirectSkillExecutor>).mockImplementation(() => mockDirectExecutor as any);
+
+      const strategy = createMockStrategy([stage0, stage1]);
+      const executor = new StrategyExecutor(strategy, mockServices);
+      const ctx = createMockExecutionContext();
+
+      await executor.execute(ctx, mockEmitter);
+
+      expect(ctx.sharedContext.frameMechanismRecords).toHaveLength(1);
+      expect(ctx.sharedContext.frameMechanismRecords?.[0].frameId).toBe('1001');
     });
   });
 

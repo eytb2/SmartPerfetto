@@ -25,7 +25,7 @@ prerequisites:
     - linux.memory.general
 display:
   name: "LMK 分析"
-  level: expert
+  level: detail
   description: "Low Memory Killer 事件分析，追踪内存压力、进程被杀原因及系统内存状态"
 
 triggers:

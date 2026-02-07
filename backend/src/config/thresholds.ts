@@ -248,6 +248,14 @@ export const DEFAULT_DIRECT_SKILL_CONCURRENCY = 6;
 export const DEFAULT_MAX_FRAMES_PER_SESSION = 8;
 
 /**
+ * Maximum number of frames per session when cluster-first full analysis is required.
+ *
+ * Used by scrolling strategy stage-2 frame list extraction so we can analyze
+ * significantly more frames (e.g., 50+) and produce actionable K1/K2/K3 clusters.
+ */
+export const DEFAULT_CLUSTERING_MAX_FRAMES_PER_SESSION = 200;
+
+/**
  * Maximum number of sessions to analyze in overview stage.
  *
  * This limits the scope of analysis for very long traces.
@@ -440,6 +448,7 @@ export const ANALYSIS_THRESHOLDS = {
   execution: {
     directSkillConcurrency: DEFAULT_DIRECT_SKILL_CONCURRENCY,
     maxFramesPerSession: DEFAULT_MAX_FRAMES_PER_SESSION,
+    clusteringMaxFramesPerSession: DEFAULT_CLUSTERING_MAX_FRAMES_PER_SESSION,
     maxSessionsToAnalyze: DEFAULT_MAX_SESSIONS_TO_ANALYZE,
   },
   confidence: {

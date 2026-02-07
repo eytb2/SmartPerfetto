@@ -6,6 +6,23 @@ AI-driven Perfetto analysis platform for Android performance data.
 
 This is primarily a TypeScript codebase. Use TypeScript idioms, strict typing, and follow existing patterns in the codebase.
 
+## Mandatory Post-change Trace Regression
+
+After every code change, run the scene reconstruction regression suite:
+
+```bash
+cd backend && npm run test:scene-trace-regression
+```
+
+This suite is mandatory and validates these canonical traces in `test-traces/`:
+
+- 重度滑动卡顿: `app_aosp_scrolling_heavy_jank.pftrace`
+- 轻度滑动: `app_aosp_scrolling_light.pftrace`
+- 标准滑动: `app_scroll_Standard-AOSP-App-Without-PreAnimation.pftrace`
+- App 启动: `app_start_heavy.pftrace`
+- Flutter TextureView 滑动: `Scroll-Flutter-327-TextureView.pftrace`
+- Flutter SurfaceView 滑动: `Scroll-Flutter-SurfaceView-Wechat-Wenyiwen.pftrace`
+
 ## Architecture Overview
 
 ```

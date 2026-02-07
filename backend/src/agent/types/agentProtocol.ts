@@ -387,6 +387,11 @@ export interface SharedAgentContext {
    * Used by ConclusionGenerator to include structured root cause statistics.
    */
   jankCauseSummary?: import('../core/jankCauseSummarizer').JankCauseSummary;
+  /**
+   * Per-frame mechanism records captured directly from root_cause step outputs.
+   * Unlike findings, these records are not reduced by synthesis deduplication.
+   */
+  frameMechanismRecords?: import('./jankCause').FrameMechanismRecord[];
 }
 
 /**

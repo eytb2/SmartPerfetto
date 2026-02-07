@@ -694,12 +694,19 @@ export class AgentDrivenOrchestrator extends EventEmitter {
       // 8.5 Merge findings with previous analysis (v2.0 incremental analysis)
       // If this is an incremental turn, merge new findings with existing ones
       let mergedFindings = executorResult.findings;
-      if (incrementalScope.isExtension && previousFindings.length > 0) {
+      const shouldMergeHistoricalFindings =
+        incrementalScope.isExtension &&
+        previousFindings.length > 0 &&
+        followUpType !== 'drill_down';
+
+      if (shouldMergeHistoricalFindings) {
         mergedFindings = this.incrementalAnalyzer.mergeFindings(
           previousFindings,
           executorResult.findings
         );
         emitter.log(`[IncrementalAnalysis] Merged ${executorResult.findings.length} new findings with ${previousFindings.length} previous → ${mergedFindings.length} total`);
+      } else if (incrementalScope.isExtension && previousFindings.length > 0 && followUpType === 'drill_down') {
+        emitter.log('[IncrementalAnalysis] Drill-down turn keeps findings scope-local; skipped historical merge');
       }
 
       // 9. Generate conclusion
