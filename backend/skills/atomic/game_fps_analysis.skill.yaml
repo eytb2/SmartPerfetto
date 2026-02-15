@@ -69,6 +69,30 @@ steps:
     display:
       level: summary
       title: "目标帧率检测"
+      columns:
+        - name: detected_fps_mode
+          label: "检测模式"
+          type: string
+        - name: target_interval_ns
+          label: "目标间隔"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: target_fps
+          label: "目标帧率"
+          type: number
+        - name: frames_at_target
+          label: "达标帧数"
+          type: number
+          format: compact
+        - name: total_frames
+          label: "总帧数"
+          type: number
+          format: compact
+        - name: target_hit_rate
+          label: "达标率"
+          type: percentage
+          format: percentage
     sql: |
       WITH
       time_bounds AS (
@@ -148,6 +172,47 @@ steps:
     display:
       level: detail
       title: "帧间隔分析"
+      columns:
+        - name: total_frames
+          label: "总帧数"
+          type: number
+          format: compact
+        - name: duration_sec
+          label: "时长(秒)"
+          type: number
+        - name: actual_fps
+          label: "实际FPS"
+          type: number
+        - name: avg_interval_ms
+          label: "平均间隔"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: min_interval_ms
+          label: "最小间隔"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_interval_ms
+          label: "最大间隔"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: p50_interval_ms
+          label: "P50间隔"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: p95_interval_ms
+          label: "P95间隔"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: interval_stddev_ms
+          label: "间隔标准差"
+          type: duration
+          format: duration_ms
+          unit: ms
     sql: |
       WITH
       time_bounds AS (
@@ -193,6 +258,42 @@ steps:
     display:
       level: detail
       title: "掉帧分析"
+      columns:
+        - name: total_frames
+          label: "总帧数"
+          type: number
+          format: compact
+        - name: jank_count
+          label: "掉帧数"
+          type: number
+          format: compact
+        - name: severe_jank_count
+          label: "严重掉帧"
+          type: number
+          format: compact
+        - name: freeze_count
+          label: "卡顿数"
+          type: number
+          format: compact
+        - name: jank_rate
+          label: "掉帧率"
+          type: percentage
+          format: percentage
+        - name: severe_jank_rate
+          label: "严重掉帧率"
+          type: percentage
+          format: percentage
+        - name: target_interval_ms
+          label: "目标间隔"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: target_fps
+          label: "目标帧率"
+          type: number
+        - name: quality_rating
+          label: "质量评级"
+          type: string
     sql: |
       WITH
       time_bounds AS (

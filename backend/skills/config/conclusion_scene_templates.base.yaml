@@ -10,6 +10,8 @@ scenes:
     output_requirement_lines:
       - "- 启动场景必须给出至少 1 个阶段耗时或启动指标（TTID/TTFD/冷温热启动）。"
       - "- 资源问题要明确归类（CPU 频率/调度、I/O、Binder、类加载/初始化），不要笼统写“系统慢”。"
+      - "- 若最慢切片命中框架包裹层（clientTransactionExecuted/activityStart/performCreate/bindApplication），必须继续下钻到业务可改切片后再给“直接原因”。"
+      - "- 启动结论优先落在 Application/Activity 内的具体初始化任务，不要把框架壳层名称当最终根因。"
     next_step_line: "- “下一步”优先给出启动阶段拆分与最慢阶段下钻动作，避免泛化为“继续观察”。"
     require_top_clusters: false
 

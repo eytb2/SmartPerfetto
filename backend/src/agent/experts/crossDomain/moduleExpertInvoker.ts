@@ -436,6 +436,42 @@ export class ModuleExpertInvoker extends EventEmitter {
   }
 
   /**
+   * Unwrap StepResult / nested SkillExecutionResult payloads into row data.
+   * This keeps module extraction resilient when a step is switched to `type: skill`.
+   */
+  private unwrapStepData(value: any): any {
+    if (!value || typeof value !== 'object') return value;
+
+    const maybe = value as Record<string, any>;
+    const isStepResult =
+      typeof maybe.stepId === 'string' &&
+      typeof maybe.success === 'boolean' &&
+      Object.prototype.hasOwnProperty.call(maybe, 'data');
+    if (isStepResult) {
+      return this.unwrapStepData(maybe.data);
+    }
+
+    const rawResults = maybe.rawResults;
+    if (rawResults && typeof rawResults === 'object') {
+      if (Object.prototype.hasOwnProperty.call(maybe, 'data')) {
+        return this.unwrapStepData(maybe.data);
+      }
+
+      if ((rawResults as any).root?.data !== undefined) {
+        return this.unwrapStepData((rawResults as any).root.data);
+      }
+
+      for (const step of Object.values(rawResults as Record<string, any>)) {
+        if (step && typeof step === 'object' && Object.prototype.hasOwnProperty.call(step, 'data')) {
+          return this.unwrapStepData((step as any).data);
+        }
+      }
+    }
+
+    return value;
+  }
+
+  /**
    * Auto-detect findings from step results
    * Looks for common patterns that indicate performance issues
    */
@@ -446,9 +482,8 @@ export class ModuleExpertInvoker extends EventEmitter {
     const findings: ModuleFinding[] = [];
 
     for (const [stepId, stepResult] of Object.entries(stepResults)) {
-      if (!stepResult?.data || !Array.isArray(stepResult.data)) continue;
-
-      const data = stepResult.data;
+      const data = this.unwrapStepData(stepResult);
+      if (!Array.isArray(data)) continue;
 
       // Pattern 1: Jank frame detection (for scrolling_analysis)
       if (stepId.includes('jank') || stepId.includes('frame')) {
@@ -537,8 +572,8 @@ export class ModuleExpertInvoker extends EventEmitter {
     const flattened: Record<string, any> = {};
 
     for (const [stepId, stepResult] of Object.entries(rawResults)) {
-      if (stepResult?.data !== undefined) {
-        flattened[stepId] = stepResult.data;
+      if (stepResult !== undefined) {
+        flattened[stepId] = this.unwrapStepData(stepResult);
       }
     }
 

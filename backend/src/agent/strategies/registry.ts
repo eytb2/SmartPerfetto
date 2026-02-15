@@ -13,6 +13,7 @@
 import { StagedAnalysisStrategy } from './types';
 import { scrollingStrategy } from './scrollingStrategy';
 import { startupStrategy } from './startupStrategy';
+import { interactionStrategy } from './interactionStrategy';
 import { sceneReconstructionQuickStrategy, sceneReconstructionStrategy } from './sceneReconstructionStrategy';
 import {
   LLMStrategySelector,
@@ -120,8 +121,28 @@ export class StrategyRegistry {
     }
 
     // Mode 2: LLM-only
-    if (this.matchMode === 'llm_only' && this.llmSelector && intent && traceContext) {
-      return this.matchLLMOnly(query, intent, traceContext);
+    if (this.matchMode === 'llm_only') {
+      if (this.llmSelector && intent && traceContext) {
+        return this.matchLLMOnly(query, intent, traceContext);
+      }
+      // Guardrail: avoid dropping strategy selection when LLM context is incomplete.
+      // Fall back to keyword matching instead of returning no strategy.
+      const keywordFallback = this.match(query);
+      if (keywordFallback) {
+        return {
+          strategy: keywordFallback,
+          matchMethod: 'keyword',
+          confidence: 1.0,
+          shouldFallback: false,
+        };
+      }
+      return {
+        strategy: null,
+        matchMethod: 'none',
+        confidence: 0,
+        shouldFallback: true,
+        fallbackReason: 'LLM-only 模式缺少 intent/traceContext，且关键词未匹配策略',
+      };
     }
 
     // Mode 3: Keyword-first, fall back to LLM
@@ -294,6 +315,7 @@ export function createStrategyRegistry(): StrategyRegistry {
   // Register strategies in order of specificity (more specific first)
   registry.register(scrollingStrategy);
   registry.register(startupStrategy);
+  registry.register(interactionStrategy);
   registry.register(sceneReconstructionQuickStrategy);
   // Scene reconstruction is a catch-all for overview queries
   registry.register(sceneReconstructionStrategy);

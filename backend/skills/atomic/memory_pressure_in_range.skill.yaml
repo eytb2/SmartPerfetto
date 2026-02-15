@@ -96,7 +96,8 @@ steps:
           s.dur,
           s.name
         FROM slice s
-        JOIN thread t ON s.utid = t.id
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
         CROSS JOIN params p
         WHERE t.name LIKE 'kswapd%'
           AND s.ts >= p.start_ts
@@ -121,7 +122,8 @@ steps:
           s.name,
           t.name AS thread_name
         FROM slice s
-        JOIN thread t ON s.utid = t.id
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
         CROSS JOIN params p
         WHERE (s.name LIKE '%direct_reclaim%' OR s.name LIKE '%reclaim%alloc%')
           AND s.ts >= p.start_ts
@@ -185,8 +187,9 @@ steps:
           t.name AS thread_name,
           p2.name AS process_name
         FROM slice s
-        JOIN thread t ON s.utid = t.id
-        JOIN process p2 ON t.upid = p2.id
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p2 ON t.upid = p2.upid
         CROSS JOIN params p
         WHERE (s.name LIKE '%alloc_pages%' OR s.name LIKE '%page_alloc%')
           AND s.dur > 1000000  -- > 1ms stall

@@ -892,7 +892,7 @@ export interface LogEntry {
 
 | 组件 | 主链路接入 | 说明 |
 |------|-----------|------|
-| EnhancedSessionContext | **已接入** | AgentDrivenOrchestrator 核心上下文 |
+| EnhancedSessionContext | **已接入** | AgentRuntime 核心上下文 |
 | TraceAgentState | **已接入** | goal/evidence/experiment/contradiction 全链路使用 |
 | EntityStore | **已接入** | drill-down、extend、entity capture 使用 |
 | FocusStore | **已接入** | 持久化已支持，增量分析引用 |
@@ -914,6 +914,6 @@ export interface LogEntry {
 2. **证据链可追溯**：finding 增加 evidenceIds（指向 TraceAgentState.evidence），让结论可自动生成链路摘要
 3. **偏好可调**：允许用户显式设置"快/准/可解释"，并映射到 soft budget、策略选择与输出视图
 4. **ContextCompactor 主链路集成**：在 HypothesisExecutor 多轮循环中自动触发 `compactIfNeeded()`
-5. **Hook 系统完整挂载**：在 AgentDrivenOrchestrator 的 session/iteration/subagent 生命周期中调用 HookRegistry
+5. **Hook 系统完整挂载**：在 AgentRuntime 的 session/iteration/subagent 生命周期中调用 HookRegistry
 6. **Checkpoint 恢复集成**：在 POST /api/agent/analyze 入口检查 `canResume()`，提供恢复选项
 7. **Fork 体验完善**：暴露 fork/compare/merge API，支持用户在分析过程中创建分支探索

@@ -548,7 +548,7 @@ describe('Scrolling Decision Tree', () => {
     });
 
     // Mock SF analysis result - SF has problem
-    mockExecutor.setMockResult('sf_analysis', {
+    mockExecutor.setMockResult('surfaceflinger_analysis', {
       sf_avg_duration: 8, // > 4ms threshold, SF issue
     });
 

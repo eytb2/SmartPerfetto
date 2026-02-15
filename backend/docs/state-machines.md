@@ -2273,15 +2273,15 @@ This state machine describes how skill execution errors are collected and displa
 
 本节描述 Section 12 中设计的 Agent-Driven 架构的实际实现状态机。
 
-### 13.1 AgentDrivenOrchestrator 状态机
+### 13.1 AgentRuntime 状态机
 
-**文件:** `backend/src/agent/core/agentDrivenOrchestrator.ts`
+**文件:** `backend/src/agentv2/runtime/agentRuntime.ts`
 
 这是新架构的 AI 决策核心，替代原有的 MasterOrchestrator。
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                       AgentDrivenOrchestrator.analyze()                      │
+│                           AgentRuntime.analyze()                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │    ┌───────────┐                                                             │
@@ -2382,7 +2382,7 @@ This state machine describes how skill execution errors are collected and displa
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### AgentDrivenOrchestrator 状态定义
+#### AgentRuntime 状态定义
 
 | State | Description | Emitted Event |
 |-------|-------------|---------------|
@@ -2820,13 +2820,13 @@ This state machine describes how skill execution errors are collected and displa
 | AMB-001 | agentMessageBus.ts:218-220 | **High** | Busy-wait 轮询效率低 | 替换为 Semaphore 类 |
 | AMB-002 | agentMessageBus.ts:234 | **Critical** | 非空断言 `!` 可能导致崩溃 | 添加 null 检查并抛出明确错误 |
 | AMB-003 | agentMessageBus.ts:329 | Low | `finding.confidence` 未检查 | 使用 `finding.confidence ?? 0` |
-| ADO-001 | agentDrivenOrchestrator.ts:265-267 | **High** | deep_dive/pivot 策略处理不完整 | 实现完整的假设创建和上下文更新 |
+| ADO-001 | agentRuntime.ts:265-267 | **High** | deep_dive/pivot 策略处理不完整 | 实现完整的假设创建和上下文更新 |
 
 ---
 
 ### 13.6 新旧架构对比
 
-| 维度 | MasterOrchestrator (旧) | AgentDrivenOrchestrator (新) |
+| 维度 | MasterOrchestrator (旧) | AgentRuntime (新) |
 |------|------------------------|------------------------------|
 | AI 参与度 | 仅开头(规划)和结尾(合成) | 全流程 AI 驱动 |
 | 执行方式 | 确定性 Pipeline | 动态任务派发 |
@@ -2848,5 +2848,5 @@ This state machine describes how skill execution errors are collected and displa
 | 1.3.0 | 2026-01-21 | **All issues resolved**: (1) SM2 去重键 - NOT A BUG; (2) SM4 PENDING 状态 - DOC FIXED; (3) SM8 渲染器 - IMPLEMENTED; (4) SM5 类型验证 - IMPLEMENTED |
 | 2.0.0 | 2026-01-21 | **Major update - AI Agent State Machines**: Added Section 8 with (1) Agent Phase State Machine (AgentStateMachine) - 完整生命周期; (2) Circuit Breaker State Machine - 熔断器模式; (3) Pipeline Executor State Machine - 流水线执行; (4) MasterOrchestrator 完整执行流程; (5) OrchestratorBridge 事件映射 |
 | 3.0.0 | 2026-01-21 | **Critical Architecture Review**: Added Section 11 (AI 闭环架构问题诊断 - 5大缺陷分析) and Section 12 (真正的 AI Agents 架构设计 - 完整重构方案，包含子 Agent 设计、Master Agent 决策流程、Agent 间通信协议、6.5 周实施路线图) |
-| 4.0.0 | 2026-01-22 | **Agent-Driven Implementation**: Added Section 13 with implemented state machines for (1) AgentDrivenOrchestrator - 新 AI 决策核心; (2) BaseAgent Think-Act-Reflect Loop - 子 Agent 执行循环; (3) IterationStrategyPlanner - 迭代策略决策; (4) AgentMessageBus with Semaphore - Agent 通信; (5) 已修复问题清单 (6 issues fixed); (6) 新旧架构对比 |
+| 4.0.0 | 2026-01-22 | **Agent-Driven Implementation**: Added Section 13 with implemented state machines for (1) AgentRuntime - 新 AI 决策核心; (2) BaseAgent Think-Act-Reflect Loop - 子 Agent 执行循环; (3) IterationStrategyPlanner - 迭代策略决策; (4) AgentMessageBus with Semaphore - Agent 通信; (5) 已修复问题清单 (6 issues fixed); (6) 新旧架构对比 |
 | 4.1.0 | 2026-01-22 | **Type Safety Refactoring**: (1) Converted `AgentPhase`, `CircuitState`, `StateEventType` from type aliases to enums for better type safety; (2) Migrated `skill_data` → `skill_layered_result` event type; (3) Added `SSEEventType` and `StreamingUpdateType` enums in `types/analysis.ts`; (4) Added `forceClose` limit (MAX=5) to CircuitBreaker; (5) Added comprehensive CircuitBreaker unit tests (28 tests) |

@@ -55,16 +55,45 @@ inputs:
     type: timestamp
     required: false
     description: "分析结束时间戳（纳秒，可选）"
+  - name: slow_binder_critical_ms
+    type: number
+    required: false
+    default: 50
+    description: "慢 Binder 严重阈值（ms）"
+  - name: slow_binder_warning_ms
+    type: number
+    required: false
+    default: 16
+    description: "慢 Binder 警告阈值（ms）"
+  - name: main_thread_txn_warning
+    type: number
+    required: false
+    default: 50
+    description: "主线程事务数告警阈值"
+  - name: server_response_warning_ms
+    type: number
+    required: false
+    default: 20
+    description: "服务端响应告警阈值（ms）"
 
 steps:
   # ========== 检查 Binder 数据 ==========
   - id: check_binder
     type: atomic
     name: "检查 Binder 数据"
+    optional: true
     display:
       level: summary
       layer: overview
       title: "数据检查"
+      columns:
+        - name: txn_count
+          label: "事务数"
+          type: number
+          format: compact
+        - name: status
+          label: "状态"
+          type: string
     sql: |
       SELECT
         COUNT(*) as txn_count,
@@ -189,9 +218,9 @@ steps:
         -- 主线程慢调用
         SUM(CASE WHEN is_main_thread = 1 AND client_dur / 1e6 > 16 THEN 1 ELSE 0 END) as main_thread_slow_count,
         CASE
-          WHEN MAX(client_dur) / 1e6 > 100 THEN '严重'
-          WHEN MAX(client_dur) / 1e6 > 50 THEN '需优化'
-          WHEN MAX(client_dur) / 1e6 > 16 THEN '良好'
+          WHEN MAX(client_dur) / 1e6 > ${slow_binder_critical_ms|50} * 2 THEN '严重'
+          WHEN MAX(client_dur) / 1e6 > ${slow_binder_critical_ms|50} THEN '需优化'
+          WHEN MAX(client_dur) / 1e6 > ${slow_binder_warning_ms|16} THEN '良好'
           ELSE '优秀'
         END as rating
       FROM android_binder_txns bt
@@ -250,7 +279,7 @@ steps:
           type: number
     sql: |
       SELECT
-        bt.aidl_interface,
+        COALESCE(bt.aidl_name, 'unknown') as aidl_interface,
         bt.server_process,
         COUNT(*) as call_count,
         SUM(bt.client_dur) / 1e6 as total_dur_ms,
@@ -265,7 +294,7 @@ steps:
       WHERE bt.client_process = '${target_process.data[0].process_name}'
         AND (${start_ts} IS NULL OR bt.client_ts + bt.client_dur > ${start_ts})
         AND (${end_ts} IS NULL OR bt.client_ts < ${end_ts})
-      GROUP BY bt.aidl_interface, bt.server_process
+      GROUP BY COALESCE(bt.aidl_name, 'unknown'), bt.server_process
       ORDER BY total_dur_ms DESC
       LIMIT 15
     save_as: outgoing_by_interface
@@ -324,7 +353,7 @@ steps:
         ROUND(bt.client_dur / 1e6, 2) as dur_ms,
         bt.server_process,
         bt.aidl_name,
-        bt.aidl_interface,
+        COALESCE(bt.aidl_name, 'unknown') as aidl_interface,
         bt.client_process as process_name,
         -- 时间戳用于详细分析
         printf('%d', bt.client_ts) as binder_ts,
@@ -333,8 +362,8 @@ steps:
         printf('%d', CAST(bt.client_ts - 10000000 AS INTEGER)) as perfetto_start,
         printf('%d', CAST(bt.client_ts + bt.client_dur + 10000000 AS INTEGER)) as perfetto_end,
         CASE
-          WHEN bt.client_dur / 1e6 > 50 THEN 'critical'
-          WHEN bt.client_dur / 1e6 > 16 THEN 'warning'
+          WHEN bt.client_dur / 1e6 > ${slow_binder_critical_ms|50} THEN 'critical'
+          WHEN bt.client_dur / 1e6 > ${slow_binder_warning_ms|16} THEN 'warning'
           WHEN bt.client_dur / 1e6 > 8 THEN 'notice'
           ELSE 'normal'
         END as severity
@@ -353,10 +382,42 @@ steps:
   - id: binder_blocking_analysis
     type: atomic
     name: "Binder 阻塞分析"
+    optional: true
     display:
       level: key
       layer: list
       title: "Binder 阻塞期间状态分析"
+      columns:
+        - name: server_process
+          label: "服务进程"
+          type: string
+        - name: aidl_name
+          label: "AIDL 方法"
+          type: string
+        - name: binder_dur_ms
+          label: "Binder 耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: state
+          label: "线程状态"
+          type: string
+        - name: blocked_function
+          label: "阻塞函数"
+          type: string
+        - name: state_dur_ms
+          label: "状态耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: state_percent
+          label: "状态占比"
+          type: percentage
+          format: percentage
+        - name: ts_str
+          label: "时间"
+          type: timestamp
+          clickAction: navigate_timeline
     sql: |
       SELECT
         bt.server_process,
@@ -379,7 +440,7 @@ steps:
         AND (${end_ts} IS NULL OR bt.client_ts < ${end_ts})
         AND bt.is_main_thread = 1
         AND bt.client_dur > 5000000  -- > 5ms
-      GROUP BY bt.id, ts.state
+      GROUP BY bt.client_ts, bt.client_utid, bt.server_process, bt.aidl_name, bt.client_dur, ts.state
       ORDER BY bt.client_dur DESC, state_dur_ms DESC
       LIMIT 30
     save_as: binder_blocking
@@ -393,10 +454,46 @@ steps:
       level: detail
       layer: list
       title: "服务端处理时间分析"
+      columns:
+        - name: server_process
+          label: "服务进程"
+          type: string
+        - name: aidl_interface
+          label: "AIDL 接口"
+          type: string
+        - name: call_count
+          label: "调用次数"
+          type: number
+          format: compact
+        - name: total_client_wait_ms
+          label: "客户端总等待"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: total_server_process_ms
+          label: "服务端总处理"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_server_dur_ms
+          label: "服务端平均耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_server_dur_ms
+          label: "服务端最大耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_transport_overhead_ms
+          label: "平均传输开销"
+          type: duration
+          format: duration_ms
+          unit: ms
     sql: |
       SELECT
         bt.server_process,
-        bt.aidl_interface,
+        COALESCE(bt.aidl_name, 'unknown') as aidl_interface,
         COUNT(*) as call_count,
         -- 客户端等待 vs 服务端处理
         SUM(bt.client_dur) / 1e6 as total_client_wait_ms,
@@ -410,7 +507,7 @@ steps:
         AND (${start_ts} IS NULL OR bt.client_ts + bt.client_dur > ${start_ts})
         AND (${end_ts} IS NULL OR bt.client_ts < ${end_ts})
         AND bt.is_sync = 1
-      GROUP BY bt.server_process, bt.aidl_interface
+      GROUP BY bt.server_process, COALESCE(bt.aidl_name, 'unknown')
       ORDER BY total_client_wait_ms DESC
       LIMIT 15
     save_as: server_response
@@ -420,10 +517,34 @@ steps:
   - id: binder_frame_correlation
     type: atomic
     name: "Binder 与帧关联"
+    optional: true
     display:
       level: detail
       layer: list
       title: "Binder 调用与帧渲染关联"
+      columns:
+        - name: server_process
+          label: "服务进程"
+          type: string
+        - name: aidl_name
+          label: "AIDL 方法"
+          type: string
+        - name: binder_dur_ms
+          label: "Binder 耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: frame_id
+          label: "帧 ID"
+          type: number
+        - name: frame_dur_ms
+          label: "帧耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: in_frame
+          label: "帧内/帧外"
+          type: string
     sql: |
       SELECT
         bt.server_process,
@@ -460,10 +581,36 @@ steps:
       level: summary
       layer: list
       title: "接收的 Binder 调用"
+      columns:
+        - name: client_process
+          label: "客户端进程"
+          type: string
+        - name: aidl_interface
+          label: "AIDL 接口"
+          type: string
+        - name: call_count
+          label: "调用次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_dur_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
     sql: |
       SELECT
         bt.client_process,
-        bt.aidl_interface,
+        COALESCE(bt.aidl_name, 'unknown') as aidl_interface,
         COUNT(*) as call_count,
         SUM(bt.server_dur) / 1e6 as total_dur_ms,
         ROUND(AVG(bt.server_dur) / 1e6, 2) as avg_dur_ms,
@@ -472,7 +619,7 @@ steps:
       WHERE bt.server_process = '${target_process.data[0].process_name}'
         AND (${start_ts} IS NULL OR bt.client_ts + bt.client_dur > ${start_ts})
         AND (${end_ts} IS NULL OR bt.client_ts < ${end_ts})
-      GROUP BY bt.client_process, bt.aidl_interface
+      GROUP BY bt.client_process, COALESCE(bt.aidl_name, 'unknown')
       ORDER BY total_dur_ms DESC
       LIMIT 15
     save_as: incoming_calls
@@ -525,7 +672,7 @@ steps:
     inputs: [binder_overview, main_thread_binder, binder_blocking, server_response]
     rules:
       # 主线程慢 Binder
-      - condition: "main_thread_binder.data[0]?.dur_ms > 50"
+      - condition: "main_thread_binder.data[0]?.dur_ms > (inputs?.slow_binder_critical_ms ?? 50)"
         severity: critical
         diagnosis: "主线程存在严重慢 Binder 调用 (${main_thread_binder.data[0].dur_ms}ms)"
         confidence: high
@@ -534,7 +681,7 @@ steps:
           - "检查服务 ${main_thread_binder.data[0].server_process} 响应延迟"
           - "考虑使用异步 Binder 接口"
 
-      - condition: "main_thread_binder.data[0]?.dur_ms > 16"
+      - condition: "main_thread_binder.data[0]?.dur_ms > (inputs?.slow_binder_warning_ms ?? 16)"
         severity: warning
         diagnosis: "主线程 Binder 调用超过一帧时间 (${main_thread_binder.data[0].dur_ms}ms)"
         confidence: high
@@ -543,7 +690,7 @@ steps:
           - "优化服务端处理时间"
 
       # 主线程 Binder 调用过多
-      - condition: "binder_overview.data[0]?.main_thread_txns > 50"
+      - condition: "binder_overview.data[0]?.main_thread_txns > (inputs?.main_thread_txn_warning ?? 50)"
         severity: warning
         diagnosis: "主线程发起 ${binder_overview.data[0].main_thread_txns} 次 Binder 调用"
         confidence: medium
@@ -553,7 +700,7 @@ steps:
           - "将非必要调用移到后台线程"
 
       # 服务端响应慢
-      - condition: "server_response.data[0]?.avg_server_dur_ms > 20"
+      - condition: "server_response.data[0]?.avg_server_dur_ms > (inputs?.server_response_warning_ms ?? 20)"
         severity: warning
         diagnosis: "服务端平均处理时间较长 (${server_response.data[0].avg_server_dur_ms}ms)"
         confidence: medium
@@ -570,65 +717,5 @@ steps:
           - "检查服务端是否有 IO 操作"
           - "考虑使用异步接口"
 
-  # ========== AI 总结 ==========
-  - id: global_summary
-    type: ai_summary
-    name: "分析总结"
-    display:
-      level: key
-      layer: overview
-      title: "Binder 分析总结"
-    inputs: [binder_check, binder_overview, outgoing_by_interface, main_thread_binder, analyze_slow_binder, binder_blocking, binder_diagnosis]
-    prompt: |
-      请基于以下 Binder 分析结果，生成专业的性能评估总结。
-
-      ## 数据检查
-          binder_check
-
-      ## Binder 概览
-          binder_overview
-
-      ## 发出的调用（按接口）
-          outgoing_by_interface
-
-      ## 主线程 Binder 调用
-          main_thread_binder
-
-      ## 逐个慢 Binder 详细分析（大小核、四象限）
-          analyze_slow_binder
-
-      ## Binder 阻塞分析
-          binder_blocking
-
-      ## 诊断结果
-          binder_diagnosis
-
-      ## 专业分析要求
-
-      如果无 Binder 数据，请输出：
-      "未检测到 Binder 调用数据。
-
-      可能原因：
-      - Trace 未包含 Binder 事件（需要启用 android.binder 模块）
-      - 应用未进行跨进程调用
-
-      建议：如需分析 Binder 问题，请确保 Trace 包含 android.binder 数据。"
-
-      如果有数据，请分析并输出：
-      1. **整体评价**：
-         - 主线程 Binder：<16ms优秀，16-50ms需优化，>50ms严重
-         - 关注主线程同步调用占比
-      2. **热点服务**：哪些服务/接口被频繁调用
-      3. **四象限分析**：Binder 期间主线程状态分布（通常以 Sleeping 为主）
-      4. **阻塞分析**：主线程阻塞期间的状态分布
-      5. **优化建议**：基于实际问题给出1-3条具体建议
-
-      ## 严格要求
-      - 只基于提供的实际数据分析
-      - 重点关注主线程同步 Binder 调用的影响
-      - 格式清晰，不超过250字
-
 output:
-  display:
-    level: key
-    format: summary
+  format: structured

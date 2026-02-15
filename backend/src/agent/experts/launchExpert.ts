@@ -198,11 +198,13 @@ export class LaunchExpert extends BaseExpert {
     const context: DecisionContext = {
       sessionId: input.sessionId,
       traceId: input.traceId,
+      query: input.query,
       architecture,
       traceProcessorService: input.traceProcessorService,
       previousResults: new Map(),
       timeRange: input.timeRange,
       packageName: input.packageName,
+      analysisParams: input.analysisParams,
     };
 
     try {

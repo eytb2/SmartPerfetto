@@ -354,11 +354,13 @@ export abstract class BaseExpert extends EventEmitter implements BaseExpertInter
     const context: DecisionContext = {
       sessionId: input.sessionId,
       traceId: input.traceId,
+      query: input.query,
       architecture,
       traceProcessorService: input.traceProcessorService,
       previousResults: new Map(),
       timeRange: input.timeRange,
       packageName: input.packageName,
+      analysisParams: input.analysisParams,
     };
 
     // Add previous findings to context

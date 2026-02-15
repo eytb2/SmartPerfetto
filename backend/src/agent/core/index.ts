@@ -9,11 +9,6 @@ export { CircuitBreaker } from './circuitBreaker';
 export { ModelRouter, AllModelsFailedError } from './modelRouter';
 export { PipelineExecutor } from './pipelineExecutor';
 
-// Orchestrator and executors
-export { AgentDrivenOrchestrator, createAgentDrivenOrchestrator } from './agentDrivenOrchestrator';
-export { StrategyExecutor } from './executors/strategyExecutor';
-export { HypothesisExecutor } from './executors/hypothesisExecutor';
-
 // Orchestrator sub-modules
 export { understandIntent } from './intentUnderstanding';
 export { generateInitialHypotheses, generateDefaultHypotheses, createHypothesis } from './hypothesisGenerator';
@@ -47,7 +42,7 @@ export {
 
 // Orchestrator types
 export type {
-  AgentDrivenOrchestratorConfig,
+  AgentRuntimeConfig,
   AnalysisResult,
   AnalysisOptions,
   AnalysisServices,

@@ -11,7 +11,7 @@
 
 | 文档 | 关注点 | 对应核心代码 |
 |------|--------|--------------|
-| [01-agent-driven-orchestrator.md](./01-agent-driven-orchestrator.md) | Orchestrator（薄协调层）与执行器路由 | `backend/src/agent/core/agentDrivenOrchestrator.ts` |
+| [01-agent-runtime.md](./01-agent-runtime.md) | Runtime（薄协调层）与执行器路由 | `backend/src/agentv2/runtime/agentRuntime.ts` |
 | [02-multi-round-conversation.md](./02-multi-round-conversation.md) | 多轮对话：follow-up、实体引用、上下文注入 | `backend/src/agent/context/enhancedSessionContext.ts` |
 | [03-memory-state-management.md](./03-memory-state-management.md) | Memory：短期/长期、证据摘要、trace 隔离、持久化 | `backend/src/agent/state/traceAgentState.ts` |
 | [04-strategy-system.md](./04-strategy-system.md) | Strategy：确定性流水线作为"工具"，以及如何与目标驱动 loop 融合 | `backend/src/agent/strategies/*` |
@@ -35,7 +35,7 @@ SmartPerfetto 的核心升级点是：从"按固定 pipeline 走完就结束"变
 
 ```mermaid
 flowchart TD
-    A[HTTP /api/agent/analyze] --> B[AgentDrivenOrchestrator]
+    A[HTTP /api/agent/analyze] --> B[AgentRuntime]
     B --> C{follow-up 类型}
 
     C -->|clarify| C1[ClarifyExecutor]
@@ -99,7 +99,7 @@ flowchart TD
 
 | 文件 | 职责 |
 |------|------|
-| agentDrivenOrchestrator.ts | 主协调器（薄协调层）：状态装配 → 意图理解 → 执行器路由 → 结论生成 |
+| agentRuntime.ts | 主协调器（薄协调层）：状态装配 → 意图理解 → 执行器路由 → 结论生成 |
 | orchestratorTypes.ts | Orchestrator 配置/结果/选项/上下文类型定义 |
 | circuitBreaker.ts | 熔断器，置信度过低时触发用户介入 |
 | modelRouter.ts | 多模型路由（DeepSeek/OpenAI/Anthropic/GLM） |

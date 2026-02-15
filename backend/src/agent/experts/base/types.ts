@@ -55,6 +55,8 @@ export interface ExpertInput {
   packageName?: string;
   /** Time range for analysis (string for precision-safe ns timestamps) */
   timeRange?: { start: number | string; end: number | string };
+  /** Optional analysis parameters for expert/decision-tree customization */
+  analysisParams?: Record<string, any>;
   /** Context from previous analysis turns */
   previousFindings?: Finding[];
 }

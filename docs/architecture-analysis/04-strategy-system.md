@@ -173,7 +173,7 @@ interface StrategyMatchResult {
 - `options.suggestedStrategy`（无论是否执行 pipeline，都传入 planner 作为结构化 hint）
 
 补充说明：
-- `AgentDrivenOrchestrator` 中，`scrolling/startup/scene_reconstruction` 命中时默认优先走 `StrategyExecutor`（除非显式 force hypothesis）。
+- `AgentRuntime` 中，`scrolling/startup/scene_reconstruction` 命中时默认优先走 `StrategyExecutor`（除非显式 force hypothesis）。
 - 策略信息仍会注入 `options.suggestedStrategy`，供 hypothesis loop 复用结构化 hint。
 
 ---

@@ -1,292 +1,692 @@
-# Suspend/Wakeup Analysis Skill v2.1
-# Uses Perfetto stdlib tables:
-# - android_suspend_state: ts, dur, power_state ('awake' or 'suspended')
+# =============================================================================
+# 休眠唤醒分析 v3.0（组合 Skill）- 基于 Perfetto stdlib
+# =============================================================================
+# 使用 Perfetto stdlib 的 android_suspend_state 和 android_wakeups 视图
+#
+# 核心表：
+# - android_suspend_state: ts, dur, power_state ('awake' / 'suspended')
 # - android_wakeups: ts, dur, raw_wakeup, on_device_attribution, type, item,
-#                    suspend_quality, backoff_state, backoff_reason, backoff_count, backoff_millis
-# Wakeup types: 'normal', 'abort_pending', 'abort_last_active', 'abort_other'
+#     suspend_quality, backoff_state, backoff_reason, backoff_count, backoff_millis
+#
+# 唤醒类型：
+# - normal: 正常唤醒
+# - abort_pending: Suspend 中止（pending 阶段）
+# - abort_last_active: Suspend 中止（last active）
+# - abort_other: 其他中止原因
+#
+# 分析维度：
+# - 休眠/唤醒时间分布
+# - 唤醒源排行和归因
+# - Suspend 失败和 Backoff 分析
+# - 休眠质量综合评估
+#
+# Fallback: 若 stdlib 视图不存在，检查 ftrace/slice 中的 suspend/wakeup 数据
 
 name: suspend_wakeup_analysis
-version: "1.0"
+version: "3.0"
 type: composite
 category: power
 
 meta:
-  display_name: "唤醒源分析"
-  description: "分析系统挂起和唤醒原因"
+  display_name: "休眠唤醒分析"
+  description: "分析系统挂起和唤醒原因、休眠质量和功耗影响"
   icon: "power_settings_new"
-  tags: [power, suspend, wakeup, kernel]
+  tags: [power, suspend, wakeup, kernel, composite]
 
 prerequisites:
   required_tables:
     - sched_slice
   modules:
     - android.suspend
-    - android.wakeups
-display:
-  name: "休眠唤醒分析"
-  level: detail
-  description: "系统休眠/唤醒分析，识别唤醒源、suspend 失败原因和功耗影响"
 
 triggers:
-  - pattern: "(休眠|suspend|唤醒|wakeup|待机)"
-    confidence: 0.95
-  - pattern: "(电池|battery|功耗|power)"
-    confidence: 0.8
-  - pattern: "(保活|keep awake|wakelock)"
-    confidence: 0.85
+  keywords:
+    zh: [休眠, 挂起, 唤醒, 待机, 功耗, 电池, 保活, wakelock]
+    en: [suspend, wakeup, sleep, standby, power, battery, keep awake, wakelock]
+  patterns:
+    - ".*休眠.*"
+    - ".*suspend.*"
+    - ".*唤醒.*"
+    - ".*wakeup.*"
+    - ".*(电池|battery|功耗|power).*"
+    - ".*(保活|keep.?awake|wakelock).*"
 
 inputs:
   - name: wakeup_source
     type: string
     required: false
-    description: "唤醒源过滤"
-  - name: include_aborts
-    type: boolean
+    description: "唤醒源过滤（可选）"
+  - name: start_ts
+    type: timestamp
     required: false
-    default: true
-    description: "是否包含 suspend 中止事件"
+    description: "分析起始时间戳（纳秒，可选）"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳（纳秒，可选）"
+  - name: frequent_wakeup_critical
+    type: number
+    required: false
+    default: 50
+    description: "频繁唤醒严重阈值（次数）"
+  - name: frequent_wakeup_warning
+    type: number
+    required: false
+    default: 20
+    description: "频繁唤醒警告阈值（次数）"
+  - name: abort_pct_critical
+    type: number
+    required: false
+    default: 30
+    description: "Suspend 中止率严重阈值（%）"
+  - name: abort_pct_warning
+    type: number
+    required: false
+    default: 10
+    description: "Suspend 中止率警告阈值（%）"
+  - name: low_suspend_pct
+    type: number
+    required: false
+    default: 30
+    description: "休眠占比过低警告阈值（%）"
 
 steps:
-  # Step 1: 休眠唤醒概览
+  # ========== L0: 检查 suspend state 数据 ==========
+  - id: check_suspend_data
+    type: atomic
+    name: "检查休眠数据"
+    display: false
+    optional: true
+    sql: |
+      SELECT
+        COUNT(*) as state_count,
+        CASE WHEN COUNT(*) > 0 THEN 'available' ELSE 'unavailable' END as status
+      FROM android_suspend_state
+      WHERE (${start_ts} IS NULL OR ts + dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+    save_as: suspend_check
+
+  # ========== L0: 检查 wakeup 数据 ==========
+  - id: check_wakeup_data
+    type: atomic
+    name: "检查唤醒数据"
+    display: false
+    optional: true
+    sql: |
+      SELECT
+        COUNT(*) as wakeup_count,
+        CASE WHEN COUNT(*) > 0 THEN 'available' ELSE 'unavailable' END as status
+      FROM android_wakeups
+      WHERE (item GLOB '*${wakeup_source}*' OR '${wakeup_source}' = '')
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+    save_as: wakeup_check
+    condition: suspend_check.data[0]?.status === 'available'
+
+  # ========== L0 Fallback: 检查 ftrace/slice 中的 suspend 数据 ==========
+  - id: check_suspend_slices
+    type: atomic
+    name: "检查 Suspend Slice 数据"
+    display: false
+    sql: |
+      SELECT
+        COUNT(*) as slice_count,
+        CASE WHEN COUNT(*) > 0 THEN 'available' ELSE 'unavailable' END as status
+      FROM slice
+      WHERE (
+          name GLOB '*suspend*'
+          OR name GLOB '*Suspend*'
+          OR name GLOB '*wakeup*'
+          OR name GLOB '*Wakeup*'
+          OR name GLOB '*wake_lock*'
+          OR name GLOB '*WakeLock*'
+          OR name GLOB '*power_state*'
+        )
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+    save_as: suspend_slice_check
+    condition: suspend_check.data[0]?.status === 'unavailable'
+
+  # ========== L1: 休眠唤醒概览 ==========
   - id: suspend_overview
     type: atomic
     name: "休眠唤醒概览"
-    description: "统计系统休眠和唤醒时间"
+    optional: true
+    synthesize:
+      role: overview
+      fields:
+        - key: suspended_pct
+          label: 休眠占比
+          format: "{{value}}%"
+        - key: awake_pct
+          label: 唤醒占比
+          format: "{{value}}%"
+        - key: suspend_count
+          label: 休眠次数
+        - key: rating
+          label: 评级
+      insights:
+        - condition: "suspended_pct < 50"
+          template: "休眠时间占比仅 {{suspended_pct}}%，设备难以进入深度休眠"
+        - condition: "awake_count > 50"
+          template: "唤醒次数多达 {{awake_count}} 次，频繁唤醒影响续航"
+    display:
+      level: key
+      layer: overview
+      title: "休眠唤醒概览"
+      columns:
+        - name: power_state
+          label: "电源状态"
+          type: string
+        - name: period_count
+          label: "周期数"
+          type: number
+          format: compact
+        - name: total_time_sec
+          label: "总时间 (秒)"
+          type: number
+          format: compact
+        - name: avg_duration_sec
+          label: "平均时长 (秒)"
+          type: number
+          format: compact
+        - name: max_duration_sec
+          label: "最长时长 (秒)"
+          type: number
+          format: compact
+        - name: min_duration_sec
+          label: "最短时长 (秒)"
+          type: number
+          format: compact
     sql: |
-      INCLUDE PERFETTO MODULE android.suspend;
-
       SELECT
         power_state,
-        COUNT(*) AS period_count,
-        SUM(dur) / 1e9 AS total_time_sec,
-        AVG(dur) / 1e9 AS avg_duration_sec,
-        MAX(dur) / 1e9 AS max_duration_sec,
-        MIN(dur) / 1e9 AS min_duration_sec
+        COUNT(*) as period_count,
+        ROUND(SUM(dur) / 1e9, 2) as total_time_sec,
+        ROUND(AVG(dur) / 1e9, 2) as avg_duration_sec,
+        ROUND(MAX(dur) / 1e9, 2) as max_duration_sec,
+        ROUND(MIN(dur) / 1e9, 2) as min_duration_sec
       FROM android_suspend_state
-      GROUP BY power_state;
-    interpretation:
-      key_metrics:
-        - name: "total_time_sec"
-          description: "各状态总时间 (秒)"
-        - name: "avg_duration_sec"
-          description: "平均持续时间 (秒)"
+      WHERE (${start_ts} IS NULL OR ts + dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+      GROUP BY power_state
+    save_as: suspend_overview
+    condition: suspend_check.data[0]?.status === 'available'
 
-  # Step 2: 唤醒事件概览
-  - id: wakeup_overview
-    type: atomic
-    name: "唤醒事件概览"
-    description: "统计唤醒事件类型分布"
-    sql: |
-      INCLUDE PERFETTO MODULE android.wakeups;
-
-      SELECT
-        type AS wakeup_type,
-        suspend_quality,
-        COUNT(*) AS wakeup_count,
-        SUM(dur) / 1e9 AS total_awake_time_sec,
-        AVG(dur) / 1e9 AS avg_awake_time_sec
-      FROM android_wakeups
-      WHERE CASE WHEN NOT COALESCE(${include_aborts|1}, 1)
-                 THEN type = 'normal'
-                 ELSE 1 END
-      GROUP BY type, suspend_quality
-      ORDER BY wakeup_count DESC;
-    interpretation:
-      key_metrics:
-        - name: "wakeup_type"
-          description: "唤醒类型: normal=正常唤醒, abort_*=suspend失败"
-        - name: "suspend_quality"
-          description: "good=正常, bad=suspend失败触发backoff"
-      analysis_hints:
-        - condition: "wakeup_type LIKE 'abort%' AND wakeup_count > 5"
-          insight: "频繁 suspend 失败，设备无法有效休眠"
-        - condition: "suspend_quality = 'bad'"
-          insight: "suspend 质量差，触发 backoff 延迟"
-
-  # Step 3: 唤醒源排行
-  - id: wakeup_source_ranking
-    type: atomic
-    name: "唤醒源排行"
-    description: "按唤醒源统计唤醒次数和时间"
-    sql: |
-      INCLUDE PERFETTO MODULE android.wakeups;
-
-      SELECT
-        item AS wakeup_source,
-        type AS wakeup_type,
-        COUNT(*) AS wakeup_count,
-        SUM(dur) / 1e9 AS total_awake_sec,
-        AVG(dur) / 1e9 AS avg_awake_sec
-      FROM android_wakeups
-      WHERE CASE WHEN '${wakeup_source}' != ''
-                 THEN item GLOB '*${wakeup_source}*'
-                 ELSE 1 END
-      GROUP BY item, type
-      ORDER BY wakeup_count DESC
-      LIMIT 30;
-    interpretation:
-      key_metrics:
-        - name: "wakeup_source"
-          description: "唤醒源设备名"
-        - name: "total_awake_sec"
-          description: "该唤醒源导致的总唤醒时间"
-      analysis_hints:
-        - condition: "wakeup_source LIKE '%wifi%' OR wakeup_source LIKE '%wlan%'"
-          insight: "WiFi 唤醒，检查 WiFi 扫描或 keep-alive 设置"
-        - condition: "wakeup_source LIKE '%alarm%'"
-          insight: "Alarm 唤醒，检查应用定时任务"
-        - condition: "wakeup_source LIKE '%modem%' OR wakeup_source LIKE '%rmnet%'"
-          insight: "移动网络唤醒，可能是推送或后台数据同步"
-
-  # Step 4: Suspend Backoff 分析
-  - id: suspend_backoff
-    type: atomic
-    name: "Suspend Backoff 分析"
-    description: "分析 suspend 失败和 backoff 情况"
-    sql: |
-      INCLUDE PERFETTO MODULE android.wakeups;
-
-      SELECT
-        backoff_reason,
-        backoff_state,
-        COUNT(*) AS count,
-        MAX(backoff_count) AS max_backoff_count,
-        MAX(backoff_millis) AS max_backoff_ms,
-        AVG(backoff_millis) AS avg_backoff_ms
-      FROM android_wakeups
-      WHERE backoff_reason IS NOT NULL
-        AND backoff_reason != 'none'
-      GROUP BY backoff_reason, backoff_state
-      ORDER BY count DESC;
-    interpretation:
-      key_metrics:
-        - name: "backoff_reason"
-          description: "backoff 原因: short=短暂唤醒, failed=suspend失败"
-        - name: "max_backoff_ms"
-          description: "最大 backoff 延迟"
-      analysis_hints:
-        - condition: "backoff_reason = 'failed'"
-          insight: "suspend 失败，系统无法进入休眠"
-        - condition: "max_backoff_count > 5"
-          insight: "连续多次 backoff，系统在挣扎休眠"
-
-  # Step 5: 唤醒时间线
-  - id: wakeup_timeline
-    type: atomic
-    name: "唤醒时间线"
-    description: "按时间顺序列出唤醒事件"
-    sql: |
-      INCLUDE PERFETTO MODULE android.wakeups;
-
-      SELECT
-        ts / 1e9 AS time_sec,
-        dur / 1e9 AS awake_duration_sec,
-        type AS wakeup_type,
-        item AS wakeup_source,
-        suspend_quality,
-        on_device_attribution
-      FROM android_wakeups
-      ORDER BY ts
-      LIMIT 100;
-    interpretation:
-      key_metrics:
-        - name: "awake_duration_sec"
-          description: "唤醒持续时间"
-
-  # Step 6: 休眠质量评估
+  # ========== L1: 休眠质量综合评估 ==========
   - id: suspend_quality_assessment
     type: atomic
     name: "休眠质量评估"
-    description: "综合评估系统休眠质量"
+    optional: true
+    synthesize:
+      role: overview
+      fields:
+        - key: suspend_pct
+          label: 休眠占比
+          format: "{{value}}%"
+        - key: abort_pct
+          label: 失败率
+          format: "{{value}}%"
+        - key: total_wakeups
+          label: 总唤醒次数
+    display:
+      level: key
+      layer: overview
+      title: "休眠质量综合评估"
+      columns:
+        - name: suspend_pct
+          label: "休眠占比 (%)"
+          type: percentage
+        - name: awake_pct
+          label: "唤醒占比 (%)"
+          type: percentage
+        - name: total_wakeups
+          label: "总唤醒次数"
+          type: number
+          format: compact
+        - name: abort_count
+          label: "Suspend 中止次数"
+          type: number
+          format: compact
+        - name: bad_quality_count
+          label: "低质量唤醒"
+          type: number
+          format: compact
+        - name: abort_pct
+          label: "中止率 (%)"
+          type: percentage
     sql: |
-      INCLUDE PERFETTO MODULE android.suspend;
-      INCLUDE PERFETTO MODULE android.wakeups;
-
       WITH suspend_stats AS (
         SELECT
-          SUM(CASE WHEN power_state = 'suspended' THEN dur ELSE 0 END) AS suspended_time,
-          SUM(CASE WHEN power_state = 'awake' THEN dur ELSE 0 END) AS awake_time,
-          SUM(dur) AS total_time
+          SUM(CASE WHEN power_state = 'suspended' THEN dur ELSE 0 END) as suspended_time,
+          SUM(CASE WHEN power_state = 'awake' THEN dur ELSE 0 END) as awake_time,
+          SUM(dur) as total_time
         FROM android_suspend_state
+        WHERE (${start_ts} IS NULL OR ts + dur > ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
       ),
       wakeup_stats AS (
         SELECT
-          COUNT(*) AS total_wakeups,
-          SUM(CASE WHEN type != 'normal' THEN 1 ELSE 0 END) AS abort_count,
-          SUM(CASE WHEN suspend_quality = 'bad' THEN 1 ELSE 0 END) AS bad_quality_count
+          COUNT(*) as total_wakeups,
+          SUM(CASE WHEN type != 'normal' THEN 1 ELSE 0 END) as abort_count,
+          SUM(CASE WHEN suspend_quality = 'bad' THEN 1 ELSE 0 END) as bad_quality_count
         FROM android_wakeups
+        WHERE (${start_ts} IS NULL OR ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
       )
       SELECT
-        ROUND(ss.suspended_time * 100.0 / ss.total_time, 2) AS suspend_pct,
-        ROUND(ss.awake_time * 100.0 / ss.total_time, 2) AS awake_pct,
+        ROUND(ss.suspended_time * 100.0 / NULLIF(ss.total_time, 0), 2) as suspend_pct,
+        ROUND(ss.awake_time * 100.0 / NULLIF(ss.total_time, 0), 2) as awake_pct,
         ws.total_wakeups,
         ws.abort_count,
         ws.bad_quality_count,
-        ROUND(ws.abort_count * 100.0 / NULLIF(ws.total_wakeups, 0), 2) AS abort_pct
-      FROM suspend_stats ss, wakeup_stats ws;
-    interpretation:
-      key_metrics:
-        - name: "suspend_pct"
-          description: "休眠时间占比"
-        - name: "abort_pct"
-          description: "suspend 失败率"
-          thresholds:
-            warning: 10
-            critical: 30
+        ROUND(ws.abort_count * 100.0 / NULLIF(ws.total_wakeups, 0), 2) as abort_pct
+      FROM suspend_stats ss, wakeup_stats ws
+    save_as: suspend_quality
+    condition: suspend_check.data[0]?.status === 'available'
 
-  # Step 7: AI 综合分析
-  - id: suspend_ai_summary
-    type: ai_summary
-    name: "休眠唤醒 AI 分析"
-    description: "综合分析休眠唤醒行为"
-    inputs: [suspend_overview, wakeup_overview, wakeup_source_ranking, suspend_backoff, wakeup_timeline, suspend_quality_assessment]
-    depends_on:
-      - suspend_overview
-      - wakeup_overview
-      - wakeup_source_ranking
-      - suspend_backoff
-      - wakeup_timeline
-      - suspend_quality_assessment
-    prompt: |
-      请基于以下休眠唤醒分析数据，提供专业的分析：
+  # ========== L1: 唤醒事件类型分布 ==========
+  - id: wakeup_type_overview
+    type: atomic
+    name: "唤醒事件类型分布"
+    optional: true
+    synthesize:
+      role: list
+      groupBy:
+        - field: wakeup_type
+          title: 按唤醒类型分布
+        - field: suspend_quality
+          title: 按休眠质量分布
+      fields:
+        - key: wakeup_type
+          label: 唤醒类型
+        - key: wakeup_count
+          label: 次数
+        - key: total_awake_time_sec
+          label: 唤醒时间
+          format: "{{value}} 秒"
+    display:
+      level: key
+      layer: overview
+      title: "唤醒事件类型分布"
+      columns:
+        - name: wakeup_type
+          label: "唤醒类型"
+          type: string
+        - name: suspend_quality
+          label: "休眠质量"
+          type: string
+        - name: wakeup_count
+          label: "唤醒次数"
+          type: number
+          format: compact
+        - name: total_awake_time_sec
+          label: "总唤醒时间 (秒)"
+          type: number
+          format: compact
+        - name: avg_awake_time_sec
+          label: "平均唤醒时长 (秒)"
+          type: number
+          format: compact
+    sql: |
+      SELECT
+        type as wakeup_type,
+        suspend_quality,
+        COUNT(*) as wakeup_count,
+        ROUND(SUM(dur) / 1e9, 2) as total_awake_time_sec,
+        ROUND(AVG(dur) / 1e9, 2) as avg_awake_time_sec
+      FROM android_wakeups
+      WHERE (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+      GROUP BY type, suspend_quality
+      ORDER BY wakeup_count DESC
+    save_as: wakeup_type_overview
+    condition: suspend_check.data[0]?.status === 'available' && wakeup_check.data[0]?.status === 'available'
 
-      ## 休眠概览
-          suspend_overview
+  # ========== L2: 唤醒源排行 ==========
+  - id: wakeup_source_ranking
+    type: atomic
+    name: "唤醒源排行"
+    optional: true
+    synthesize:
+      role: list
+      groupBy:
+        - field: wakeup_source
+          title: 按唤醒源分布
+      fields:
+        - key: wakeup_source
+          label: 唤醒源
+        - key: wakeup_count
+          label: 唤醒次数
+        - key: total_awake_sec
+          label: 总唤醒时间
+          format: "{{value}} 秒"
+    display:
+      level: key
+      layer: list
+      title: "唤醒源排行"
+      columns:
+        - name: wakeup_source
+          label: "唤醒源"
+          type: string
+        - name: wakeup_type
+          label: "唤醒类型"
+          type: string
+        - name: wakeup_count
+          label: "唤醒次数"
+          type: number
+          format: compact
+        - name: total_awake_sec
+          label: "总唤醒时间 (秒)"
+          type: number
+          format: compact
+        - name: avg_awake_sec
+          label: "平均唤醒时长 (秒)"
+          type: number
+          format: compact
+    sql: |
+      SELECT
+        item as wakeup_source,
+        type as wakeup_type,
+        COUNT(*) as wakeup_count,
+        ROUND(SUM(dur) / 1e9, 2) as total_awake_sec,
+        ROUND(AVG(dur) / 1e9, 2) as avg_awake_sec
+      FROM android_wakeups
+      WHERE (item GLOB '*${wakeup_source}*' OR '${wakeup_source}' = '')
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+      GROUP BY item, type
+      ORDER BY wakeup_count DESC
+      LIMIT 30
+    save_as: wakeup_source_ranking
+    condition: suspend_check.data[0]?.status === 'available' && wakeup_check.data[0]?.status === 'available'
 
-      ## 唤醒事件概览
-          wakeup_overview
+  # ========== L2: Suspend Backoff 分析 ==========
+  - id: suspend_backoff
+    type: atomic
+    name: "Suspend Backoff 分析"
+    optional: true
+    display:
+      level: key
+      layer: list
+      title: "Suspend Backoff 分析"
+      columns:
+        - name: backoff_reason
+          label: "Backoff 原因"
+          type: string
+        - name: backoff_state
+          label: "Backoff 状态"
+          type: string
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: max_backoff_count
+          label: "最大连续次数"
+          type: number
+        - name: max_backoff_ms
+          label: "最大延迟"
+          type: duration
+          unit: ms
+          format: duration_ms
+        - name: avg_backoff_ms
+          label: "平均延迟"
+          type: duration
+          unit: ms
+          format: duration_ms
+    sql: |
+      SELECT
+        backoff_reason,
+        backoff_state,
+        COUNT(*) as count,
+        MAX(backoff_count) as max_backoff_count,
+        ROUND(MAX(backoff_millis), 2) as max_backoff_ms,
+        ROUND(AVG(backoff_millis), 2) as avg_backoff_ms
+      FROM android_wakeups
+      WHERE backoff_reason IS NOT NULL
+        AND backoff_reason != 'none'
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+      GROUP BY backoff_reason, backoff_state
+      ORDER BY count DESC
+    save_as: suspend_backoff
+    condition: suspend_check.data[0]?.status === 'available' && wakeup_check.data[0]?.status === 'available'
 
-      ## 唤醒源排行
-          wakeup_source_ranking
+  # ========== L2: 唤醒事件时间线 ==========
+  - id: wakeup_timeline
+    type: atomic
+    name: "唤醒事件时间线"
+    optional: true
+    display:
+      level: detail
+      layer: list
+      title: "唤醒事件时间线"
+      columns:
+        - name: event_ts
+          label: "时间"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: awake_duration_sec
+          label: "唤醒时长 (秒)"
+          type: number
+          format: compact
+        - name: wakeup_type
+          label: "唤醒类型"
+          type: string
+        - name: wakeup_source
+          label: "唤醒源"
+          type: string
+        - name: suspend_quality
+          label: "休眠质量"
+          type: string
+        - name: on_device_attribution
+          label: "设备归因"
+          type: string
+    sql: |
+      SELECT
+        printf('%d', ts) as event_ts,
+        ROUND(dur / 1e9, 2) as awake_duration_sec,
+        type as wakeup_type,
+        item as wakeup_source,
+        suspend_quality,
+        on_device_attribution
+      FROM android_wakeups
+      WHERE (item GLOB '*${wakeup_source}*' OR '${wakeup_source}' = '')
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ORDER BY ts
+      LIMIT 100
+    save_as: wakeup_timeline
+    condition: suspend_check.data[0]?.status === 'available' && wakeup_check.data[0]?.status === 'available'
 
-      ## Suspend Backoff
-          suspend_backoff
+  # ========== L2: 长时间休眠事件 ==========
+  - id: long_suspend_events
+    type: atomic
+    name: "长时间休眠事件"
+    optional: true
+    display:
+      level: detail
+      layer: list
+      title: "长时间休眠事件（Top 20）"
+      columns:
+        - name: event_ts
+          label: "开始时间"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: power_state
+          label: "状态"
+          type: string
+        - name: duration_sec
+          label: "持续时长 (秒)"
+          type: number
+          format: compact
+    sql: |
+      SELECT
+        printf('%d', ts) as event_ts,
+        power_state,
+        ROUND(dur / 1e9, 2) as duration_sec
+      FROM android_suspend_state
+      WHERE (${start_ts} IS NULL OR ts + dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ORDER BY dur DESC
+      LIMIT 20
+    save_as: long_suspend_events
+    condition: suspend_check.data[0]?.status === 'available'
 
-      ## 休眠质量
-          suspend_quality_assessment
+  # ========== Fallback: Suspend/Wakeup 相关 Slice ==========
+  - id: suspend_slice_overview
+    type: atomic
+    name: "Suspend/Wakeup 相关 Slice"
+    display:
+      level: key
+      layer: overview
+      title: "Suspend/Wakeup 相关 Slice（无 stdlib 数据时）"
+      columns:
+        - name: slice_name
+          label: "Slice 名称"
+          type: string
+        - name: count
+          label: "出现次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_dur_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+    sql: |
+      SELECT
+        s.name as slice_name,
+        COUNT(*) as count,
+        ROUND(SUM(s.dur) / 1e6, 2) as total_dur_ms,
+        ROUND(AVG(s.dur) / 1e6, 2) as avg_dur_ms,
+        ROUND(MAX(s.dur) / 1e6, 2) as max_dur_ms
+      FROM slice s
+      WHERE (
+          s.name GLOB '*suspend*'
+          OR s.name GLOB '*Suspend*'
+          OR s.name GLOB '*wakeup*'
+          OR s.name GLOB '*Wakeup*'
+          OR s.name GLOB '*wake_lock*'
+          OR s.name GLOB '*WakeLock*'
+          OR s.name GLOB '*power_state*'
+        )
+        AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+      GROUP BY s.name
+      ORDER BY total_dur_ms DESC
+      LIMIT 20
+    save_as: suspend_slice_overview
+    condition: suspend_check.data[0]?.status === 'unavailable' && suspend_slice_check.data[0]?.status === 'available'
 
-      请分析：
-      1. 系统休眠效率评估
-      2. 主要唤醒源识别
-      3. Suspend 失败原因分析
-      4. 对电池续航的影响
-      5. 优化建议
+  # ========== 根因诊断 ==========
+  - id: suspend_diagnosis
+    type: diagnostic
+    name: "休眠唤醒诊断"
+    synthesize:
+      role: conclusion
+      fields:
+        - key: diagnosis
+          label: 诊断结论
+        - key: severity
+          label: 严重程度
+        - key: confidence
+          label: 置信度
+      insights:
+        - template: "休眠唤醒诊断：{{diagnosis}}"
+    display:
+      level: key
+      layer: overview
+      title: "问题诊断"
+    inputs: [suspend_overview, suspend_quality, wakeup_type_overview, wakeup_source_ranking, suspend_backoff]
+    rules:
+      # 频繁唤醒
+      - condition: "wakeup_source_ranking.data[0]?.wakeup_count > ${frequent_wakeup_critical|50}"
+        severity: critical
+        diagnosis: "FREQUENT_WAKEUP - 唤醒源 '${wakeup_source_ranking.data[0].wakeup_source}' 唤醒 ${wakeup_source_ranking.data[0].wakeup_count} 次"
+        confidence: high
+        suggestions:
+          - "检查该唤醒源对应的驱动或服务"
+          - "减少不必要的定时唤醒"
+          - "使用 AlarmManager 合并唤醒请求"
 
-      使用中文回答，结构清晰。
+      - condition: "wakeup_source_ranking.data[0]?.wakeup_count > ${frequent_wakeup_warning|20}"
+        severity: warning
+        diagnosis: "FREQUENT_WAKEUP - 唤醒源 '${wakeup_source_ranking.data[0].wakeup_source}' 唤醒 ${wakeup_source_ranking.data[0].wakeup_count} 次"
+        confidence: medium
+        suggestions:
+          - "检查唤醒频率是否合理"
+          - "考虑延长唤醒间隔"
 
-output:
-  format: markdown
-  sections:
-    - title: "休眠唤醒分析总结"
-      content: |
-        ## 休眠概览
-            suspend_overview
+      # Suspend 失败率高
+      - condition: "suspend_quality.data[0]?.abort_pct > ${abort_pct_critical|30}"
+        severity: critical
+        diagnosis: "LONG_SUSPEND - Suspend 中止率高达 ${suspend_quality.data[0].abort_pct}%，设备难以进入休眠"
+        confidence: high
+        suggestions:
+          - "检查阻止 suspend 的内核模块或驱动"
+          - "检查 wakelock 持有情况"
+          - "排查 suspend_quality = 'bad' 的唤醒事件"
 
-        ## 唤醒源排行
-            wakeup_source_ranking
+      - condition: "suspend_quality.data[0]?.abort_pct > ${abort_pct_warning|10}"
+        severity: warning
+        diagnosis: "LONG_SUSPEND - Suspend 中止率 ${suspend_quality.data[0].abort_pct}%"
+        confidence: medium
+        suggestions:
+          - "检查 suspend 失败的 backoff 原因"
+          - "排查是否有持续持有 wakelock 的进程"
 
-        ## 休眠质量
-            suspend_quality_assessment
+      # 休眠占比低
+      - condition: "suspend_quality.data[0]?.suspend_pct < ${low_suspend_pct|30}"
+        severity: warning
+        diagnosis: "LONG_SUSPEND - 休眠时间占比仅 ${suspend_quality.data[0].suspend_pct}%"
+        confidence: medium
+        suggestions:
+          - "设备大部分时间处于唤醒状态"
+          - "检查是否有后台活动阻止休眠"
 
-        ## AI 综合分析
-            suspend_ai_summary
+      # 正常
+      - condition: "suspend_quality.data[0]?.suspend_pct >= 50 && suspend_quality.data[0]?.abort_pct <= ${abort_pct_warning|10}"
+        severity: info
+        diagnosis: "SUSPEND_NORMAL - 休眠质量正常（休眠占比 ${suspend_quality.data[0].suspend_pct}%，中止率 ${suspend_quality.data[0].abort_pct}%）"
+        confidence: high
+        suggestions:
+          - "休眠唤醒行为在正常范围内"
+
+  # ========== Fallback 诊断 ==========
+  - id: fallback_diagnosis
+    type: diagnostic
+    name: "Fallback 诊断"
+    synthesize:
+      role: conclusion
+      fields:
+        - key: diagnosis
+          label: 诊断结论
+        - key: severity
+          label: 严重程度
+      insights:
+        - template: "{{diagnosis}}"
+    display:
+      level: key
+      layer: overview
+      title: "数据可用性诊断"
+    inputs: [suspend_check, suspend_slice_check]
+    rules:
+      - condition: "suspend_check.data[0]?.status === 'unavailable' && (!suspend_slice_check.data || suspend_slice_check.data[0]?.status === 'unavailable')"
+        severity: info
+        diagnosis: "未检测到休眠唤醒数据。Trace 中未包含 android.suspend 模块数据，也未发现 suspend/wakeup 相关 Slice。如需分析休眠问题，请在录制 Trace 时启用 power 相关数据源。"
+        confidence: high
+        suggestions:
+          - "录制 Trace 时启用 android.suspend 和 android.wakeups 模块"
+          - "确保录制时间覆盖设备待机周期"
+    condition: suspend_check.data[0]?.status === 'unavailable'

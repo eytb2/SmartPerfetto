@@ -1,244 +1,466 @@
-# GPU Analysis Skill v2.1
-# Uses Perfetto stdlib tables:
-# - android_gpu_frequency: ts, dur, gpu_id, gpu_freq, prev_gpu_freq, next_gpu_freq
-# - android_gpu_memory_per_process: ts, dur, upid, gpu_memory
-# - android_gpu_work_period (if available)
-# - actual_frame_timeline_slice for GPU jank correlation
-
 name: gpu_analysis
-version: "2.1"
+version: "3.0"
 type: composite
-category: hardware
 
 meta:
   display_name: "GPU 分析"
-  description: "分析 GPU 负载、渲染性能和队列等待"
+  description: "分析 GPU 频率分布、内存使用和帧渲染关联，识别 GPU 瓶颈"
   icon: "memory"
-  tags: [gpu, rendering, queue, composite]
+  tags: [gpu, rendering, frequency, memory, composite]
+
+triggers:
+  keywords:
+    zh: [GPU, 显卡, 图形, GPU频率, GPU内存, 显存, GPU负载, GPU瓶颈]
+    en: [gpu, graphics, gpu frequency, gpu memory, gpu load, gpu bound, mali, adreno]
+  patterns:
+    - ".*[Gg][Pp][Uu].*"
+    - ".*显卡.*"
+    - ".*图形.*性能.*"
 
 prerequisites:
-  required_tables:
-    - gpu_counter_track
   modules:
     - android.gpu.frequency
     - android.gpu.memory
-    - android.frames
-display:
-  name: "GPU 分析"
-  level: detail
-  description: "GPU 频率、内存、负载分析，关联帧渲染和 Jank 检测"
-
-triggers:
-  - pattern: "(GPU|gpu|显卡|图形|渲染|rendering)"
-    confidence: 0.95
-  - pattern: "(GPU 频率|gpu freq|graphics|mali|adreno)"
-    confidence: 0.9
-  - pattern: "(GPU 内存|gpu memory|显存)"
-    confidence: 0.9
 
 inputs:
-  - name: process_name
+  - name: package
     type: string
     required: false
-    description: "目标进程名，留空分析全局 GPU 状态"
-  - name: time_range_start
+    description: "应用包名（可选，不填则分析全局 GPU 状态）"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳（纳秒，可选）"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳（纳秒，可选）"
+  - name: high_freq_threshold_pct
     type: number
     required: false
-    description: "分析时间范围起始 (秒)"
-  - name: time_range_end
+    default: 70
+    description: "GPU 高负载判定阈值（最高频占比百分比）"
+  - name: mid_freq_threshold_pct
     type: number
     required: false
-    description: "分析时间范围结束 (秒)"
+    default: 40
+    description: "GPU 中负载判定阈值（最高频占比百分比）"
+  - name: low_freq_threshold_pct
+    type: number
+    required: false
+    default: 10
+    description: "GPU 低负载判定阈值（最高频占比百分比）"
+  - name: freq_drop_ratio
+    type: number
+    required: false
+    default: 0.7
+    description: "频率突降检测比例（低于上次频率的该比例视为突降）"
+  - name: freq_drop_count_threshold
+    type: number
+    required: false
+    default: 20
+    description: "频率突降次数阈值（超过该值判定为限频）"
+  - name: high_load_min_dur_ns
+    type: number
+    required: false
+    default: 500000000
+    description: "高负载时段最小持续时间阈值（纳秒，默认500ms）"
 
 steps:
-  # Step 1: GPU 频率分布分析
-  - id: gpu_frequency_distribution
+  # ==========================================================================
+  # L0: 数据源检测 - GPU counter track 是否可用
+  # ==========================================================================
+  - id: data_check
     type: atomic
-    name: "GPU 频率分布"
-    description: "分析 GPU 各频率档位的时间占比"
+    name: "GPU 数据源检测"
+    display: false
     sql: |
-      INCLUDE PERFETTO MODULE android.gpu.frequency;
-
       SELECT
-        gpu_id,
-        gpu_freq / 1000000 AS gpu_freq_mhz,
-        SUM(dur) / 1e9 AS total_time_sec,
-        ROUND(SUM(dur) * 100.0 / (SELECT SUM(dur) FROM android_gpu_frequency WHERE gpu_id = g.gpu_id), 2) AS time_pct
-      FROM android_gpu_frequency g
-      WHERE dur > 0
-        AND CASE WHEN ${time_range_start} IS NOT NULL
-                 THEN ts >= ${time_range_start} * 1e9
-                 ELSE 1 END
-        AND CASE WHEN ${time_range_end} IS NOT NULL
-                 THEN ts <= ${time_range_end} * 1e9
-                 ELSE 1 END
-      GROUP BY gpu_id, gpu_freq
-      ORDER BY gpu_id, gpu_freq DESC;
-    interpretation:
-      key_metrics:
-        - name: "time_pct"
-          description: "各频率档位时间占比"
-      analysis_hints:
-        - condition: "gpu_freq_mhz = MAX(gpu_freq_mhz) AND time_pct > 50"
-          insight: "GPU 长时间运行在最高频，可能存在性能瓶颈或发热问题"
-        - condition: "gpu_freq_mhz = MIN(gpu_freq_mhz) AND time_pct > 80"
-          insight: "GPU 大部分时间低频运行，负载较轻"
+        CASE
+          WHEN EXISTS (
+            SELECT 1 FROM sqlite_master
+            WHERE type IN ('table', 'view') AND name = 'android_gpu_frequency'
+          ) THEN 1
+          ELSE 0
+        END as has_gpu_freq,
+        CASE
+          WHEN EXISTS (
+            SELECT 1 FROM sqlite_master
+            WHERE type IN ('table', 'view') AND name = 'android_gpu_memory_per_process'
+          ) THEN 1
+          ELSE 0
+        END as has_gpu_memory,
+        CASE
+          WHEN EXISTS (
+            SELECT 1 FROM sqlite_master
+            WHERE type IN ('table', 'view') AND name = 'actual_frame_timeline_slice'
+          ) THEN 1
+          ELSE 0
+        END as has_frame_timeline,
+        CASE
+          WHEN EXISTS (
+            SELECT 1 FROM android_gpu_frequency LIMIT 1
+          ) THEN 1
+          ELSE 0
+        END as has_gpu_data
+    save_as: data_check
 
-  # Step 2: GPU 频率变化分析
-  - id: gpu_frequency_changes
+  # ==========================================================================
+  # L1: GPU 频率概览 - 加权平均频率、最高频占比、频率档位数
+  # ==========================================================================
+  - id: gpu_freq_overview
     type: atomic
-    name: "GPU 频率变化统计"
-    description: "分析 GPU 频率变化模式"
+    name: "GPU 频率概览"
+    optional: true
+    synthesize:
+      role: overview
+      fields:
+        - key: weighted_avg_freq_mhz
+          label: 加权平均频率
+          format: "{{value}} MHz"
+        - key: max_freq_time_pct
+          label: 最高频占比
+          format: "{{value}}%"
+        - key: total_time_sec
+          label: 总采样时间
+          format: "{{value}} s"
+      insights:
+        - condition: "max_freq_time_pct > 70"
+          template: "GPU 在最高频率运行 {{max_freq_time_pct}}%，可能存在 GPU 瓶颈"
+        - condition: "max_freq_time_pct < 10"
+          template: "GPU 大部分时间低频运行，负载较轻"
+        - condition: "freq_change_count > 500"
+          template: "GPU 频率变化 {{freq_change_count}} 次，调频活跃"
+    display:
+      level: summary
+      layer: overview
+      title: "GPU 频率概览"
+      columns:
+        - name: gpu_id
+          label: "GPU ID"
+          type: number
+        - name: weighted_avg_freq_mhz
+          label: "加权平均频率"
+          type: number
+          format: compact
+        - name: max_freq_mhz
+          label: "最高频率"
+          type: number
+          format: compact
+        - name: min_freq_mhz
+          label: "最低频率"
+          type: number
+          format: compact
+        - name: max_freq_time_pct
+          label: "最高频占比"
+          type: percentage
+          format: percentage
+        - name: freq_levels
+          label: "频率档位数"
+          type: number
+        - name: freq_change_count
+          label: "变频次数"
+          type: number
+          format: compact
+        - name: total_time_sec
+          label: "采样时间"
+          type: number
+        - name: rating
+          label: "评级"
+          type: string
     sql: |
-      INCLUDE PERFETTO MODULE android.gpu.frequency;
-
-      WITH freq_changes AS (
+      WITH
+      gpu_freq_filtered AS (
         SELECT
           gpu_id,
-          ts,
           gpu_freq,
-          prev_gpu_freq,
-          CASE
-            WHEN gpu_freq > prev_gpu_freq THEN 'UP'
-            WHEN gpu_freq < prev_gpu_freq THEN 'DOWN'
-            ELSE 'SAME'
-          END AS direction
+          dur,
+          ts
         FROM android_gpu_frequency
-        WHERE prev_gpu_freq IS NOT NULL
-          AND gpu_freq != prev_gpu_freq
+        WHERE dur > 0
+          AND (${start_ts} IS NULL OR ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ),
+      max_freq_per_gpu AS (
+        SELECT gpu_id, MAX(gpu_freq) as max_gpu_freq
+        FROM gpu_freq_filtered
+        GROUP BY gpu_id
+      ),
+      gpu_stats AS (
+        SELECT
+          g.gpu_id,
+          -- 加权平均频率 (按持续时间加权)
+          ROUND(SUM(g.gpu_freq * 1.0 * g.dur) / NULLIF(SUM(g.dur), 0) / 1e6, 0) as weighted_avg_freq_mhz,
+          ROUND(MAX(g.gpu_freq) / 1e6, 0) as max_freq_mhz,
+          ROUND(MIN(g.gpu_freq) / 1e6, 0) as min_freq_mhz,
+          -- 最高频占比
+          ROUND(100.0 * SUM(CASE WHEN g.gpu_freq = mf.max_gpu_freq THEN g.dur ELSE 0 END) / NULLIF(SUM(g.dur), 0), 1) as max_freq_time_pct,
+          COUNT(DISTINCT g.gpu_freq) as freq_levels,
+          -- 变频次数 (频率不同于上一条记录的次数)
+          (SELECT COUNT(*) FROM android_gpu_frequency f2
+           WHERE f2.gpu_id = g.gpu_id
+             AND f2.prev_gpu_freq IS NOT NULL
+             AND f2.gpu_freq != f2.prev_gpu_freq
+             AND (${start_ts} IS NULL OR f2.ts >= ${start_ts})
+             AND (${end_ts} IS NULL OR f2.ts < ${end_ts})
+          ) as freq_change_count,
+          ROUND(SUM(g.dur) / 1e9, 2) as total_time_sec
+        FROM gpu_freq_filtered g
+        JOIN max_freq_per_gpu mf ON g.gpu_id = mf.gpu_id
+        GROUP BY g.gpu_id
       )
       SELECT
         gpu_id,
-        direction,
-        COUNT(*) AS change_count,
-        AVG(ABS(gpu_freq - prev_gpu_freq)) / 1e6 AS avg_change_mhz
-      FROM freq_changes
-      GROUP BY gpu_id, direction
-      ORDER BY gpu_id, direction;
-    interpretation:
-      key_metrics:
-        - name: "change_count"
-          description: "频率变化次数"
-      analysis_hints:
-        - condition: "change_count > 1000"
-          insight: "GPU 频率频繁变化，可能导致功耗波动"
+        weighted_avg_freq_mhz,
+        max_freq_mhz,
+        min_freq_mhz,
+        max_freq_time_pct,
+        freq_levels,
+        freq_change_count,
+        total_time_sec,
+        CASE
+          WHEN max_freq_time_pct > ${high_freq_threshold_pct|70} THEN '高负载'
+          WHEN max_freq_time_pct > ${mid_freq_threshold_pct|40} THEN '中负载'
+          WHEN max_freq_time_pct > ${low_freq_threshold_pct|10} THEN '低负载'
+          ELSE '空闲'
+        END as rating
+      FROM gpu_stats
+      ORDER BY gpu_id
+    save_as: gpu_freq_overview
+    condition: "data_check.data[0]?.has_gpu_data === 1"
 
-  # Step 3: GPU 内存使用分析 (按进程)
-  - id: gpu_memory_by_process
+  # ==========================================================================
+  # L1: GPU 内存概览 (可选 - 部分 trace 无 GPU 内存数据)
+  # ==========================================================================
+  - id: gpu_memory_overview
     type: atomic
-    name: "各进程 GPU 内存使用"
-    description: "统计各进程的 GPU 内存使用量"
+    name: "GPU 内存概览"
+    optional: true
+    synthesize:
+      role: overview
+      fields:
+        - key: total_max_mb
+          label: 全局 GPU 内存峰值
+          format: "{{value}} MB"
+        - key: process_count
+          label: 使用 GPU 内存的进程数
+    display:
+      level: summary
+      layer: overview
+      title: "GPU 内存概览"
+      columns:
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: max_gpu_memory_mb
+          label: "峰值内存"
+          type: bytes
+          format: compact
+        - name: avg_gpu_memory_mb
+          label: "平均内存"
+          type: bytes
+          format: compact
+        - name: min_gpu_memory_mb
+          label: "最小内存"
+          type: bytes
+          format: compact
+        - name: memory_change_mb
+          label: "内存变化"
+          type: number
     sql: |
-      INCLUDE PERFETTO MODULE android.gpu.memory;
-
       SELECT
-        p.name AS process_name,
-        MAX(gm.gpu_memory) / 1024 / 1024 AS max_gpu_memory_mb,
-        AVG(gm.gpu_memory) / 1024 / 1024 AS avg_gpu_memory_mb,
-        MIN(gm.gpu_memory) / 1024 / 1024 AS min_gpu_memory_mb
+        p.name as process_name,
+        ROUND(MAX(gm.gpu_memory) / 1024.0 / 1024.0, 2) as max_gpu_memory_mb,
+        ROUND(AVG(gm.gpu_memory) / 1024.0 / 1024.0, 2) as avg_gpu_memory_mb,
+        ROUND(MIN(gm.gpu_memory) / 1024.0 / 1024.0, 2) as min_gpu_memory_mb,
+        ROUND((MAX(gm.gpu_memory) - MIN(gm.gpu_memory)) / 1024.0 / 1024.0, 2) as memory_change_mb
       FROM android_gpu_memory_per_process gm
-      JOIN process p ON gm.upid = p.id
-      WHERE CASE WHEN '${process_name}' != ''
-                 THEN p.name GLOB '*${process_name}*'
-                 ELSE 1 END
+      JOIN process p ON gm.upid = p.upid
+      WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+        AND (${start_ts} IS NULL OR gm.ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR gm.ts < ${end_ts})
       GROUP BY p.name
       ORDER BY max_gpu_memory_mb DESC
-      LIMIT 20;
-    interpretation:
-      key_metrics:
-        - name: "max_gpu_memory_mb"
-          description: "GPU 内存峰值使用"
-          thresholds:
-            warning: 512
-            critical: 1024
+      LIMIT 15
+    save_as: gpu_memory_overview
+    condition: "data_check.data[0]?.has_gpu_memory === 1"
 
-  # Step 4: GPU 内存变化趋势
-  - id: gpu_memory_timeline
+  # ==========================================================================
+  # L2: GPU 频率档位分布详情
+  # ==========================================================================
+  - id: gpu_freq_distribution
     type: atomic
-    name: "GPU 内存变化趋势"
-    description: "追踪目标进程 GPU 内存随时间变化"
+    name: "GPU 频率档位分布"
+    optional: true
+    display:
+      level: detail
+      layer: list
+      title: "GPU 频率档位分布"
+      columns:
+        - name: gpu_id
+          label: "GPU"
+          type: number
+        - name: gpu_freq_mhz
+          label: "频率 (MHz)"
+          type: number
+          format: compact
+        - name: total_time_sec
+          label: "持续时间"
+          type: number
+        - name: time_pct
+          label: "时间占比"
+          type: percentage
+          format: percentage
+        - name: is_max_freq
+          label: "是否最高频"
+          type: string
     sql: |
-      INCLUDE PERFETTO MODULE android.gpu.memory;
-
-      WITH memory_samples AS (
-        SELECT
-          CAST(ts / 1e9 AS INTEGER) AS time_sec,
-          p.name AS process_name,
-          MAX(gm.gpu_memory) AS gpu_memory
-        FROM android_gpu_memory_per_process gm
-        JOIN process p ON gm.upid = p.id
-        WHERE CASE WHEN '${process_name}' != ''
-                   THEN p.name GLOB '*${process_name}*'
-                   ELSE 1 END
-        GROUP BY time_sec, p.name
+      WITH
+      max_freq_per_gpu AS (
+        SELECT gpu_id, MAX(gpu_freq) as max_gpu_freq
+        FROM android_gpu_frequency
+        WHERE dur > 0
+          AND (${start_ts} IS NULL OR ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
+        GROUP BY gpu_id
       )
       SELECT
-        time_sec,
-        process_name,
-        gpu_memory / 1024 / 1024 AS gpu_memory_mb,
-        gpu_memory / 1024 / 1024 - LAG(gpu_memory / 1024 / 1024) OVER (
-          PARTITION BY process_name ORDER BY time_sec
-        ) AS delta_mb
-      FROM memory_samples
-      ORDER BY process_name, time_sec;
-    interpretation:
-      analysis_hints:
-        - condition: "delta_mb > 50"
-          insight: "GPU 内存突增，检查是否有大纹理或 buffer 分配"
-        - condition: "delta_mb < -50"
-          insight: "GPU 内存释放，可能是资源回收"
+        g.gpu_id,
+        ROUND(g.gpu_freq / 1e6, 0) as gpu_freq_mhz,
+        ROUND(SUM(g.dur) / 1e9, 3) as total_time_sec,
+        ROUND(100.0 * SUM(g.dur) / NULLIF(
+          (SELECT SUM(dur) FROM android_gpu_frequency
+           WHERE gpu_id = g.gpu_id AND dur > 0
+             AND (${start_ts} IS NULL OR ts >= ${start_ts})
+             AND (${end_ts} IS NULL OR ts < ${end_ts})),
+          0), 2) as time_pct,
+        CASE WHEN g.gpu_freq = mf.max_gpu_freq THEN '是' ELSE '' END as is_max_freq
+      FROM android_gpu_frequency g
+      JOIN max_freq_per_gpu mf ON g.gpu_id = mf.gpu_id
+      WHERE g.dur > 0
+        AND (${start_ts} IS NULL OR g.ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR g.ts < ${end_ts})
+      GROUP BY g.gpu_id, g.gpu_freq
+      ORDER BY g.gpu_id, g.gpu_freq DESC
+    save_as: gpu_freq_distribution
+    condition: "data_check.data[0]?.has_gpu_data === 1"
 
-  # Step 5: GPU 与帧渲染关联分析
+  # ==========================================================================
+  # L2: GPU-帧渲染关联分析
+  # ==========================================================================
   - id: gpu_frame_correlation
     type: atomic
-    name: "GPU 与帧渲染关联"
-    description: "分析 GPU 频率与帧渲染/Jank 的关系"
+    name: "GPU-帧渲染关联"
+    optional: true
+    display:
+      level: detail
+      layer: list
+      title: "GPU 频率与帧渲染关联"
+      columns:
+        - name: jank_type
+          label: "帧类型"
+          type: string
+        - name: frame_count
+          label: "帧数"
+          type: number
+          format: compact
+        - name: avg_gpu_freq_mhz
+          label: "平均 GPU 频率"
+          type: number
+          format: compact
+        - name: avg_frame_dur_ms
+          label: "平均帧耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_frame_dur_ms
+          label: "最大帧耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: gpu_freq_range
+          label: "频率范围"
+          type: string
     sql: |
-      INCLUDE PERFETTO MODULE android.gpu.frequency;
-      INCLUDE PERFETTO MODULE android.frames;
-
-      WITH frame_gpu_freq AS (
+      WITH
+      frame_gpu AS (
         SELECT
           f.ts,
           f.dur,
-          f.jank_type,
+          COALESCE(f.jank_type, 'None') as jank_type,
           (
-            SELECT gpu_freq / 1e6
+            SELECT ROUND(g.gpu_freq / 1e6, 0)
             FROM android_gpu_frequency g
             WHERE g.ts <= f.ts
               AND g.ts + g.dur > f.ts
             LIMIT 1
-          ) AS gpu_freq_mhz
+          ) as gpu_freq_mhz
         FROM actual_frame_timeline_slice f
+        LEFT JOIN process p ON f.upid = p.upid
         WHERE f.dur > 0
+          AND (p.name GLOB '${package}*' OR '${package}' = '')
+          AND p.name NOT LIKE '/system/%'
+          AND (${start_ts} IS NULL OR f.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR f.ts < ${end_ts})
+          AND COALESCE(f.display_frame_token, f.surface_frame_token) IS NOT NULL
       )
       SELECT
         jank_type,
-        COUNT(*) AS frame_count,
-        AVG(gpu_freq_mhz) AS avg_gpu_freq_mhz,
-        AVG(dur) / 1e6 AS avg_frame_dur_ms
-      FROM frame_gpu_freq
+        COUNT(*) as frame_count,
+        ROUND(AVG(gpu_freq_mhz), 0) as avg_gpu_freq_mhz,
+        ROUND(AVG(dur) / 1e6, 2) as avg_frame_dur_ms,
+        ROUND(MAX(dur) / 1e6, 2) as max_frame_dur_ms,
+        ROUND(MIN(gpu_freq_mhz), 0) || ' - ' || ROUND(MAX(gpu_freq_mhz), 0) || ' MHz' as gpu_freq_range
+      FROM frame_gpu
+      WHERE gpu_freq_mhz IS NOT NULL
       GROUP BY jank_type
-      ORDER BY frame_count DESC;
-    interpretation:
-      key_metrics:
-        - name: "avg_gpu_freq_mhz"
-          description: "各 Jank 类型对应的平均 GPU 频率"
-      analysis_hints:
-        - condition: "jank_type = 'SurfaceFlinger GPU Deadline Missed' AND avg_gpu_freq_mhz < MAX(avg_gpu_freq_mhz)"
-          insight: "GPU Deadline Missed 时 GPU 未运行在最高频，可能是调频不及时"
+      ORDER BY frame_count DESC
+      LIMIT 10
+    save_as: gpu_frame_correlation
+    condition: "data_check.data[0]?.has_gpu_data === 1 && data_check.data[0]?.has_frame_timeline === 1"
 
-  # Step 6: GPU 高负载时段识别
+  # ==========================================================================
+  # L2: GPU 高负载时段识别
+  # ==========================================================================
   - id: gpu_high_load_periods
     type: atomic
     name: "GPU 高负载时段"
-    description: "识别 GPU 持续高频运行的时段"
+    optional: true
+    display:
+      level: detail
+      layer: list
+      title: "GPU 高负载时段"
+      columns:
+        - name: gpu_id
+          label: "GPU"
+          type: number
+        - name: start_ts
+          label: "开始时间"
+          type: timestamp
+          clickAction: navigate_range
+          durationColumn: duration_ns
+        - name: high_freq_dur_ms
+          label: "高频持续时间"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: segment_count
+          label: "段数"
+          type: number
+        - name: duration_ns
+          label: "持续时间"
+          type: duration
+          format: duration_ms
+          unit: ns
+          hidden: true
     sql: |
-      INCLUDE PERFETTO MODULE android.gpu.frequency;
-
-      WITH max_freq AS (
-        SELECT gpu_id, MAX(gpu_freq) AS max_gpu_freq
+      WITH
+      max_freq AS (
+        SELECT gpu_id, MAX(gpu_freq) as max_gpu_freq
         FROM android_gpu_frequency
+        WHERE dur > 0
+          AND (${start_ts} IS NULL OR ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
         GROUP BY gpu_id
       ),
       high_freq_periods AS (
@@ -247,81 +469,227 @@ steps:
           g.ts,
           g.dur,
           g.gpu_freq,
-          g.gpu_freq = mf.max_gpu_freq AS is_max_freq
+          -- 按秒聚合
+          CAST(g.ts / 1000000000 AS INTEGER) as time_bucket
         FROM android_gpu_frequency g
         JOIN max_freq mf ON g.gpu_id = mf.gpu_id
         WHERE g.gpu_freq >= mf.max_gpu_freq * 0.9
+          AND g.dur > 0
+          AND (${start_ts} IS NULL OR g.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR g.ts < ${end_ts})
       )
       SELECT
         gpu_id,
-        ts / 1e9 AS start_sec,
-        SUM(dur) / 1e9 AS high_freq_duration_sec,
-        COUNT(*) AS segment_count
+        printf('%d', MIN(ts)) as start_ts,
+        ROUND(SUM(dur) / 1e6, 1) as high_freq_dur_ms,
+        COUNT(*) as segment_count,
+        printf('%d', MAX(ts + dur) - MIN(ts)) as duration_ns
       FROM high_freq_periods
-      GROUP BY gpu_id, CAST(ts / 1e9 AS INTEGER)
-      HAVING high_freq_duration_sec > 0.5
-      ORDER BY start_sec;
-    interpretation:
-      key_metrics:
-        - name: "high_freq_duration_sec"
-          description: "每秒内高频运行时间"
-          thresholds:
-            warning: 0.8
-            critical: 0.95
+      GROUP BY gpu_id, time_bucket
+      HAVING SUM(dur) > ${high_load_min_dur_ns|500000000}  -- > 500ms of high freq per second bucket
+      ORDER BY MIN(ts)
+      LIMIT 20
+    save_as: gpu_high_load
+    condition: "data_check.data[0]?.has_gpu_data === 1"
 
-  # Step 7: AI 综合分析
-  - id: gpu_ai_summary
-    type: ai_summary
-    name: "GPU 性能 AI 分析"
-    description: "综合分析 GPU 频率、内存和帧渲染"
-    inputs: [gpu_frequency_distribution, gpu_frequency_changes, gpu_memory_by_process, gpu_memory_timeline, gpu_frame_correlation, gpu_high_load_periods]
-    depends_on:
-      - gpu_frequency_distribution
-      - gpu_frequency_changes
-      - gpu_memory_by_process
-      - gpu_memory_timeline
-      - gpu_frame_correlation
-      - gpu_high_load_periods
-    prompt: |
-      请基于以下 GPU 分析数据，提供专业的性能分析：
+  # ==========================================================================
+  # Root Cause: GPU 问题根因分类
+  # ==========================================================================
+  - id: root_cause_classification
+    type: atomic
+    name: "GPU 根因分类"
+    optional: true
+    synthesize:
+      role: conclusion
+      fields:
+        - key: gpu_category
+          label: GPU 状态
+        - key: confidence
+          label: 置信度
+          format: "{{value}}%"
+      insights:
+        - template: "GPU 诊断：{{gpu_category}} - {{root_cause_summary}}"
+    display:
+      level: summary
+      layer: overview
+      title: "GPU 分析结论"
+      columns:
+        - name: gpu_category
+          label: "GPU 状态"
+          type: enum
+        - name: confidence
+          label: "置信度"
+          type: percentage
+          format: percentage
+        - name: root_cause_summary
+          label: "根因总结"
+          type: string
+        - name: evidence
+          label: "关键证据"
+          type: string
+        - name: suggestion
+          label: "优化建议"
+          type: string
+    sql: |
+      WITH
+      -- GPU 频率统计
+      gpu_freq_stats AS (
+        SELECT
+          gpu_id,
+          MAX(gpu_freq) as max_gpu_freq,
+          SUM(gpu_freq * dur) * 1.0 / NULLIF(SUM(dur), 0) as weighted_avg_freq,
+          SUM(dur) as total_dur
+        FROM android_gpu_frequency
+        WHERE dur > 0
+          AND (${start_ts} IS NULL OR ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
+        GROUP BY gpu_id
+      ),
+      -- 最高频运行时间占比
+      max_freq_ratio AS (
+        SELECT
+          g.gpu_id,
+          ROUND(100.0 * SUM(CASE WHEN g.gpu_freq = s.max_gpu_freq THEN g.dur ELSE 0 END) / NULLIF(SUM(g.dur), 0), 1) as max_freq_pct,
+          -- 高频区间 (>=90% max) 占比
+          ROUND(100.0 * SUM(CASE WHEN g.gpu_freq >= s.max_gpu_freq * 0.9 THEN g.dur ELSE 0 END) / NULLIF(SUM(g.dur), 0), 1) as high_freq_pct,
+          -- 低频区间 (<=30% max) 占比
+          ROUND(100.0 * SUM(CASE WHEN g.gpu_freq <= s.max_gpu_freq * 0.3 THEN g.dur ELSE 0 END) / NULLIF(SUM(g.dur), 0), 1) as low_freq_pct
+        FROM android_gpu_frequency g
+        JOIN gpu_freq_stats s ON g.gpu_id = s.gpu_id
+        WHERE g.dur > 0
+          AND (${start_ts} IS NULL OR g.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR g.ts < ${end_ts})
+        GROUP BY g.gpu_id
+      ),
+      -- 频率下降检测 (可能的降频/限频)
+      freq_drops AS (
+        SELECT
+          gpu_id,
+          COUNT(*) as drop_count
+        FROM android_gpu_frequency
+        WHERE prev_gpu_freq IS NOT NULL
+          AND gpu_freq < prev_gpu_freq * ${freq_drop_ratio|0.7}  -- 频率突降 >30%
+          AND (${start_ts} IS NULL OR ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
+        GROUP BY gpu_id
+      ),
+      -- GPU-帧关联 (如果有帧数据)
+      frame_stats AS (
+        SELECT
+          COUNT(*) as total_frames,
+          SUM(CASE WHEN jank_type GLOB '*GPU*' THEN 1 ELSE 0 END) as gpu_jank_frames
+        FROM actual_frame_timeline_slice
+        WHERE dur > 0
+          AND (${start_ts} IS NULL OR ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ),
+      analysis AS (
+        SELECT
+          COALESCE((SELECT max_freq_pct FROM max_freq_ratio LIMIT 1), 0) as max_freq_pct,
+          COALESCE((SELECT high_freq_pct FROM max_freq_ratio LIMIT 1), 0) as high_freq_pct,
+          COALESCE((SELECT low_freq_pct FROM max_freq_ratio LIMIT 1), 0) as low_freq_pct,
+          COALESCE((SELECT drop_count FROM freq_drops LIMIT 1), 0) as freq_drop_count,
+          COALESCE((SELECT gpu_jank_frames FROM frame_stats), 0) as gpu_jank_frames,
+          COALESCE((SELECT total_frames FROM frame_stats), 0) as total_frames
+      )
+      SELECT
+        -- GPU 状态分类
+        CASE
+          WHEN (SELECT high_freq_pct FROM analysis) > ${high_freq_threshold_pct|70} THEN 'GPU_BOUND'
+          WHEN (SELECT freq_drop_count FROM analysis) > ${freq_drop_count_threshold|20}
+               AND (SELECT high_freq_pct FROM analysis) > 30 THEN 'GPU_THROTTLED'
+          WHEN (SELECT low_freq_pct FROM analysis) > ${high_freq_threshold_pct|70} THEN 'GPU_IDLE'
+          WHEN (SELECT gpu_jank_frames FROM analysis) > 0 THEN 'GPU_JANK_RELATED'
+          ELSE 'NORMAL'
+        END as gpu_category,
+        -- 置信度
+        CASE
+          WHEN (SELECT high_freq_pct FROM analysis) > ${high_freq_threshold_pct|70} THEN 0.9
+          WHEN (SELECT freq_drop_count FROM analysis) > ${freq_drop_count_threshold|20} THEN 0.75
+          WHEN (SELECT low_freq_pct FROM analysis) > ${high_freq_threshold_pct|70} THEN 0.85
+          WHEN (SELECT gpu_jank_frames FROM analysis) > 0 THEN 0.7
+          ELSE 0.6
+        END as confidence,
+        -- 根因总结
+        CASE
+          WHEN (SELECT high_freq_pct FROM analysis) > ${high_freq_threshold_pct|70} THEN
+            'GPU 瓶颈: 高频区间 (>=90%最高频) 运行时间占 ' || (SELECT high_freq_pct FROM analysis) || '%，GPU 持续满载'
+          WHEN (SELECT freq_drop_count FROM analysis) > ${freq_drop_count_threshold|20}
+               AND (SELECT high_freq_pct FROM analysis) > 30 THEN
+            'GPU 限频: 检测到 ' || (SELECT freq_drop_count FROM analysis) || ' 次频率突降，可能受温控限制'
+          WHEN (SELECT low_freq_pct FROM analysis) > ${high_freq_threshold_pct|70} THEN
+            'GPU 空闲: 低频区间运行时间占 ' || (SELECT low_freq_pct FROM analysis) || '%，GPU 负载极低'
+          WHEN (SELECT gpu_jank_frames FROM analysis) > 0 THEN
+            'GPU 相关掉帧: 检测到 ' || (SELECT gpu_jank_frames FROM analysis) || ' 帧 GPU 相关 Jank'
+          ELSE
+            'GPU 状态正常，频率分布合理'
+        END as root_cause_summary,
+        -- 证据
+        '[' ||
+          '"最高频占比: ' || COALESCE((SELECT max_freq_pct FROM analysis), 0) || '%",' ||
+          '"高频区间占比: ' || COALESCE((SELECT high_freq_pct FROM analysis), 0) || '%",' ||
+          '"低频区间占比: ' || COALESCE((SELECT low_freq_pct FROM analysis), 0) || '%",' ||
+          '"频率突降次数: ' || COALESCE((SELECT freq_drop_count FROM analysis), 0) || '",' ||
+          '"GPU 相关掉帧: ' || COALESCE((SELECT gpu_jank_frames FROM analysis), 0) || '"' ||
+        ']' as evidence,
+        -- 优化建议
+        CASE
+          WHEN (SELECT high_freq_pct FROM analysis) > ${high_freq_threshold_pct|70} THEN
+            '减少 GPU 负载：简化 shader、降低绘制复杂度、减少 overdraw'
+          WHEN (SELECT freq_drop_count FROM analysis) > ${freq_drop_count_threshold|20} THEN
+            '检查设备温度，考虑降低渲染负载以避免温控降频'
+          WHEN (SELECT low_freq_pct FROM analysis) > ${high_freq_threshold_pct|70} THEN
+            'GPU 空闲，性能瓶颈不在 GPU 侧'
+          WHEN (SELECT gpu_jank_frames FROM analysis) > 0 THEN
+            '检查 GPU 渲染管线，优化 RenderThread 工作负载'
+          ELSE
+            '当前 GPU 运行状态良好，无需特别优化'
+        END as suggestion
+    save_as: conclusion
+    condition: "data_check.data[0]?.has_gpu_data === 1"
 
-      ## GPU 频率分布
-          gpu_frequency_distribution
-
-      ## 频率变化统计
-          gpu_frequency_changes
-
-      ## GPU 内存使用
-          gpu_memory_by_process
-
-      ## 帧渲染关联
-          gpu_frame_correlation
-
-      ## 高负载时段
-          gpu_high_load_periods
-
-      请分析：
-      1. GPU 整体负载水平评估
-      2. GPU 频率调节是否合理
-      3. GPU 内存使用是否正常
-      4. GPU 与帧卡顿的关联性
-      5. 优化建议
-
-      使用中文回答，结构清晰。
+  # ==========================================================================
+  # Fallback: GPU 数据不可用
+  # ==========================================================================
+  - id: fallback_no_gpu_data
+    type: atomic
+    name: "GPU 数据不可用"
+    condition: "data_check.data[0]?.has_gpu_data === 0"
+    display:
+      level: summary
+      layer: overview
+      title: "GPU 分析 - 数据缺失"
+      columns:
+        - name: status
+          label: "状态"
+          type: string
+        - name: missing_data
+          label: "缺失数据"
+          type: string
+        - name: suggestion
+          label: "建议"
+          type: string
+    sql: |
+      SELECT
+        '无法执行 GPU 分析' as status,
+        'android_gpu_frequency (GPU 频率数据)' as missing_data,
+        '请确保 trace 采集时启用了 GPU 频率采集 (需要内核支持 gpu_frequency tracepoint)' as suggestion
+      UNION ALL
+      SELECT
+        '可用替代方案' as status,
+        CASE
+          WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='gpu_counter_track') THEN 'gpu_counter_track (可用)'
+          ELSE 'gpu_counter_track (不可用)'
+        END as missing_data,
+        '可尝试通过 gpu_counter_track 获取 GPU 频率和利用率数据' as suggestion
+    save_as: fallback_info
 
 output:
-  format: markdown
-  sections:
-    - title: "GPU 分析总结"
-      content: |
-        ## GPU 频率分析
-            gpu_frequency_distribution
-
-        ## GPU 内存分析
-            gpu_memory_by_process
-
-        ## GPU-帧渲染关联
-            gpu_frame_correlation
-
-        ## AI 综合分析
-            gpu_ai_summary
+  format: layered
+  default_expanded: [overview, list]
+  conclusion:
+    category: $conclusion.gpu_category
+    confidence: $conclusion.confidence
+    summary: $conclusion.root_cause_summary
+    evidence: $conclusion.evidence
+    suggestion: $conclusion.suggestion

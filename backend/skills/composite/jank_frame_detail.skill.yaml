@@ -1,5 +1,6 @@
+# v2.0: Replaced inline CPU topology CTEs with shared _cpu_topology VIEW
 name: jank_frame_detail
-version: "1.0"
+version: "2.0"
 type: composite
 category: rendering
 
@@ -97,6 +98,14 @@ inputs:
     description: "掉帧责任归属: APP（BufferTX=0）或 SF（BufferTX>0）"
 
 steps:
+  - id: init_cpu_topology
+    type: skill
+    name: "初始化 CPU 拓扑"
+    skill: cpu_topology_view
+    display:
+      level: hidden
+    optional: true
+
   # ===== 数据源检测：Monitor contention 表是否可用（可选）=====
   - id: monitor_contention_check
     type: atomic
@@ -180,6 +189,7 @@ steps:
   - id: quadrant_analysis
     type: atomic
     name: "四象限分析"
+    optional: true
     display:
       level: key
       layer: deep
@@ -200,7 +210,8 @@ steps:
           type: percentage
           format: percentage
     sql: |
-      WITH target_threads AS (
+      WITH
+      target_threads AS (
         SELECT t.utid, t.tid, t.name as thread_name, p.pid, p.name as process_name,
           CASE
             WHEN t.tid = p.pid THEN 'MainThread'
@@ -229,14 +240,15 @@ steps:
           ts.cpu,
           ts.dur,
           CASE
-            WHEN ts.state = 'Running' AND ts.cpu >= 4 THEN 'Q1_大核运行'
-            WHEN ts.state = 'Running' AND ts.cpu < 4 THEN 'Q2_小核运行'
+            WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('prime', 'big') THEN 'Q1_大核运行'
+            WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('medium', 'little') THEN 'Q2_小核运行'
             WHEN ts.state = 'R' THEN 'Q3_等待调度'
             WHEN ts.state IN ('S', 'D', 'I') THEN 'Q4_休眠阻塞'
             ELSE 'Other'
           END as quadrant_name
         FROM thread_state ts
         JOIN target_threads tt ON ts.utid = tt.utid
+        LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
         WHERE ts.ts >= tt.thread_start_ts
           AND ts.ts < tt.thread_end_ts
       ),
@@ -349,13 +361,15 @@ steps:
           label: "最小频率"
           type: number
     sql: |
-      WITH freq_data AS (
+      WITH
+      freq_data AS (
         SELECT
-          cpu,
-          CASE WHEN cpu >= 4 THEN 'big' ELSE 'little' END as core_type,
-          value as freq_khz
+          t.cpu,
+          COALESCE(ct.core_type, 'little') as core_type,
+          c.value as freq_khz
         FROM counter c
         JOIN cpu_counter_track t ON c.track_id = t.id
+        LEFT JOIN _cpu_topology ct ON t.cpu = ct.cpu_id
         WHERE t.name = 'cpufreq'
           AND c.ts >= ${start_ts}
           AND c.ts < ${end_ts}
@@ -541,15 +555,17 @@ steps:
           label: "变化"
           type: enum
     sql: |
-      WITH freq_events AS (
+      WITH
+      freq_events AS (
         SELECT
           c.ts,
           t.cpu,
           c.value as freq_khz,
-          CASE WHEN t.cpu >= 4 THEN 'big' ELSE 'little' END as core_type,
+          COALESCE(ct.core_type, 'little') as core_type,
           LAG(c.value) OVER (PARTITION BY t.cpu ORDER BY c.ts) as prev_freq_khz
         FROM counter c
         JOIN cpu_counter_track t ON c.track_id = t.id
+        LEFT JOIN _cpu_topology ct ON t.cpu = ct.cpu_id
         WHERE t.name = 'cpufreq'
           AND c.ts >= ${start_ts}
           AND c.ts < ${end_ts}
@@ -653,7 +669,6 @@ steps:
           type: duration
           format: duration_ms
     sql: |
-      INCLUDE PERFETTO MODULE android.garbage_collection;
       WITH gc_events AS (
         SELECT
           gc.tid,
@@ -951,8 +966,8 @@ steps:
         SELECT
           tt.thread_type,
           CASE
-            WHEN ts.state = 'Running' AND ts.cpu >= 4 THEN 'Q1'
-            WHEN ts.state = 'Running' AND ts.cpu < 4 THEN 'Q2'
+            WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('prime', 'big') THEN 'Q1'
+            WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('medium', 'little') THEN 'Q2'
             WHEN ts.state = 'R' THEN 'Q3'
             WHEN ts.state IN ('S', 'D', 'I') THEN 'Q4'
             ELSE 'Other'
@@ -960,6 +975,7 @@ steps:
           SUM(ts.dur) as dur_ns
         FROM thread_state ts
         JOIN target_threads tt ON ts.utid = tt.utid
+        LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
         WHERE ts.ts >= ${start_ts} AND ts.ts < ${end_ts}
         GROUP BY tt.thread_type, quadrant
       ),
@@ -969,7 +985,7 @@ steps:
           thread_type,
           quadrant,
           dur_ns,
-          ROUND(100.0 * dur_ns / SUM(dur_ns) OVER (PARTITION BY thread_type), 1) as pct
+          ROUND(100.0 * dur_ns / NULLIF(SUM(dur_ns) OVER (PARTITION BY thread_type), 0), 1) as pct
         FROM thread_states
         WHERE quadrant != 'Other'
       ),
@@ -1026,6 +1042,7 @@ steps:
         SELECT
           ts.state,
           ts.cpu,
+          COALESCE(ct.core_type, 'little') as core_type,
           (
             CASE
               WHEN ts.ts + ts.dur < b.slice_end_ns THEN ts.ts + ts.dur
@@ -1040,18 +1057,19 @@ steps:
         FROM thread_state ts
         JOIN main_thread_utid mtu ON ts.utid = mtu.utid
         JOIN top_slice_bounds b
+        LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
         WHERE ts.ts < b.slice_end_ns
           AND ts.ts + ts.dur > b.slice_start_ns
       ),
       top_slice_cpu_mix AS (
         SELECT
           ROUND(
-            100.0 * SUM(CASE WHEN state = 'Running' AND cpu < 4 AND overlap_ns > 0 THEN overlap_ns ELSE 0 END)
+            100.0 * SUM(CASE WHEN state = 'Running' AND core_type IN ('medium', 'little') AND overlap_ns > 0 THEN overlap_ns ELSE 0 END)
             / NULLIF((SELECT slice_dur_ns FROM top_slice_bounds), 0),
             1
           ) as little_run_pct,
           ROUND(
-            100.0 * SUM(CASE WHEN state = 'Running' AND cpu >= 4 AND overlap_ns > 0 THEN overlap_ns ELSE 0 END)
+            100.0 * SUM(CASE WHEN state = 'Running' AND core_type IN ('prime', 'big') AND overlap_ns > 0 THEN overlap_ns ELSE 0 END)
             / NULLIF((SELECT slice_dur_ns FROM top_slice_bounds), 0),
             1
           ) as big_run_pct,
@@ -1070,25 +1088,27 @@ steps:
       -- 5. 获取 CPU 频率
       freq_info AS (
         SELECT
-          ROUND(AVG(CASE WHEN cpu >= 4 THEN value END) / 1000, 0) as big_avg_freq,
-          ROUND(MAX(CASE WHEN cpu >= 4 THEN value END) / 1000, 0) as big_max_freq,
-          ROUND(MIN(CASE WHEN cpu >= 4 THEN value END) / 1000, 0) as big_min_freq,
-          ROUND(AVG(CASE WHEN cpu < 4 THEN value END) / 1000, 0) as little_avg_freq,
-          ROUND(MAX(CASE WHEN cpu < 4 THEN value END) / 1000, 0) as little_max_freq,
-          ROUND(MIN(CASE WHEN cpu < 4 THEN value END) / 1000, 0) as little_min_freq
+          ROUND(AVG(CASE WHEN ct.core_type IN ('prime', 'big') THEN c.value END) / 1000, 0) as big_avg_freq,
+          ROUND(MAX(CASE WHEN ct.core_type IN ('prime', 'big') THEN c.value END) / 1000, 0) as big_max_freq,
+          ROUND(MIN(CASE WHEN ct.core_type IN ('prime', 'big') THEN c.value END) / 1000, 0) as big_min_freq,
+          ROUND(AVG(CASE WHEN ct.core_type IN ('medium', 'little') THEN c.value END) / 1000, 0) as little_avg_freq,
+          ROUND(MAX(CASE WHEN ct.core_type IN ('medium', 'little') THEN c.value END) / 1000, 0) as little_max_freq,
+          ROUND(MIN(CASE WHEN ct.core_type IN ('medium', 'little') THEN c.value END) / 1000, 0) as little_min_freq
         FROM counter c
         JOIN cpu_counter_track t ON c.track_id = t.id
+        LEFT JOIN _cpu_topology ct ON t.cpu = ct.cpu_id
         WHERE t.name = 'cpufreq'
           AND c.ts >= ${start_ts} AND c.ts < ${end_ts}
       ),
       top_slice_freq AS (
         SELECT
-          ROUND(AVG(CASE WHEN t.cpu >= 4 THEN c.value END) / 1000, 0) as top_big_avg_freq_mhz,
-          ROUND(MAX(CASE WHEN t.cpu >= 4 THEN c.value END) / 1000, 0) as top_big_max_freq_mhz,
-          ROUND(MIN(CASE WHEN t.cpu >= 4 THEN c.value END) / 1000, 0) as top_big_min_freq_mhz,
-          ROUND(AVG(CASE WHEN t.cpu < 4 THEN c.value END) / 1000, 0) as top_little_avg_freq_mhz
+          ROUND(AVG(CASE WHEN ct.core_type IN ('prime', 'big') THEN c.value END) / 1000, 0) as top_big_avg_freq_mhz,
+          ROUND(MAX(CASE WHEN ct.core_type IN ('prime', 'big') THEN c.value END) / 1000, 0) as top_big_max_freq_mhz,
+          ROUND(MIN(CASE WHEN ct.core_type IN ('prime', 'big') THEN c.value END) / 1000, 0) as top_big_min_freq_mhz,
+          ROUND(AVG(CASE WHEN ct.core_type IN ('medium', 'little') THEN c.value END) / 1000, 0) as top_little_avg_freq_mhz
         FROM counter c
         JOIN cpu_counter_track t ON c.track_id = t.id
+        LEFT JOIN _cpu_topology ct ON t.cpu = ct.cpu_id
         WHERE t.name = 'cpufreq'
           AND EXISTS (SELECT 1 FROM top_slice_bounds)
           AND c.ts >= (SELECT slice_start_ns FROM top_slice_bounds)
@@ -1099,7 +1119,7 @@ steps:
         FROM counter c
         JOIN cpu_counter_track t ON c.track_id = t.id
         WHERE t.name = 'cpufreq'
-          AND t.cpu >= 4
+          AND t.cpu IN (SELECT cpu_id FROM _cpu_topology WHERE core_type IN ('prime', 'big'))
           AND c.ts >= ${start_ts}
           AND c.ts < ${end_ts}
       ),
@@ -1173,13 +1193,14 @@ steps:
       -- 9. CPU 簇负载检测
       cluster_load AS (
         SELECT
-          ROUND(100.0 * SUM(CASE WHEN ts.cpu >= 4 THEN
+          ROUND(100.0 * SUM(CASE WHEN COALESCE(ct.core_type, 'little') IN ('prime', 'big') THEN
             MIN(ts.ts + ts.dur, ${end_ts}) - MAX(ts.ts, ${start_ts})
           ELSE 0 END) / NULLIF((${end_ts} - ${start_ts}) * 4, 0), 1) as big_load_pct,
-          ROUND(100.0 * SUM(CASE WHEN ts.cpu < 4 THEN
+          ROUND(100.0 * SUM(CASE WHEN COALESCE(ct.core_type, 'little') IN ('medium', 'little') THEN
             MIN(ts.ts + ts.dur, ${end_ts}) - MAX(ts.ts, ${start_ts})
           ELSE 0 END) / NULLIF((${end_ts} - ${start_ts}) * 4, 0), 1) as little_load_pct
         FROM thread_state ts
+        LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
         WHERE ts.ts < ${end_ts}
           AND ts.ts + ts.dur > ${start_ts}
           AND ts.state = 'Running'

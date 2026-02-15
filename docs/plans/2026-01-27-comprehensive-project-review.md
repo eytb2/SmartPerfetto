@@ -67,8 +67,8 @@
 
 ### 1.1 Core Components
 
-#### AgentDrivenOrchestrator
-**File:** `backend/src/agent/core/agentDrivenOrchestrator.ts`
+#### AgentRuntime
+**File:** `backend/src/agentv2/runtime/agentRuntime.ts`
 
 **Responsibilities:**
 - Thin coordination layer delegating to specialized executors
@@ -459,7 +459,7 @@ steps:
 
 ```typescript
 // tests/integration/orchestration.test.ts
-describe('AgentDrivenOrchestrator', () => {
+describe('AgentRuntime', () => {
   describe('Strategy Matching', () => {
     it('should route scrolling query to StrategyExecutor');
     it('should route unknown query to HypothesisExecutor');

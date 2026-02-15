@@ -102,13 +102,12 @@ steps:
         SELECT
           dur AS interval_ns,
           PERCENT_RANK() OVER (ORDER BY dur) AS pct
-        FROM slice s
+        FROM expected_frame_timeline_slice e
         CROSS JOIN params p
-        WHERE s.name = 'expected_frame_timeline_slice'
-          AND s.ts >= p.start_ts
-          AND s.ts <= p.end_ts
-          AND s.dur > 4000000
-          AND s.dur < 20000000
+        WHERE e.ts >= p.start_ts
+          AND e.ts <= p.end_ts
+          AND e.dur > 4000000
+          AND e.dur < 20000000
       ),
 
       frame_timeline_stats AS (

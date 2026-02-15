@@ -320,6 +320,7 @@ export interface StreamingUpdate {
    * - 'tool_call': Tool invocation
    * - 'finding': Diagnostic finding
    * - 'progress': Progress update
+   * - 'answer_token': Incremental final answer text stream
    * - 'conclusion': Analysis conclusion
    * - 'error': Error message
    *
@@ -332,7 +333,7 @@ export interface StreamingUpdate {
    * - 'synthesis_complete': Feedback synthesis complete
    * - 'strategy_decision': Next iteration strategy decided
    */
-  type: 'data' | 'thought' | 'tool_call' | 'finding' | 'progress' | 'conclusion' | 'error' | 'scene_detected' | 'track_data' | 'skill_layered_result' | 'worker_thought' | 'architecture_detected'
+  type: 'data' | 'thought' | 'tool_call' | 'finding' | 'progress' | 'answer_token' | 'conclusion' | 'error' | 'scene_detected' | 'track_data' | 'skill_layered_result' | 'worker_thought' | 'architecture_detected'
     | 'hypothesis_generated' | 'agent_task_dispatched' | 'agent_dialogue' | 'agent_response' | 'round_start' | 'synthesis_complete' | 'strategy_decision'
     | 'degraded' | 'stage_transition' | 'circuit_breaker'
     // Agent-Driven Architecture v2.0 events
@@ -658,6 +659,8 @@ export interface SubAgentContext {
   package?: string;
   /** 分析时间范围 (string for precision-safe ns timestamps) */
   timeRange?: { start: number | string; end: number | string };
+  /** 分析参数（可选） */
+  analysisParams?: Record<string, any>;
   /** AI 服务，用于 Skill 的 ai_summary 和 ai_decision 步骤 */
   aiService?: {
     chat: (prompt: string) => Promise<string>;

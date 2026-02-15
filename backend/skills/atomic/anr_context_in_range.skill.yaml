@@ -1,0 +1,90 @@
+# =============================================================================
+# ANR Context in Range (Atomic Skill)
+# =============================================================================
+# Extracts the first ANR event data for use as a time-window anchor
+# in subsequent analysis steps. Replaces the `first_anr` CTE that was
+# duplicated 5× in anr_analysis.skill.yaml.
+#
+# Output fields used as parameters by consumers:
+#   - anr_ts: ANR timestamp (for window end)
+#   - timeout_ns: ANR timeout in nanoseconds (for window start = anr_ts - timeout_ns)
+#   - process_name, pid, anr_type, error_id: ANR metadata
+#
+# Usage:
+#   - id: get_anr_context
+#     type: skill
+#     skill: anr_context_in_range
+#     params:
+#       process_name: "${process_name}"
+#       package: "${package}"
+#     save_as: anr_ctx
+#   Then use: ${anr_ctx.data[0].anr_ts}, ${anr_ctx.data[0].timeout_ns}
+# =============================================================================
+
+name: anr_context_in_range
+version: "1.0"
+type: atomic
+category: app_lifecycle
+
+meta:
+  display_name: "ANR 上下文提取"
+  description: "提取首个 ANR 事件的时间窗口参数，供后续分析步骤复用"
+  icon: "error"
+  tags: [anr, context, atomic]
+
+inputs:
+  - name: process_name
+    type: string
+    required: false
+    description: "目标进程名"
+  - name: package
+    type: string
+    required: false
+    description: "应用包名（process_name 的别名）"
+
+display:
+  level: summary
+  layer: overview
+  title: "ANR 上下文"
+  columns:
+    - name: anr_ts
+      label: "ANR 时间"
+      type: timestamp
+      clickAction: navigate_timeline
+    - name: timeout_ns
+      label: "超时时长(ns)"
+      type: duration
+      unit: ns
+    - name: timeout_ms
+      label: "超时时长(ms)"
+      type: duration
+      format: duration_ms
+      unit: ms
+    - name: process_name
+      label: "进程名"
+      type: string
+    - name: anr_type
+      label: "ANR 类型"
+      type: string
+
+sql: |
+  SELECT
+    printf('%d', ts) as anr_ts,
+    printf('%d', CAST(default_anr_dur_ms * 1e6 AS INTEGER)) as timeout_ns,
+    ROUND(default_anr_dur_ms, 2) as timeout_ms,
+    process_name,
+    pid,
+    anr_type,
+    error_id
+  FROM android_anrs
+  WHERE (process_name GLOB '${process_name}*'
+         OR process_name GLOB '${package}*'
+         OR ('${process_name}' = '' AND '${package}' = ''))
+  ORDER BY ts ASC
+  LIMIT 1
+
+save_as: first_anr
+optional: true
+
+output:
+  format: structured

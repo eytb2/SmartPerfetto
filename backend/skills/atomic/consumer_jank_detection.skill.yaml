@@ -77,6 +77,43 @@ steps:
     display:
       level: detail
       title: "真正的掉帧帧（SF 消费端视角）"
+      columns:
+        - name: frame_id
+          label: "帧ID"
+          type: string
+        - name: layer_name
+          label: "图层"
+          type: string
+        - name: ts_str
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: ts_sec
+          label: "时间(s)"
+          type: number
+        - name: dur_ms
+          label: "帧耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: token_gap
+          label: "Token跳跃"
+          type: number
+        - name: vsync_missed
+          label: "跳帧数"
+          type: number
+        - name: interval_ms
+          label: "间隔"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: app_jank_type
+          label: "App标记"
+          type: string
+        - name: jank_severity
+          label: "严重程度"
+          type: string
     sql: |
       WITH
       vsync_ticks AS (
@@ -205,6 +242,29 @@ steps:
     display:
       level: summary
       title: "消费端掉帧统计"
+      columns:
+        - name: total_frames
+          label: "总帧数"
+          type: number
+          format: compact
+        - name: consumer_jank_frames
+          label: "掉帧数"
+          type: number
+          format: compact
+        - name: smooth_frames
+          label: "流畅帧"
+          type: number
+          format: compact
+        - name: consumer_jank_rate
+          label: "掉帧率"
+          type: percentage
+          format: percentage
+        - name: max_vsync_missed
+          label: "最大跳帧"
+          type: number
+        - name: rating
+          label: "评级"
+          type: string
     sql: |
       WITH
       vsync_ticks AS (
@@ -323,6 +383,18 @@ steps:
     display:
       level: detail
       title: "掉帧严重程度分布"
+      columns:
+        - name: severity
+          label: "严重程度"
+          type: string
+        - name: count
+          label: "帧数"
+          type: number
+          format: compact
+        - name: percentage
+          label: "占比"
+          type: percentage
+          format: percentage
     sql: |
       WITH
       vsync_ticks AS (
@@ -395,7 +467,7 @@ steps:
       SELECT
         severity,
         COUNT(*) as count,
-        ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) as percentage
+        ROUND(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER (), 0), 2) as percentage
       FROM gap_analysis
       GROUP BY severity
       ORDER BY

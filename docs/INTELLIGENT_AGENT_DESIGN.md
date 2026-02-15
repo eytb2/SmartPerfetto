@@ -2,7 +2,7 @@
 
 > 本文档持续迭代，记录 Agent 系统从"指令执行器"到"智能分析专家"的演进设计。
 > 
-> ⚠️ 说明：当前仅保留 AgentDrivenOrchestrator 主链路，文档中的 Master/OrchestratorBridge 方案为历史版本。
+> ⚠️ 说明：当前仅保留 AgentRuntime 主链路，文档中的 Master/OrchestratorBridge 方案为历史版本。
 
 ## 目录
 

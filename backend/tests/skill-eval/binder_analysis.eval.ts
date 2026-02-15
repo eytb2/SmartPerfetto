@@ -631,6 +631,8 @@ describe('binder_analysis edge cases', () => {
       const result = await evaluator.executeStep('binder_overview');
 
       expect(result.success).toBe(true);
+      // Startup fixture has known Binder traffic; empty indicates extraction or schema regression.
+      expect(result.data.length).toBeGreaterThan(0);
       // Startup traces typically have Binder activity for service binding
     }, 30000);
   });

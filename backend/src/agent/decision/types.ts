@@ -143,6 +143,8 @@ export interface DecisionContext {
   sessionId: string;
   /** Trace ID */
   traceId: string;
+  /** 用户原始查询（可选，用于策略细化） */
+  query?: string;
   /** 检测到的架构信息 */
   architecture?: ArchitectureInfo;
   /** TraceProcessorService */
@@ -153,6 +155,8 @@ export interface DecisionContext {
   timeRange?: { start: number | string; end: number | string };
   /** 目标包名 */
   packageName?: string;
+  /** 分析参数（可选，用于决策树的定制化行为） */
+  analysisParams?: Record<string, any>;
 }
 
 /**

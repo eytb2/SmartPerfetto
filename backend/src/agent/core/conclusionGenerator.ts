@@ -78,6 +78,70 @@ const PROMPT_FINDING_OTHER_FIELD_MAX_CHARS = 90;
 const PROMPT_FINDING_PRIORITY_FIELD_MAX_CHARS = 140;
 const PROMPT_FINDING_EVIDENCE_ITEMS_LIMIT = 4;
 const PROMPT_FINDING_EVIDENCE_MAX_CHARS = 120;
+const STARTUP_WRAPPER_SLICE_RE = /\b(clientTransactionExecuted|activityStart|bindApplication|performCreate:)/i;
+const STARTUP_ACTIONABLE_HINT_RE = /\b(LoadSimulator_|ChaosTask|SimulateInflation|RealInflation|AppInit|ActivityInit)\b/i;
+
+function normalizeFindingTitleKey(title: string): string {
+  return String(title || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+function dedupeFindingsForConclusion(findings: Finding[]): Finding[] {
+  const merged = new Map<string, Finding>();
+
+  for (const finding of findings) {
+    const key = normalizeFindingTitleKey(finding.title || '');
+    if (!key) continue;
+
+    if (!merged.has(key)) {
+      merged.set(key, finding);
+      continue;
+    }
+
+    const existing = merged.get(key)!;
+    const existingScore = Number(existing.confidence || 0.5);
+    const candidateScore = Number(finding.confidence || 0.5);
+    if (candidateScore > existingScore) {
+      merged.set(key, finding);
+    }
+  }
+
+  return Array.from(merged.values());
+}
+
+function isStartupDetailFinding(finding: Finding): boolean {
+  const src = String(finding.source || '').toLowerCase();
+  if (src.includes('startup_detail')) return true;
+  const title = String(finding.title || '');
+  return title.includes('启动') || title.includes('温启动') || title.includes('冷启动') || title.includes('热启动');
+}
+
+function isStartupFrameworkWrapperFinding(finding: Finding): boolean {
+  if (!isStartupDetailFinding(finding)) return false;
+  const text = `${String(finding.title || '')}\n${String(finding.description || '')}`;
+  return STARTUP_WRAPPER_SLICE_RE.test(text);
+}
+
+function hasStartupActionableFinding(findings: Finding[]): boolean {
+  return findings.some((finding) => {
+    if (!isStartupDetailFinding(finding)) return false;
+    const text = `${String(finding.title || '')}\n${String(finding.description || '')}`;
+    if (text.includes('主线程可操作热点')) return true;
+    return STARTUP_ACTIONABLE_HINT_RE.test(text);
+  });
+}
+
+function sanitizeFindingsForConclusion(allFindings: Finding[]): Finding[] {
+  const deduped = dedupeFindingsForConclusion(allFindings);
+  if (deduped.length === 0) return deduped;
+
+  const actionableStartupExists = hasStartupActionableFinding(deduped);
+  if (!actionableStartupExists) return deduped;
+
+  return deduped.filter((finding) => !isStartupFrameworkWrapperFinding(finding));
+}
 
 function toEvidenceArray(evidence: unknown): unknown[] {
   if (Array.isArray(evidence)) {
@@ -2191,6 +2255,79 @@ export function renderConclusionContractMarkdown(
   });
 }
 
+const ANSWER_STREAM_MAX_CHARS_PER_CHUNK = 18;
+const ANSWER_STREAM_BOUNDARY_RE = /[\n。！？!?；;：:,，]/;
+const ANSWER_STREAM_TOKEN_RE = /(\n+|[。！？!?；;：:,，]|[^\s。！？!?；;：:,，\n]+|\s+)/g;
+
+function tokenizeConclusionForStreaming(content: string): string[] {
+  const normalized = String(content || '');
+  if (!normalized) return [];
+
+  const rawTokens = normalized.match(ANSWER_STREAM_TOKEN_RE) || [normalized];
+  const chunks: string[] = [];
+  let buffer = '';
+
+  const flush = () => {
+    if (!buffer) return;
+    chunks.push(buffer);
+    buffer = '';
+  };
+
+  for (const token of rawTokens) {
+    if (!token) continue;
+
+    // Split oversized "word" tokens to keep UI refresh granular and stable.
+    if (
+      token.length > ANSWER_STREAM_MAX_CHARS_PER_CHUNK * 2 &&
+      !ANSWER_STREAM_BOUNDARY_RE.test(token) &&
+      !/\s/.test(token)
+    ) {
+      for (let i = 0; i < token.length; i += ANSWER_STREAM_MAX_CHARS_PER_CHUNK) {
+        const piece = token.slice(i, i + ANSWER_STREAM_MAX_CHARS_PER_CHUNK);
+        if (buffer && buffer.length + piece.length > ANSWER_STREAM_MAX_CHARS_PER_CHUNK) {
+          flush();
+        }
+        buffer += piece;
+        flush();
+      }
+      continue;
+    }
+
+    if (buffer && buffer.length + token.length > ANSWER_STREAM_MAX_CHARS_PER_CHUNK) {
+      flush();
+    }
+    buffer += token;
+
+    if (ANSWER_STREAM_BOUNDARY_RE.test(token) || buffer.length >= ANSWER_STREAM_MAX_CHARS_PER_CHUNK) {
+      flush();
+    }
+  }
+
+  flush();
+  return chunks;
+}
+
+function emitConclusionAsAnswerTokens(
+  emitter: ProgressEmitter,
+  conclusion: string,
+  options: { emitTokens?: boolean } = {}
+): string {
+  const text = String(conclusion || '');
+  const shouldEmitTokens = options.emitTokens !== false;
+  const chunks = shouldEmitTokens ? tokenizeConclusionForStreaming(text) : [];
+
+  for (const token of chunks) {
+    emitter.emitUpdate('answer_token', { token });
+  }
+
+  emitter.emitUpdate('answer_token', {
+    done: true,
+    totalChars: text.length,
+  });
+
+  return text;
+}
+
 /**
  * Generate an AI-powered conclusion from analysis results.
  * Falls back to a simple markdown summary if LLM fails.
@@ -2204,6 +2341,19 @@ export async function generateConclusion(
   stopReason?: string,
   options: ConclusionGenerationOptions = {}
 ): Promise<string> {
+  let hasModelTokenStream = false;
+  const onModelToken = (token: string) => {
+    if (!token) return;
+    hasModelTokenStream = true;
+    emitter.emitUpdate('answer_token', { token });
+  };
+
+  const streamConclusionAndReturn = (text: string): string =>
+    emitConclusionAsAnswerTokens(emitter, text, {
+      emitTokens: !hasModelTokenStream,
+    });
+
+  const sanitizedFindings = sanitizeFindingsForConclusion(allFindings);
   const confirmedHypotheses = Array.from(sharedContext.hypotheses.values())
     .filter(h => h.status === 'confirmed' || h.confidence >= 0.85);
 
@@ -2215,13 +2365,13 @@ export async function generateConclusion(
 
   // Collect contradicted findings for explicit mention in prompt
   // Instead of filtering them out, we let LLM resolve contradictions with guidance
-  const contradictedFindings = allFindings.filter(f => f.details?._contradicted);
+  const contradictedFindings = sanitizedFindings.filter(f => f.details?._contradicted);
   const contradictionReasons = contradictedFindings
     .map(f => f.details?._contradictionReason)
     .filter((r): r is string => typeof r === 'string');
 
   // Sort findings by confidence (highest first) for better LLM processing
-  const sortedFindings = [...allFindings].sort((a, b) => (b.confidence || 0.5) - (a.confidence || 0.5));
+  const sortedFindings = [...sanitizedFindings].sort((a, b) => (b.confidence || 0.5) - (a.confidence || 0.5));
 
   // Filter out contradicted findings to prevent LLM from generating conflicting conclusions
   const findingsForPrompt = sortedFindings.filter(f => !f.details?._contradicted);
@@ -2406,8 +2556,10 @@ ${sharedContext.traceConfig ? (sharedContext.traceConfig.isVRR
   try {
     const response = await modelRouter.callWithFallback(prompt, 'synthesis', {
       jsonMode: insightEnabled,
+      onToken: onModelToken,
       sessionId: sharedContext.sessionId,
       traceId: sharedContext.traceId,
+      maxTokens: insightEnabled ? 3000 : 2000,
       promptId: insightEnabled
         ? `agent.conclusionGenerator.insight.${outputMode}`
         : (turnCount >= 1 ? 'agent.conclusionGenerator.dialogue' : 'agent.conclusionGenerator'),
@@ -2453,15 +2605,16 @@ ${sharedContext.traceConfig ? (sharedContext.traceConfig.isVRR
         contractRenderOptions,
         emitter
       );
-      return finalizeConclusionMarkdown(
+      const finalizedFallback = finalizeConclusionMarkdown(
         deterministicFallback,
         finalFindings,
         scopedJankSummary,
         { singleFrameDrillDown }
       );
+      return streamConclusionAndReturn(finalizedFallback);
     }
 
-    return conclusion;
+    return streamConclusionAndReturn(conclusion);
   } catch (error) {
     emitter.log(`Failed to generate conclusion: ${error}`);
     emitter.emitUpdate('degraded', {
@@ -2496,17 +2649,19 @@ ${sharedContext.traceConfig ? (sharedContext.traceConfig.isVRR
       contractRenderOptions,
       emitter
     );
-    return finalizeConclusionMarkdown(
+    const finalizedFallback = finalizeConclusionMarkdown(
       deterministicFallback,
       fallbackEvidenceFindings,
       scopedJankSummary,
       { singleFrameDrillDown }
     );
+    return streamConclusionAndReturn(finalizedFallback);
   }
 
-  return turnCount >= 1
+  const plainFallback = turnCount >= 1
     ? generateDialogueFallback(sortedFindings, intent, stopReason, historyContext)
     : generateSimpleConclusion(sortedFindings, stopReason);
+  return streamConclusionAndReturn(plainFallback);
 }
 
 /**

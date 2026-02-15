@@ -3968,7 +3968,7 @@ export class HTMLReportGenerator {
   }
 
   /**
-   * Generate HTML report from AgentDrivenOrchestrator result (Phase 2-4 architecture)
+   * Generate HTML report from agent runtime result (Phase 2-4 architecture)
    */
   generateAgentDrivenHTML(data: AgentDrivenReportData): string {
     const { traceId, query, result, hypotheses, dialogue, timestamp } = data;

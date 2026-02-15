@@ -5,9 +5,10 @@
 # - CPU 大小核占比
 # - 四大象限分析：Running/Runnable/Sleeping 分布
 # - 阻塞原因分析
+# v2.0: 复用 _cpu_topology 视图替代内联 CTE，统一核心分类
 
 name: binder_detail
-version: "1.0"
+version: "2.0"
 type: composite
 category: kernel
 
@@ -19,7 +20,7 @@ meta:
 
 prerequisites:
   required_tables:
-    - slices
+    - slice
 
 inputs:
   - name: binder_ts
@@ -57,6 +58,15 @@ inputs:
     description: "Perfetto 跳转结束时间"
 
 steps:
+  # ========== 初始化 CPU 拓扑 ==========
+  - id: init_cpu_topology
+    type: skill
+    name: "初始化 CPU 拓扑"
+    skill: cpu_topology_view
+    display:
+      level: hidden
+    optional: true
+
   # ========== Binder 基本信息 ==========
   - id: binder_info
     type: atomic
@@ -65,6 +75,34 @@ steps:
       level: key
       layer: deep
       title: "Binder 详情"
+      columns:
+        - name: server_process
+          label: "服务进程"
+          type: string
+        - name: aidl_name
+          label: "AIDL 方法"
+          type: string
+        - name: client_process
+          label: "客户端进程"
+          type: string
+        - name: dur_ms
+          label: "耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: binder_ts
+          label: "开始时间"
+          type: timestamp
+          clickAction: navigate_range
+          durationColumn: binder_end_ts
+        - name: binder_end_ts
+          label: "结束时间"
+          type: timestamp
+          clickAction: navigate_timeline
+          hidden: true
+        - name: rating
+          label: "评级"
+          type: string
     sql: |
       SELECT
         '${server_process}' as server_process,
@@ -92,6 +130,29 @@ steps:
       level: key
       layer: deep
       title: "大小核占比"
+      columns:
+        - name: thread_type
+          label: "线程"
+          type: string
+        - name: big_core_ms
+          label: "大核运行"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: little_core_ms
+          label: "小核运行"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: total_running_ms
+          label: "总 Running"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: running_pct
+          label: "Running 占比"
+          type: percentage
+          format: percentage
     sql: |
       WITH main_thread AS (
         SELECT t.utid, t.tid, p.pid
@@ -106,20 +167,18 @@ steps:
           SUM(
             MIN(ss.ts + ss.dur, ${binder_end_ts}) - MAX(ss.ts, ${binder_ts})
           ) / 1e6 as dur_ms,
-          CASE
-            WHEN ss.cpu >= 4 THEN 'big'
-            ELSE 'little'
-          END as core_type
+          COALESCE(ct.core_type, 'little') as core_type
         FROM sched_slice ss
         JOIN main_thread mt ON ss.utid = mt.utid
+        LEFT JOIN _cpu_topology ct ON ss.cpu = ct.cpu_id
         WHERE ss.ts < ${binder_end_ts}
           AND ss.ts + ss.dur > ${binder_ts}
         GROUP BY ss.cpu
       )
       SELECT
         'MainThread' as thread_type,
-        ROUND(SUM(CASE WHEN core_type = 'big' THEN dur_ms ELSE 0 END), 2) as big_core_ms,
-        ROUND(SUM(CASE WHEN core_type = 'little' THEN dur_ms ELSE 0 END), 2) as little_core_ms,
+        ROUND(SUM(CASE WHEN core_type IN ('prime', 'big') THEN dur_ms ELSE 0 END), 2) as big_core_ms,
+        ROUND(SUM(CASE WHEN core_type IN ('medium', 'little') THEN dur_ms ELSE 0 END), 2) as little_core_ms,
         ROUND(SUM(dur_ms), 2) as total_running_ms,
         ROUND(100.0 * SUM(dur_ms) / ${dur_ms}, 1) as running_pct
       FROM cpu_time
@@ -130,10 +189,44 @@ steps:
   - id: quadrant_analysis
     type: atomic
     name: "四大象限分析"
+    optional: true
     display:
       level: key
       layer: deep
       title: "四大象限分析"
+      columns:
+        - name: thread_type
+          label: "线程"
+          type: string
+        - name: q1_big_running_ms
+          label: "Q1 大核 Running"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: q2_little_running_ms
+          label: "Q2 小核 Running"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: q3_runnable_ms
+          label: "Q3 Runnable"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: q4_sleeping_ms
+          label: "Q4 Sleeping"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: total_ms
+          label: "总时间"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: sleeping_pct
+          label: "Sleeping 占比"
+          type: percentage
+          format: percentage
     sql: |
       WITH main_thread AS (
         SELECT t.utid, t.tid, p.pid
@@ -159,8 +252,8 @@ steps:
       quadrant_data AS (
         SELECT
           CASE
-            WHEN state = 'Running' AND cpu >= 4 THEN 'Q1_big_running'
-            WHEN state = 'Running' AND cpu < 4 THEN 'Q2_little_running'
+            WHEN state = 'Running' AND COALESCE((SELECT core_type FROM _cpu_topology WHERE cpu_id = thread_states.cpu), 'little') IN ('prime', 'big') THEN 'Q1_big_running'
+            WHEN state = 'Running' THEN 'Q2_little_running'
             WHEN state IN ('R', 'R+') THEN 'Q3_runnable'
             WHEN state IN ('S', 'D', 'I') THEN 'Q4_sleeping'
             ELSE 'other'
@@ -186,10 +279,30 @@ steps:
   - id: blocking_analysis
     type: atomic
     name: "阻塞原因分析"
+    optional: true
     display:
       level: key
       layer: deep
       title: "阻塞原因"
+      columns:
+        - name: state
+          label: "线程状态"
+          type: string
+        - name: state_desc
+          label: "状态说明"
+          type: string
+        - name: blocked_function
+          label: "阻塞函数"
+          type: string
+        - name: dur_ms
+          label: "耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
     sql: |
       WITH main_thread AS (
         SELECT t.utid, t.tid, p.pid

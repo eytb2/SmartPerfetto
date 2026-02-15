@@ -92,6 +92,24 @@ const FRAME_SKILLS: SkillDefinitionForAgent[] = [
     description: '【显示时序分析】分析Present Fence等待时间和显示延迟。适用于：怀疑显示端问题、GPU Fence阻塞。输出：Fence等待时序数据',
     category: 'frame',
   },
+  {
+    skillId: 'gpu_analysis',
+    toolName: 'analyze_gpu',
+    description: '【GPU概览分析】分析GPU频率、负载和渲染管线耗时。适用于：首次分析GPU性能、怀疑GPU瓶颈。输出：GPU频率统计+负载分布+渲染管线耗时+根因分类',
+    category: 'frame',
+  },
+  {
+    skillId: 'surfaceflinger_analysis',
+    toolName: 'analyze_surfaceflinger',
+    description: '【SurfaceFlinger分析】分析系统合成器的帧处理流程和延迟。适用于：怀疑SF合成瓶颈、多窗口场景掉帧、HWC合成问题。输出：SF合成统计+帧丢失分析+合成延迟分布',
+    category: 'frame',
+  },
+  {
+    skillId: 'game_fps_analysis',
+    toolName: 'analyze_game_fps',
+    description: '【游戏帧率分析】分析游戏渲染帧率，检测目标FPS（30/45/60/90/120fps）、帧间隔分布和掉帧率。适用于：游戏性能分析、游戏流畅度评估。输出：目标FPS+帧间隔统计+掉帧率',
+    category: 'frame',
+  },
 ];
 
 function toNumber(value: any): number {
@@ -620,6 +638,15 @@ ${findings || '无'}
 
     if (needsConsumerPerspective) {
       tools.push('detect_consumer_jank');
+      tools.push('analyze_surfaceflinger');
+    }
+
+    if (query.includes('gpu') || query.includes('渲染') || query.includes('render')) {
+      tools.push('analyze_gpu');
+    }
+
+    if (query.includes('surfaceflinger') || query.includes('sf') || query.includes('合成') || query.includes('hwc')) {
+      tools.push('analyze_surfaceflinger');
     }
 
     // Default: use scrolling analysis

@@ -15,7 +15,7 @@
 # =============================================================================
 
 name: callstack_analysis
-version: "1.0"
+version: "3.0"
 type: deep
 category: deep_analysis
 
@@ -60,6 +60,27 @@ steps:
       level: summary
       layer: overview
       title: "采样数据概览"
+      columns:
+        - name: total_samples
+          label: "总采样数"
+          type: number
+          format: compact
+        - name: unique_callsites
+          label: "唯一调用位置"
+          type: number
+          format: compact
+        - name: first_sample_ts
+          label: "首次采样"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: last_sample_ts
+          label: "末次采样"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: duration_sec
+          label: "采样时长(秒)"
+          type: number
+          format: compact
     sql: |
       SELECT
         COUNT(*) as total_samples,
@@ -75,10 +96,40 @@ steps:
   - id: hot_functions
     type: atomic
     name: "热点函数 Top 20"
+    optional: true
     display:
       level: detail
       layer: list
       title: "热点函数排行"
+      columns:
+        - name: function_name
+          label: "函数名"
+          type: string
+        - name: module_name
+          label: "模块"
+          type: string
+        - name: sample_count
+          label: "采样数"
+          type: number
+          format: compact
+        - name: percentage
+          label: "占比"
+          type: percentage
+          format: percentage
+    synthesize:
+      role: list
+      groupBy:
+        - field: module_name
+          title: 按模块分布
+      fields:
+        - key: function_name
+          label: 函数名
+        - key: percentage
+          label: 占比
+          format: "{{value}}%"
+      insights:
+        - condition: "percentage > 10"
+          template: "热点函数 {{function_name}} 占 {{percentage}}%，是主要瓶颈"
     sql: |
       WITH RECURSIVE
       -- 展开调用栈
@@ -115,7 +166,7 @@ steps:
         function_name,
         module_name,
         sample_count,
-        ROUND(sample_count * 100.0 / (SELECT total_samples FROM (${sample_stats})), 2) as percentage
+        ROUND(sample_count * 100.0 / NULLIF((SELECT total_samples FROM (${sample_stats})), 0), 2) as percentage
       FROM frame_symbols
       WHERE sample_count >= ${min_samples}
       ORDER BY sample_count DESC
@@ -126,10 +177,26 @@ steps:
   - id: module_distribution
     type: atomic
     name: "模块采样分布"
+    optional: true
     display:
       level: detail
       layer: list
       title: "模块热度分布"
+      columns:
+        - name: module_name
+          label: "模块名"
+          type: string
+        - name: module_type
+          label: "模块类型"
+          type: string
+        - name: sample_count
+          label: "采样数"
+          type: number
+          format: compact
+        - name: percentage
+          label: "占比"
+          type: percentage
+          format: percentage
     sql: |
       WITH
       frame_modules AS (
@@ -151,7 +218,7 @@ steps:
         module_name,
         module_type,
         COUNT(*) as sample_count,
-        ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM perf_sample), 2) as percentage
+        ROUND(COUNT(*) * 100.0 / NULLIF((SELECT COUNT(*) FROM perf_sample), 0), 2) as percentage
       FROM frame_modules
       GROUP BY module_name, module_type
       ORDER BY sample_count DESC
@@ -162,17 +229,36 @@ steps:
   - id: thread_hotspots
     type: atomic
     name: "线程采样分布"
+    optional: true
     display:
       level: detail
       layer: list
       title: "线程 CPU 采样分布"
+      columns:
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: tid
+          label: "TID"
+          type: number
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: sample_count
+          label: "采样数"
+          type: number
+          format: compact
+        - name: percentage
+          label: "占比"
+          type: percentage
+          format: percentage
     sql: |
       SELECT
         t.name as thread_name,
         t.tid,
         p.name as process_name,
         COUNT(*) as sample_count,
-        ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM perf_sample), 2) as percentage
+        ROUND(COUNT(*) * 100.0 / NULLIF((SELECT COUNT(*) FROM perf_sample), 0), 2) as percentage
       FROM perf_sample ps
       JOIN thread t ON ps.utid = t.utid
       JOIN process p ON t.upid = p.upid
@@ -187,10 +273,25 @@ steps:
   - id: caller_analysis
     type: atomic
     name: "热点函数调用者分析"
+    optional: true
     display:
       level: detail
       layer: deep
       title: "调用路径追踪"
+      columns:
+        - name: hot_function
+          label: "热点函数"
+          type: string
+        - name: call_depth
+          label: "调用层级"
+          type: number
+        - name: caller_name
+          label: "调用者"
+          type: string
+        - name: occurrence_count
+          label: "出现次数"
+          type: number
+          format: compact
     sql: |
       WITH RECURSIVE
       -- 获取 Top 5 热点函数的 frame_id
@@ -258,10 +359,40 @@ steps:
   - id: analysis_conclusion
     type: atomic
     name: "分析结论"
+    optional: true
     display:
       level: summary
       layer: overview
       title: "调用栈分析结论"
+      columns:
+        - name: total_samples
+          label: "总采样数"
+          type: number
+          format: compact
+        - name: duration_sec
+          label: "采样时长(秒)"
+          type: number
+          format: compact
+        - name: top_hotspots
+          label: "热点函数"
+          type: string
+        - name: dominant_module_type
+          label: "主导模块"
+          type: string
+        - name: suggestion
+          label: "建议"
+          type: string
+    synthesize:
+      role: conclusion
+      fields:
+        - key: top_hotspots
+          label: 热点函数
+        - key: dominant_module_type
+          label: 主导模块
+        - key: suggestion
+          label: 建议
+      insights:
+        - template: "调用栈分析：{{dominant_module_type}} 为主，{{suggestion}}"
     sql: |
       WITH
       sample_info AS (

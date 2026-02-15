@@ -28,6 +28,34 @@ steps:
   - id: present_fence_stats
     type: atomic
     name: "Present Fence 统计"
+    display:
+      level: summary
+      format: table
+      columns:
+        - name: total_fences
+          label: "总 Fence 数"
+          type: number
+        - name: avg_wait_ms
+          label: "平均等待"
+          type: duration
+          format: duration_ms
+        - name: max_wait_ms
+          label: "最大等待"
+          type: duration
+          format: duration_ms
+        - name: slow_fences_vsync
+          label: "超帧预算"
+          type: number
+        - name: slow_rate_pct
+          label: "超时率"
+          type: percentage
+        - name: vsync_period_ms
+          label: "VSync 周期"
+          type: duration
+          format: duration_ms
+        - name: gpu_status
+          label: "GPU 状态"
+          type: string
     sql: |
       WITH
       time_bounds AS (
@@ -45,7 +73,7 @@ steps:
              AND ts >= (SELECT start_ts FROM time_bounds)
              AND ts <= (SELECT end_ts FROM time_bounds)
            LIMIT 1000),
-          16666666
+          8333333  -- 默认 120Hz (保守阈值)
         ) as vsync_period_ns
       ),
       fence_data AS (
@@ -100,15 +128,3 @@ steps:
     save_as: fence_stats
     optional: true
 
-output:
-  format: single_row
-  fields:
-    - name: total_fences
-      type: integer
-      description: "总 fence 数量"
-    - name: avg_wait_ms
-      type: number
-      description: "平均等待时间 (ms)"
-    - name: gpu_status
-      type: string
-      description: "GPU 状态"

@@ -1,18 +1,19 @@
 # =============================================================================
-# CPU 时间分析（原子 Skill）
+# CPU 时间分析（Composite Skill）
 # =============================================================================
 # 分析指定时间范围内的 CPU 使用情况
+# v2.0: 复用 _cpu_topology 视图替代内联 CTE，统一核心分类
 
 name: cpu_slice_analysis
-version: "1.0"
-type: atomic
+version: "2.0"
+type: composite
 category: hardware
 
 meta:
   display_name: "CPU Slice 分析"
-  description: "分析 CPU 时间片分布"
+  description: "分析 CPU 时间片分布（动态拓扑检测）"
   icon: "pie_chart"
-  tags: [cpu, slice, distribution, atomic]
+  tags: [cpu, slice, distribution, composite]
 
 prerequisites:
   required_tables:
@@ -21,108 +22,92 @@ prerequisites:
 inputs:
   - name: start_ts
     type: timestamp
-    required: true
-    description: "开始时间戳(ns)"
+    required: false
+    description: "开始时间戳(ns，可选)"
   - name: end_ts
     type: timestamp
-    required: true
-    description: "结束时间戳(ns)"
+    required: false
+    description: "结束时间戳(ns，可选)"
   - name: package
     type: string
     required: false
     description: "应用包名（可选）"
 
-sql: |
-  WITH 
-  -- 动态检测 CPU 集群
-  cpu_max_freq AS (
-    SELECT cpu, MAX(value) as max_freq
-    FROM counter c
-    JOIN cpu_counter_track t ON c.track_id = t.id
-    WHERE t.name = 'cpufreq'
-    GROUP BY cpu
-  ),
-  global_max AS (
-    SELECT MAX(max_freq) as val FROM cpu_max_freq
-  ),
-  cpu_clusters AS (
-    SELECT cpu,
-      CASE
-        WHEN max_freq >= (SELECT val FROM global_max) * 0.75 THEN 'big'
-        WHEN max_freq >= (SELECT val FROM global_max) * 0.50 THEN 'mid'
-        ELSE 'little'
-      END as cluster_type
-    FROM cpu_max_freq
-  ),
-  target_threads AS (
-    SELECT t.utid, t.tid, t.name as thread_name, p.name as process_name
-    FROM thread t
-    JOIN process p ON t.upid = p.upid
-    WHERE p.name GLOB '${package}*' OR '${package}' = ''
-  ),
-  cpu_slices AS (
-    SELECT
-      ss.utid,
-      ss.dur,
-      ss.cpu,
-      COALESCE(cl.cluster_type, 'little') as core_type
-    FROM sched_slice ss
-    LEFT JOIN cpu_clusters cl ON ss.cpu = cl.cpu
-    WHERE ss.ts >= ${start_ts}
-      AND ss.ts < ${end_ts}
-      AND ss.utid IN (SELECT utid FROM target_threads)
-  )
-  SELECT
-    tt.thread_name,
-    tt.process_name,
-    SUM(cs.dur) / 1e6 as total_cpu_ms,
-    SUM(CASE WHEN cs.core_type = 'big' THEN cs.dur ELSE 0 END) / 1e6 as big_core_ms,
-    SUM(CASE WHEN cs.core_type = 'little' THEN cs.dur ELSE 0 END) / 1e6 as little_core_ms,
-    COUNT(*) as slice_count,
-    AVG(cs.dur) / 1e6 as avg_slice_ms
-  FROM target_threads tt
-  LEFT JOIN cpu_slices cs ON tt.utid = cs.utid
-  GROUP BY tt.utid
-  HAVING total_cpu_ms > 0
-  ORDER BY total_cpu_ms DESC
+steps:
+  - id: init_cpu_topology
+    type: skill
+    name: "初始化 CPU 拓扑"
+    skill: cpu_topology_view
+    display:
+      level: hidden
+    optional: true
+
+  - id: cpu_time_by_core
+    type: atomic
+    name: "CPU 时间片分布"
+    display:
+      level: detail
+      format: table
+      columns:
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: total_cpu_ms
+          label: "CPU时间"
+          type: duration
+          format: duration_ms
+        - name: big_core_ms
+          label: "大核时间"
+          type: duration
+          format: duration_ms
+        - name: little_core_ms
+          label: "小核时间"
+          type: duration
+          format: duration_ms
+        - name: slice_count
+          label: "切片数"
+          type: number
+          format: compact
+        - name: avg_slice_ms
+          label: "平均切片"
+          type: duration
+          format: duration_ms
+    sql: |
+      WITH
+      target_threads AS (
+        SELECT t.utid, t.tid, t.name as thread_name, p.name as process_name
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE p.name GLOB '${package}*' OR '${package}' = ''
+      ),
+      cpu_slices AS (
+        SELECT
+          ss.utid,
+          ss.dur,
+          ss.cpu,
+          COALESCE(ct.core_type, 'little') as core_type
+        FROM sched_slice ss
+        LEFT JOIN _cpu_topology ct ON ss.cpu = ct.cpu_id
+        WHERE (${start_ts} IS NULL OR ss.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ss.ts < ${end_ts})
+          AND ss.utid IN (SELECT utid FROM target_threads)
+      )
+      SELECT
+        tt.thread_name,
+        tt.process_name,
+        SUM(cs.dur) / 1e6 as total_cpu_ms,
+        SUM(CASE WHEN cs.core_type IN ('prime', 'big') THEN cs.dur ELSE 0 END) / 1e6 as big_core_ms,
+        SUM(CASE WHEN cs.core_type IN ('medium', 'little') THEN cs.dur ELSE 0 END) / 1e6 as little_core_ms,
+        COUNT(*) as slice_count,
+        AVG(cs.dur) / 1e6 as avg_slice_ms
+      FROM target_threads tt
+      LEFT JOIN cpu_slices cs ON tt.utid = cs.utid
+      GROUP BY tt.utid
+      HAVING total_cpu_ms > 0
+      ORDER BY total_cpu_ms DESC
 
 output:
-  display:
-    level: detail
-    format: table
-    columns:
-      - name: thread_name
-        label: "线程"
-        type: string
-      - name: process_name
-        label: "进程"
-        type: string
-      - name: total_cpu_ms
-        label: "CPU时间"
-        type: duration
-        format: duration_ms
-      - name: big_core_ms
-        label: "大核时间"
-        type: duration
-        format: duration_ms
-      - name: little_core_ms
-        label: "小核时间"
-        type: duration
-        format: duration_ms
-      - name: slice_count
-        label: "切片数"
-        type: number
-        format: compact
-      - name: avg_slice_ms
-        label: "平均切片"
-        type: duration
-        format: duration_ms
-  fields:
-    - name: thread_name
-      label: "线程"
-    - name: total_cpu_ms
-      label: "CPU时间(ms)"
-    - name: big_core_ms
-      label: "大核(ms)"
-    - name: little_core_ms
-      label: "小核(ms)"
+  format: structured

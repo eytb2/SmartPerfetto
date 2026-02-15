@@ -238,6 +238,7 @@ export enum SSEEventType {
   WORKER_THOUGHT = 'worker_thought',
   THOUGHT = 'thought',
   FINDING = 'finding',
+  ANSWER_TOKEN = 'answer_token',
   CONCLUSION = 'conclusion',
 
   // === Circuit Breaker Events ===
@@ -252,7 +253,7 @@ export enum SSEEventType {
 }
 
 /**
- * Streaming update types from AgentDrivenOrchestrator
+ * Streaming update types from AgentRuntime
  * These are internal event types before SSE conversion
  */
 export enum StreamingUpdateType {
@@ -432,6 +433,15 @@ export interface DataEvent extends SSEEvent {
   };
 }
 
+export interface AnswerTokenEvent extends SSEEvent {
+  type: SSEEventType.ANSWER_TOKEN | 'answer_token';
+  data: {
+    token?: string;
+    done?: boolean;
+    totalChars?: number;
+  };
+}
+
 export type AnalysisSSEEvent =
   | SQLGeneratedEvent
   | SQLExecutedEvent
@@ -442,7 +452,8 @@ export type AnalysisSSEEvent =
   | SkillSectionEvent
   | SkillDiagnosticsEvent
   | SkillLayeredResultEvent
-  | DataEvent;
+  | DataEvent
+  | AnswerTokenEvent;
 
 // ============================================================================
 // Orchestrator Types

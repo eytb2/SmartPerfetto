@@ -106,9 +106,34 @@ function formatTimeValue(seconds: number): string {
  */
 export function unwrapStepResult(value: any): any {
   if (!value || typeof value !== 'object') return value;
-  if ('stepId' in value && 'success' in value && 'data' in value) {
-    return value.data;
+  const maybe = value as Record<string, any>;
+
+  const isStepResult =
+    typeof maybe.stepId === 'string' &&
+    typeof maybe.success === 'boolean' &&
+    Object.prototype.hasOwnProperty.call(maybe, 'data');
+  if (isStepResult) {
+    return unwrapStepResult(maybe.data);
   }
+
+  const rawResults = maybe.rawResults;
+  if (rawResults && typeof rawResults === 'object') {
+    if (Object.prototype.hasOwnProperty.call(maybe, 'data')) {
+      return unwrapStepResult(maybe.data);
+    }
+
+    const rootData = (rawResults as any).root?.data;
+    if (rootData !== undefined) {
+      return unwrapStepResult(rootData);
+    }
+
+    for (const step of Object.values(rawResults as Record<string, any>)) {
+      if (step && typeof step === 'object' && Object.prototype.hasOwnProperty.call(step, 'data')) {
+        return unwrapStepResult((step as any).data);
+      }
+    }
+  }
+
   return value;
 }
 

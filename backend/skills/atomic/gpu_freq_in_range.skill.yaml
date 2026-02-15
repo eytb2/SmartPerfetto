@@ -22,12 +22,17 @@ prerequisites:
 inputs:
   - name: start_ts
     type: timestamp
-    required: true
-    description: "分析起始时间戳(ns)"
+    required: false
+    description: "分析起始时间戳(ns，可选)"
   - name: end_ts
     type: timestamp
-    required: true
-    description: "分析结束时间戳(ns)"
+    required: false
+    description: "分析结束时间戳(ns，可选)"
+  - name: low_freq_threshold_pct
+    type: number
+    required: false
+    default: 40
+    description: "低频阈值百分比 (相对最大频率，默认 40%)"
 
 display:
   level: detail
@@ -55,15 +60,25 @@ display:
       format: percentage
 
 sql: |
-  INCLUDE PERFETTO MODULE android.gpu.frequency;
-  WITH gpu_samples AS (
-    SELECT
-      gpu_id,
-      gpu_freq,
-      dur,
-      CASE WHEN gpu_freq < 400000000 THEN dur ELSE 0 END as low_freq_dur  -- < 400MHz
+  WITH gpu_raw AS (
+    SELECT gpu_id, gpu_freq, dur
     FROM android_gpu_frequency
-    WHERE ts >= ${start_ts} AND ts < ${end_ts}
+    WHERE (${start_ts} IS NULL OR ts >= ${start_ts}) AND (${end_ts} IS NULL OR ts < ${end_ts})
+  ),
+  gpu_max AS (
+    SELECT gpu_id, MAX(gpu_freq) as max_freq
+    FROM gpu_raw
+    GROUP BY gpu_id
+  ),
+  gpu_samples AS (
+    SELECT
+      r.gpu_id,
+      r.gpu_freq,
+      r.dur,
+      CASE WHEN r.gpu_freq < m.max_freq * ${low_freq_threshold_pct|40} / 100.0
+           THEN r.dur ELSE 0 END as low_freq_dur
+    FROM gpu_raw r
+    JOIN gpu_max m ON r.gpu_id = m.gpu_id
   )
   SELECT
     gpu_id,

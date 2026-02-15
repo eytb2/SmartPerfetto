@@ -856,6 +856,7 @@ ${Array.from(sharedContext.hypotheses.values()).map(h => `- ${h.description} (${
       sessionId: sharedContext.sessionId,
       traceId: sharedContext.traceId,
       jsonMode: true,
+      maxTokens: 2000,
       promptId: 'agent.feedbackSynthesizer',
       promptVersion: '1.0.0',
       contractVersion: 'feedback_synthesis_json@1.0.0',

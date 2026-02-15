@@ -97,6 +97,10 @@ describe('anr_analysis skill', () => {
 
       it('should have valid ANR type structure when data exists', async () => {
         const result = await evaluator.executeStep('anr_overview');
+        if (hasAnrData) {
+          expect(result.success).toBe(true);
+          expect(result.data.length).toBeGreaterThan(0);
+        }
 
         if (result.data.length > 0) {
           const overview = result.data[0];
@@ -183,6 +187,10 @@ describe('anr_analysis skill', () => {
 
       it('should have valid ANR event structure when data exists', async () => {
         const result = await evaluator.executeStep('get_anr_events');
+        if (hasAnrData) {
+          expect(result.success).toBe(true);
+          expect(result.data.length).toBeGreaterThan(0);
+        }
 
         if (result.data.length > 0) {
           const event = result.data[0];
@@ -211,6 +219,10 @@ describe('anr_analysis skill', () => {
 
       it('should include process/thread info', async () => {
         const result = await evaluator.executeStep('get_anr_events');
+        if (hasAnrData) {
+          expect(result.success).toBe(true);
+          expect(result.data.length).toBeGreaterThan(0);
+        }
 
         if (result.data.length > 0) {
           const event = result.data[0];
@@ -226,6 +238,10 @@ describe('anr_analysis skill', () => {
 
       it('should have timestamp navigation fields', async () => {
         const result = await evaluator.executeStep('get_anr_events');
+        if (hasAnrData) {
+          expect(result.success).toBe(true);
+          expect(result.data.length).toBeGreaterThan(0);
+        }
 
         if (result.data.length > 0) {
           const event = result.data[0];
@@ -537,7 +553,6 @@ describe('anr_analysis skill definition', () => {
     expect(stepIds).toContain('top_cpu_processes');
     expect(stepIds).toContain('analyze_anr_events'); // Iterator step
     expect(stepIds).toContain('anr_diagnosis');
-    expect(stepIds).toContain('global_summary');
   });
 
   it('should have proper display layer assignments', () => {
@@ -548,7 +563,7 @@ describe('anr_analysis skill definition', () => {
         if (step.display && typeof step.display === 'object') {
           // Validate display level (when defined)
           if (step.display.level) {
-            expect(['none', 'debug', 'detail', 'summary', 'key']).toContain(step.display.level);
+            expect(['none', 'debug', 'detail', 'summary', 'key', 'hidden']).toContain(step.display.level);
           }
 
           // Validate display layer (when defined)

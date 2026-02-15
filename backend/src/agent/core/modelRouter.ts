@@ -299,7 +299,16 @@ export class ModelRouter extends EventEmitter {
             console.log(`[ModelRouter.callWithFallback] Trying model: ${model.id} (${model.provider})`);
           }
 
-          const result = await this.callModel(model, promptCandidate, { ...options, taskType });
+          const canStreamThisAttempt =
+            model.id === primary.id &&
+            attempt === 0 &&
+            typeof options.onToken === 'function';
+
+          const result = await this.callModel(model, promptCandidate, {
+            ...options,
+            taskType,
+            onToken: canStreamThisAttempt ? options.onToken : undefined,
+          });
           if (result.success) {
             console.log(`[ModelRouter.callWithFallback] Model ${model.id} succeeded`);
             return result;
@@ -414,10 +423,12 @@ export class ModelRouter extends EventEmitter {
       const client = this.getOrCreateClient(model);
 
       // 调用模型
+      const onToken = model.supportsStreaming ? options.onToken : undefined;
       const response = await client.complete(redactedPrompt.text, {
         maxTokens,
         temperature,
         jsonMode,
+        onToken,
       });
 
       const latencyMs = Date.now() - startTime;
@@ -793,6 +804,7 @@ interface CallOptions {
   maxTokens?: number;
   temperature?: number;
   jsonMode?: boolean;
+  onToken?: (token: string) => void;
   // Telemetry (optional)
   sessionId?: string;
   traceId?: string;
@@ -854,6 +866,102 @@ IMPORTANT:
 - 只输出合法 JSON，不要输出 Markdown/代码块/解释。`;
 }
 
+function normalizeStreamText(content: unknown): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        if (item && typeof item === 'object') {
+          const text = (item as { text?: unknown }).text;
+          return typeof text === 'string' ? text : '';
+        }
+        return '';
+      })
+      .join('');
+  }
+
+  if (content && typeof content === 'object') {
+    const text = (content as { text?: unknown }).text;
+    return typeof text === 'string' ? text : '';
+  }
+
+  return '';
+}
+
+function extractOpenAICompatibleToken(payload: any): string {
+  const choices = Array.isArray(payload?.choices) ? payload.choices : [];
+  if (choices.length > 0) {
+    const deltaToken = normalizeStreamText(choices[0]?.delta?.content);
+    if (deltaToken) return deltaToken;
+
+    const messageToken = normalizeStreamText(choices[0]?.message?.content);
+    if (messageToken) return messageToken;
+  }
+
+  return '';
+}
+
+async function readOpenAICompatibleStreamResponse(
+  response: Response,
+  onToken: (token: string) => void
+): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error('Streaming response body is unavailable');
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let fullText = '';
+
+  const processLine = (rawLine: string) => {
+    const line = rawLine.trim();
+    if (!line || line.startsWith(':')) return;
+    if (!line.startsWith('data:')) return;
+
+    const data = line.slice(5).trim();
+    if (!data || data === '[DONE]') return;
+
+    try {
+      const payload = JSON.parse(data);
+      const token = extractOpenAICompatibleToken(payload);
+      if (!token) return;
+
+      fullText += token;
+      onToken(token);
+    } catch {
+      // Ignore malformed or non-JSON SSE packets.
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      processLine(line);
+    }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    const trailingLines = buffer.split('\n');
+    for (const line of trailingLines) {
+      processLine(line);
+    }
+  }
+
+  return fullText;
+}
+
 /**
  * DeepSeek 客户端
  */
@@ -873,6 +981,7 @@ class DeepSeekClient implements LLMClientInterface {
       throw new Error('DEEPSEEK_API_KEY not configured');
     }
 
+    const useStreaming = typeof options.onToken === 'function';
     const response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: {
@@ -884,12 +993,17 @@ class DeepSeekClient implements LLMClientInterface {
         messages: [{ role: 'user', content: prompt }],
         max_tokens: options.maxTokens || this.model.maxTokens,
         temperature: options.temperature ?? 0.3,
+        stream: useStreaming,
       }),
     });
 
     if (!response.ok) {
       const error = await response.text();
       throw new Error(`DeepSeek API error: ${response.status} - ${error}`);
+    }
+
+    if (useStreaming) {
+      return readOpenAICompatibleStreamResponse(response, options.onToken!);
     }
 
     const data = await response.json() as { choices: Array<{ message?: { content?: string } }> };
@@ -958,11 +1072,13 @@ class OpenAIClient implements LLMClientInterface {
       throw new Error('OPENAI_API_KEY not configured');
     }
 
+    const useStreaming = typeof options.onToken === 'function';
     const body: any = {
       model: this.model.model,
       messages: [{ role: 'user', content: prompt }],
       max_tokens: options.maxTokens || this.model.maxTokens,
       temperature: options.temperature ?? 0.3,
+      stream: useStreaming,
     };
 
     if (options.jsonMode) {
@@ -981,6 +1097,10 @@ class OpenAIClient implements LLMClientInterface {
     if (!response.ok) {
       const error = await response.text();
       throw new Error(`OpenAI API error: ${response.status} - ${error}`);
+    }
+
+    if (useStreaming) {
+      return readOpenAICompatibleStreamResponse(response, options.onToken!);
     }
 
     const data = await response.json() as { choices: Array<{ message?: { content?: string } }> };
@@ -1007,6 +1127,7 @@ class GLMClient implements LLMClientInterface {
       throw new Error('GLM_API_KEY not configured');
     }
 
+    const useStreaming = typeof options.onToken === 'function';
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -1018,12 +1139,17 @@ class GLMClient implements LLMClientInterface {
         messages: [{ role: 'user', content: prompt }],
         max_tokens: options.maxTokens || this.model.maxTokens,
         temperature: options.temperature ?? 0.3,
+        stream: useStreaming,
       }),
     });
 
     if (!response.ok) {
       const error = await response.text();
       throw new Error(`GLM API error: ${response.status} - ${error}`);
+    }
+
+    if (useStreaming) {
+      return readOpenAICompatibleStreamResponse(response, options.onToken!);
     }
 
     const data = await response.json() as { choices: Array<{ message?: { content?: string } }> };
@@ -1041,17 +1167,26 @@ class MockClient implements LLMClientInterface {
     this.model = model;
   }
 
-  async complete(prompt: string, _options: CallOptions = {}): Promise<string> {
+  async complete(prompt: string, options: CallOptions = {}): Promise<string> {
     // 模拟延迟
     await new Promise(resolve => setTimeout(resolve, 100));
 
     // 返回模拟响应
-    return JSON.stringify({
+    const mockResponse = JSON.stringify({
       mock: true,
       model: this.model.id,
       promptLength: prompt.length,
       response: 'This is a mock response for testing purposes.',
     });
+
+    if (typeof options.onToken === 'function') {
+      const chunkSize = 16;
+      for (let i = 0; i < mockResponse.length; i += chunkSize) {
+        options.onToken(mockResponse.slice(i, i + chunkSize));
+      }
+    }
+
+    return mockResponse;
   }
 }
 

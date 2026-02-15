@@ -84,6 +84,24 @@ const CPU_SKILLS: SkillDefinitionForAgent[] = [
     description: '【调用栈分析】分析采样调用栈，定位性能热点代码路径。适用于：需要函数级定位。输出：调用栈聚合分析（需要trace包含callstack数据）',
     category: 'cpu',
   },
+  {
+    skillId: 'cpu_cluster_load_in_range',
+    toolName: 'analyze_cpu_cluster_load',
+    description: '【区间大小核负载】分析指定时间范围内各CPU簇（大核/小核）的负载分布。适用于：分析卡顿区间CPU核心调度策略是否合理。输出：大小核利用率+线程核心分布',
+    category: 'cpu',
+  },
+  {
+    skillId: 'cpu_throttling_in_range',
+    toolName: 'analyze_cpu_throttling',
+    description: '【区间限频检测】检测指定时间范围内CPU频率是否被限制（温控/功耗）。适用于：怀疑温控降频导致性能下降。输出：限频事件+频率下降比例',
+    category: 'cpu',
+  },
+  {
+    skillId: 'task_migration_in_range',
+    toolName: 'analyze_task_migration',
+    description: '【区间任务迁移】分析指定时间范围内线程在大小核之间的迁移情况。适用于：怀疑频繁核间迁移导致缓存失效、性能抖动。输出：迁移次数+核心切换模式',
+    category: 'cpu',
+  },
 ];
 
 // =============================================================================

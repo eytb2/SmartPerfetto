@@ -42,6 +42,20 @@ steps:
       level: summary
       layer: overview
       title: "Trace 概览"
+      columns:
+        - name: start_ts_str
+          label: "开始时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: end_ts_str
+          label: "结束时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: duration_sec
+          label: "时长(秒)"
+          type: number
     sql: |
       SELECT
         MIN(ts) AS start_ts,
@@ -66,6 +80,23 @@ steps:
       level: detail
       layer: list
       title: "屏幕状态"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: dur
+          label: "持续"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: event
+          label: "状态"
+          type: string
+        - name: category
+          label: "类别"
+          type: string
     sql: |
       WITH RECURSIVE screen_data AS (
         SELECT 1 AS dummy WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='android_screen_state')
@@ -97,6 +128,26 @@ steps:
       level: detail
       layer: list
       title: "应用切换"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: dur
+          label: "持续"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: event
+          label: "事件"
+          type: string
+        - name: app_package
+          label: "包名"
+          type: string
+        - name: category
+          label: "类别"
+          type: string
     sql: |
       WITH RECURSIVE battery_check AS (
         SELECT 1 AS dummy WHERE EXISTS (
@@ -127,6 +178,36 @@ steps:
       level: detail
       layer: list
       title: "用户操作"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_range
+          durationColumn: dur
+        - name: dur
+          label: "持续"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: event
+          label: "操作"
+          type: string
+        - name: gesture_type
+          label: "类型"
+          type: string
+        - name: confidence
+          label: "置信度"
+          type: string
+        - name: move_count
+          label: "移动次数"
+          type: number
+        - name: app_package
+          label: "应用"
+          type: string
+        - name: category
+          label: "类别"
+          type: string
     sql: |
       WITH RECURSIVE input_check AS (
         SELECT 1 AS dummy WHERE EXISTS (
@@ -319,6 +400,24 @@ steps:
       level: detail
       layer: list
       title: "滑动启动"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: event
+          label: "事件"
+          type: string
+        - name: gesture_id
+          label: "手势ID"
+          type: number
+        - name: category
+          label: "类别"
+          type: string
+        - name: explanation
+          label: "说明"
+          type: string
     sql: |
       -- 此 step 检测滑动开始的精确时刻
       -- 原理：当手指 DOWN 后连续出现 2 个 MOVE 事件时，认为滑动启动
@@ -391,6 +490,33 @@ steps:
       level: detail
       layer: list
       title: "惯性滑动"
+      columns:
+        - name: ts
+          label: "开始时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_range
+          durationColumn: dur
+        - name: dur
+          label: "持续"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: event
+          label: "事件"
+          type: string
+        - name: frame_count
+          label: "帧数"
+          type: number
+        - name: jank_frames
+          label: "掉帧数"
+          type: number
+        - name: app_package
+          label: "应用"
+          type: string
+        - name: category
+          label: "类别"
+          type: string
     sql: |
       WITH RECURSIVE input_check AS (
         SELECT 1 AS dummy WHERE EXISTS (
@@ -581,6 +707,27 @@ steps:
       level: detail
       layer: list
       title: "空闲区间"
+      columns:
+        - name: ts
+          label: "开始时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_range
+          durationColumn: dur
+        - name: dur
+          label: "持续"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: event
+          label: "事件"
+          type: string
+        - name: confidence
+          label: "置信度"
+          type: string
+        - name: category
+          label: "类别"
+          type: string
     sql: |
       WITH key_events AS (
         SELECT read_time AS ts
@@ -655,6 +802,33 @@ steps:
       level: detail
       layer: list
       title: "App 启动"
+      columns:
+        - name: startup_id
+          label: "ID"
+          type: number
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_range
+          durationColumn: dur
+        - name: dur
+          label: "耗时"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: event
+          label: "事件"
+          type: string
+        - name: startup_type
+          label: "类型"
+          type: string
+        - name: package
+          label: "包名"
+          type: string
+        - name: category
+          label: "类别"
+          type: string
     sql: |
       WITH RECURSIVE startup_check AS (
         SELECT 1 AS dummy WHERE EXISTS (
@@ -695,6 +869,23 @@ steps:
       level: detail
       layer: list
       title: "系统事件"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: dur
+          label: "持续"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: event
+          label: "事件"
+          type: string
+        - name: category
+          label: "类别"
+          type: string
     sql: |
       SELECT
         printf('%d', ts) AS ts,
@@ -748,6 +939,29 @@ steps:
       level: detail
       layer: list
       title: "性能事件"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: dur
+          label: "帧耗时"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: event
+          label: "事件"
+          type: string
+        - name: jank_type
+          label: "掉帧类型"
+          type: string
+        - name: jank_severity_type
+          label: "严重程度"
+          type: string
+        - name: category
+          label: "类别"
+          type: string
     sql: |
       SELECT
         printf('%d', ts) AS ts,
@@ -786,6 +1000,30 @@ steps:
       level: detail
       layer: list
       title: "操作时间线"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_range
+          durationColumn: dur
+        - name: dur
+          label: "持续"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: time_offset_sec
+          label: "时间偏移(s)"
+          type: number
+        - name: event
+          label: "事件"
+          type: string
+        - name: category
+          label: "类别"
+          type: string
+        - name: priority
+          label: "优先级"
+          type: number
     sql: |
       WITH all_events AS (
         -- 屏幕状态

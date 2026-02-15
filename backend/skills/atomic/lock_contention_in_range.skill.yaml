@@ -35,6 +35,33 @@ steps:
     display:
       level: detail
       title: "Java Monitor 锁竞争"
+      columns:
+        - name: blocking_method
+          label: "持锁方法"
+          type: string
+        - name: blocking_thread_name
+          label: "持锁线程"
+          type: string
+        - name: blocked_method
+          label: "阻塞方法"
+          type: string
+        - name: blocked_thread_name
+          label: "阻塞线程"
+          type: string
+        - name: main_blocked
+          label: "主线程阻塞"
+          type: boolean
+        - name: wait_ms
+          label: "等待时长"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: waiter_count
+          label: "等待数"
+          type: number
+        - name: lock_type
+          label: "锁类型"
+          type: string
     sql: |
       SELECT
         short_blocking_method as blocking_method,
@@ -61,6 +88,27 @@ steps:
     display:
       level: detail
       title: "Futex/Mutex 等待"
+      columns:
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: blocked_function
+          label: "阻塞函数"
+          type: string
+        - name: wait_ms
+          label: "等待时长"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: lock_type
+          label: "锁类型"
+          type: string
+        - name: is_main_thread
+          label: "主线程"
+          type: boolean
     sql: |
       SELECT
         t.name as thread_name,
@@ -97,9 +145,47 @@ steps:
   - id: lock_summary
     type: atomic
     name: "锁竞争汇总"
+    optional: true
     display:
       level: summary
       title: "锁竞争汇总"
+      columns:
+        - name: java_monitor_count
+          label: "Java锁次数"
+          type: number
+          format: compact
+        - name: futex_mutex_count
+          label: "Futex次数"
+          type: number
+          format: compact
+        - name: total_contentions
+          label: "总竞争次数"
+          type: number
+          format: compact
+        - name: java_monitor_wait_ms
+          label: "Java锁等待"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: futex_mutex_wait_ms
+          label: "Futex等待"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: total_wait_ms
+          label: "总等待"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_monitor_wait_ms
+          label: "最大Java锁等待"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: main_thread_blocked_count
+          label: "主线程阻塞"
+          type: number
+          format: compact
     sql: |
       WITH
       monitor_stats AS (

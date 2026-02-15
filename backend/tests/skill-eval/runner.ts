@@ -282,10 +282,40 @@ export class SkillEvaluator {
     return {
       success: stepResult.success,
       stepId,
-      data: Array.isArray(stepResult.data) ? stepResult.data : [],
+      data: this.extractStepData(stepResult),
       error: stepResult.error,
       executionTimeMs: stepResult.executionTimeMs || 0,
     };
+  }
+
+  private extractStepData(stepResult: StepResult): any[] {
+    // Non-skill steps generally store row arrays directly.
+    if (Array.isArray(stepResult.data)) {
+      return stepResult.data;
+    }
+
+    // For `skill` reference steps, unwrap nested SkillExecutionResult payloads.
+    if (stepResult.stepType === 'skill' && stepResult.data && typeof stepResult.data === 'object') {
+      const nested = stepResult.data as any;
+
+      if (Array.isArray(nested.data)) {
+        return nested.data;
+      }
+
+      const rawResults = nested.rawResults;
+      if (rawResults && typeof rawResults === 'object') {
+        if (Array.isArray((rawResults as any).root?.data)) {
+          return (rawResults as any).root.data;
+        }
+        for (const step of Object.values(rawResults as Record<string, any>)) {
+          if (step && typeof step === 'object' && Array.isArray((step as any).data)) {
+            return (step as any).data;
+          }
+        }
+      }
+    }
+
+    return [];
   }
 
   /**

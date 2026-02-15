@@ -22,7 +22,7 @@
 # - 再不足时才回退到 CPU 编号阈值（低置信度）
 
 name: startup_detail
-version: "1.0"
+version: "2.0"
 type: composite
 category: app_lifecycle
 
@@ -85,6 +85,15 @@ inputs:
     description: "Perfetto 跳转结束时间"
 
 steps:
+  # ========== 初始化 CPU 拓扑 ==========
+  - id: init_cpu_topology
+    type: skill
+    name: "初始化 CPU 拓扑"
+    skill: cpu_topology_view
+    display:
+      level: hidden
+    optional: true
+
   # ========== 启动基本信息 ==========
   - id: startup_info
     type: atomic
@@ -125,18 +134,22 @@ steps:
           label: "开始时间"
           type: timestamp
           unit: ns
+          clickAction: navigate_range
         - name: end_ts
           label: "结束时间"
           type: timestamp
           unit: ns
+          clickAction: navigate_timeline
         - name: perfetto_start
           label: "Perfetto开始"
           type: timestamp
           unit: ns
+          clickAction: navigate_range
         - name: perfetto_end
           label: "Perfetto结束"
           type: timestamp
           unit: ns
+          clickAction: navigate_timeline
         - name: rating
           label: "评级"
           type: string
@@ -222,62 +235,6 @@ steps:
         WHERE p.name GLOB '${package}*'
           AND t.tid = p.pid  -- 主线程
       ),
-      cpu_cap AS (
-        SELECT id as cpu, capacity
-        FROM cpu
-      ),
-      cpu_freq AS (
-        SELECT
-          cpu,
-          MAX(freq) as max_freq_khz
-        FROM cpu_frequency_counters
-        GROUP BY cpu
-      ),
-      cpu_rank AS (
-        SELECT
-          c.cpu,
-          c.capacity,
-          f.max_freq_khz,
-          ROW_NUMBER() OVER (
-            ORDER BY COALESCE(f.max_freq_khz, 0) DESC, COALESCE(c.capacity, 0) DESC, c.cpu DESC
-          ) as perf_rank,
-          COUNT(*) OVER () as cpu_count,
-          SUM(CASE WHEN f.max_freq_khz IS NOT NULL THEN 1 ELSE 0 END) OVER () as freq_known_count,
-          AVG(CASE WHEN c.capacity IS NOT NULL THEN c.capacity END) OVER () as avg_capacity
-        FROM cpu_cap c
-        LEFT JOIN cpu_freq f ON c.cpu = f.cpu
-      ),
-      cpu_info AS (
-        SELECT
-          cpu,
-          CASE
-            -- 频率可用时，按性能排名划分大小核（8核取前3，6核取前2，其余取前1）
-            WHEN freq_known_count >= 2 THEN
-              CASE
-                WHEN perf_rank <= CASE
-                  WHEN cpu_count >= 8 THEN 3
-                  WHEN cpu_count >= 6 THEN 2
-                  ELSE 1
-                END THEN 'big'
-                ELSE 'little'
-              END
-            -- 频率不可用，回退到 capacity
-            WHEN capacity IS NOT NULL AND capacity > 0 THEN
-              CASE
-                WHEN capacity >= COALESCE(avg_capacity, capacity) THEN 'big'
-                ELSE 'little'
-              END
-            -- 最后回退到 CPU 编号阈值（低置信度）
-            ELSE
-              CASE WHEN cpu >= 4 THEN 'big' ELSE 'little' END
-          END as core_type,
-          CASE
-            WHEN freq_known_count >= 2 THEN 'freq_rank'
-            WHEN capacity IS NOT NULL AND capacity > 0 THEN 'capacity_fallback'
-            ELSE 'cpu_id_fallback'
-          END as classify_method
-        FROM cpu_rank
-      ),
       cpu_time AS (
         SELECT
           ss.utid,
@@ -285,26 +242,25 @@ steps:
           SUM(
             MIN(ss.ts + ss.dur, ${end_ts}) - MAX(ss.ts, ${start_ts})
           ) / 1e6 as dur_ms,
-          COALESCE(c.core_type, 'little') as core_type,
-          COALESCE(c.classify_method, 'cpu_id_fallback') as classify_method
+          COALESCE(ct.core_type, 'little') as core_type
         FROM sched_slice ss
         JOIN main_thread mt ON ss.utid = mt.utid
-        LEFT JOIN cpu_info c ON ss.cpu = c.cpu
+        LEFT JOIN _cpu_topology ct ON ss.cpu = ct.cpu_id
         WHERE ss.ts < ${end_ts}
           AND ss.ts + ss.dur > ${start_ts}
         GROUP BY ss.utid, ss.cpu
       )
       SELECT
         'MainThread' as thread_type,
-        ROUND(SUM(CASE WHEN core_type = 'big' THEN dur_ms ELSE 0 END), 2) as big_core_ms,
-        ROUND(SUM(CASE WHEN core_type = 'little' THEN dur_ms ELSE 0 END), 2) as little_core_ms,
+        ROUND(SUM(CASE WHEN core_type IN ('prime', 'big') THEN dur_ms ELSE 0 END), 2) as big_core_ms,
+        ROUND(SUM(CASE WHEN core_type IN ('medium', 'little') THEN dur_ms ELSE 0 END), 2) as little_core_ms,
         ROUND(SUM(dur_ms), 2) as total_running_ms,
-        ROUND(100.0 * SUM(CASE WHEN core_type = 'big' THEN dur_ms ELSE 0 END) /
+        ROUND(100.0 * SUM(CASE WHEN core_type IN ('prime', 'big') THEN dur_ms ELSE 0 END) /
               NULLIF(SUM(dur_ms), 0), 1) as big_core_pct,
-        ROUND(100.0 * SUM(CASE WHEN core_type = 'little' THEN dur_ms ELSE 0 END) /
+        ROUND(100.0 * SUM(CASE WHEN core_type IN ('medium', 'little') THEN dur_ms ELSE 0 END) /
               NULLIF(SUM(dur_ms), 0), 1) as little_core_pct,
         GROUP_CONCAT(DISTINCT cpu) as used_cpus,
-        GROUP_CONCAT(DISTINCT classify_method) as classify_method
+        'topology_view' as classify_method
       FROM cpu_time
       GROUP BY 1
     save_as: cpu_core
@@ -341,69 +297,15 @@ steps:
         WHERE p.name GLOB '${package}*'
           AND t.tid = p.pid
       ),
-      cpu_cap AS (
-        SELECT id as cpu, capacity
-        FROM cpu
-      ),
-      cpu_freq AS (
-        SELECT
-          cpu,
-          MAX(freq) as max_freq_khz
-        FROM cpu_frequency_counters
-        GROUP BY cpu
-      ),
-      cpu_rank AS (
-        SELECT
-          c.cpu,
-          c.capacity,
-          f.max_freq_khz,
-          ROW_NUMBER() OVER (
-            ORDER BY COALESCE(f.max_freq_khz, 0) DESC, COALESCE(c.capacity, 0) DESC, c.cpu DESC
-          ) as perf_rank,
-          COUNT(*) OVER () as cpu_count,
-          SUM(CASE WHEN f.max_freq_khz IS NOT NULL THEN 1 ELSE 0 END) OVER () as freq_known_count,
-          AVG(CASE WHEN c.capacity IS NOT NULL THEN c.capacity END) OVER () as avg_capacity
-        FROM cpu_cap c
-        LEFT JOIN cpu_freq f ON c.cpu = f.cpu
-      ),
-      cpu_info AS (
-        SELECT
-          cpu,
-          CASE
-            WHEN freq_known_count >= 2 THEN
-              CASE
-                WHEN perf_rank <= CASE
-                  WHEN cpu_count >= 8 THEN 3
-                  WHEN cpu_count >= 6 THEN 2
-                  ELSE 1
-                END THEN 'big'
-                ELSE 'little'
-              END
-            WHEN capacity IS NOT NULL AND capacity > 0 THEN
-              CASE
-                WHEN capacity >= COALESCE(avg_capacity, capacity) THEN 'big'
-                ELSE 'little'
-              END
-            ELSE
-              CASE WHEN cpu >= 4 THEN 'big' ELSE 'little' END
-          END as core_type,
-          CASE
-            WHEN freq_known_count >= 2 THEN 'freq_rank'
-            WHEN capacity IS NOT NULL AND capacity > 0 THEN 'capacity_fallback'
-            ELSE 'cpu_id_fallback'
-          END as classify_method
-        FROM cpu_rank
-      ),
       running_samples AS (
         SELECT
           ss.cpu,
           ss.ts,
           ss.dur,
-          COALESCE(c.core_type, 'little') as core_type,
-          COALESCE(c.classify_method, 'cpu_id_fallback') as classify_method
+          COALESCE(ct.core_type, 'little') as core_type
         FROM sched_slice ss
         JOIN main_thread mt ON ss.utid = mt.utid
-        LEFT JOIN cpu_info c ON ss.cpu = c.cpu
+        LEFT JOIN _cpu_topology ct ON ss.cpu = ct.cpu_id
         WHERE ss.ts < ${end_ts}
           AND ss.ts + ss.dur > ${start_ts}
       ),
@@ -412,7 +314,6 @@ steps:
           cf.cpu,
           cf.freq as freq_khz,
           rs.core_type,
-          rs.classify_method,
           MIN(cf.ts + cf.dur, ${end_ts}) - MAX(cf.ts, rs.ts) as overlap_dur
         FROM cpu_frequency_counters cf
         JOIN running_samples rs ON cf.cpu = rs.cpu
@@ -425,7 +326,7 @@ steps:
         ROUND(SUM(freq_khz * overlap_dur) / NULLIF(SUM(overlap_dur), 0) / 1000, 0) as avg_freq_mhz,
         ROUND(MAX(freq_khz) / 1000, 0) as max_freq_mhz,
         ROUND(MIN(freq_khz) / 1000, 0) as min_freq_mhz,
-        GROUP_CONCAT(DISTINCT classify_method) as classify_method
+        'topology_view' as classify_method
       FROM freq_samples
       WHERE overlap_dur > 0
       GROUP BY core_type
@@ -436,6 +337,7 @@ steps:
   - id: quadrant_analysis
     type: atomic
     name: "四大象限分析"
+    optional: true
     display:
       level: key
       layer: deep
@@ -496,72 +398,18 @@ steps:
         WHERE p.name GLOB '${package}*'
           AND t.tid = p.pid
       ),
-      cpu_cap AS (
-        SELECT id as cpu, capacity
-        FROM cpu
-      ),
-      cpu_freq AS (
-        SELECT
-          cpu,
-          MAX(freq) as max_freq_khz
-        FROM cpu_frequency_counters
-        GROUP BY cpu
-      ),
-      cpu_rank AS (
-        SELECT
-          c.cpu,
-          c.capacity,
-          f.max_freq_khz,
-          ROW_NUMBER() OVER (
-            ORDER BY COALESCE(f.max_freq_khz, 0) DESC, COALESCE(c.capacity, 0) DESC, c.cpu DESC
-          ) as perf_rank,
-          COUNT(*) OVER () as cpu_count,
-          SUM(CASE WHEN f.max_freq_khz IS NOT NULL THEN 1 ELSE 0 END) OVER () as freq_known_count,
-          AVG(CASE WHEN c.capacity IS NOT NULL THEN c.capacity END) OVER () as avg_capacity
-        FROM cpu_cap c
-        LEFT JOIN cpu_freq f ON c.cpu = f.cpu
-      ),
-      cpu_info AS (
-        SELECT
-          cpu,
-          CASE
-            WHEN freq_known_count >= 2 THEN
-              CASE
-                WHEN perf_rank <= CASE
-                  WHEN cpu_count >= 8 THEN 3
-                  WHEN cpu_count >= 6 THEN 2
-                  ELSE 1
-                END THEN 'big'
-                ELSE 'little'
-              END
-            WHEN capacity IS NOT NULL AND capacity > 0 THEN
-              CASE
-                WHEN capacity >= COALESCE(avg_capacity, capacity) THEN 'big'
-                ELSE 'little'
-              END
-            ELSE
-              CASE WHEN cpu >= 4 THEN 'big' ELSE 'little' END
-          END as core_type,
-          CASE
-            WHEN freq_known_count >= 2 THEN 'freq_rank'
-            WHEN capacity IS NOT NULL AND capacity > 0 THEN 'capacity_fallback'
-            ELSE 'cpu_id_fallback'
-          END as classify_method
-        FROM cpu_rank
-      ),
       thread_states AS (
         SELECT
           ts.utid,
           ts.state,
           ts.cpu,
-          COALESCE(c.core_type, 'little') as core_type,
-          COALESCE(c.classify_method, 'cpu_id_fallback') as classify_method,
+          COALESCE(ct.core_type, 'little') as core_type,
           SUM(
             MIN(ts.ts + ts.dur, ${end_ts}) - MAX(ts.ts, ${start_ts})
           ) / 1e6 as dur_ms
         FROM thread_state ts
         JOIN main_thread mt ON ts.utid = mt.utid
-        LEFT JOIN cpu_info c ON ts.cpu = c.cpu
+        LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
         WHERE ts.ts < ${end_ts}
           AND ts.ts + ts.dur > ${start_ts}
         GROUP BY ts.utid, ts.state, ts.cpu
@@ -569,14 +417,13 @@ steps:
       quadrant_data AS (
         SELECT
           CASE
-            WHEN state = 'Running' AND core_type = 'big' THEN 'Q1_big_running'
-            WHEN state = 'Running' AND core_type = 'little' THEN 'Q2_little_running'
+            WHEN state = 'Running' AND core_type IN ('prime', 'big') THEN 'Q1_big_running'
+            WHEN state = 'Running' AND core_type IN ('medium', 'little') THEN 'Q2_little_running'
             WHEN state IN ('R', 'R+') THEN 'Q3_runnable'
             WHEN state IN ('S', 'D', 'I') THEN 'Q4_sleeping'
             ELSE 'other'
           END as quadrant,
-          dur_ms,
-          classify_method
+          dur_ms
         FROM thread_states
       )
       SELECT
@@ -595,7 +442,7 @@ steps:
               NULLIF(SUM(dur_ms), 0), 1) as q3_pct,
         ROUND(100.0 * SUM(CASE WHEN quadrant = 'Q4_sleeping' THEN dur_ms ELSE 0 END) /
               NULLIF(SUM(dur_ms), 0), 1) as q4_pct,
-        GROUP_CONCAT(DISTINCT classify_method) as classify_method
+        'topology_view' as classify_method
       FROM quadrant_data
       GROUP BY 1
     save_as: quadrant
@@ -615,7 +462,119 @@ steps:
       level: key
       layer: deep
       title: "主线程耗时操作 Top10"
+      columns:
+        - name: slice_name
+          label: "切片名"
+          type: string
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: avg_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: max_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+        - name: percent
+          label: "区间占比"
+          type: percentage
+          format: percentage
     save_as: main_slices
+
+  # ========== 主线程可操作热点（剔除框架包裹切片） ==========
+  - id: actionable_main_thread_slices
+    type: atomic
+    name: "主线程可操作热点"
+    display:
+      level: detail
+      layer: deep
+      title: "主线程可操作热点 Top5"
+      columns:
+        - name: slice_name
+          label: "切片名"
+          type: string
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: percent
+          label: "区间占比"
+          type: percentage
+          format: percentage
+        - name: is_framework_wrapper
+          label: "框架包裹切片"
+          type: boolean
+    sql: |
+      WITH main_thread AS (
+        SELECT t.utid
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND t.tid = p.pid
+      ),
+      slice_clipped AS (
+        SELECT
+          s.name as slice_name,
+          MIN(s.ts + s.dur, ${end_ts}) - MAX(s.ts, ${start_ts}) as clipped_dur
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN main_thread mt ON tt.utid = mt.utid
+        WHERE s.ts < ${end_ts}
+          AND s.ts + s.dur > ${start_ts}
+      ),
+      agg AS (
+        SELECT
+          slice_name,
+          COUNT(*) as count,
+          ROUND(SUM(clipped_dur) / 1e6, 2) as total_ms,
+          ROUND(AVG(clipped_dur) / 1e6, 2) as avg_ms,
+          ROUND(MAX(clipped_dur) / 1e6, 2) as max_ms,
+          ROUND(100.0 * SUM(clipped_dur) / NULLIF(${end_ts} - ${start_ts}, 0), 1) as percent,
+          CASE
+            WHEN lower(slice_name) IN ('clienttransactionexecuted', 'activitystart', 'bindapplication') THEN 1
+            WHEN lower(slice_name) GLOB 'performcreate:*' THEN 1
+            WHEN lower(slice_name) GLOB 'performresume*' THEN 1
+            WHEN lower(slice_name) GLOB 'activitythreadmain*' THEN 1
+            ELSE 0
+          END as is_framework_wrapper
+        FROM slice_clipped
+        WHERE clipped_dur >= 1000000
+        GROUP BY slice_name
+      )
+      SELECT
+        slice_name,
+        count,
+        total_ms,
+        avg_ms,
+        max_ms,
+        percent,
+        is_framework_wrapper
+      FROM agg
+      ORDER BY is_framework_wrapper ASC, total_ms DESC
+      LIMIT 5
+    save_as: actionable_main_slices
 
   # ========== 主线程文件 IO 分析 ==========
   - id: main_thread_file_io
@@ -632,6 +591,30 @@ steps:
       level: key
       layer: deep
       title: "主线程文件 IO Top10"
+      columns:
+        - name: io_slice
+          label: "IO 切片"
+          type: string
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: avg_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: max_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+        - name: percent
+          label: "区间占比"
+          type: percentage
+          format: percentage
     save_as: main_file_io
 
   # ========== Binder 调用分析 ==========
@@ -647,6 +630,32 @@ steps:
       level: key
       layer: deep
       title: "Binder 调用"
+      columns:
+        - name: client_process
+          label: "客户端"
+          type: string
+        - name: server_process
+          label: "服务端"
+          type: string
+        - name: call_count
+          label: "调用次数"
+          type: number
+          format: compact
+        - name: total_client_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: max_delay_ms
+          label: "最大延迟"
+          type: duration
+          format: duration_ms
+        - name: avg_delay_ms
+          label: "平均延迟"
+          type: duration
+          format: duration_ms
+        - name: slow_calls
+          label: "慢调用"
+          type: number
     save_as: binder_calls
 
   # ========== 主线程同步 Binder ==========
@@ -662,6 +671,31 @@ steps:
       level: key
       layer: deep
       title: "主线程同步 Binder Top10"
+      columns:
+        - name: server_process
+          label: "对端进程"
+          type: string
+        - name: interface
+          label: "接口"
+          type: string
+        - name: call_count
+          label: "调用次数"
+          type: number
+        - name: total_block_ms
+          label: "总阻塞时间"
+          type: duration
+          format: duration_ms
+        - name: server_exec_ms
+          label: "服务端执行"
+          type: duration
+          format: duration_ms
+        - name: max_block_ms
+          label: "最大阻塞"
+          type: duration
+          format: duration_ms
+        - name: is_main_blocked
+          label: "主线程被阻"
+          type: boolean
     save_as: main_sync_binder
 
   # ========== 调度延迟分析 ==========
@@ -677,6 +711,31 @@ steps:
       level: detail
       layer: deep
       title: "主线程调度延迟"
+      columns:
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: runnable_count
+          label: "等待次数"
+          type: number
+        - name: total_runnable_ms
+          label: "总等待"
+          type: duration
+          format: duration_ms
+        - name: max_latency_ms
+          label: "最大延迟"
+          type: duration
+          format: duration_ms
+        - name: avg_latency_ms
+          label: "平均延迟"
+          type: duration
+          format: duration_ms
+        - name: long_wait_count
+          label: ">2ms 次数"
+          type: number
+        - name: severe_count
+          label: ">8ms 次数"
+          type: number
     save_as: sched_delay
 
   # ========== 启动诊断 ==========
@@ -687,7 +746,7 @@ steps:
       level: key
       layer: deep
       title: "问题诊断"
-    inputs: [startup_basic, cpu_core, quadrant, main_slices, main_file_io, binder_calls, main_sync_binder, sched_delay]
+    inputs: [startup_basic, cpu_core, quadrant, main_slices, actionable_main_slices, main_file_io, binder_calls, main_sync_binder, sched_delay]
     rules:
       # 大核占比偏低 + Runnable 明显（仅在判定来源可信时触发）
       - condition: "cpu_core.data[0]?.big_core_pct < 20 && quadrant.data[0]?.q3_runnable_ms > 50 && !(cpu_core.data[0]?.classify_method || '').includes('cpu_id_fallback')"
@@ -760,8 +819,17 @@ steps:
           - "检查系统负载，减少后台进程"
           - "考虑使用 SCHED_FIFO 策略"
 
+      # 可操作业务 Slice 耗时过长（优先使用非框架包裹切片）
+      - condition: "((actionable_main_slices.data[0]?.is_framework_wrapper || 0) === 0) && (actionable_main_slices.data[0]?.max_ms || 0) > 80 && (actionable_main_slices.data[0]?.percent || 0) > 15"
+        severity: warning
+        diagnosis: "主线程可操作热点 '${actionable_main_slices.data[0].slice_name}' 最长耗时 ${actionable_main_slices.data[0].max_ms}ms（占比 ${actionable_main_slices.data[0].percent}%）"
+        confidence: high
+        suggestions:
+          - "优先下钻该切片内部子阶段，定位可迁移到后台的初始化任务"
+          - "将首帧前非关键任务延后到 TTID 之后执行"
+
       # 单个 Slice 耗时过长（且区间占比高）
-      - condition: "main_slices.data[0]?.max_ms > 100 && (main_slices.data[0]?.percent || 0) > 20"
+      - condition: "main_slices.data[0]?.max_ms > 100 && (main_slices.data[0]?.percent || 0) > 20 && !['clientTransactionExecuted', 'activityStart', 'bindApplication'].includes(main_slices.data[0]?.slice_name || '') && !(main_slices.data[0]?.slice_name || '').startsWith('performCreate:')"
         severity: warning
         diagnosis: "主线程操作 '${main_slices.data[0].slice_name}' 最长耗时 ${main_slices.data[0].max_ms}ms"
         confidence: high

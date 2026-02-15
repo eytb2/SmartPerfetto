@@ -96,14 +96,27 @@ export class DecisionTreeStageExecutor extends EventEmitter implements StageExec
     console.log(`[DecisionTreeStageExecutor] Executing tree: ${tree.name} (${tree.id})`);
 
     // Build decision context from SubAgentContext
+    const stageAnalysisParams =
+      stage.metadata && typeof stage.metadata === 'object'
+        ? (stage.metadata as any).analysisParams
+        : undefined;
+
     const decisionContext: DecisionContext = {
       sessionId: context.sessionId,
       traceId: context.traceId || '',
+      query: context.query || context.userQuery,
       architecture: context.architecture,
       traceProcessorService: context.traceProcessorService,
       previousResults: new Map(),
       timeRange: context.timeRange,
       packageName: context.package,
+      analysisParams:
+        (context.analysisParams && typeof context.analysisParams === 'object'
+          ? context.analysisParams
+          : undefined) ||
+        (stageAnalysisParams && typeof stageAnalysisParams === 'object'
+          ? stageAnalysisParams
+          : undefined),
     };
 
     // Add any previous stage results to the context

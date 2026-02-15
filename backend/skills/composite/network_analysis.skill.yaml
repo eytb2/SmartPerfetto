@@ -1,20 +1,33 @@
-# Network Analysis Skill v2.1
-# Uses Perfetto stdlib: android_network_packets view
-# Key columns: ts, dur, track_name, package_name, iface, direction, packet_count,
-#              packet_length, packet_transport, packet_tcp_flags, socket_tag,
-#              socket_uid, local_port, remote_port
-# Macros: android_network_uptime_spans, android_network_uptime_cost
+# =============================================================================
+# 网络活动分析 v3.0（组合 Skill）- 基于 Perfetto stdlib
+# =============================================================================
+# 使用 Perfetto stdlib 的 android_network_packets 视图
+#
+# 核心表：
+# - android_network_packets: ts, dur, track_name, package_name, iface, direction,
+#     packet_count, packet_length, packet_transport, packet_tcp_flags,
+#     socket_tag, socket_uid, local_port, remote_port
+# - android_network_uptime_spans (宏): 网络活跃周期估算
+#
+# 分析维度：
+# - 流量概览：按接口/方向统计总包数和字节数
+# - 应用流量：按应用排行网络使用量
+# - 协议分布：TCP/UDP/其他协议使用比例
+# - 时间分布：流量随时间变化趋势
+# - 功耗影响：网络活跃周期对功耗的影响
+#
+# Fallback: 若 android_network_packets 不存在，检查 slice 表中的网络相关 slice
 
 name: network_analysis
-version: "1.0"
+version: "3.0"
 type: composite
 category: network
 
 meta:
   display_name: "网络活动分析"
-  description: "分析网络包收发活动 (基于 net hook)"
+  description: "分析网络包收发活动、协议分布和功耗影响"
   icon: "wifi"
-  tags: [network, packet, composite]
+  tags: [network, packet, traffic, power, composite]
 
 prerequisites:
   optional_tables:
@@ -23,24 +36,25 @@ prerequisites:
     - android.network_packets
 
 triggers:
-  - pattern: "(网络|network|流量|traffic)"
-    confidence: 0.95
-  - pattern: "(wifi|WiFi|移动网络|cellular|4G|5G)"
-    confidence: 0.9
-  - pattern: "(TCP|UDP|packet|数据包)"
-    confidence: 0.85
-  - pattern: "(网络唤醒|network wakeup|数据传输)"
-    confidence: 0.8
+  keywords:
+    zh: [网络, 流量, 数据包, 网络唤醒, 数据传输, WiFi, 移动网络]
+    en: [network, traffic, packet, network wakeup, data transfer, wifi, cellular]
+  patterns:
+    - ".*网络.*"
+    - ".*network.*"
+    - ".*流量.*"
+    - ".*(WiFi|wifi|4G|5G|cellular).*"
+    - ".*(TCP|UDP|packet|数据包).*"
 
 inputs:
-  - name: package_name
+  - name: package
     type: string
     required: false
-    description: "目标应用包名，留空分析所有网络流量"
+    description: "应用包名（可选，留空分析所有流量）"
   - name: interface
     type: string
     required: false
-    description: "网络接口过滤 (wlan0, rmnet_data0 等)"
+    description: "网络接口过滤（wlan0, rmnet_data0 等）"
   - name: start_ts
     type: timestamp
     required: false
@@ -49,111 +63,346 @@ inputs:
     type: timestamp
     required: false
     description: "分析结束时间戳（纳秒，可选）"
+  - name: heavy_traffic_critical_mb
+    type: number
+    required: false
+    default: 100
+    description: "大流量严重阈值（MB）"
+  - name: heavy_traffic_warning_mb
+    type: number
+    required: false
+    default: 10
+    description: "大流量警告阈值（MB）"
+  - name: frequent_active_periods
+    type: number
+    required: false
+    default: 20
+    description: "频繁网络活跃周期阈值（次数）"
 
 steps:
-  # Step 1: 网络流量概览
+  # ========== L0: 检查网络数据可用性 ==========
+  - id: check_network_data
+    type: atomic
+    name: "检查网络数据"
+    display: false
+    optional: true
+    sql: |
+      SELECT
+        COUNT(*) as pkt_count,
+        CASE WHEN COUNT(*) > 0 THEN 'available' ELSE 'unavailable' END as status
+      FROM android_network_packets
+      WHERE (package_name GLOB '${package}*' OR '${package}' = '')
+        AND (iface GLOB '*${interface}*' OR '${interface}' = '')
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+    save_as: network_check
+
+  # ========== L0 Fallback: 检查 slice 表中的网络相关数据 ==========
+  - id: check_network_slices
+    type: atomic
+    name: "检查网络 Slice 数据"
+    display: false
+    sql: |
+      SELECT
+        COUNT(*) as slice_count,
+        CASE WHEN COUNT(*) > 0 THEN 'available' ELSE 'unavailable' END as status
+      FROM slice
+      WHERE (
+          name GLOB '*network*'
+          OR name GLOB '*Network*'
+          OR name GLOB '*socket*'
+          OR name GLOB '*Socket*'
+          OR name GLOB '*DNS*'
+          OR name GLOB '*dns*'
+          OR name GLOB '*http*'
+          OR name GLOB '*Http*'
+          OR name GLOB '*connect*'
+          OR name GLOB '*Connect*'
+        )
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+    save_as: network_slice_check
+    condition: network_check.data[0]?.status === 'unavailable'
+
+  # ========== L1: 网络流量概览 ==========
   - id: network_overview
     type: atomic
     name: "网络流量概览"
-    description: "按接口和方向统计网络流量"
+    optional: true
+    synthesize:
+      role: overview
+      fields:
+        - key: total_events
+          label: 总事件数
+        - key: total_packets
+          label: 总数据包
+        - key: total_mb
+          label: 总流量
+          format: "{{value}} MB"
+        - key: rating
+          label: 评级
+      insights:
+        - condition: "total_mb > 100"
+          template: "网络流量较大 ({{total_mb}} MB)，可能影响功耗"
+        - condition: "total_events > 1000"
+          template: "网络事件频繁 ({{total_events}} 次)，检查是否可批量化"
+    display:
+      level: key
+      layer: overview
+      title: "网络流量概览"
+      columns:
+        - name: total_events
+          label: "总事件数"
+          type: number
+          format: compact
+        - name: total_packets
+          label: "总数据包"
+          type: number
+          format: compact
+        - name: total_kb
+          label: "总流量 (KB)"
+          type: number
+          format: compact
+        - name: total_mb
+          label: "总流量 (MB)"
+          type: number
+          format: compact
+        - name: tx_packets
+          label: "发送包数"
+          type: number
+          format: compact
+        - name: rx_packets
+          label: "接收包数"
+          type: number
+          format: compact
+        - name: tx_kb
+          label: "发送 (KB)"
+          type: number
+          format: compact
+        - name: rx_kb
+          label: "接收 (KB)"
+          type: number
+          format: compact
+        - name: rating
+          label: "评级"
+          type: string
     sql: |
-      INCLUDE PERFETTO MODULE android.network_packets;
+      SELECT
+        COUNT(*) as total_events,
+        SUM(packet_count) as total_packets,
+        ROUND(SUM(packet_length) / 1024.0, 2) as total_kb,
+        ROUND(SUM(packet_length) / 1024.0 / 1024.0, 2) as total_mb,
+        SUM(CASE WHEN direction = 'Transmitted' THEN packet_count ELSE 0 END) as tx_packets,
+        SUM(CASE WHEN direction = 'Received' THEN packet_count ELSE 0 END) as rx_packets,
+        ROUND(SUM(CASE WHEN direction = 'Transmitted' THEN packet_length ELSE 0 END) / 1024.0, 2) as tx_kb,
+        ROUND(SUM(CASE WHEN direction = 'Received' THEN packet_length ELSE 0 END) / 1024.0, 2) as rx_kb,
+        CASE
+          WHEN SUM(packet_length) / 1024.0 / 1024.0 > 100 THEN '流量大'
+          WHEN SUM(packet_length) / 1024.0 / 1024.0 > 10 THEN '中等'
+          ELSE '正常'
+        END as rating
+      FROM android_network_packets
+      WHERE (package_name GLOB '${package}*' OR '${package}' = '')
+        AND (iface GLOB '*${interface}*' OR '${interface}' = '')
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+    save_as: network_overview
+    condition: network_check.data[0]?.status === 'available'
 
+  # ========== L1: 按接口流量分布 ==========
+  - id: traffic_by_interface
+    type: atomic
+    name: "按接口流量分布"
+    optional: true
+    synthesize:
+      role: list
+      groupBy:
+        - field: iface
+          title: 按网络接口分布
+      fields:
+        - key: iface
+          label: 接口
+        - key: total_kb
+          label: 流量
+          format: "{{value}} KB"
+    display:
+      level: key
+      layer: overview
+      title: "按接口流量分布"
+      columns:
+        - name: iface
+          label: "网络接口"
+          type: string
+        - name: direction
+          label: "方向"
+          type: string
+        - name: event_count
+          label: "事件数"
+          type: number
+          format: compact
+        - name: total_packets
+          label: "数据包数"
+          type: number
+          format: compact
+        - name: total_kb
+          label: "流量 (KB)"
+          type: number
+          format: compact
+    sql: |
       SELECT
         iface,
         direction,
-        COUNT(*) AS event_count,
-        SUM(packet_count) AS total_packets,
-        SUM(packet_length) / 1024 AS total_kb,
-        SUM(packet_length) / 1024 / 1024 AS total_mb
+        COUNT(*) as event_count,
+        SUM(packet_count) as total_packets,
+        ROUND(SUM(packet_length) / 1024.0, 2) as total_kb
       FROM android_network_packets
-      WHERE CASE WHEN '${interface}' != ''
-                 THEN iface GLOB '*${interface}*'
-                 ELSE 1 END
+      WHERE (package_name GLOB '${package}*' OR '${package}' = '')
+        AND (iface GLOB '*${interface}*' OR '${interface}' = '')
         AND (${start_ts} IS NULL OR ts >= ${start_ts})
         AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY iface, direction
-      ORDER BY total_kb DESC;
-    interpretation:
-      key_metrics:
-        - name: "total_mb"
-          description: "总流量 (MB)"
-        - name: "total_packets"
-          description: "总数据包数"
+      ORDER BY total_kb DESC
+    save_as: traffic_by_interface
+    condition: network_check.data[0]?.status === 'available'
 
-  # Step 2: 应用流量排行
+  # ========== L2: 应用流量排行 ==========
   - id: app_traffic_ranking
     type: atomic
     name: "应用流量排行"
-    description: "按应用统计网络流量使用"
+    optional: true
+    synthesize:
+      role: list
+      groupBy:
+        - field: package_name
+          title: 按应用分布
+      fields:
+        - key: package_name
+          label: 应用包名
+        - key: total_kb
+          label: 流量
+          format: "{{value}} KB"
+    display:
+      level: key
+      layer: list
+      title: "应用流量排行"
+      columns:
+        - name: package_name
+          label: "应用包名"
+          type: string
+        - name: direction
+          label: "方向"
+          type: string
+        - name: event_count
+          label: "事件数"
+          type: number
+          format: compact
+        - name: total_packets
+          label: "数据包数"
+          type: number
+          format: compact
+        - name: total_kb
+          label: "流量 (KB)"
+          type: number
+          format: compact
     sql: |
-      INCLUDE PERFETTO MODULE android.network_packets;
-
       SELECT
         package_name,
         direction,
-        COUNT(*) AS event_count,
-        SUM(packet_count) AS total_packets,
-        SUM(packet_length) / 1024 AS total_kb
+        COUNT(*) as event_count,
+        SUM(packet_count) as total_packets,
+        ROUND(SUM(packet_length) / 1024.0, 2) as total_kb
       FROM android_network_packets
-      WHERE CASE WHEN '${package_name}' != ''
-                 THEN package_name GLOB '*${package_name}*'
-                 ELSE 1 END
-        AND CASE WHEN '${interface}' != ''
-                 THEN iface GLOB '*${interface}*'
-                 ELSE 1 END
+      WHERE (package_name GLOB '${package}*' OR '${package}' = '')
+        AND (iface GLOB '*${interface}*' OR '${interface}' = '')
         AND (${start_ts} IS NULL OR ts >= ${start_ts})
         AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY package_name, direction
       ORDER BY total_kb DESC
-      LIMIT 30;
-    interpretation:
-      key_metrics:
-        - name: "total_kb"
-          description: "流量使用 (KB)"
+      LIMIT 30
+    save_as: app_traffic_ranking
+    condition: network_check.data[0]?.status === 'available'
 
-  # Step 3: 传输协议分布
+  # ========== L2: 传输协议分布 ==========
   - id: transport_distribution
     type: atomic
     name: "传输协议分布"
-    description: "分析各传输协议的使用情况"
+    optional: true
+    synthesize:
+      role: list
+      groupBy:
+        - field: packet_transport
+          title: 按传输协议分布
+      fields:
+        - key: packet_transport
+          label: 协议
+        - key: total_kb
+          label: 流量
+          format: "{{value}} KB"
+    display:
+      level: key
+      layer: list
+      title: "传输协议分布"
+      columns:
+        - name: packet_transport
+          label: "传输协议"
+          type: string
+        - name: event_count
+          label: "事件数"
+          type: number
+          format: compact
+        - name: total_packets
+          label: "数据包数"
+          type: number
+          format: compact
+        - name: total_kb
+          label: "流量 (KB)"
+          type: number
+          format: compact
     sql: |
-      INCLUDE PERFETTO MODULE android.network_packets;
-
       SELECT
         packet_transport,
-        COUNT(*) AS event_count,
-        SUM(packet_count) AS total_packets,
-        SUM(packet_length) / 1024 AS total_kb
+        COUNT(*) as event_count,
+        SUM(packet_count) as total_packets,
+        ROUND(SUM(packet_length) / 1024.0, 2) as total_kb
       FROM android_network_packets
-      WHERE CASE WHEN '${package_name}' != ''
-                 THEN package_name GLOB '*${package_name}*'
-                 ELSE 1 END
-        AND CASE WHEN '${interface}' != ''
-                 THEN iface GLOB '*${interface}*'
-                 ELSE 1 END
+      WHERE (package_name GLOB '${package}*' OR '${package}' = '')
+        AND (iface GLOB '*${interface}*' OR '${interface}' = '')
         AND (${start_ts} IS NULL OR ts >= ${start_ts})
         AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY packet_transport
-      ORDER BY total_kb DESC;
-    interpretation:
-      key_metrics:
-        - name: "packet_transport"
-          description: "传输协议"
-      analysis_hints:
-        - condition: "packet_transport = 'TCP'"
-          insight: "TCP 流量占主导，适用于可靠传输"
-        - condition: "packet_transport = 'UDP'"
-          insight: "UDP 流量，可能是音视频或游戏"
+      ORDER BY total_kb DESC
+    save_as: transport_distribution
+    condition: network_check.data[0]?.status === 'available'
 
-  # Step 4: 端口使用分析
+  # ========== L2: 端口使用分析 ==========
   - id: port_analysis
     type: atomic
     name: "端口使用分析"
-    description: "分析常用端口的流量"
+    optional: true
+    display:
+      level: detail
+      layer: list
+      title: "远程端口使用分析"
+      columns:
+        - name: remote_port
+          label: "远程端口"
+          type: number
+        - name: service
+          label: "服务类型"
+          type: string
+        - name: event_count
+          label: "事件数"
+          type: number
+          format: compact
+        - name: total_packets
+          label: "数据包数"
+          type: number
+          format: compact
+        - name: total_kb
+          label: "流量 (KB)"
+          type: number
+          format: compact
     sql: |
-      INCLUDE PERFETTO MODULE android.network_packets;
-
       SELECT
         remote_port,
         CASE remote_port
@@ -165,112 +414,169 @@ steps:
           WHEN 5229 THEN 'GCM/FCM'
           WHEN 5230 THEN 'GCM/FCM'
           ELSE 'OTHER'
-        END AS service,
-        COUNT(*) AS event_count,
-        SUM(packet_count) AS total_packets,
-        SUM(packet_length) / 1024 AS total_kb
+        END as service,
+        COUNT(*) as event_count,
+        SUM(packet_count) as total_packets,
+        ROUND(SUM(packet_length) / 1024.0, 2) as total_kb
       FROM android_network_packets
       WHERE remote_port IS NOT NULL
-        AND CASE WHEN '${package_name}' != ''
-                 THEN package_name GLOB '*${package_name}*'
-                 ELSE 1 END
-        AND CASE WHEN '${interface}' != ''
-                 THEN iface GLOB '*${interface}*'
-                 ELSE 1 END
+        AND (package_name GLOB '${package}*' OR '${package}' = '')
+        AND (iface GLOB '*${interface}*' OR '${interface}' = '')
         AND (${start_ts} IS NULL OR ts >= ${start_ts})
         AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY remote_port
       ORDER BY total_kb DESC
-      LIMIT 20;
-    interpretation:
-      analysis_hints:
-        - condition: "service = 'HTTPS'"
-          insight: "HTTPS 流量占主导，加密传输"
-        - condition: "remote_port = 53"
-          insight: "DNS 查询，检查是否过于频繁"
+      LIMIT 20
+    save_as: port_analysis
+    condition: network_check.data[0]?.status === 'available'
 
-  # Step 5: TCP 标志分析
-  - id: tcp_flags_analysis
-    type: atomic
-    name: "TCP 标志分析"
-    description: "分析 TCP 连接状态"
-    sql: |
-      INCLUDE PERFETTO MODULE android.network_packets;
-
-      SELECT
-        packet_tcp_flags,
-        COUNT(*) AS flag_count,
-        SUM(packet_count) AS total_packets
-      FROM android_network_packets
-      WHERE packet_transport = 'TCP'
-        AND packet_tcp_flags IS NOT NULL
-        AND CASE WHEN '${package_name}' != ''
-                 THEN package_name GLOB '*${package_name}*'
-                 ELSE 1 END
-        AND CASE WHEN '${interface}' != ''
-                 THEN iface GLOB '*${interface}*'
-                 ELSE 1 END
-        AND (${start_ts} IS NULL OR ts >= ${start_ts})
-        AND (${end_ts} IS NULL OR ts < ${end_ts})
-      GROUP BY packet_tcp_flags
-      ORDER BY flag_count DESC
-      LIMIT 15;
-    interpretation:
-      analysis_hints:
-        - condition: "packet_tcp_flags LIKE '%SYN%'"
-          insight: "TCP 连接建立"
-        - condition: "packet_tcp_flags LIKE '%FIN%' OR packet_tcp_flags LIKE '%RST%'"
-          insight: "TCP 连接关闭或重置"
-
-  # Step 6: 流量时间分布
+  # ========== L2: 流量时间分布 ==========
   - id: traffic_timeline
     type: atomic
     name: "流量时间分布"
-    description: "按时间统计网络流量"
+    optional: true
+    display:
+      level: detail
+      layer: list
+      title: "流量时间分布（每秒）"
+      columns:
+        - name: time_sec
+          label: "时间 (秒)"
+          type: number
+        - name: packets_per_sec
+          label: "包数/秒"
+          type: number
+          format: compact
+        - name: kb_per_sec
+          label: "流量/秒 (KB)"
+          type: number
+          format: compact
+        - name: tx_kb
+          label: "发送 (KB)"
+          type: number
+          format: compact
+        - name: rx_kb
+          label: "接收 (KB)"
+          type: number
+          format: compact
     sql: |
-      INCLUDE PERFETTO MODULE android.network_packets;
-
       SELECT
-        CAST(ts / 1e9 AS INTEGER) AS time_sec,
-        SUM(packet_count) AS packets_per_sec,
-        SUM(packet_length) / 1024 AS kb_per_sec,
-        SUM(CASE WHEN direction = 'Transmitted' THEN packet_length ELSE 0 END) / 1024 AS tx_kb,
-        SUM(CASE WHEN direction = 'Received' THEN packet_length ELSE 0 END) / 1024 AS rx_kb
+        CAST(ts / 1000000000 AS INTEGER) as time_sec,
+        SUM(packet_count) as packets_per_sec,
+        ROUND(SUM(packet_length) / 1024.0, 2) as kb_per_sec,
+        ROUND(SUM(CASE WHEN direction = 'Transmitted' THEN packet_length ELSE 0 END) / 1024.0, 2) as tx_kb,
+        ROUND(SUM(CASE WHEN direction = 'Received' THEN packet_length ELSE 0 END) / 1024.0, 2) as rx_kb
       FROM android_network_packets
-      WHERE CASE WHEN '${package_name}' != ''
-                 THEN package_name GLOB '*${package_name}*'
-                 ELSE 1 END
-        AND CASE WHEN '${interface}' != ''
-                 THEN iface GLOB '*${interface}*'
-                 ELSE 1 END
+      WHERE (package_name GLOB '${package}*' OR '${package}' = '')
+        AND (iface GLOB '*${interface}*' OR '${interface}' = '')
         AND (${start_ts} IS NULL OR ts >= ${start_ts})
         AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY time_sec
-      ORDER BY time_sec;
-    interpretation:
-      key_metrics:
-        - name: "kb_per_sec"
-          description: "每秒流量 (KB)"
-        - name: "packets_per_sec"
-          description: "每秒数据包数"
+      ORDER BY time_sec
+    save_as: traffic_timeline
+    condition: network_check.data[0]?.status === 'available'
 
-  # Step 7: 网络唤醒成本分析
-  - id: network_uptime_cost
+  # ========== L2: 大流量传输事件 ==========
+  - id: large_transfers
+    type: atomic
+    name: "大流量传输事件"
+    optional: true
+    display:
+      level: key
+      layer: list
+      title: "大流量传输事件（Top 20）"
+      columns:
+        - name: event_ts
+          label: "时间"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: package_name
+          label: "应用"
+          type: string
+        - name: iface
+          label: "接口"
+          type: string
+        - name: direction
+          label: "方向"
+          type: string
+        - name: packet_transport
+          label: "协议"
+          type: string
+        - name: packet_count
+          label: "包数"
+          type: number
+        - name: kb
+          label: "大小 (KB)"
+          type: number
+          format: compact
+    sql: |
+      SELECT
+        printf('%d', ts) as event_ts,
+        package_name,
+        iface,
+        direction,
+        packet_transport,
+        packet_count,
+        ROUND(packet_length / 1024.0, 2) as kb
+      FROM android_network_packets
+      WHERE (package_name GLOB '${package}*' OR '${package}' = '')
+        AND (iface GLOB '*${interface}*' OR '${interface}' = '')
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ORDER BY packet_length DESC
+      LIMIT 20
+    save_as: large_transfers
+    condition: network_check.data[0]?.status === 'available'
+
+  # ========== L2: 网络功耗影响 ==========
+  - id: network_power_cost
     type: atomic
     name: "网络功耗影响"
-    description: "分析网络活动对功耗的影响 (使用 10 秒空闲超时模型)"
+    optional: true
+    synthesize:
+      role: list
+      fields:
+        - key: iface
+          label: 接口
+        - key: total_active_sec
+          label: 活跃时间
+          format: "{{value}} 秒"
+        - key: active_periods
+          label: 活跃周期数
+    display:
+      level: key
+      layer: list
+      title: "网络功耗影响（10 秒空闲超时模型）"
+      columns:
+        - name: iface
+          label: "网络接口"
+          type: string
+        - name: active_periods
+          label: "活跃周期数"
+          type: number
+          format: compact
+        - name: total_active_sec
+          label: "总活跃时间 (秒)"
+          type: number
+          format: compact
+        - name: avg_active_sec
+          label: "平均活跃时长 (秒)"
+          type: number
+          format: compact
+        - name: total_packets
+          label: "总包数"
+          type: number
+          format: compact
+        - name: total_mb
+          label: "总流量 (MB)"
+          type: number
+          format: compact
     sql: |
-      INCLUDE PERFETTO MODULE android.network_packets;
-
       WITH filtered_packets AS (
         SELECT *
         FROM android_network_packets
-        WHERE CASE WHEN '${package_name}' != ''
-                   THEN package_name GLOB '*${package_name}*'
-                   ELSE 1 END
-          AND CASE WHEN '${interface}' != ''
-                   THEN iface GLOB '*${interface}*'
-                   ELSE 1 END
+        WHERE (package_name GLOB '${package}*' OR '${package}' = '')
+          AND (iface GLOB '*${interface}*' OR '${interface}' = '')
           AND (${start_ts} IS NULL OR ts >= ${start_ts})
           AND (${end_ts} IS NULL OR ts < ${end_ts})
       ),
@@ -279,86 +585,171 @@ steps:
         FROM android_network_uptime_spans!(
           filtered_packets,
           (iface),
-          10000000000  -- 10 second timeout
+          10000000000
         )
       )
       SELECT
         iface,
-        COUNT(*) AS active_periods,
-        SUM(dur) / 1e9 AS total_active_sec,
-        AVG(dur) / 1e9 AS avg_active_sec,
-        SUM(packet_count) AS total_packets,
-        SUM(packet_length) / 1024 / 1024 AS total_mb
+        COUNT(*) as active_periods,
+        ROUND(SUM(dur) / 1e9, 2) as total_active_sec,
+        ROUND(AVG(dur) / 1e9, 2) as avg_active_sec,
+        SUM(packet_count) as total_packets,
+        ROUND(SUM(packet_length) / 1024.0 / 1024.0, 2) as total_mb
       FROM uptime_spans
       GROUP BY iface
-      ORDER BY total_active_sec DESC;
-    interpretation:
-      key_metrics:
-        - name: "total_active_sec"
-          description: "网络活跃总时间 (秒)"
-        - name: "active_periods"
-          description: "独立活跃周期数"
-      analysis_hints:
-        - condition: "active_periods > total_mb * 10"
-          insight: "频繁小量传输，建议批量处理以节省功耗"
+      ORDER BY total_active_sec DESC
+    save_as: network_power_cost
+    condition: network_check.data[0]?.status === 'available'
 
-  # Step 8: AI 综合分析
-  - id: network_ai_summary
-    type: ai_summary
-    name: "网络性能 AI 分析"
-    description: "综合分析网络使用模式"
-    inputs: [network_overview, app_traffic_ranking, transport_distribution, port_analysis, tcp_flags_analysis, traffic_timeline, network_uptime_cost]
-    depends_on:
-      - network_overview
-      - app_traffic_ranking
-      - transport_distribution
-      - port_analysis
-      - tcp_flags_analysis
-      - traffic_timeline
-      - network_uptime_cost
-    prompt: |
-      请基于以下网络分析数据，提供专业的分析：
+  # ========== Fallback: 网络相关 Slice 概览 ==========
+  - id: network_slice_overview
+    type: atomic
+    name: "网络相关 Slice 概览"
+    display:
+      level: key
+      layer: overview
+      title: "网络相关 Slice（无 android_network_packets 数据时）"
+      columns:
+        - name: slice_name
+          label: "Slice 名称"
+          type: string
+        - name: count
+          label: "出现次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_dur_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+    sql: |
+      SELECT
+        s.name as slice_name,
+        COUNT(*) as count,
+        ROUND(SUM(s.dur) / 1e6, 2) as total_dur_ms,
+        ROUND(AVG(s.dur) / 1e6, 2) as avg_dur_ms,
+        ROUND(MAX(s.dur) / 1e6, 2) as max_dur_ms
+      FROM slice s
+      WHERE (
+          s.name GLOB '*network*'
+          OR s.name GLOB '*Network*'
+          OR s.name GLOB '*socket*'
+          OR s.name GLOB '*Socket*'
+          OR s.name GLOB '*DNS*'
+          OR s.name GLOB '*dns*'
+          OR s.name GLOB '*http*'
+          OR s.name GLOB '*Http*'
+          OR s.name GLOB '*connect*'
+          OR s.name GLOB '*Connect*'
+        )
+        AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+      GROUP BY s.name
+      ORDER BY total_dur_ms DESC
+      LIMIT 20
+    save_as: network_slice_overview
+    condition: network_check.data[0]?.status === 'unavailable' && network_slice_check.data[0]?.status === 'available'
 
-      ## 流量概览
-          network_overview
+  # ========== 根因诊断 ==========
+  - id: network_diagnosis
+    type: diagnostic
+    name: "网络诊断"
+    synthesize:
+      role: conclusion
+      fields:
+        - key: diagnosis
+          label: 诊断结论
+        - key: severity
+          label: 严重程度
+        - key: confidence
+          label: 置信度
+      insights:
+        - template: "网络诊断：{{diagnosis}}"
+    display:
+      level: key
+      layer: overview
+      title: "问题诊断"
+    inputs: [network_overview, app_traffic_ranking, transport_distribution, large_transfers, network_power_cost]
+    rules:
+      # 大流量应用
+      - condition: "network_overview.data[0]?.total_mb > ${heavy_traffic_critical_mb|100}"
+        severity: critical
+        diagnosis: "NETWORK_HEAVY - 网络流量过大 (${network_overview.data[0].total_mb} MB)"
+        confidence: high
+        suggestions:
+          - "检查是否有不必要的大文件下载"
+          - "考虑使用压缩传输和增量更新"
+          - "检查图片/视频资源是否过大"
 
-      ## 应用流量排行
-          app_traffic_ranking
+      - condition: "network_overview.data[0]?.total_mb > ${heavy_traffic_warning_mb|10}"
+        severity: warning
+        diagnosis: "NETWORK_HEAVY - 网络流量较大 (${network_overview.data[0].total_mb} MB)"
+        confidence: medium
+        suggestions:
+          - "检查流量来源应用"
+          - "考虑优化资源加载策略"
 
-      ## 传输协议分布
-          transport_distribution
+      # 频繁小量传输（功耗问题）
+      - condition: "network_power_cost.data[0]?.active_periods > network_overview.data[0]?.total_mb * 10 && network_power_cost.data[0]?.active_periods > ${frequent_active_periods|20}"
+        severity: warning
+        diagnosis: "NETWORK_LATENCY - 频繁小量网络传输，功耗影响大（${network_power_cost.data[0].active_periods} 个活跃周期）"
+        confidence: medium
+        suggestions:
+          - "批量合并网络请求以减少唤醒次数"
+          - "使用 JobScheduler 或 WorkManager 延迟非紧急请求"
+          - "检查后台定时同步频率"
 
-      ## 端口使用
-          port_analysis
+      # 大量 DNS 查询
+      - condition: "port_analysis.data.find(p => p.service === 'DNS')?.event_count > 100"
+        severity: warning
+        diagnosis: "NETWORK_LATENCY - DNS 查询频繁，可能导致网络延迟"
+        confidence: medium
+        suggestions:
+          - "检查是否有重复 DNS 查询"
+          - "考虑使用 DNS 缓存或预解析"
 
-      ## 流量时间分布
-          traffic_timeline
+      # 正常
+      - condition: "network_overview.data[0]?.total_mb <= ${heavy_traffic_warning_mb|10}"
+        severity: info
+        diagnosis: "NETWORK_NORMAL - 网络流量正常"
+        confidence: high
+        suggestions:
+          - "网络使用在正常范围内"
 
-      ## 功耗影响
-          network_uptime_cost
-
-      请分析：
-      1. 网络流量使用模式
-      2. 主要流量来源应用
-      3. 传输协议和端口使用情况
-      4. 对功耗的影响评估
-      5. 优化建议（批量传输、减少唤醒等）
-
-      使用中文回答，结构清晰。
-
-output:
-  format: markdown
-  sections:
-    - title: "网络分析总结"
-      content: |
-        ## 流量概览
-            network_overview
-
-        ## 应用流量排行
-            app_traffic_ranking
-
-        ## 功耗影响
-            network_uptime_cost
-
-        ## AI 综合分析
-            network_ai_summary
+  # ========== Fallback 诊断 ==========
+  - id: fallback_diagnosis
+    type: diagnostic
+    name: "Fallback 诊断"
+    synthesize:
+      role: conclusion
+      fields:
+        - key: diagnosis
+          label: 诊断结论
+        - key: severity
+          label: 严重程度
+      insights:
+        - template: "{{diagnosis}}"
+    display:
+      level: key
+      layer: overview
+      title: "数据可用性诊断"
+    inputs: [network_check, network_slice_check]
+    rules:
+      - condition: "network_check.data[0]?.status === 'unavailable' && (!network_slice_check.data || network_slice_check.data[0]?.status === 'unavailable')"
+        severity: info
+        diagnosis: "未检测到网络数据。Trace 中未包含 android.network_packets 模块数据，也未发现网络相关 Slice。如需分析网络问题，请在录制 Trace 时启用 net 数据源。"
+        confidence: high
+        suggestions:
+          - "录制 Trace 时启用 android.network_packets"
+          - "确保已安装 net hook"
+    condition: network_check.data[0]?.status === 'unavailable'

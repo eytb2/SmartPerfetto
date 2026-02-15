@@ -2,14 +2,14 @@
 
 > 本文档详细描述从用户输入到最终呈现的完整数据流程
 > 
-> ⚠️ 说明：当前仅保留 AgentDrivenOrchestrator 主链路，历史内容若涉及 Master/PerfettoAnalysisOrchestrator 已不再适用。
+> ⚠️ 说明：当前仅保留 AgentRuntime 主链路，历史内容若涉及 Master/PerfettoAnalysisOrchestrator 已不再适用。
 
 ## 0. 重要架构说明
 
 当前已统一为单一主链路：
 
 - 路由: /api/agent/*
-- Orchestrator: AgentDrivenOrchestrator
+- Orchestrator: AgentRuntime
 - 会话管理: 内存 sessions Map + SSE 流
 
 ---

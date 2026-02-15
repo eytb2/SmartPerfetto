@@ -1,13 +1,19 @@
+# =============================================================================
+# CPU 负载区间分析（Composite Skill）
+# =============================================================================
+# 分析指定时间范围内各 CPU 核心的负载情况
+# v2.0: 复用 _cpu_topology 视图替代内联 CTE，统一核心分类
+
 name: cpu_load_in_range
-version: "1.0"
-type: atomic
+version: "2.0"
+type: composite
 category: hardware
 
 meta:
   display_name: "CPU 负载区间分析"
   description: "分析指定时间范围内各 CPU 核心的负载情况"
   icon: "bar_chart"
-  tags: [cpu, load, usage, atomic]
+  tags: [cpu, load, usage, composite]
 
 prerequisites:
   required_tables:
@@ -22,6 +28,14 @@ inputs:
     required: true
 
 steps:
+  - id: init_cpu_topology
+    type: skill
+    name: "初始化 CPU 拓扑"
+    skill: cpu_topology_view
+    display:
+      level: hidden
+    optional: true
+
   - id: cpu_utilization
     type: atomic
     name: "CPU 利用率"
@@ -29,37 +43,16 @@ steps:
       level: detail
       title: "CPU 利用率"
     sql: |
-      WITH 
-      -- 动态检测 CPU 集群
-      cpu_max_freq AS (
-        SELECT cpu, MAX(value) as max_freq
-        FROM counter c
-        JOIN cpu_counter_track t ON c.track_id = t.id
-        WHERE t.name = 'cpufreq'
-        GROUP BY cpu
-      ),
-      global_max AS (
-        SELECT MAX(max_freq) as val FROM cpu_max_freq
-      ),
-      cpu_clusters AS (
-        SELECT cpu,
-          CASE
-            WHEN max_freq >= (SELECT val FROM global_max) * 0.95 THEN 'prime'
-            WHEN max_freq >= (SELECT val FROM global_max) * 0.75 THEN 'big'
-            WHEN max_freq >= (SELECT val FROM global_max) * 0.50 THEN 'mid'
-            ELSE 'little'
-          END as cluster_type
-        FROM cpu_max_freq
-      ),
+      WITH
       cpu_time AS (
         SELECT
           ss.cpu,
-          COALESCE(cl.cluster_type, 'little') as core_type,
+          COALESCE(ct.core_type, 'little') as core_type,
           ss.utid,
           -- clamp dur 到范围内，处理跨边界的 sched_slice
           SUM(MIN(ss.ts + ss.dur, ${end_ts}) - MAX(ss.ts, ${start_ts})) as total_dur
         FROM sched_slice ss
-        LEFT JOIN cpu_clusters cl ON ss.cpu = cl.cpu
+        LEFT JOIN _cpu_topology ct ON ss.cpu = ct.cpu_id
         WHERE (ss.ts + ss.dur) > ${start_ts}
           AND ss.ts < ${end_ts}
         GROUP BY ss.cpu, ss.utid
@@ -81,12 +74,12 @@ steps:
       FROM cpu_total ct
       LEFT JOIN cpu_time ctime ON ct.cpu = ctime.cpu
       GROUP BY ct.core_type
-      ORDER BY 
-        CASE ct.core_type 
-          WHEN 'prime' THEN 1 
-          WHEN 'big' THEN 2 
-          WHEN 'mid' THEN 3 
-          ELSE 4 
+      ORDER BY
+        CASE ct.core_type
+          WHEN 'prime' THEN 1
+          WHEN 'big' THEN 2
+          WHEN 'medium' THEN 3
+          ELSE 4
         END
     save_as: utilization
 
@@ -97,25 +90,14 @@ steps:
       level: detail
       title: "运行队列"
     sql: |
-      WITH cpu_clusters AS (
-        SELECT cpu,
-          CASE
-            WHEN MAX(value) >= (SELECT MAX(value) * 0.75 FROM counter c2 JOIN cpu_counter_track t2 ON c2.track_id = t2.id WHERE t2.name = 'cpufreq') THEN 'big'
-            ELSE 'little'
-          END as cluster_type
-        FROM counter c
-        JOIN cpu_counter_track t ON c.track_id = t.id
-        WHERE t.name = 'cpufreq'
-        GROUP BY cpu
-      )
       SELECT
         t.cpu,
-        COALESCE(cl.cluster_type, 'little') as core_type,
+        COALESCE(ct.core_type, 'little') as core_type,
         ROUND(AVG(c.value), 2) as avg_runqueue,
         MAX(c.value) as max_runqueue
       FROM counter c
       JOIN cpu_counter_track t ON c.track_id = t.id
-      LEFT JOIN cpu_clusters cl ON t.cpu = cl.cpu
+      LEFT JOIN _cpu_topology ct ON t.cpu = ct.cpu_id
       WHERE t.name = 'runqueue_length'
         AND c.ts >= ${start_ts}
         AND c.ts < ${end_ts}
@@ -132,27 +114,6 @@ steps:
       title: "线程迁移"
     sql: |
       WITH
-      -- 动态检测 CPU 集群（与 cpu_utilization step 一致）
-      cpu_max_freq AS (
-        SELECT cpu, MAX(value) as max_freq
-        FROM counter c
-        JOIN cpu_counter_track t ON c.track_id = t.id
-        WHERE t.name = 'cpufreq'
-        GROUP BY cpu
-      ),
-      global_max AS (
-        SELECT MAX(max_freq) as val FROM cpu_max_freq
-      ),
-      cpu_clusters AS (
-        SELECT cpu,
-          CASE
-            WHEN max_freq >= (SELECT val FROM global_max) * 0.95 THEN 'prime'
-            WHEN max_freq >= (SELECT val FROM global_max) * 0.75 THEN 'big'
-            WHEN max_freq >= (SELECT val FROM global_max) * 0.50 THEN 'mid'
-            ELSE 'little'
-          END as cluster_type
-        FROM cpu_max_freq
-      ),
       migrations AS (
         SELECT
           utid,
@@ -165,10 +126,10 @@ steps:
       SELECT
         COUNT(*) as migration_count,
         SUM(CASE
-          WHEN (prev_cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type = 'little')
-                AND cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type != 'little'))
-               OR (prev_cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type != 'little')
-                   AND cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type = 'little'))
+          WHEN (prev_cpu IN (SELECT cpu_id FROM _cpu_topology WHERE core_type IN ('medium', 'little'))
+                AND cpu IN (SELECT cpu_id FROM _cpu_topology WHERE core_type IN ('prime', 'big')))
+               OR (prev_cpu IN (SELECT cpu_id FROM _cpu_topology WHERE core_type IN ('prime', 'big'))
+                   AND cpu IN (SELECT cpu_id FROM _cpu_topology WHERE core_type IN ('medium', 'little')))
           THEN 1 ELSE 0
         END) as cross_cluster_migrations
       FROM migrations

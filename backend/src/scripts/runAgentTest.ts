@@ -3,7 +3,7 @@ import {
   registerCoreTools,
   StreamingUpdate,
   ModelRouter,
-  createAgentDrivenOrchestrator,
+  createAgentRuntime,
   getAgentTraceRecorder,
 } from '../agent';
 import fs from 'fs';
@@ -47,7 +47,7 @@ async function runAgentTest() {
 
     registerCoreTools();
     const modelRouter = new ModelRouter();
-    const orchestrator = createAgentDrivenOrchestrator(modelRouter, {
+    const orchestrator = createAgentRuntime(modelRouter, {
       maxRounds: 3,
       maxConcurrentTasks: 3,
       confidenceThreshold: 0.7,
@@ -57,7 +57,7 @@ async function runAgentTest() {
     });
 
     console.log('✓ Agent system initialized');
-    console.log('  - Orchestrator: AgentDrivenOrchestrator');
+    console.log('  - Runtime: AgentRuntime (AgentV2)');
     console.log('  - Domain Agents: Frame/CPU/Binder/Memory/Startup/Interaction/ANR/System');
     console.log('  - Tools: skills-as-tools + DataEnvelope streaming');
     console.log('');
@@ -95,7 +95,7 @@ async function runAgentTest() {
       console.log('');
 
       console.log('Findings:', result.findings.length);
-      result.findings.slice(0, 3).forEach(f => {
+      result.findings.slice(0, 3).forEach((f: { severity: string; title: string }) => {
         console.log(`  - [${f.severity}] ${f.title}`);
       });
       if (result.findings.length > 3) {

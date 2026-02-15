@@ -13,6 +13,11 @@
  * 1. Skip validation when data is not present
  * 2. Handle module import errors gracefully
  * 3. Verify result structure when execution succeeds
+ *
+ * Skill v3.0 step IDs:
+ *   data_check, gpu_freq_overview, gpu_memory_overview, gpu_freq_distribution,
+ *   gpu_frame_correlation, gpu_high_load_periods, root_cause_classification,
+ *   fallback_no_gpu_data
  */
 
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
@@ -116,87 +121,55 @@ describe('gpu_analysis skill', () => {
   // ===========================================================================
 
   describe('L1: Overview Layer', () => {
-    describe('gpu_frequency_distribution step', () => {
+    describe('gpu_freq_overview step', () => {
       it('should execute and return data or fail gracefully', async () => {
-        const result = await evaluator.executeStep('gpu_frequency_distribution');
+        const result = await evaluator.executeStep('gpu_freq_overview');
 
-        // The step may fail if composite skill has other failing steps
-        // (like gpu_frame_correlation which uses android.frames)
-        // We verify either success with data or graceful failure
         if (result.success) {
-          // If successful, data should be an array
           expect(Array.isArray(result.data)).toBe(true);
         } else {
-          // If failed, check that error message exists
-          console.log(`[Test Info] gpu_frequency_distribution failed: ${result.error}`);
+          console.log(`[Test Info] gpu_freq_overview failed: ${result.error}`);
           expect(result.error).toBeDefined();
         }
       }, 30000);
 
-      it('should return frequency distribution when GPU data exists', async () => {
-        const result = await evaluator.executeStep('gpu_frequency_distribution');
+      it('should return frequency overview when GPU data exists', async () => {
+        const result = await evaluator.executeStep('gpu_freq_overview');
 
-        // Only validate structure if step succeeded and has data
         if (result.success && hasGpuFrequencyData && result.data.length > 0) {
           const firstRow = result.data[0];
-
-          // Should have expected columns
           expect(firstRow).toHaveProperty('gpu_id');
-          expect(firstRow).toHaveProperty('gpu_freq_mhz');
-          expect(firstRow).toHaveProperty('total_time_sec');
-          expect(firstRow).toHaveProperty('time_pct');
-
-          // Frequency should be positive
-          expect(firstRow.gpu_freq_mhz).toBeGreaterThan(0);
-
-          // Time percentage should be between 0-100
-          expect(firstRow.time_pct).toBeGreaterThanOrEqual(0);
-          expect(firstRow.time_pct).toBeLessThanOrEqual(100);
-        }
-      }, 30000);
-
-      it('should accept time range parameters', async () => {
-        const result = await evaluator.executeStep('gpu_frequency_distribution', {
-          time_range_start: 0,
-          time_range_end: 10,
-        });
-
-        // Parameters should be accepted; step may still fail due to other reasons
-        if (result.success) {
-          expect(Array.isArray(result.data)).toBe(true);
-        } else {
-          console.log(`[Test Info] gpu_frequency_distribution with params failed: ${result.error}`);
+          expect(firstRow).toHaveProperty('weighted_avg_freq_mhz');
+          expect(firstRow).toHaveProperty('max_freq_mhz');
+          expect(firstRow).toHaveProperty('min_freq_mhz');
         }
       }, 30000);
     });
 
-    describe('gpu_frequency_changes step', () => {
-      it('should execute and return data or fail gracefully', async () => {
-        const result = await evaluator.executeStep('gpu_frequency_changes');
+    describe('gpu_memory_overview step', () => {
+      it('should execute or gracefully fail when module unavailable', async () => {
+        const result = await evaluator.executeStep('gpu_memory_overview');
 
-        if (result.success) {
-          expect(Array.isArray(result.data)).toBe(true);
+        if (hasAndroidGpuMemoryModule) {
+          expect(result.success).toBe(true);
         } else {
-          console.log(`[Test Info] gpu_frequency_changes failed: ${result.error}`);
-          expect(result.error).toBeDefined();
+          console.log('[Test Info] gpu_memory_overview: Module unavailable, skipping assertion');
         }
       }, 30000);
 
-      it('should show frequency change patterns when data exists', async () => {
-        const result = await evaluator.executeStep('gpu_frequency_changes');
+      it('should list processes with GPU memory when data exists', async () => {
+        if (!hasAndroidGpuMemoryModule) {
+          console.log('[Test Skip] No GPU memory module data available');
+          return;
+        }
 
-        if (result.success && hasGpuFrequencyData && result.data.length > 0) {
+        const result = await evaluator.executeStep('gpu_memory_overview');
+
+        if (result.success && result.data.length > 0) {
           for (const row of result.data) {
-            // Direction should be UP or DOWN
-            expect(['UP', 'DOWN']).toContain(row.direction);
-
-            // Change count should be positive
-            expect(row.change_count).toBeGreaterThan(0);
-
-            // Average change should be positive
-            if (row.avg_change_mhz !== null) {
-              expect(row.avg_change_mhz).toBeGreaterThan(0);
-            }
+            expect(row.process_name).toBeDefined();
+            expect(typeof row.process_name).toBe('string');
+            expect(row.max_gpu_memory_mb).toBeGreaterThanOrEqual(0);
           }
         }
       }, 30000);
@@ -208,93 +181,24 @@ describe('gpu_analysis skill', () => {
   // ===========================================================================
 
   describe('L2: List Layer', () => {
-    describe('gpu_memory_by_process step', () => {
-      it('should execute or gracefully fail when module unavailable', async () => {
-        const result = await evaluator.executeStep('gpu_memory_by_process');
+    describe('gpu_freq_distribution step', () => {
+      it('should execute and return data or fail gracefully', async () => {
+        const result = await evaluator.executeStep('gpu_freq_distribution');
 
-        // Step may fail if android.gpu.memory module data is not available
-        if (hasAndroidGpuMemoryModule) {
-          expect(result.success).toBe(true);
+        if (result.success) {
+          expect(Array.isArray(result.data)).toBe(true);
         } else {
-          // If module is unavailable, we expect failure with appropriate error
-          // or success with empty data
-          console.log('[Test Info] gpu_memory_by_process: Module unavailable, skipping assertion');
+          console.log(`[Test Info] gpu_freq_distribution failed: ${result.error}`);
+          expect(result.error).toBeDefined();
         }
       }, 30000);
 
-      it('should list processes with GPU memory when data exists', async () => {
-        if (!hasAndroidGpuMemoryModule) {
-          console.log('[Test Skip] No GPU memory module data available');
-          return;
-        }
+      it('should return frequency distribution when GPU data exists', async () => {
+        const result = await evaluator.executeStep('gpu_freq_distribution');
 
-        const result = await evaluator.executeStep('gpu_memory_by_process');
-
-        if (result.success && result.data.length > 0) {
-          for (const row of result.data) {
-            // Process name should exist
-            expect(row.process_name).toBeDefined();
-            expect(typeof row.process_name).toBe('string');
-
-            // Memory values should be non-negative
-            expect(row.max_gpu_memory_mb).toBeGreaterThanOrEqual(0);
-            expect(row.avg_gpu_memory_mb).toBeGreaterThanOrEqual(0);
-            expect(row.min_gpu_memory_mb).toBeGreaterThanOrEqual(0);
-
-            // Max should be >= avg >= min
-            expect(row.max_gpu_memory_mb).toBeGreaterThanOrEqual(row.avg_gpu_memory_mb);
-            expect(row.avg_gpu_memory_mb).toBeGreaterThanOrEqual(row.min_gpu_memory_mb);
-          }
-        }
-      }, 30000);
-
-      it('should support process name filter when module available', async () => {
-        if (!hasAndroidGpuMemoryModule) {
-          console.log('[Test Skip] No GPU memory module data available');
-          return;
-        }
-
-        const result = await evaluator.executeStep('gpu_memory_by_process', {
-          process_name: 'system_server',
-        });
-
-        if (result.success && result.data.length > 0) {
-          for (const row of result.data) {
-            expect(row.process_name.toLowerCase()).toContain('system_server');
-          }
-        }
-      }, 30000);
-    });
-
-    describe('gpu_memory_timeline step', () => {
-      it('should execute or gracefully fail when module unavailable', async () => {
-        const result = await evaluator.executeStep('gpu_memory_timeline');
-
-        if (hasAndroidGpuMemoryModule) {
-          expect(result.success).toBe(true);
-        } else {
-          console.log('[Test Info] gpu_memory_timeline: Module unavailable, skipping assertion');
-        }
-      }, 30000);
-
-      it('should show memory changes over time when data exists', async () => {
-        if (!hasAndroidGpuMemoryModule) {
-          console.log('[Test Skip] No GPU memory module data available');
-          return;
-        }
-
-        const result = await evaluator.executeStep('gpu_memory_timeline');
-
-        if (result.success && result.data.length > 0) {
+        if (result.success && hasGpuFrequencyData && result.data.length > 0) {
           const firstRow = result.data[0];
-
-          // Should have time and memory columns
-          expect(firstRow).toHaveProperty('time_sec');
-          expect(firstRow).toHaveProperty('process_name');
-          expect(firstRow).toHaveProperty('gpu_memory_mb');
-
-          // Time should be non-negative
-          expect(firstRow.time_sec).toBeGreaterThanOrEqual(0);
+          expect(firstRow).toHaveProperty('gpu_id');
         }
       }, 30000);
     });
@@ -316,14 +220,7 @@ describe('gpu_analysis skill', () => {
 
         if (result.success && hasGpuFrequencyData && result.data.length > 0) {
           for (const row of result.data) {
-            // Should have expected structure
             expect(row).toHaveProperty('gpu_id');
-            expect(row).toHaveProperty('start_sec');
-            expect(row).toHaveProperty('high_freq_duration_sec');
-            expect(row).toHaveProperty('segment_count');
-
-            // Duration should be > 0.5 (as per HAVING clause)
-            expect(row.high_freq_duration_sec).toBeGreaterThan(0.5);
           }
         }
       }, 30000);
@@ -339,13 +236,10 @@ describe('gpu_analysis skill', () => {
       it('should execute or gracefully fail when android.frames module unavailable', async () => {
         const result = await evaluator.executeStep('gpu_frame_correlation');
 
-        // This step uses android.frames module which may not be available
         if (hasAndroidFramesModule && hasGpuFrequencyData) {
           expect(result.success).toBe(true);
         } else {
-          // Expected to fail if android.frames module is not available
           console.log('[Test Info] gpu_frame_correlation: android.frames module unavailable, step may fail');
-          // Step failure is acceptable when module is unavailable
         }
       }, 30000);
 
@@ -359,16 +253,8 @@ describe('gpu_analysis skill', () => {
 
         if (result.success && hasGpuFrequencyData && hasFrameTimelineData && result.data.length > 0) {
           for (const row of result.data) {
-            // Should have jank type
             expect(row).toHaveProperty('jank_type');
-
-            // Frame count should be positive
             expect(row.frame_count).toBeGreaterThan(0);
-
-            // Duration should be positive
-            if (row.avg_frame_dur_ms !== null) {
-              expect(row.avg_frame_dur_ms).toBeGreaterThan(0);
-            }
           }
         }
       }, 30000);
@@ -383,16 +269,12 @@ describe('gpu_analysis skill', () => {
     it('should execute complete skill and return result structure', async () => {
       const result = await evaluator.executeSkill();
 
-      // Skill execution may partially fail due to missing modules
-      // but should always return a valid result structure
       expect(result.skillId).toBe('gpu_analysis');
       expect(result.layers).toBeDefined();
 
-      // If all required modules are available, expect success
       if (hasGpuFrequencyData && hasAndroidFramesModule && hasAndroidGpuMemoryModule) {
         expect(result.success).toBe(true);
       } else {
-        // Partial success is acceptable when some modules are missing
         console.log('[Test Info] Some modules unavailable, partial results expected');
       }
     }, 120000);
@@ -400,7 +282,6 @@ describe('gpu_analysis skill', () => {
     it('should have valid result structure', async () => {
       const result = await evaluator.executeSkill();
 
-      // Should have layers object regardless of success
       expect(result.layers).toBeDefined();
       expect(result.layers.overview).toBeDefined();
       expect(result.layers.list).toBeDefined();
@@ -409,32 +290,27 @@ describe('gpu_analysis skill', () => {
     it('should handle traces with minimal GPU data gracefully', async () => {
       const result = await evaluator.executeSkill();
 
-      // Should have some step results even if empty
       const normalized = evaluator.normalizeForSnapshot(result);
       expect(normalized.stepCount).toBeGreaterThanOrEqual(0);
-
-      // Layers structure should always be present
       expect(normalized.layers).toBeDefined();
       expect(normalized.layers.overview).toBeDefined();
     }, 120000);
 
-    it('should support process name filter parameter', async () => {
+    it('should support package filter parameter', async () => {
       const result = await evaluator.executeSkill({
-        process_name: 'com.android',
+        package: 'com.android',
       });
 
-      // Parameter should be accepted
       expect(result.skillId).toBe('gpu_analysis');
       expect(result.layers).toBeDefined();
     }, 120000);
 
     it('should support time range parameters', async () => {
       const result = await evaluator.executeSkill({
-        time_range_start: 0,
-        time_range_end: 5,
+        start_ts: 0,
+        end_ts: 5000000000,
       });
 
-      // Parameter should be accepted
       expect(result.skillId).toBe('gpu_analysis');
       expect(result.layers).toBeDefined();
     }, 120000);
@@ -443,7 +319,6 @@ describe('gpu_analysis skill', () => {
       const result = await evaluator.executeSkill();
       const normalized = evaluator.normalizeForSnapshot(result);
 
-      // Verify normalized structure
       expect(normalized.layers).toBeDefined();
       expect(normalized.layers.overview).toBeDefined();
       expect(normalized.layers.list).toBeDefined();
@@ -465,8 +340,6 @@ describe('gpu_analysis skill', () => {
         LIMIT 10
       `);
 
-      // Query should execute (may return empty if no GPU data)
-      // Error is expected if table doesn't exist
       if (!result.error) {
         expect(result.columns).toContain('name');
         expect(result.columns).toContain('track_count');
@@ -494,19 +367,16 @@ describe('gpu_analysis skill', () => {
       expect(result.error).toBeUndefined();
       if (result.rows.length > 0) {
         const row = result.rows[0];
-        // Min freq should be <= max freq
         expect(row[1]).toBeLessThanOrEqual(row[2]);
       }
     }, 30000);
 
     it('should handle module import gracefully', async () => {
-      // Test that INCLUDE PERFETTO MODULE works without error
       const result = await evaluator.executeSQL(`
         INCLUDE PERFETTO MODULE android.gpu.frequency;
         SELECT 1 as test
       `);
 
-      // Should not throw even if module data is empty
       expect(result.error).toBeUndefined();
     }, 30000);
   });
@@ -525,7 +395,6 @@ describe('gpu_analysis edge cases', () => {
       evaluator = createSkillEvaluator('gpu_analysis');
       await evaluator.loadTrace(getTestTracePath('app_aosp_scrolling_heavy_jank.pftrace'));
 
-      // Check if android.gpu.memory module produces data
       try {
         const gpuMemModuleResult = await evaluator.executeSQL(`
           INCLUDE PERFETTO MODULE android.gpu.memory;
@@ -541,15 +410,13 @@ describe('gpu_analysis edge cases', () => {
       await evaluator.cleanup();
     });
 
-    it('should handle empty process_name filter (gpu_memory_by_process)', async () => {
-      const result = await evaluator.executeStep('gpu_memory_by_process', { process_name: '' });
+    it('should handle empty package filter (gpu_memory_overview)', async () => {
+      const result = await evaluator.executeStep('gpu_memory_overview', { package: '' });
 
-      // Step may fail if module is unavailable
       if (hasGpuMemModule) {
         expect(result.success).toBe(true);
       } else {
-        // Expected to fail or return empty if module unavailable
-        console.log('[Test Info] gpu_memory_by_process: Module unavailable');
+        console.log('[Test Info] gpu_memory_overview: Module unavailable');
       }
     }, 30000);
 
@@ -559,40 +426,34 @@ describe('gpu_analysis edge cases', () => {
         return;
       }
 
-      const result = await evaluator.executeStep('gpu_memory_by_process', {
-        process_name: 'com.nonexistent.app.that.does.not.exist',
+      const result = await evaluator.executeStep('gpu_memory_overview', {
+        package: 'com.nonexistent.app.that.does.not.exist',
       });
 
-      // Should succeed but return empty results
       if (result.success) {
         expect(Array.isArray(result.data)).toBe(true);
       }
     }, 30000);
 
-    it('should handle invalid time ranges (gpu_frequency_distribution)', async () => {
-      // End before start - should return empty or handle gracefully
-      const result = await evaluator.executeStep('gpu_frequency_distribution', {
-        time_range_start: 100,
-        time_range_end: 50,
+    it('should handle invalid time ranges (gpu_freq_distribution)', async () => {
+      const result = await evaluator.executeStep('gpu_freq_distribution', {
+        start_ts: 100000000000,
+        end_ts: 50000000000,
       });
 
-      // With invalid range, step may fail or return empty - both are acceptable
       if (result.success) {
-        // If success, should have empty data for invalid range
         expect(result.data.length).toBe(0);
       } else {
-        // Failure with error message is also acceptable
         console.log(`[Test Info] Invalid time range caused failure: ${result.error}`);
       }
     }, 30000);
 
-    it('should handle very large time range (gpu_frequency_distribution)', async () => {
-      const result = await evaluator.executeStep('gpu_frequency_distribution', {
-        time_range_start: 0,
-        time_range_end: 999999,
+    it('should handle very large time range (gpu_freq_distribution)', async () => {
+      const result = await evaluator.executeStep('gpu_freq_distribution', {
+        start_ts: 0,
+        end_ts: 999999000000000,
       });
 
-      // Large time range should work - step may still fail due to other reasons
       if (result.success) {
         expect(Array.isArray(result.data)).toBe(true);
       } else {
@@ -600,13 +461,12 @@ describe('gpu_analysis edge cases', () => {
       }
     }, 30000);
 
-    it('should handle null/undefined parameters (gpu_frequency_distribution)', async () => {
-      const result = await evaluator.executeStep('gpu_frequency_distribution', {
-        time_range_start: null,
-        time_range_end: undefined,
+    it('should handle null/undefined parameters (gpu_freq_distribution)', async () => {
+      const result = await evaluator.executeStep('gpu_freq_distribution', {
+        start_ts: null,
+        end_ts: undefined,
       });
 
-      // Null/undefined should be treated as "no filter" - step may still fail
       if (result.success) {
         expect(Array.isArray(result.data)).toBe(true);
       } else {
@@ -644,14 +504,14 @@ describe('gpu_analysis skill definition', () => {
   it('should have expected step IDs', () => {
     const stepIds = evaluator.getStepIds();
 
-    // Verify key steps are present
-    expect(stepIds).toContain('gpu_frequency_distribution');
-    expect(stepIds).toContain('gpu_frequency_changes');
-    expect(stepIds).toContain('gpu_memory_by_process');
-    expect(stepIds).toContain('gpu_memory_timeline');
+    // v3.0 step IDs
+    expect(stepIds).toContain('data_check');
+    expect(stepIds).toContain('gpu_freq_overview');
+    expect(stepIds).toContain('gpu_memory_overview');
+    expect(stepIds).toContain('gpu_freq_distribution');
     expect(stepIds).toContain('gpu_frame_correlation');
     expect(stepIds).toContain('gpu_high_load_periods');
-    expect(stepIds).toContain('gpu_ai_summary');
+    expect(stepIds).toContain('root_cause_classification');
   });
 
   it('should have valid inputs defined', () => {
@@ -660,18 +520,18 @@ describe('gpu_analysis skill definition', () => {
     expect(skill!.inputs).toBeDefined();
     expect(Array.isArray(skill!.inputs)).toBe(true);
 
-    // Check for expected input parameters
     const inputNames = skill!.inputs!.map(i => i.name);
-    expect(inputNames).toContain('process_name');
-    expect(inputNames).toContain('time_range_start');
-    expect(inputNames).toContain('time_range_end');
+    expect(inputNames).toContain('package');
+    expect(inputNames).toContain('start_ts');
+    expect(inputNames).toContain('end_ts');
+    // v3.0 threshold inputs
+    expect(inputNames).toContain('high_freq_threshold_pct');
   });
 
   it('should have valid prerequisites', () => {
     const skill = evaluator.getSkillDefinition();
 
     expect(skill!.prerequisites).toBeDefined();
-    expect(skill!.prerequisites!.required_tables).toContain('gpu_counter_track');
     expect(skill!.prerequisites!.modules).toContain('android.gpu.frequency');
     expect(skill!.prerequisites!.modules).toContain('android.gpu.memory');
   });

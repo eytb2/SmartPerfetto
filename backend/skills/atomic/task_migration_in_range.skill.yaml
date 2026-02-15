@@ -1,19 +1,21 @@
 # =============================================================================
-# 任务迁移分析 (Atomic Skill)
+# 任务迁移分析 (Composite Skill)
 # =============================================================================
 # 分析指定时间范围内线程在大小核之间的迁移情况
 # 频繁迁移会导致 Cache Miss 增加，影响性能
+#
+# v2.0: 使用共享 _cpu_topology 视图替代内联 CTE，动态检测大小核拓扑
 
 name: task_migration_in_range
-version: "1.0"
-type: atomic
+version: "2.0"
+type: composite
 category: kernel
 
 meta:
   display_name: "任务迁移分析"
-  description: "分析线程在大小核之间的迁移频率"
+  description: "分析线程在大小核之间的迁移频率（动态拓扑检测）"
   icon: "swap_horiz"
-  tags: [sched, migration, kernel, atomic]
+  tags: [sched, migration, kernel, composite]
 
 inputs:
   - name: start_ts
@@ -28,67 +30,81 @@ inputs:
     type: string
     required: false
     description: "目标进程名（支持 GLOB 匹配）"
-  - name: big_core_start
-    type: integer
-    required: false
-    description: "大核起始编号，默认 4（即 CPU 4-7 为大核）"
 
-display:
-  level: detail
-  layer: deep
-  title: "大小核迁移"
-  columns:
-    - name: thread_name
-      label: "线程"
-      type: string
-    - name: migration_count
-      label: "迁移次数"
-      type: number
-    - name: big_to_little
-      label: "大→小"
-      type: number
-    - name: little_to_big
-      label: "小→大"
-      type: number
-    - name: big_core_pct
-      label: "大核占比"
-      type: percentage
-      format: percentage
-    - name: unique_cpus
-      label: "使用核心数"
-      type: number
+steps:
+  # ========== 初始化 CPU 拓扑视图（供后续步骤 JOIN）==========
+  - id: init_cpu_topology
+    type: skill
+    name: "初始化 CPU 拓扑"
+    skill: cpu_topology_view
+    display:
+      level: hidden
+    optional: true
 
-sql: |
-  WITH target_threads AS (
-    SELECT t.utid, t.name as thread_name
-    FROM thread t
-    JOIN process p ON t.upid = p.upid
-    WHERE (p.name GLOB '${package}*' OR '${package}' = '')
-      AND (t.tid = p.pid OR t.name = 'RenderThread')
-  ),
-  cpu_switches AS (
-    SELECT
-      tt.thread_name,
-      ts.cpu,
-      CASE WHEN ts.cpu >= COALESCE(${big_core_start}, 4) THEN 'big' ELSE 'little' END as core_type,
-      LAG(ts.cpu) OVER (PARTITION BY tt.utid ORDER BY ts.ts) as prev_cpu,
-      ts.dur
-    FROM thread_state ts
-    JOIN target_threads tt ON ts.utid = tt.utid
-    WHERE ts.ts >= ${start_ts} AND ts.ts < ${end_ts}
-      AND ts.state = 'Running'
-  )
-  SELECT
-    thread_name,
-    SUM(CASE WHEN cpu != prev_cpu AND prev_cpu IS NOT NULL THEN 1 ELSE 0 END) as migration_count,
-    SUM(CASE WHEN cpu < COALESCE(${big_core_start}, 4) AND prev_cpu >= COALESCE(${big_core_start}, 4) THEN 1 ELSE 0 END) as big_to_little,
-    SUM(CASE WHEN cpu >= COALESCE(${big_core_start}, 4) AND prev_cpu < COALESCE(${big_core_start}, 4) THEN 1 ELSE 0 END) as little_to_big,
-    ROUND(100.0 * SUM(CASE WHEN cpu >= COALESCE(${big_core_start}, 4) THEN dur ELSE 0 END) / NULLIF(SUM(dur), 0), 1) as big_core_pct,
-    COUNT(DISTINCT cpu) as unique_cpus
-  FROM cpu_switches
-  GROUP BY thread_name
-  HAVING migration_count > 0
-  ORDER BY migration_count DESC
+  # ========== 任务迁移分析 ==========
+  - id: migration_analysis
+    type: atomic
+    name: "大小核迁移分析"
+    optional: true
+    display:
+      level: detail
+      layer: deep
+      title: "大小核迁移"
+      columns:
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: migration_count
+          label: "迁移次数"
+          type: number
+        - name: big_to_little
+          label: "大→小"
+          type: number
+        - name: little_to_big
+          label: "小→大"
+          type: number
+        - name: big_core_pct
+          label: "大核占比"
+          type: percentage
+          format: percentage
+        - name: unique_cpus
+          label: "使用核心数"
+          type: number
+    sql: |
+      WITH
+      target_threads AS (
+        SELECT t.utid, t.name as thread_name
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND (t.tid = p.pid OR t.name = 'RenderThread')
+      ),
+      cpu_switches AS (
+        SELECT
+          tt.thread_name,
+          ts.cpu,
+          ct.core_type,
+          LAG(ts.cpu) OVER (PARTITION BY tt.utid ORDER BY ts.ts) as prev_cpu,
+          LAG(ct.core_type) OVER (PARTITION BY tt.utid ORDER BY ts.ts) as prev_core_type,
+          ts.dur
+        FROM thread_state ts
+        JOIN target_threads tt ON ts.utid = tt.utid
+        JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
+        WHERE ts.ts >= ${start_ts} AND ts.ts < ${end_ts}
+          AND ts.state = 'Running'
+      )
+      SELECT
+        thread_name,
+        SUM(CASE WHEN cpu != prev_cpu AND prev_cpu IS NOT NULL THEN 1 ELSE 0 END) as migration_count,
+        SUM(CASE WHEN core_type = 'little' AND prev_core_type = 'big' THEN 1 ELSE 0 END) as big_to_little,
+        SUM(CASE WHEN core_type = 'big' AND prev_core_type = 'little' THEN 1 ELSE 0 END) as little_to_big,
+        ROUND(100.0 * SUM(CASE WHEN core_type = 'big' THEN dur ELSE 0 END) / NULLIF(SUM(dur), 0), 1) as big_core_pct,
+        COUNT(DISTINCT cpu) as unique_cpus
+      FROM cpu_switches
+      GROUP BY thread_name
+      HAVING migration_count > 0
+      ORDER BY migration_count DESC
+    save_as: migration_data
 
 output:
   format: structured

@@ -50,7 +50,7 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 **Core:** `backend/src/agent/core/`
 | Component | Purpose |
 |-----------|---------|
-| agentDrivenOrchestrator.ts | 主协调器 (策略匹配 → 执行器路由) |
+| agentRuntime.ts | 主协调器 (策略匹配 → 执行器路由) |
 | circuitBreaker.ts | 熔断器，触发用户介入 |
 | modelRouter.ts | 多模型路由 (DeepSeek/OpenAI/Anthropic/GLM) |
 | stateMachine.ts | 状态机 (IDLE→PLANNING→HYPOTHESIS→ROUNDS→CONCLUSION) |
@@ -201,7 +201,7 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 ## Data Flow
 
 ```
-User Query → POST /api/agent/analyze → AgentDrivenOrchestrator
+User Query → POST /api/agent/analyze → AgentRuntime
     │
     ├─ Phase 1: Intent Understanding + Hypothesis Generation
     │   └─ intentUnderstanding → generateInitialHypotheses (LLM)

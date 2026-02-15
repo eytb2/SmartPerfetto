@@ -956,6 +956,10 @@ function extractFrameId(step: StepResult): string {
   if (Array.isArray(step.data) && step.data.length > 0) {
     return `frame_${step.data[0].frame_index ?? step.data[0].frame_id ?? 0}`;
   }
+  // For non-frame deep steps, use stepId as key to avoid overwriting previous steps.
+  if (step.stepId && step.stepId.length > 0) {
+    return step.stepId;
+  }
   return 'frame_0';
 }
 

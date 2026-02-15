@@ -7,9 +7,10 @@
 # - 四大象限分析：Running/Runnable/Sleeping 分布
 # - 主线程阻塞原因
 # - Binder 调用分析
+# v2.0: 复用 _cpu_topology 视图替代内联 CTE，统一核心分类
 
 name: click_response_detail
-version: "1.0"
+version: "2.0"
 type: composite
 category: interaction
 
@@ -73,6 +74,15 @@ inputs:
     description: "Perfetto 跳转结束时间"
 
 steps:
+  # ========== 初始化 CPU 拓扑 ==========
+  - id: init_cpu_topology
+    type: skill
+    name: "初始化 CPU 拓扑"
+    skill: cpu_topology_view
+    display:
+      level: hidden
+    optional: true
+
   # ========== 事件基本信息 ==========
   - id: event_info
     type: atomic
@@ -81,6 +91,50 @@ steps:
       level: key
       layer: deep
       title: "事件详情"
+      columns:
+        - name: event_type
+          label: "事件类型"
+          type: string
+        - name: event_action
+          label: "事件动作"
+          type: string
+        - name: process_name
+          label: "进程名"
+          type: string
+        - name: total_ms
+          label: "总延迟(ms)"
+          type: duration
+          format: duration_ms
+        - name: dispatch_ms
+          label: "分发延迟(ms)"
+          type: duration
+          format: duration_ms
+        - name: handling_ms
+          label: "处理延迟(ms)"
+          type: duration
+          format: duration_ms
+        - name: event_ts
+          label: "事件开始"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: event_end_ts
+          label: "事件结束"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: perfetto_start
+          label: "Perfetto开始"
+          type: timestamp
+          clickAction: navigate_range
+        - name: perfetto_end
+          label: "Perfetto结束"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: main_bottleneck
+          label: "主要瓶颈"
+          type: string
+        - name: rating
+          label: "评级"
+          type: string
     sql: |
       SELECT
         '${event_type}' as event_type,
@@ -154,58 +208,15 @@ steps:
         WHERE p.name GLOB '${process_name}*'
           AND t.tid = p.pid
       ),
-      cpu_cap AS (
-        SELECT id as cpu, capacity
-        FROM cpu
-      ),
-      cpu_freq AS (
+      -- 检测拓扑分类来源（用于诊断置信度判断）
+      topology_meta AS (
         SELECT
-          cpu,
-          MAX(freq) as max_freq_khz
-        FROM cpu_frequency_counters
-        GROUP BY cpu
-      ),
-      cpu_rank AS (
-        SELECT
-          c.cpu,
-          c.capacity,
-          f.max_freq_khz,
-          ROW_NUMBER() OVER (
-            ORDER BY COALESCE(f.max_freq_khz, 0) DESC, COALESCE(c.capacity, 0) DESC, c.cpu DESC
-          ) as perf_rank,
-          COUNT(*) OVER () as cpu_count,
-          SUM(CASE WHEN f.max_freq_khz IS NOT NULL THEN 1 ELSE 0 END) OVER () as freq_known_count,
-          AVG(CASE WHEN c.capacity IS NOT NULL THEN c.capacity END) OVER () as avg_capacity
-        FROM cpu_cap c
-        LEFT JOIN cpu_freq f ON c.cpu = f.cpu
-      ),
-      cpu_info AS (
-        SELECT
-          cpu,
           CASE
-            WHEN freq_known_count >= 2 THEN
-              CASE
-                WHEN perf_rank <= CASE
-                  WHEN cpu_count >= 8 THEN 3
-                  WHEN cpu_count >= 6 THEN 2
-                  ELSE 1
-                END THEN 'big'
-                ELSE 'little'
-              END
-            WHEN capacity IS NOT NULL AND capacity > 0 THEN
-              CASE
-                WHEN capacity >= COALESCE(avg_capacity, capacity) THEN 'big'
-                ELSE 'little'
-              END
-            ELSE
-              CASE WHEN cpu >= 4 THEN 'big' ELSE 'little' END
-          END as core_type,
-          CASE
-            WHEN freq_known_count >= 2 THEN 'freq_rank'
-            WHEN capacity IS NOT NULL AND capacity > 0 THEN 'capacity_fallback'
+            WHEN MAX(ct.capacity) > 0 THEN 'capacity'
+            WHEN EXISTS (SELECT 1 FROM cpu_counter_track WHERE name = 'cpufreq' LIMIT 1) THEN 'freq_rank'
             ELSE 'cpu_id_fallback'
           END as classify_method
-        FROM cpu_rank
+        FROM _cpu_topology ct
       ),
       cpu_time AS (
         SELECT
@@ -213,27 +224,26 @@ steps:
           SUM(
             MIN(ss.ts + ss.dur, ${event_end_ts}) - MAX(ss.ts, ${event_ts})
           ) / 1e6 as dur_ms,
-          COALESCE(ci.core_type, 'little') as core_type,
-          COALESCE(ci.classify_method, 'cpu_id_fallback') as classify_method
+          COALESCE(ct.core_type, 'little') as core_type
         FROM sched_slice ss
         JOIN main_thread mt ON ss.utid = mt.utid
-        LEFT JOIN cpu_info ci ON ss.cpu = ci.cpu
+        LEFT JOIN _cpu_topology ct ON ss.cpu = ct.cpu_id
         WHERE ss.ts < ${event_end_ts}
           AND ss.ts + ss.dur > ${event_ts}
         GROUP BY ss.cpu
       )
       SELECT
         'MainThread' as thread_type,
-        ROUND(SUM(CASE WHEN core_type = 'big' THEN dur_ms ELSE 0 END), 2) as big_core_ms,
-        ROUND(SUM(CASE WHEN core_type = 'little' THEN dur_ms ELSE 0 END), 2) as little_core_ms,
+        ROUND(SUM(CASE WHEN core_type IN ('prime', 'big') THEN dur_ms ELSE 0 END), 2) as big_core_ms,
+        ROUND(SUM(CASE WHEN core_type IN ('medium', 'little') THEN dur_ms ELSE 0 END), 2) as little_core_ms,
         ROUND(SUM(dur_ms), 2) as total_running_ms,
-        ROUND(100.0 * SUM(CASE WHEN core_type = 'big' THEN dur_ms ELSE 0 END) /
+        ROUND(100.0 * SUM(CASE WHEN core_type IN ('prime', 'big') THEN dur_ms ELSE 0 END) /
               NULLIF(SUM(dur_ms), 0), 1) as big_core_pct,
-        ROUND(100.0 * SUM(CASE WHEN core_type = 'little' THEN dur_ms ELSE 0 END) /
+        ROUND(100.0 * SUM(CASE WHEN core_type IN ('medium', 'little') THEN dur_ms ELSE 0 END) /
               NULLIF(SUM(dur_ms), 0), 1) as little_core_pct,
         ROUND(100.0 * SUM(dur_ms) / ${total_ms}, 1) as running_pct,
         GROUP_CONCAT(DISTINCT cpu) as used_cpus,
-        GROUP_CONCAT(DISTINCT classify_method) as classify_method
+        (SELECT classify_method FROM topology_meta) as classify_method
       FROM cpu_time
       GROUP BY 1
     save_as: cpu_core
@@ -242,6 +252,7 @@ steps:
   - id: quadrant_analysis
     type: atomic
     name: "四大象限分析"
+    optional: true
     display:
       level: key
       layer: deep
@@ -284,86 +295,41 @@ steps:
         WHERE p.name GLOB '${process_name}*'
           AND t.tid = p.pid
       ),
-      cpu_cap AS (
-        SELECT id as cpu, capacity
-        FROM cpu
-      ),
-      cpu_freq AS (
+      -- 检测拓扑分类来源
+      topology_meta AS (
         SELECT
-          cpu,
-          MAX(freq) as max_freq_khz
-        FROM cpu_frequency_counters
-        GROUP BY cpu
-      ),
-      cpu_rank AS (
-        SELECT
-          c.cpu,
-          c.capacity,
-          f.max_freq_khz,
-          ROW_NUMBER() OVER (
-            ORDER BY COALESCE(f.max_freq_khz, 0) DESC, COALESCE(c.capacity, 0) DESC, c.cpu DESC
-          ) as perf_rank,
-          COUNT(*) OVER () as cpu_count,
-          SUM(CASE WHEN f.max_freq_khz IS NOT NULL THEN 1 ELSE 0 END) OVER () as freq_known_count,
-          AVG(CASE WHEN c.capacity IS NOT NULL THEN c.capacity END) OVER () as avg_capacity
-        FROM cpu_cap c
-        LEFT JOIN cpu_freq f ON c.cpu = f.cpu
-      ),
-      cpu_info AS (
-        SELECT
-          cpu,
           CASE
-            WHEN freq_known_count >= 2 THEN
-              CASE
-                WHEN perf_rank <= CASE
-                  WHEN cpu_count >= 8 THEN 3
-                  WHEN cpu_count >= 6 THEN 2
-                  ELSE 1
-                END THEN 'big'
-                ELSE 'little'
-              END
-            WHEN capacity IS NOT NULL AND capacity > 0 THEN
-              CASE
-                WHEN capacity >= COALESCE(avg_capacity, capacity) THEN 'big'
-                ELSE 'little'
-              END
-            ELSE
-              CASE WHEN cpu >= 4 THEN 'big' ELSE 'little' END
-          END as core_type,
-          CASE
-            WHEN freq_known_count >= 2 THEN 'freq_rank'
-            WHEN capacity IS NOT NULL AND capacity > 0 THEN 'capacity_fallback'
+            WHEN MAX(ct.capacity) > 0 THEN 'capacity'
+            WHEN EXISTS (SELECT 1 FROM cpu_counter_track WHERE name = 'cpufreq' LIMIT 1) THEN 'freq_rank'
             ELSE 'cpu_id_fallback'
           END as classify_method
-        FROM cpu_rank
+        FROM _cpu_topology ct
       ),
       thread_states AS (
         SELECT
           ts.state,
-          COALESCE(ci.core_type, 'little') as core_type,
-          COALESCE(ci.classify_method, 'cpu_id_fallback') as classify_method,
+          COALESCE(ct.core_type, 'little') as core_type,
           ts.blocked_function,
           SUM(
             MIN(ts.ts + ts.dur, ${event_end_ts}) - MAX(ts.ts, ${event_ts})
           ) / 1e6 as dur_ms
         FROM thread_state ts
         JOIN main_thread mt ON ts.utid = mt.utid
-        LEFT JOIN cpu_info ci ON ts.cpu = ci.cpu
+        LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
         WHERE ts.ts < ${event_end_ts}
           AND ts.ts + ts.dur > ${event_ts}
-        GROUP BY ts.state, ci.core_type, ci.classify_method, ts.blocked_function
+        GROUP BY ts.state, ct.core_type, ts.blocked_function
       ),
       quadrant_data AS (
         SELECT
           CASE
-            WHEN state = 'Running' AND core_type = 'big' THEN 'Q1_big_running'
-            WHEN state = 'Running' AND core_type = 'little' THEN 'Q2_little_running'
+            WHEN state = 'Running' AND core_type IN ('prime', 'big') THEN 'Q1_big_running'
+            WHEN state = 'Running' AND core_type IN ('medium', 'little') THEN 'Q2_little_running'
             WHEN state IN ('R', 'R+') THEN 'Q3_runnable'
             WHEN state IN ('S', 'D', 'I') THEN 'Q4_sleeping'
             ELSE 'other'
           END as quadrant,
-          dur_ms,
-          classify_method
+          dur_ms
         FROM thread_states
       )
       SELECT
@@ -378,7 +344,7 @@ steps:
               NULLIF(SUM(dur_ms), 0), 1) as runnable_pct,
         ROUND(100.0 * SUM(CASE WHEN quadrant = 'Q4_sleeping' THEN dur_ms ELSE 0 END) /
               NULLIF(SUM(dur_ms), 0), 1) as sleeping_pct,
-        GROUP_CONCAT(DISTINCT classify_method) as classify_method
+        (SELECT classify_method FROM topology_meta) as classify_method
       FROM quadrant_data
       GROUP BY 1
     save_as: quadrant
@@ -392,6 +358,29 @@ steps:
       level: key
       layer: deep
       title: "阻塞原因 Top5"
+      columns:
+        - name: state
+          label: "状态"
+          type: string
+        - name: state_desc
+          label: "状态说明"
+          type: string
+        - name: blocked_function
+          label: "阻塞函数"
+          type: string
+          format: code
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: pct
+          label: "区间占比"
+          type: percentage
+          format: percentage
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
     params:
       start_ts: "${event_ts}"
       end_ts: "${event_end_ts}"
@@ -408,6 +397,32 @@ steps:
       level: key
       layer: deep
       title: "Binder 调用"
+      columns:
+        - name: client_process
+          label: "客户端"
+          type: string
+        - name: server_process
+          label: "服务端"
+          type: string
+        - name: call_count
+          label: "调用次数"
+          type: number
+          format: compact
+        - name: total_client_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: max_delay_ms
+          label: "最大延迟"
+          type: duration
+          format: duration_ms
+        - name: avg_delay_ms
+          label: "平均延迟"
+          type: duration
+          format: duration_ms
+        - name: slow_calls
+          label: "慢调用"
+          type: number
     params:
       start_ts: "${event_ts}"
       end_ts: "${event_end_ts}"
@@ -423,6 +438,31 @@ steps:
       level: key
       layer: deep
       title: "主线程同步 Binder"
+      columns:
+        - name: server_process
+          label: "对端进程"
+          type: string
+        - name: interface
+          label: "接口"
+          type: string
+        - name: call_count
+          label: "调用次数"
+          type: number
+        - name: total_block_ms
+          label: "总阻塞时间"
+          type: duration
+          format: duration_ms
+        - name: server_exec_ms
+          label: "服务端执行"
+          type: duration
+          format: duration_ms
+        - name: max_block_ms
+          label: "最大阻塞"
+          type: duration
+          format: duration_ms
+        - name: is_main_blocked
+          label: "主线程被阻"
+          type: boolean
     params:
       start_ts: "${event_ts}"
       end_ts: "${event_end_ts}"
@@ -438,6 +478,31 @@ steps:
       level: detail
       layer: deep
       title: "主线程调度延迟"
+      columns:
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: runnable_count
+          label: "等待次数"
+          type: number
+        - name: total_runnable_ms
+          label: "总等待"
+          type: duration
+          format: duration_ms
+        - name: max_latency_ms
+          label: "最大延迟"
+          type: duration
+          format: duration_ms
+        - name: avg_latency_ms
+          label: "平均延迟"
+          type: duration
+          format: duration_ms
+        - name: long_wait_count
+          label: ">2ms 次数"
+          type: number
+        - name: severe_count
+          label: ">8ms 次数"
+          type: number
     params:
       start_ts: "${event_ts}"
       end_ts: "${event_end_ts}"
@@ -453,6 +518,30 @@ steps:
       level: detail
       layer: deep
       title: "主线程文件 IO"
+      columns:
+        - name: io_slice
+          label: "IO 切片"
+          type: string
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: avg_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: max_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+        - name: percent
+          label: "区间占比"
+          type: percentage
+          format: percentage
     params:
       start_ts: "${event_ts}"
       end_ts: "${event_end_ts}"

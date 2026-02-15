@@ -50,32 +50,32 @@ describe('cpu_analysis skill', () => {
     });
 
     describe('core_type_stats step', () => {
-      it('should return core type distribution when data exists', async () => {
+      it('should return non-empty core type distribution', async () => {
         const result = await evaluator.executeStep('core_type_stats', { package: '' });
 
         expect(result.success).toBe(true);
-        if (result.data.length > 0) {
-          const row = result.data[0];
-          expect(row.core_type).toBeDefined();
-          expect(row.total_time_ms).toBeGreaterThanOrEqual(0);
-          expect(row.percent).toBeGreaterThanOrEqual(0);
-          expect(row.percent).toBeLessThanOrEqual(100);
-        }
+        // app_aosp_scrolling_heavy_jank.pftrace has known CPU samples; empty means extraction regressed.
+        expect(result.data.length).toBeGreaterThan(0);
+        const row = result.data[0];
+        expect(row.core_type).toBeDefined();
+        expect(row.total_time_ms).toBeGreaterThanOrEqual(0);
+        expect(row.percent).toBeGreaterThanOrEqual(0);
+        expect(row.percent).toBeLessThanOrEqual(100);
       }, 30000);
     });
 
     describe('main_thread_states step', () => {
-      it('should return main thread state breakdown when data exists', async () => {
+      it('should return non-empty main thread state breakdown', async () => {
         const result = await evaluator.executeStep('main_thread_states', { package: '' });
 
         expect(result.success).toBe(true);
-        if (result.data.length > 0) {
-          const row = result.data[0];
-          expect(row.state).toBeDefined();
-          expect(row.total_dur_ms).toBeGreaterThanOrEqual(0);
-          expect(row.percent).toBeGreaterThanOrEqual(0);
-          expect(row.percent).toBeLessThanOrEqual(100);
-        }
+        // Fixture includes main-thread state slices; empty means evaluator/data extraction regressed.
+        expect(result.data.length).toBeGreaterThan(0);
+        const row = result.data[0];
+        expect(row.state).toBeDefined();
+        expect(row.total_dur_ms).toBeGreaterThanOrEqual(0);
+        expect(row.percent).toBeGreaterThanOrEqual(0);
+        expect(row.percent).toBeLessThanOrEqual(100);
       }, 30000);
     });
   });

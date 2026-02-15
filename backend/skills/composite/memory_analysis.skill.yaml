@@ -52,6 +52,31 @@ inputs:
     type: timestamp
     required: false
     description: "分析结束时间戳（纳秒，可选）"
+  - name: gc_count_critical
+    type: number
+    required: false
+    default: 100
+    description: "GC 次数严重阈值"
+  - name: gc_count_warning
+    type: number
+    required: false
+    default: 50
+    description: "GC 次数警告阈值"
+  - name: gc_total_time_critical_ms
+    type: number
+    required: false
+    default: 2000
+    description: "GC 总耗时严重阈值（ms）"
+  - name: main_thread_gc_critical
+    type: number
+    required: false
+    default: 10
+    description: "主线程 GC 次数严重阈值"
+  - name: single_gc_warning_ms
+    type: number
+    required: false
+    default: 50
+    description: "单次 GC 告警阈值（ms）"
 
 steps:
   # ========== 获取目标进程 ==========
@@ -62,6 +87,16 @@ steps:
       level: summary
       layer: overview
       title: "目标进程"
+      columns:
+        - name: upid
+          label: "UPID"
+          type: number
+        - name: pid
+          label: "PID"
+          type: number
+        - name: process_name
+          label: "进程名"
+          type: string
     sql: |
       SELECT
         upid,
@@ -75,6 +110,57 @@ steps:
       LIMIT 1
     save_as: target_process
     on_empty: "未找到目标进程"
+
+  # ========== 初始化 GC 事件视图（供后续步骤 JOIN）==========
+  - id: init_gc_view
+    type: atomic
+    name: "初始化 GC 事件视图"
+    display:
+      level: hidden
+    optional: true
+    sql: |
+      CREATE VIEW IF NOT EXISTS _gc_events AS
+      SELECT
+        s.ts,
+        s.dur,
+        s.name as gc_name,
+        t.name as thread_name,
+        t.tid,
+        p.pid,
+        p.name as process_name,
+        CASE WHEN t.tid = p.pid THEN 1 ELSE 0 END as is_main_thread,
+        CASE
+          WHEN s.name GLOB '*ConcurrentCopying*' THEN 'ConcurrentCopying'
+          WHEN s.name GLOB '*MarkSweep*' THEN 'MarkSweep'
+          WHEN s.name GLOB '*Explicit*' THEN 'Explicit'
+          WHEN s.name GLOB '*Alloc*' THEN 'Alloc'
+          WHEN s.name GLOB '*Background*' THEN 'Background'
+          WHEN s.name GLOB '*young*' OR s.name GLOB '*Young*' THEN 'Young'
+          WHEN s.name GLOB '*full*' OR s.name GLOB '*Full*' THEN 'Full'
+          ELSE 'Other'
+        END as gc_type
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name GLOB '${package}*'
+        AND (s.name GLOB '*GC*' OR s.name GLOB '*gc*' OR s.name GLOB '*ConcurrentCopying*')
+        AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+    condition: target_process.data.length > 0
+
+  # ========== 获取 VSync 周期（供帧关联分析使用）==========
+  - id: get_vsync_period
+    type: skill
+    name: "检测 VSync 周期"
+    skill: vsync_period_detection
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    save_as: vsync_info
+    display:
+      level: hidden
+    optional: true
 
   # ========== GC 总体概览 ==========
   - id: gc_overview
@@ -101,23 +187,50 @@ steps:
       level: key
       layer: overview
       title: "GC 总体情况"
+      columns:
+        - name: total_gc_count
+          label: "GC 次数"
+          type: number
+          format: compact
+        - name: total_gc_time_ms
+          label: "GC 总耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_gc_time_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_gc_time_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: min_gc_time_ms
+          label: "最小耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: main_thread_gc_count
+          label: "主线程 GC"
+          type: number
+          format: compact
+        - name: main_thread_gc_time_ms
+          label: "主线程 GC 耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: gc_per_second
+          label: "GC 频率"
+          type: number
+        - name: gc_frequency_rating
+          label: "频率评级"
+          type: string
+        - name: gc_time_rating
+          label: "耗时评级"
+          type: string
     sql: |
-      WITH gc_events AS (
-        SELECT
-          s.ts,
-          s.dur,
-          s.name,
-          t.name as thread_name,
-          CASE WHEN t.tid = p.pid THEN 1 ELSE 0 END as is_main_thread
-        FROM slice s
-        JOIN thread_track tt ON s.track_id = tt.id
-        JOIN thread t ON tt.utid = t.utid
-        JOIN process p ON t.upid = p.upid
-        WHERE p.name GLOB '${package}*'
-          AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
-          AND (${end_ts} IS NULL OR s.ts < ${end_ts})
-          AND (s.name GLOB '*GC*' OR s.name GLOB '*gc*' OR s.name GLOB '*ConcurrentCopying*')
-      )
       SELECT
         COUNT(*) as total_gc_count,
         SUM(dur) / 1e6 as total_gc_time_ms,
@@ -131,18 +244,18 @@ steps:
         ROUND(COUNT(*) * 1e9 / (MAX(ts + dur) - MIN(ts)), 2) as gc_per_second,
         -- 评级
         CASE
-          WHEN COUNT(*) > 100 THEN '频繁'
-          WHEN COUNT(*) > 50 THEN '较多'
+          WHEN COUNT(*) > ${gc_count_critical|100} THEN '频繁'
+          WHEN COUNT(*) > ${gc_count_warning|50} THEN '较多'
           WHEN COUNT(*) > 10 THEN '正常'
           ELSE '良好'
         END as gc_frequency_rating,
         CASE
-          WHEN SUM(dur) / 1e6 > 2000 THEN '严重'
+          WHEN SUM(dur) / 1e6 > ${gc_total_time_critical_ms|2000} THEN '严重'
           WHEN SUM(dur) / 1e6 > 500 THEN '需优化'
           WHEN SUM(dur) / 1e6 > 100 THEN '良好'
           ELSE '优秀'
         END as gc_time_rating
-      FROM gc_events
+      FROM _gc_events
     save_as: gc_overview
     condition: target_process.data.length > 0
 
@@ -167,32 +280,51 @@ steps:
       level: key
       layer: overview
       title: "GC 类型分布"
+      columns:
+        - name: gc_type
+          label: "GC 类型"
+          type: string
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_dur_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: main_thread_count
+          label: "主线程 GC"
+          type: number
+          format: compact
     sql: |
       SELECT
-        CASE
-          WHEN s.name GLOB '*ConcurrentCopying*' THEN 'ConcurrentCopying (并发GC)'
-          WHEN s.name GLOB '*MarkSweep*' THEN 'MarkSweep (标记清除)'
-          WHEN s.name GLOB '*Explicit*' THEN 'Explicit (显式GC)'
-          WHEN s.name GLOB '*Alloc*' THEN 'Alloc (分配触发)'
-          WHEN s.name GLOB '*Background*' THEN 'Background (后台GC)'
-          WHEN s.name GLOB '*young*' OR s.name GLOB '*Young*' THEN 'Young Gen (新生代)'
-          WHEN s.name GLOB '*full*' OR s.name GLOB '*Full*' THEN 'Full GC (全局)'
+        CASE gc_type
+          WHEN 'ConcurrentCopying' THEN 'ConcurrentCopying (并发GC)'
+          WHEN 'MarkSweep' THEN 'MarkSweep (标记清除)'
+          WHEN 'Explicit' THEN 'Explicit (显式GC)'
+          WHEN 'Alloc' THEN 'Alloc (分配触发)'
+          WHEN 'Background' THEN 'Background (后台GC)'
+          WHEN 'Young' THEN 'Young Gen (新生代)'
+          WHEN 'Full' THEN 'Full GC (全局)'
           ELSE 'Other'
         END as gc_type,
         COUNT(*) as count,
         SUM(dur) / 1e6 as total_dur_ms,
         ROUND(AVG(dur) / 1e6, 2) as avg_dur_ms,
         ROUND(MAX(dur) / 1e6, 2) as max_dur_ms,
-        -- 主线程 GC 数量
-        SUM(CASE WHEN t.tid = p.pid THEN 1 ELSE 0 END) as main_thread_count
-      FROM slice s
-      JOIN thread_track tt ON s.track_id = tt.id
-      JOIN thread t ON tt.utid = t.utid
-      JOIN process p ON t.upid = p.upid
-      WHERE p.name GLOB '${package}*'
-        AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
-        AND (${end_ts} IS NULL OR s.ts < ${end_ts})
-        AND (s.name GLOB '*GC*' OR s.name GLOB '*gc*' OR s.name GLOB '*ConcurrentCopying*')
+        SUM(CASE WHEN is_main_thread = 1 THEN 1 ELSE 0 END) as main_thread_count
+      FROM _gc_events
       GROUP BY gc_type
       ORDER BY total_dur_ms DESC
     save_as: gc_stats
@@ -215,45 +347,50 @@ steps:
           format: "{{value}} ms"
         - key: impact
           label: 影响
+    optional: true
     display:
       level: key
       layer: list
       title: "GC 导致的掉帧分析"
+      columns:
+        - name: gc_name
+          label: "GC 类型"
+          type: string
+        - name: gc_dur_ms
+          label: "GC 耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: jank_type
+          label: "掉帧类型"
+          type: string
+        - name: frame_dur_ms
+          label: "帧耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: impact
+          label: "影响"
+          type: string
     sql: |
-      WITH gc_events AS (
-        SELECT
-          s.ts as gc_ts,
-          s.dur as gc_dur,
-          s.name as gc_name,
-          t.tid,
-          p.pid
-        FROM slice s
-        JOIN thread_track tt ON s.track_id = tt.id
-        JOIN thread t ON tt.utid = t.utid
-        JOIN process p ON t.upid = p.upid
-        WHERE p.name GLOB '${package}*'
-          AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
-          AND (${end_ts} IS NULL OR s.ts < ${end_ts})
-          AND (s.name GLOB '*GC*' OR s.name GLOB '*gc*' OR s.name GLOB '*ConcurrentCopying*')
-          AND t.tid = p.pid  -- 主线程 GC
-      )
       SELECT
         gc.gc_name,
-        gc.gc_dur / 1e6 as gc_dur_ms,
+        gc.dur / 1e6 as gc_dur_ms,
         af.jank_type,
         af.dur / 1e6 as frame_dur_ms,
         CASE
           WHEN af.jank_type != 'None' THEN 'GC导致掉帧'
-          WHEN af.dur > 16666666 THEN '帧超时'
+          WHEN af.dur > ${vsync_info.data[0].vsync_period_ns|8333333} THEN '帧超时'
           ELSE '正常'
         END as impact
-      FROM gc_events gc
+      FROM _gc_events gc
       LEFT JOIN actual_frame_timeline_slice af ON (
-        gc.gc_ts >= af.ts AND gc.gc_ts < af.ts + af.dur
+        gc.ts >= af.ts AND gc.ts < af.ts + af.dur
       )
       LEFT JOIN process p ON af.upid = p.upid
-      WHERE p.name GLOB '${package}*'
-      ORDER BY gc.gc_dur DESC
+      WHERE gc.is_main_thread = 1
+        AND p.name GLOB '${package}*'
+      ORDER BY gc.dur DESC
       LIMIT 30
     save_as: gc_frame_impact
     condition: target_process.data.length > 0
@@ -266,32 +403,51 @@ steps:
       level: key
       layer: list
       title: "主线程 GC (可能导致掉帧)"
+      columns:
+        - name: gc_type
+          label: "GC 类型"
+          type: string
+        - name: dur_ms
+          label: "耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: ts_str
+          label: "时间"
+          type: timestamp
+          clickAction: navigate_range
+          durationColumn: dur_str
+        - name: dur_str
+          label: "持续时间(ns)"
+          type: duration
+          format: duration_ms
+          unit: ns
+          hidden: true
+        - name: severity
+          label: "严重程度"
+          type: enum
+        - name: dropped_frames
+          label: "掉帧数"
+          type: number
     sql: |
       SELECT
-        s.name as gc_type,
-        s.dur / 1e6 as dur_ms,
-        s.ts / 1e6 as ts_ms,
-        printf('%d', s.ts) as ts_str,
-        printf('%d', s.dur) as dur_str,
+        gc_name as gc_type,
+        dur / 1e6 as dur_ms,
+        ts / 1e6 as ts_ms,
+        printf('%d', ts) as ts_str,
+        printf('%d', dur) as dur_str,
         CASE
-          WHEN s.dur / 1e6 > 50 THEN 'critical'
-          WHEN s.dur / 1e6 > 16 THEN 'warning'
-          WHEN s.dur / 1e6 > 8 THEN 'notice'
+          WHEN dur / 1e6 > ${single_gc_warning_ms|50} THEN 'critical'
+          WHEN dur / 1e6 > 16 THEN 'warning'
+          WHEN dur / 1e6 > 8 THEN 'notice'
           ELSE 'normal'
         END as severity,
-        -- 掉帧数估算
-        CAST(s.dur / 16666666.0 AS INTEGER) as dropped_frames
-      FROM slice s
-      JOIN thread_track tt ON s.track_id = tt.id
-      JOIN thread t ON tt.utid = t.utid
-      JOIN process p ON t.upid = p.upid
-      WHERE p.name GLOB '${package}*'
-        AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
-        AND (${end_ts} IS NULL OR s.ts < ${end_ts})
-        AND t.tid = p.pid  -- Main thread
-        AND (s.name GLOB '*GC*' OR s.name GLOB '*gc*' OR s.name GLOB '*ConcurrentCopying*')
-        AND s.dur > 1000000  -- > 1ms
-      ORDER BY s.dur DESC
+        -- 掉帧数估算（使用动态 VSync 周期）
+        CAST(dur / ${vsync_info.data[0].vsync_period_ns|8333333} AS INTEGER) as dropped_frames
+      FROM _gc_events
+      WHERE is_main_thread = 1
+        AND dur > 1000000  -- > 1ms
+      ORDER BY dur DESC
       LIMIT 20
     save_as: main_thread_gc
     condition: target_process.data.length > 0
@@ -300,10 +456,31 @@ steps:
   - id: gc_thread_state
     type: atomic
     name: "GC 期间主线程状态"
+    optional: true
     display:
       level: detail
       layer: list
       title: "GC 期间主线程状态分析"
+      columns:
+        - name: gc_type
+          label: "GC 类型"
+          type: string
+        - name: gc_dur_ms
+          label: "GC 耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: state
+          label: "线程状态"
+          type: string
+        - name: state_dur_ms
+          label: "状态耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: blocked_function
+          label: "阻塞函数"
+          type: string
     sql: |
       WITH main_thread AS (
         SELECT t.utid
@@ -312,23 +489,16 @@ steps:
         WHERE p.name GLOB '${package}*' AND t.tid = p.pid
         LIMIT 1
       ),
-      gc_events AS (
-        SELECT s.ts, s.dur, s.name
-        FROM slice s
-        JOIN thread_track tt ON s.track_id = tt.id
-        JOIN thread t ON tt.utid = t.utid
-        JOIN process p ON t.upid = p.upid
-        WHERE p.name GLOB '${package}*'
-          AND t.tid = p.pid
-          AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
-          AND (${end_ts} IS NULL OR s.ts < ${end_ts})
-          AND (s.name GLOB '*GC*' OR s.name GLOB '*gc*')
-          AND s.dur > 5000000  -- > 5ms
-        ORDER BY s.dur DESC
+      top_gc AS (
+        SELECT ts, dur, gc_name
+        FROM _gc_events
+        WHERE is_main_thread = 1
+          AND dur > 5000000  -- > 5ms
+        ORDER BY dur DESC
         LIMIT 10
       )
       SELECT
-        gc.name as gc_type,
+        gc.gc_name as gc_type,
         gc.dur / 1e6 as gc_dur_ms,
         ts.state,
         SUM(
@@ -339,7 +509,7 @@ steps:
           END
         ) / 1e6 as state_dur_ms,
         ts.blocked_function
-      FROM gc_events gc
+      FROM top_gc gc
       JOIN thread_state ts ON ts.utid = (SELECT utid FROM main_thread)
       WHERE ts.ts + ts.dur > gc.ts
         AND ts.ts < gc.ts + gc.dur
@@ -357,21 +527,31 @@ steps:
       level: detail
       layer: list
       title: "GC 间隔分析（内存抖动检测）"
+      columns:
+        - name: interval_bucket
+          label: "间隔分段"
+          type: string
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: avg_interval_ms
+          label: "平均间隔"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: min_interval_ms
+          label: "最小间隔"
+          type: duration
+          format: duration_ms
+          unit: ms
     sql: |
-      WITH gc_events AS (
+      WITH gc_with_lag AS (
         SELECT
-          s.ts,
-          s.dur,
-          s.name,
-          LAG(s.ts + s.dur) OVER (ORDER BY s.ts) as prev_end
-        FROM slice s
-        JOIN thread_track tt ON s.track_id = tt.id
-        JOIN thread t ON tt.utid = t.utid
-        JOIN process p ON t.upid = p.upid
-        WHERE p.name GLOB '${package}*'
-          AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
-          AND (${end_ts} IS NULL OR s.ts < ${end_ts})
-          AND (s.name GLOB '*GC*' OR s.name GLOB '*gc*' OR s.name GLOB '*ConcurrentCopying*')
+          ts,
+          dur,
+          LAG(ts + dur) OVER (ORDER BY ts) as prev_end
+        FROM _gc_events
       )
       SELECT
         CASE
@@ -384,7 +564,7 @@ steps:
         COUNT(*) as count,
         ROUND(AVG(ts - prev_end) / 1e6, 2) as avg_interval_ms,
         ROUND(MIN(ts - prev_end) / 1e6, 2) as min_interval_ms
-      FROM gc_events
+      FROM gc_with_lag
       WHERE prev_end IS NOT NULL
       GROUP BY interval_bucket
       ORDER BY
@@ -406,24 +586,43 @@ steps:
       level: key
       layer: list
       title: "耗时最长的 GC 事件"
+      columns:
+        - name: gc_type
+          label: "GC 类型"
+          type: string
+        - name: dur_ms
+          label: "耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: ts_str
+          label: "时间"
+          type: timestamp
+          clickAction: navigate_range
+          durationColumn: dur_str
+        - name: dur_str
+          label: "持续时间(ns)"
+          type: duration
+          format: duration_ms
+          unit: ns
+          hidden: true
+        - name: is_main_thread
+          label: "主线程"
+          type: string
     sql: |
       SELECT
-        s.name as gc_type,
-        s.dur / 1e6 as dur_ms,
-        s.ts / 1e6 as ts_ms,
-        t.name as thread_name,
-        printf('%d', s.ts) as ts_str,
-        printf('%d', s.dur) as dur_str,
-        CASE WHEN t.tid = p.pid THEN '是' ELSE '否' END as is_main_thread
-      FROM slice s
-      JOIN thread_track tt ON s.track_id = tt.id
-      JOIN thread t ON tt.utid = t.utid
-      JOIN process p ON t.upid = p.upid
-      WHERE p.name GLOB '${package}*'
-        AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
-        AND (${end_ts} IS NULL OR s.ts < ${end_ts})
-        AND (s.name GLOB '*GC*' OR s.name GLOB '*gc*' OR s.name GLOB '*ConcurrentCopying*')
-      ORDER BY s.dur DESC
+        gc_name as gc_type,
+        dur / 1e6 as dur_ms,
+        ts / 1e6 as ts_ms,
+        thread_name,
+        printf('%d', ts) as ts_str,
+        printf('%d', dur) as dur_str,
+        CASE WHEN is_main_thread = 1 THEN '是' ELSE '否' END as is_main_thread
+      FROM _gc_events
+      ORDER BY dur DESC
       LIMIT 15
     save_as: long_gc
     condition: target_process.data.length > 0
@@ -450,7 +649,7 @@ steps:
     inputs: [gc_overview, gc_stats, main_thread_gc, long_gc, gc_intervals]
     rules:
       # GC 频率过高
-      - condition: "gc_overview.data[0]?.total_gc_count > 100"
+      - condition: "gc_overview.data[0]?.total_gc_count > (inputs?.gc_count_critical ?? 100)"
         severity: critical
         diagnosis: "GC 频率过高 (${gc_overview.data[0].total_gc_count} 次)"
         confidence: high
@@ -459,7 +658,7 @@ steps:
           - "使用对象池重用对象"
           - "避免在循环中创建对象"
 
-      - condition: "gc_overview.data[0]?.total_gc_count > 50"
+      - condition: "gc_overview.data[0]?.total_gc_count > (inputs?.gc_count_warning ?? 50)"
         severity: warning
         diagnosis: "GC 频率较高 (${gc_overview.data[0].total_gc_count} 次)"
         confidence: medium
@@ -468,7 +667,7 @@ steps:
           - "优化临时对象使用"
 
       # GC 总耗时过长
-      - condition: "gc_overview.data[0]?.total_gc_time_ms > 2000"
+      - condition: "gc_overview.data[0]?.total_gc_time_ms > (inputs?.gc_total_time_critical_ms ?? 2000)"
         severity: critical
         diagnosis: "GC 总耗时过长 (${gc_overview.data[0].total_gc_time_ms}ms)"
         confidence: high
@@ -478,7 +677,7 @@ steps:
           - "考虑调整堆大小"
 
       # 主线程 GC 导致掉帧
-      - condition: "gc_overview.data[0]?.main_thread_gc_count > 10"
+      - condition: "gc_overview.data[0]?.main_thread_gc_count > (inputs?.main_thread_gc_critical ?? 10)"
         severity: critical
         diagnosis: "主线程发生 ${gc_overview.data[0].main_thread_gc_count} 次 GC"
         confidence: high
@@ -487,7 +686,7 @@ steps:
           - "避免在 UI 线程分配大量内存"
 
       # 单次 GC 暂停过长
-      - condition: "long_gc.data[0]?.dur_ms > 50"
+      - condition: "long_gc.data[0]?.dur_ms > (inputs?.single_gc_warning_ms ?? 50)"
         severity: warning
         diagnosis: "单次 GC 暂停过长 (${long_gc.data[0].dur_ms}ms)"
         confidence: medium
@@ -505,64 +704,5 @@ steps:
           - "使用 Memory Profiler 分析分配热点"
           - "考虑使用对象池"
 
-  # ========== AI 总结 ==========
-  - id: global_summary
-    type: ai_summary
-    name: "分析总结"
-    display:
-      level: key
-      layer: overview
-      title: "内存分析总结"
-    inputs: [target_process, gc_overview, gc_stats, main_thread_gc, gc_intervals, memory_diagnosis]
-    prompt: |
-      请基于以下内存分析结果，生成专业的性能评估总结。
-
-      ## 目标进程
-          target_process
-
-      ## GC 概览
-          gc_overview
-
-      ## GC 类型分布
-          gc_stats
-
-      ## 主线程 GC
-          main_thread_gc
-
-      ## GC 间隔分布
-          gc_intervals
-
-      ## 诊断结果
-          memory_diagnosis
-
-      ## 专业分析要求
-
-      如果目标进程为空或无 GC 数据，请输出：
-      "未检测到 GC 事件。
-
-      可能原因：
-      - 进程包名不匹配
-      - Trace 中未包含 GC 事件
-      - 应用内存使用正常
-
-      建议：如需分析内存问题，请确保 Trace 包含内存相关事件。"
-
-      如果有 GC 数据，请分析并输出：
-      1. **整体评价**：
-         - GC 次数：<10次优秀，10-50次良好，50-100次需关注，>100次严重
-         - GC 总耗时：<100ms优秀，100-500ms良好，500-2000ms需优化，>2000ms严重
-         - 主线程 GC：<5次良好，5-10次需关注，>10次严重
-      2. **GC 类型分析**：各类型 GC 的分布和影响
-      3. **内存抖动检测**：GC 间隔是否过短
-      4. **主线程影响**：主线程 GC 对流畅度的影响
-      5. **优化建议**：基于实际问题给出1-3条具体建议
-
-      ## 严格要求
-      - 只基于提供的实际数据分析
-      - 重点关注主线程 GC 和内存抖动
-      - 格式清晰，不超过300字
-
 output:
-  display:
-    level: key
-    format: summary
+  format: structured

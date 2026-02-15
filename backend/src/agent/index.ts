@@ -45,19 +45,22 @@ export {
 // Core exports (Agent-Driven)
 // =============================================================================
 
-export { ModelRouter } from './core';
+export { ModelRouter } from './core/modelRouter';
 
 // =============================================================================
 // Agent-Driven Architecture (唯一主链路)
 // =============================================================================
 
-// Agent-Driven Orchestrator (假设驱动分析)
+export type {
+  AgentRuntimeConfig,
+  AnalysisResult,
+} from './core/orchestratorTypes';
+
 export {
-  AgentDrivenOrchestrator,
-  createAgentDrivenOrchestrator,
-  AnalysisResult as AgentDrivenAnalysisResult,
-  AgentDrivenOrchestratorConfig,
-} from './core/agentDrivenOrchestrator';
+  AgentRuntime,
+  createAgentRuntime,
+  AgentRuntimeAnalysisResult,
+} from '../agentv2/runtime/agentRuntime';
 
 // Domain Agents (领域 Agent)
 export {

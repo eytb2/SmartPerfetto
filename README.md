@@ -53,7 +53,7 @@ Access:
 │                    Backend (Express @ :3000)                     │
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │              AgentDrivenOrchestrator                       │   │
+│  │                  AgentRuntime                              │   │
 │  │                                                            │   │
 │  │  Query → StrategyRegistry.match()                          │   │
 │  │           ├─ Match: Multi-Stage Pipeline (deterministic)   │   │
@@ -80,7 +80,7 @@ Access:
 
 | Component | Purpose |
 |-----------|---------|
-| **AgentDrivenOrchestrator** | Main coordinator: strategy matching + hypothesis-driven multi-round analysis |
+| **AgentRuntime** | Main coordinator: strategy matching + hypothesis-driven multi-round analysis |
 | **StrategyRegistry** | Matches queries to deterministic analysis strategies (scrolling, launch, etc.) |
 | **Domain Agents** | Specialized agents for Frame/CPU/Memory/Binder/Startup/System analysis |
 | **Skill Engine** | Executes YAML-defined analysis skills with SQL queries and display config |

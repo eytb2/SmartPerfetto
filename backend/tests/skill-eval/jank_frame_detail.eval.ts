@@ -75,6 +75,17 @@ describe('jank_frame_detail skill', () => {
     await new Promise(resolve => setTimeout(resolve, 2500));
   });
 
+  describe('Fixture sanity', () => {
+    it('should locate at least one janky frame in fixture trace', async () => {
+      // This fixture is expected to contain janky frames for regression checks.
+      expect(testFrameParams).not.toBeNull();
+      if (testFrameParams) {
+        expect(testFrameParams.start_ts).toBeDefined();
+        expect(testFrameParams.end_ts).toBeDefined();
+      }
+    });
+  });
+
   // ===========================================================================
   // L3 Diagnosis Layer Tests
   // ===========================================================================

@@ -92,22 +92,21 @@ describe('memory_analysis skill', () => {
         const result = await evaluator.executeStep('get_process', { package: '' });
 
         expect(result.success).toBe(true);
-        // Should find at least one process
-        if (result.data.length > 0) {
-          expect(result.data[0].upid).toBeDefined();
-          expect(result.data[0].process_name).toBeDefined();
-        }
+        // Fixture trace always contains processes; empty means extraction regressed.
+        expect(result.data.length).toBeGreaterThan(0);
+        expect(result.data[0].upid).toBeDefined();
+        expect(result.data[0].process_name).toBeDefined();
       }, 30000);
 
       it('should have valid process structure', async () => {
         const result = await evaluator.executeStep('get_process', { package: '' });
 
-        if (result.data.length > 0) {
-          const process = result.data[0];
-          expect(typeof process.upid).toBe('number');
-          expect(typeof process.pid).toBe('number');
-          expect(typeof process.process_name).toBe('string');
-        }
+        expect(result.success).toBe(true);
+        expect(result.data.length).toBeGreaterThan(0);
+        const process = result.data[0];
+        expect(typeof process.upid).toBe('number');
+        expect(typeof process.pid).toBe('number');
+        expect(typeof process.process_name).toBe('string');
       }, 30000);
     });
 

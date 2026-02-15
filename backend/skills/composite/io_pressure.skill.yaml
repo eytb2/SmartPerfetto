@@ -1,23 +1,25 @@
 # =============================================================================
-# IO Pressure Analysis v1.0 (System Analysis Skill) - Phase 6
+# IO Pressure Analysis v3.0 (System Analysis Skill)
 # =============================================================================
-# 系统级分析：分析 IO 等待和存储压力
+# 核心原则：
+# 1. L0 数据检测 → 确认 IO 阻塞数据可用
+# 2. L1 概览 → IO Wait 总量、影响线程数、严重度
+# 3. L2 详情 → 进程/线程/函数分布、时间线
+# 4. L3 诊断 → SQL 根因分类
 #
 # 核心表：
 # - thread_state: 线程状态，blocked_function 包含 IO 相关阻塞信息
-# - ftrace_event: ftrace 事件（block_rq_*, f2fs_*, ext4_* 等）
-# - counter: 系统计数器（包含 IO 相关 counter）
 # - sched_slice: 调度信息
 #
 # 分析维度：
 # - IO Wait 时间统计
 # - 阻塞函数分析
-# - 文件系统操作分析
 # - 进程 IO 分布
+# - 长 IO 事件检测
 # =============================================================================
 
 name: io_pressure
-version: "1.0"
+version: "3.0"
 type: composite
 category: io
 
@@ -39,6 +41,8 @@ triggers:
     - ".*读写.*"
 
 prerequisites:
+  required_tables:
+    - thread_state
   modules:
     - sched
     - linux.threads
@@ -48,204 +52,417 @@ inputs:
     type: string
     required: false
     description: "应用包名（可选）"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳（纳秒，可选）"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳（纳秒，可选）"
   - name: min_duration_ms
     type: number
     required: false
     default: 1
     description: "最小 IO Wait 时长阈值（毫秒）"
+  - name: max_items
+    type: number
+    required: false
+    default: 20
+    description: "列表最大返回条数"
+  - name: long_io_threshold_ms
+    type: number
+    required: false
+    default: 10
+    description: "长 IO 事件阈值（毫秒）"
+  - name: critical_io_wait_ms
+    type: number
+    required: false
+    default: 5000
+    description: "IO Wait 严重阈值（毫秒，总等待时间超过此值为 critical）"
+  - name: warning_io_wait_ms
+    type: number
+    required: false
+    default: 1000
+    description: "IO Wait 警告阈值（毫秒，总等待时间超过此值为 warning）"
 
 steps:
-  # ========== IO Wait 总览 ==========
+  # ==========================================================================
+  # L0: 数据检测
+  # ==========================================================================
+  - id: data_check
+    type: atomic
+    name: "数据检测"
+    display: false
+    sql: |
+      SELECT
+        CASE WHEN EXISTS (
+          SELECT 1 FROM thread_state ts
+          WHERE ts.state IN ('D', 'DK', 'x')
+            AND ts.dur > ${min_duration_ms|1} * 1e6
+            AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
+            AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
+          LIMIT 1
+        ) THEN 1 ELSE 0 END as has_data,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM thread_state ts
+          WHERE ts.state IN ('D', 'DK', 'x')
+            AND ts.dur > ${long_io_threshold_ms|10} * 1e6
+            AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
+            AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
+          LIMIT 1
+        ) THEN 1 ELSE 0 END as has_long_io,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM thread_state ts
+          WHERE ts.blocked_function IS NOT NULL
+            AND ts.blocked_function != ''
+            AND ts.state IN ('D', 'DK', 'x')
+            AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
+            AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
+          LIMIT 1
+        ) THEN 1 ELSE 0 END as has_blocked_functions
+    save_as: data_check
+
+  # ==========================================================================
+  # L1: IO Wait 总览
+  # ==========================================================================
   - id: io_wait_overview
     type: atomic
     name: "IO Wait 总览"
+    optional: true
+    condition: data_check.data[0]?.has_data === 1
+    synthesize:
+      role: overview
+      fields:
+        - key: io_wait_events
+          label: IO Wait 事件数
+        - key: total_io_wait_ms
+          label: 总 IO Wait 时间
+          format: duration_ms
+        - key: avg_io_wait_ms
+          label: 平均 IO Wait
+          format: duration_ms
+        - key: max_io_wait_ms
+          label: 最大 IO Wait
+          format: duration_ms
+        - key: affected_threads
+          label: 受影响线程数
+        - key: severity
+          label: 严重度
+      insights:
+        - condition: "severity === 'critical'"
+          template: "⚠️ IO 压力严重：总等待 {{total_io_wait_ms}}ms，影响 {{affected_threads}} 个线程"
+        - condition: "severity === 'warning'"
+          template: "⚠ IO 压力偏高：总等待 {{total_io_wait_ms}}ms"
+        - condition: "severity === 'info' || severity === 'normal'"
+          template: "IO 压力正常：总等待 {{total_io_wait_ms}}ms"
     display:
       level: summary
       layer: overview
       title: "IO 等待概览"
+      columns:
+        - name: io_wait_events
+          label: "IO Wait 事件数"
+          type: number
+          format: compact
+        - name: total_io_wait_ms
+          label: "总 IO Wait"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_io_wait_ms
+          label: "平均 IO Wait"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_io_wait_ms
+          label: "最大 IO Wait"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: affected_threads
+          label: "受影响线程数"
+          type: number
+          format: compact
+        - name: severity
+          label: "严重度"
+          type: string
     sql: |
-      WITH
-      io_wait_states AS (
+      WITH io_wait_states AS (
         SELECT
-          ts.utid,
-          ts.ts,
-          ts.dur,
-          ts.state,
-          ts.blocked_function
+          ts.utid, ts.ts, ts.dur, ts.state, ts.blocked_function
         FROM thread_state ts
-        WHERE
-          ts.state IN ('D', 'DK', 'x')  -- Uninterruptible sleep states
-          OR ts.blocked_function LIKE '%io%'
-          OR ts.blocked_function LIKE '%read%'
-          OR ts.blocked_function LIKE '%write%'
-          OR ts.blocked_function LIKE '%sync%'
-          OR ts.blocked_function LIKE '%f2fs%'
-          OR ts.blocked_function LIKE '%ext4%'
-          OR ts.blocked_function LIKE '%binder%'
+        WHERE ts.state IN ('D', 'DK', 'x')
+          AND ts.dur > ${min_duration_ms|1} * 1e6
+          AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
+          AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
       )
       SELECT
         COUNT(*) as io_wait_events,
-        SUM(dur) / 1e6 as total_io_wait_ms,
-        AVG(dur) / 1e6 as avg_io_wait_ms,
-        MAX(dur) / 1e6 as max_io_wait_ms,
-        COUNT(DISTINCT utid) as affected_threads
+        ROUND(SUM(dur) / 1e6, 2) as total_io_wait_ms,
+        ROUND(AVG(dur) / 1e6, 2) as avg_io_wait_ms,
+        ROUND(MAX(dur) / 1e6, 2) as max_io_wait_ms,
+        COUNT(DISTINCT utid) as affected_threads,
+        CASE
+          WHEN SUM(dur) / 1e6 > ${critical_io_wait_ms|5000} THEN 'critical'
+          WHEN SUM(dur) / 1e6 > ${warning_io_wait_ms|1000} THEN 'warning'
+          WHEN SUM(dur) / 1e6 > 100 THEN 'info'
+          ELSE 'normal'
+        END as severity
       FROM io_wait_states
-      WHERE dur > ${min_duration_ms} * 1e6
     save_as: io_overview
 
-  # ========== 进程 IO Wait 分布 ==========
+  # ==========================================================================
+  # L2: 进程 IO Wait 分布
+  # ==========================================================================
   - id: process_io_distribution
     type: atomic
     name: "进程 IO Wait 分布"
+    optional: true
+    condition: data_check.data[0]?.has_data === 1
+    synthesize:
+      role: list
+      fields:
+        - key: process_name
+          label: 进程名
+        - key: io_wait_ms
+          label: IO Wait 时间
+          format: duration_ms
+        - key: pct_of_total
+          label: 占比
+          format: percentage
+      insights:
+        - condition: "pct_of_total > 50"
+          template: "⚠️ {{process_name}} 占 IO Wait 的 {{pct_of_total}}%，是主要 IO 消费者"
     display:
       level: detail
       layer: list
       title: "进程 IO 等待排行"
+      columns:
+        - name: process_name
+          label: "进程名"
+          type: string
+        - name: pid
+          label: "PID"
+          type: number
+        - name: io_wait_ms
+          label: "IO Wait(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: io_events
+          label: "事件数"
+          type: number
+        - name: avg_wait_ms
+          label: "平均(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: pct_of_total
+          label: "占比(%)"
+          type: percentage
     sql: |
-      WITH
-      io_by_process AS (
+      WITH io_by_process AS (
         SELECT
-          p.name as process_name,
-          p.pid,
+          p.name as process_name, p.pid,
           SUM(ts.dur) / 1e6 as io_wait_ms,
           COUNT(*) as io_events,
           AVG(ts.dur) / 1e6 as avg_wait_ms
         FROM thread_state ts
         JOIN thread t ON ts.utid = t.utid
         JOIN process p ON t.upid = p.upid
-        WHERE
-          (ts.state IN ('D', 'DK', 'x')
-           OR ts.blocked_function LIKE '%io%'
-           OR ts.blocked_function LIKE '%read%'
-           OR ts.blocked_function LIKE '%write%'
-           OR ts.blocked_function LIKE '%sync%')
-          AND ts.dur > ${min_duration_ms} * 1e6
+        WHERE ts.state IN ('D', 'DK', 'x')
+          AND ts.dur > ${min_duration_ms|1} * 1e6
           AND ('${package}' = '' OR p.name GLOB '${package}*')
+          AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
+          AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
         GROUP BY p.upid
       ),
       totals AS (
-        SELECT SUM(io_wait_ms) as total_io_wait_ms
-        FROM io_by_process
+        SELECT SUM(io_wait_ms) as total_io_wait_ms FROM io_by_process
       )
       SELECT
-        process_name,
-        pid,
+        process_name, pid,
         ROUND(io_wait_ms, 2) as io_wait_ms,
         io_events,
         ROUND(avg_wait_ms, 2) as avg_wait_ms,
         ROUND(io_wait_ms * 100.0 / NULLIF((SELECT total_io_wait_ms FROM totals), 0), 1) as pct_of_total
       FROM io_by_process
       ORDER BY io_wait_ms DESC
-      LIMIT 15
+      LIMIT ${max_items|20}
     save_as: process_io
 
-  # ========== 阻塞函数分析 ==========
+  # ==========================================================================
+  # L2: 阻塞函数分析
+  # ==========================================================================
   - id: blocking_functions
     type: atomic
     name: "阻塞函数热点"
+    condition: data_check.data[0]?.has_blocked_functions === 1
+    optional: true
+    synthesize:
+      role: list
+      fields:
+        - key: blocked_function
+          label: 阻塞函数
+        - key: total_block_ms
+          label: 总阻塞时间
+          format: duration_ms
+        - key: block_count
+          label: 次数
+      insights:
+        - condition: "blocked_function.includes('f2fs') || blocked_function.includes('ext4')"
+          template: "文件系统阻塞: {{blocked_function}} 累计 {{total_block_ms}}ms"
+        - condition: "blocked_function.includes('binder')"
+          template: "Binder IPC 阻塞: {{blocked_function}} 累计 {{total_block_ms}}ms"
     display:
       level: detail
       layer: list
       title: "IO 阻塞函数排行"
+      columns:
+        - name: blocked_function
+          label: "阻塞函数"
+          type: string
+        - name: block_count
+          label: "次数"
+          type: number
+        - name: total_block_ms
+          label: "总阻塞(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_block_ms
+          label: "平均(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_block_ms
+          label: "最大(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: category
+          label: "分类"
+          type: string
     sql: |
       SELECT
         COALESCE(blocked_function, 'unknown') as blocked_function,
         COUNT(*) as block_count,
-        SUM(dur) / 1e6 as total_block_ms,
-        AVG(dur) / 1e6 as avg_block_ms,
-        MAX(dur) / 1e6 as max_block_ms
+        ROUND(SUM(dur) / 1e6, 2) as total_block_ms,
+        ROUND(AVG(dur) / 1e6, 2) as avg_block_ms,
+        ROUND(MAX(dur) / 1e6, 2) as max_block_ms,
+        CASE
+          WHEN blocked_function LIKE '%f2fs%' OR blocked_function LIKE '%ext4%' THEN 'filesystem'
+          WHEN blocked_function LIKE '%binder%' THEN 'binder_ipc'
+          WHEN blocked_function LIKE '%read%' OR blocked_function LIKE '%write%' THEN 'read_write'
+          WHEN blocked_function LIKE '%sync%' OR blocked_function LIKE '%fsync%' THEN 'sync'
+          WHEN blocked_function LIKE '%io%' OR blocked_function LIKE '%blk%' THEN 'block_io'
+          ELSE 'other'
+        END as category
       FROM thread_state
-      WHERE
-        state IN ('D', 'DK', 'x')
-        AND dur > ${min_duration_ms} * 1e6
+      WHERE state IN ('D', 'DK', 'x')
+        AND dur > ${min_duration_ms|1} * 1e6
         AND blocked_function IS NOT NULL
         AND blocked_function != ''
+        AND (${start_ts} IS NULL OR ts + dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY blocked_function
       ORDER BY total_block_ms DESC
-      LIMIT 20
+      LIMIT ${max_items|20}
     save_as: blocking_functions
 
-  # ========== 线程 IO Wait 详情 ==========
+  # ==========================================================================
+  # L2: 线程 IO Wait 详情
+  # ==========================================================================
   - id: thread_io_details
     type: atomic
     name: "线程 IO Wait 详情"
+    condition: data_check.data[0]?.has_data === 1
+    optional: true
     display:
       level: detail
       layer: list
       title: "线程级 IO 等待"
+      columns:
+        - name: thread_name
+          label: "线程名"
+          type: string
+        - name: tid
+          label: "TID"
+          type: number
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: io_wait_ms
+          label: "IO Wait(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: io_events
+          label: "事件数"
+          type: number
+        - name: max_wait_ms
+          label: "最大(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
     sql: |
       SELECT
         t.name as thread_name,
         t.tid,
         p.name as process_name,
-        SUM(ts.dur) / 1e6 as io_wait_ms,
+        ROUND(SUM(ts.dur) / 1e6, 2) as io_wait_ms,
         COUNT(*) as io_events,
-        MAX(ts.dur) / 1e6 as max_wait_ms,
+        ROUND(MAX(ts.dur) / 1e6, 2) as max_wait_ms,
         GROUP_CONCAT(DISTINCT ts.blocked_function) as blocked_functions
       FROM thread_state ts
       JOIN thread t ON ts.utid = t.utid
       JOIN process p ON t.upid = p.upid
-      WHERE
-        (ts.state IN ('D', 'DK', 'x')
-         OR ts.blocked_function LIKE '%io%'
-         OR ts.blocked_function LIKE '%read%'
-         OR ts.blocked_function LIKE '%write%')
-        AND ts.dur > ${min_duration_ms} * 1e6
+      WHERE ts.state IN ('D', 'DK', 'x')
+        AND ts.dur > ${min_duration_ms|1} * 1e6
         AND ('${package}' = '' OR p.name GLOB '${package}*')
+        AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
       GROUP BY ts.utid
       ORDER BY io_wait_ms DESC
-      LIMIT 20
+      LIMIT ${max_items|20}
     save_as: thread_io
 
-  # ========== IO 时间分布（按时间段）==========
-  - id: io_timeline
-    type: atomic
-    name: "IO Wait 时间线"
-    display:
-      level: detail
-      layer: deep
-      title: "IO 等待时间分布"
-    sql: |
-      WITH
-      time_range AS (
-        SELECT
-          MIN(ts) as start_ts,
-          MAX(ts + dur) as end_ts
-        FROM thread_state
-        WHERE state IN ('D', 'DK', 'x')
-      ),
-      time_buckets AS (
-        SELECT
-          (ts - (SELECT start_ts FROM time_range)) / 1e9 as time_sec,
-          dur / 1e6 as duration_ms
-        FROM thread_state
-        WHERE
-          state IN ('D', 'DK', 'x')
-          AND dur > ${min_duration_ms} * 1e6
-      )
-      SELECT
-        CAST(time_sec AS INT) as second,
-        COUNT(*) as io_events,
-        SUM(duration_ms) as total_io_ms,
-        MAX(duration_ms) as max_io_ms
-      FROM time_buckets
-      GROUP BY CAST(time_sec AS INT)
-      ORDER BY second
-      LIMIT 60
-    save_as: io_timeline
-
-  # ========== 长 IO Wait 事件 ==========
+  # ==========================================================================
+  # L2: 长 IO Wait 事件
+  # ==========================================================================
   - id: long_io_events
     type: atomic
     name: "长 IO Wait 事件"
+    condition: data_check.data[0]?.has_long_io === 1
+    optional: true
     display:
       level: detail
       layer: deep
       title: "长时间 IO 阻塞事件"
+      columns:
+        - name: ts
+          label: "时间戳"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: duration_ms
+          label: "时长(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: blocked_function
+          label: "阻塞函数"
+          type: string
     sql: |
       SELECT
-        ts.ts / 1e9 as time_sec,
-        ts.dur / 1e6 as duration_ms,
+        printf('%d', ts.ts) as ts,
+        ROUND(ts.dur / 1e6, 2) as duration_ms,
         t.name as thread_name,
         p.name as process_name,
         ts.state,
@@ -253,105 +470,180 @@ steps:
       FROM thread_state ts
       JOIN thread t ON ts.utid = t.utid
       JOIN process p ON t.upid = p.upid
-      WHERE
-        ts.state IN ('D', 'DK', 'x')
-        AND ts.dur > 10 * 1e6  -- > 10ms
+      WHERE ts.state IN ('D', 'DK', 'x')
+        AND ts.dur > ${long_io_threshold_ms|10} * 1e6
         AND ('${package}' = '' OR p.name GLOB '${package}*')
+        AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
       ORDER BY ts.dur DESC
-      LIMIT 30
+      LIMIT ${max_items|20}
     save_as: long_io_events
 
-  # ========== 分析结论 ==========
-  - id: io_conclusion
+  # ==========================================================================
+  # L3: IO 根因分类 (SQL 驱动)
+  # ==========================================================================
+  - id: root_cause_classification
     type: atomic
-    name: "IO 压力结论"
+    name: "IO 根因分类"
+    optional: true
+    condition: data_check.data[0]?.has_data === 1
+    synthesize:
+      role: conclusion
+      fields:
+        - key: severity
+          label: 严重度
+        - key: root_cause_type
+          label: 根因类型
+        - key: primary_category
+          label: 主要类别
+        - key: primary_pct
+          label: 占比
+          format: "{{value}}%"
+        - key: suggestion
+          label: 建议
+      insights:
+        - condition: "severity === 'critical'"
+          template: "IO 压力严重（{{root_cause_type}}）：{{suggestion}}"
+        - condition: "severity === 'warning'"
+          template: "IO 压力偏高（{{root_cause_type}}）：{{suggestion}}"
     display:
       level: summary
       layer: overview
-      title: "IO 分析结论"
+      title: "IO 压力根因"
+      columns:
+        - name: total_io_ms
+          label: "总 IO 等待"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: primary_category
+          label: "主要类别"
+          type: string
+        - name: primary_pct
+          label: "占比"
+          type: percentage
+        - name: severity
+          label: "严重度"
+          type: string
+        - name: root_cause_type
+          label: "根因类型"
+          type: string
+        - name: suggestion
+          label: "建议"
+          type: string
     sql: |
-      WITH
-      io_wait_states AS (
+      WITH io_wait_states AS (
         SELECT
-          ts.utid,
-          ts.ts,
-          ts.dur,
-          ts.state,
+          ts.utid, ts.ts, ts.dur, ts.state,
           ts.blocked_function
         FROM thread_state ts
-        JOIN thread t ON ts.utid = t.utid
-        JOIN process p ON t.upid = p.upid
-        WHERE
-          (ts.state IN ('D', 'DK', 'x')
-           OR ts.blocked_function LIKE '%io%'
-           OR ts.blocked_function LIKE '%read%'
-           OR ts.blocked_function LIKE '%write%'
-           OR ts.blocked_function LIKE '%sync%'
-           OR ts.blocked_function LIKE '%f2fs%'
-           OR ts.blocked_function LIKE '%ext4%'
-           OR ts.blocked_function LIKE '%binder%')
-          AND ts.dur > ${min_duration_ms} * 1e6
-          AND ('${package}' = '' OR p.name GLOB '${package}*')
+        WHERE ts.state IN ('D', 'DK', 'x')
+          AND ts.dur > ${min_duration_ms|1} * 1e6
+          AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
+          AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
       ),
-      overview AS (
+      category_stats AS (
         SELECT
-          SUM(dur) / 1e6 as total_io_wait_ms,
-          COUNT(DISTINCT utid) as affected_threads
+          CASE
+            WHEN blocked_function LIKE '%f2fs%' OR blocked_function LIKE '%ext4%' THEN 'filesystem'
+            WHEN blocked_function LIKE '%binder%' THEN 'binder_ipc'
+            WHEN blocked_function LIKE '%read%' OR blocked_function LIKE '%write%' THEN 'read_write'
+            WHEN blocked_function LIKE '%sync%' OR blocked_function LIKE '%fsync%' THEN 'sync'
+            WHEN blocked_function LIKE '%blk%' OR blocked_function LIKE '%mmc%' OR blocked_function LIKE '%ufs%' THEN 'block_device'
+            WHEN blocked_function IS NULL OR blocked_function = '' THEN 'unclassified'
+            ELSE 'other'
+          END as category,
+          SUM(dur) / 1e6 as total_ms,
+          COUNT(*) as event_count
         FROM io_wait_states
+        GROUP BY category
       ),
-      top_blocker AS (
-        SELECT
-          COALESCE(blocked_function, 'unknown') as blocked_function,
-          SUM(dur) / 1e6 as total_block_ms
-        FROM io_wait_states
-        WHERE blocked_function IS NOT NULL AND blocked_function != ''
-        GROUP BY blocked_function
-        ORDER BY total_block_ms DESC
-        LIMIT 1
+      total AS (
+        SELECT SUM(total_ms) as grand_total_ms FROM category_stats
       ),
-      top_process AS (
-        SELECT
-          p.name as process_name,
-          SUM(ts.dur) / 1e6 as io_wait_ms
-        FROM thread_state ts
-        JOIN thread t ON ts.utid = t.utid
-        JOIN process p ON t.upid = p.upid
-        WHERE
-          (ts.state IN ('D', 'DK', 'x')
-           OR ts.blocked_function LIKE '%io%'
-           OR ts.blocked_function LIKE '%read%'
-           OR ts.blocked_function LIKE '%write%'
-           OR ts.blocked_function LIKE '%sync%'
-           OR ts.blocked_function LIKE '%f2fs%'
-           OR ts.blocked_function LIKE '%ext4%'
-           OR ts.blocked_function LIKE '%binder%')
-          AND ts.dur > ${min_duration_ms} * 1e6
-          AND ('${package}' = '' OR p.name GLOB '${package}*')
-        GROUP BY p.upid
-        ORDER BY io_wait_ms DESC
+      dominant AS (
+        SELECT category, total_ms,
+          ROUND(100.0 * total_ms / NULLIF((SELECT grand_total_ms FROM total), 0), 1) as pct
+        FROM category_stats
+        ORDER BY total_ms DESC
         LIMIT 1
       )
       SELECT
-        (SELECT total_io_wait_ms FROM overview) as total_io_wait_ms,
-        (SELECT affected_threads FROM overview) as affected_threads,
-        (SELECT blocked_function FROM top_blocker) as top_blocker,
-        (SELECT process_name FROM top_process) as top_io_process,
+        (SELECT grand_total_ms FROM total) as total_io_ms,
+        (SELECT category FROM dominant) as primary_category,
+        (SELECT pct FROM dominant) as primary_pct,
         CASE
-          WHEN (SELECT total_io_wait_ms FROM overview) > 5000 THEN 'critical'
-          WHEN (SELECT total_io_wait_ms FROM overview) > 1000 THEN 'warning'
-          WHEN (SELECT total_io_wait_ms FROM overview) > 100 THEN 'info'
+          WHEN (SELECT grand_total_ms FROM total) > ${critical_io_wait_ms|5000} THEN 'critical'
+          WHEN (SELECT grand_total_ms FROM total) > ${warning_io_wait_ms|1000} THEN 'warning'
+          WHEN (SELECT grand_total_ms FROM total) > 100 THEN 'info'
           ELSE 'normal'
         END as severity,
         CASE
-          WHEN (SELECT blocked_function FROM top_blocker) LIKE '%f2fs%'
-               OR (SELECT blocked_function FROM top_blocker) LIKE '%ext4%'
-            THEN '文件系统操作阻塞，考虑优化文件读写或使用异步 IO'
-          WHEN (SELECT blocked_function FROM top_blocker) LIKE '%binder%'
-            THEN 'Binder IPC 阻塞，检查跨进程调用是否过于频繁'
-          WHEN (SELECT blocked_function FROM top_blocker) LIKE '%sync%'
-            THEN '同步操作阻塞，考虑减少 fsync/sync 调用'
-          WHEN (SELECT blocked_function FROM top_blocker) LIKE '%read%'
-               OR (SELECT blocked_function FROM top_blocker) LIKE '%write%'
-            THEN '读写操作阻塞，考虑使用缓存或异步读写'
-          ELSE '请检查具体阻塞函数'
+          WHEN (SELECT category FROM dominant) = 'filesystem' THEN 'IO_FS_BOUND'
+          WHEN (SELECT category FROM dominant) = 'binder_ipc' THEN 'IO_BINDER_BOUND'
+          WHEN (SELECT category FROM dominant) = 'sync' THEN 'IO_SYNC_BOUND'
+          WHEN (SELECT category FROM dominant) = 'block_device' THEN 'IO_DEVICE_BOUND'
+          WHEN (SELECT category FROM dominant) = 'read_write' THEN 'IO_RW_BOUND'
+          ELSE 'IO_MIXED'
+        END as root_cause_type,
+        CASE
+          WHEN (SELECT category FROM dominant) = 'filesystem'
+            THEN '文件系统操作是主要 IO 瓶颈 (' || (SELECT pct FROM dominant) || '%)，建议优化文件读写或使用异步 IO'
+          WHEN (SELECT category FROM dominant) = 'binder_ipc'
+            THEN 'Binder IPC 是主要阻塞源 (' || (SELECT pct FROM dominant) || '%)，检查跨进程调用频率'
+          WHEN (SELECT category FROM dominant) = 'sync'
+            THEN '同步操作是主要瓶颈 (' || (SELECT pct FROM dominant) || '%)，考虑减少 fsync/sync 调用'
+          WHEN (SELECT category FROM dominant) = 'block_device'
+            THEN '块设备 IO 是主要瓶颈 (' || (SELECT pct FROM dominant) || '%)，可能存储设备性能不足'
+          WHEN (SELECT category FROM dominant) = 'read_write'
+            THEN '读写操作是主要瓶颈 (' || (SELECT pct FROM dominant) || '%)，考虑使用缓存或异步读写'
+          ELSE 'IO 等待来源分散，需要综合优化'
         END as suggestion
+    save_as: root_cause
+
+  # ==========================================================================
+  # 诊断规则
+  # ==========================================================================
+  - id: io_diagnostic
+    type: diagnostic
+    name: "IO 诊断"
+    rules:
+      - condition: "(io_overview?.data?.[0]?.severity) === 'critical'"
+        severity: critical
+        diagnosis: "IO 压力严重: 总等待 ${io_overview.data[0].total_io_wait_ms}ms, 影响 ${io_overview.data[0].affected_threads} 个线程"
+        suggestions:
+          - "检查是否存在大文件读写或频繁的小文件操作"
+          - "考虑使用异步 IO 或 IO 调度优化"
+          - "检查存储设备健康状况"
+
+      - condition: "(io_overview?.data?.[0]?.severity) === 'warning'"
+        severity: warning
+        diagnosis: "IO 压力偏高: 总等待 ${io_overview.data[0].total_io_wait_ms}ms"
+        suggestions:
+          - "分析阻塞函数，定位 IO 热点"
+          - "考虑批量化 IO 操作"
+
+      - condition: "(root_cause?.data?.[0]?.root_cause_type) === 'IO_FS_BOUND'"
+        severity: warning
+        diagnosis: "文件系统操作是主要 IO 瓶颈 (${root_cause.data[0].primary_pct}%)"
+        suggestions:
+          - "优化文件读写模式，减少小文件操作"
+          - "使用 mmap 或缓存减少文件系统调用"
+
+      - condition: "(root_cause?.data?.[0]?.root_cause_type) === 'IO_SYNC_BOUND'"
+        severity: warning
+        diagnosis: "同步操作频繁导致 IO 等待 (${root_cause.data[0].primary_pct}%)"
+        suggestions:
+          - "减少 fsync 调用频率"
+          - "使用 write-back 缓存策略"
+
+      - condition: "(root_cause?.data?.[0]?.root_cause_type) === 'IO_BINDER_BOUND'"
+        severity: warning
+        diagnosis: "Binder IPC 是主要 IO 阻塞源 (${root_cause.data[0].primary_pct}%)"
+        suggestions:
+          - "减少跨进程 IO 操作"
+          - "考虑使用共享内存或本地缓存"
+
+      - condition: "(io_overview?.data?.[0]?.severity) === 'normal' || (io_overview?.data?.[0]?.severity) === 'info'"
+        severity: info
+        diagnosis: "IO 压力在正常范围内 (${io_overview.data[0].total_io_wait_ms}ms)"

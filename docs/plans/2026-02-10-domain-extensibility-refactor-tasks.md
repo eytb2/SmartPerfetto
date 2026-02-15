@@ -55,7 +55,7 @@
 - 2026-02-10: 初始化任务文档，完成 E1（输出重构蓝图并拆分 Phase A-E）。
 - 2026-02-10: 开始执行 E2（落地 Domain Manifest 基础实现）。
 - 2026-02-10: 完成 E2（新增 `backend/src/agent/config/domainManifest.ts`，集中管理策略执行偏好与证据映射）。
-- 2026-02-10: 完成 E3（`AgentDrivenOrchestrator` 接入 manifest helper，替换策略白名单判断与本地 `aspectEvidenceMap` 常量）。
+- 2026-02-10: 完成 E3（`AgentRuntime` 接入 manifest helper，替换策略白名单判断与本地 `aspectEvidenceMap` 常量）。
 - 2026-02-10: 完成 E4（新增 `domainManifest` 单测并回归 `agentDrivenOrchestrator` 单测，2 suites / 53 tests 通过）。
 - 2026-02-10: 完成 E5（`07-domain-extensibility-refactor.md` 已落盘 scene 路由可配置化目标架构、数据模型与阶段计划）。
 - 2026-02-10: 完成 Phase B 修复（`scene_reconstruction` Stage2 改为 `DomainManifest.sceneReconstructionRoutes` 驱动）。

@@ -18,12 +18,12 @@ meta:
 inputs:
   - name: start_ts
     type: timestamp
-    required: true
-    description: "分析起始时间戳(ns)"
+    required: false
+    description: "分析起始时间戳(ns，可选)"
   - name: end_ts
     type: timestamp
-    required: true
-    description: "分析结束时间戳(ns)"
+    required: false
+    description: "分析结束时间戳(ns，可选)"
   - name: package
     type: string
     required: false
@@ -74,7 +74,7 @@ sql: |
     JOIN thread_track tt ON s.track_id = tt.id
     JOIN thread t ON tt.utid = t.utid
     JOIN process p ON t.upid = p.upid
-    WHERE s.ts >= ${start_ts} AND s.ts < ${end_ts}
+    WHERE (${start_ts} IS NULL OR s.ts >= ${start_ts}) AND (${end_ts} IS NULL OR s.ts < ${end_ts})
       AND (p.name GLOB '${package}*' OR '${package}' = '' OR p.name = 'surfaceflinger')
       AND s.dur > 10000  -- > 10us
   )

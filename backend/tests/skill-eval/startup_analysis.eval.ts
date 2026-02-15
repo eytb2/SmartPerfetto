@@ -34,6 +34,8 @@ describe('startup_analysis skill', () => {
 
         expect(result.success).toBe(true);
         expect(Array.isArray(result.data)).toBe(true);
+        // app_start_heavy.pftrace contains known startup events; empty means evaluator/data extraction regressed.
+        expect(result.data.length).toBeGreaterThan(0);
 
         if (result.data.length > 0) {
           const s = result.data[0];

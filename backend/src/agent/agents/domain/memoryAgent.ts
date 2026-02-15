@@ -57,6 +57,18 @@ const MEMORY_SKILLS: SkillDefinitionForAgent[] = [
     description: '【DMA-BUF分析】分析DMA-BUF内存使用，检测图形内存泄漏。适用于：GPU内存问题、图形buffer泄漏。输出：DMA-BUF分配统计',
     category: 'memory',
   },
+  {
+    skillId: 'memory_pressure_in_range',
+    toolName: 'analyze_memory_pressure',
+    description: '【区间内存压力】分析指定时间范围内的系统内存压力（PSI、kswapd、直接回收、压缩、LMK）。适用于：分析特定卡顿区间是否存在内存压力导致的性能问题。输出：压力评分+各指标统计',
+    category: 'memory',
+  },
+  {
+    skillId: 'gc_events_in_range',
+    toolName: 'analyze_gc_events',
+    description: '【区间GC事件】查询指定时间范围内的GC事件并分类（ConcurrentCopying/MarkSweep/Explicit等）。适用于：分析特定区间内GC对性能的影响。输出：GC事件列表+类型分类',
+    category: 'memory',
+  },
 ];
 
 // =============================================================================

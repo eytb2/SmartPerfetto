@@ -59,16 +59,65 @@ inputs:
     type: timestamp
     required: false
     description: "分析结束时间戳（纳秒，可选）"
+  - name: slow_event_threshold_ms
+    type: number
+    required: false
+    default: 100
+    description: "慢输入事件阈值（ms，超过该值视为慢事件）"
+  - name: avg_latency_critical_ms
+    type: number
+    required: false
+    default: 100
+    description: "平均延迟-严重阈值（ms）"
+  - name: avg_handling_warning_ms
+    type: number
+    required: false
+    default: 50
+    description: "应用处理延迟-警告阈值（ms）"
+  - name: avg_dispatch_warning_ms
+    type: number
+    required: false
+    default: 20
+    description: "系统分发延迟-警告阈值（ms）"
+  - name: binder_blocking_threshold_ms
+    type: number
+    required: false
+    default: 30
+    description: "Binder 阻塞判定阈值（ms）"
+  - name: critical_event_threshold_ms
+    type: number
+    required: false
+    default: 200
+    description: "严重慢事件阈值（ms）"
+  - name: thread_state_min_dur_ms
+    type: number
+    required: false
+    default: 50
+    description: "线程状态分析最小输入延迟阈值（ms）"
+  - name: enable_per_event_detail
+    type: boolean
+    required: false
+    default: true
+    description: "是否启用逐事件详细分析（策略模式可关闭以避免重复）"
 
 steps:
   # ========== 检查输入事件数据 ==========
   - id: check_input_data
     type: atomic
     name: "检查输入事件数据"
+    optional: true
     display:
       level: summary
       layer: overview
       title: "数据检查"
+      columns:
+        - name: event_count
+          label: "事件数"
+          type: number
+          format: compact
+        - name: status
+          label: "状态"
+          type: string
     sql: |
       SELECT
         COUNT(*) as event_count,
@@ -99,6 +148,7 @@ steps:
           label: "最大延迟"
           type: duration
           format: duration_ms
+          unit: ms
     sql: |
       SELECT
         process_name,
@@ -140,6 +190,59 @@ steps:
       level: key
       layer: overview
       title: "输入延迟概览"
+      columns:
+        - name: total_events
+          label: "事件总数"
+          type: number
+          format: compact
+        - name: avg_dispatch_ms
+          label: "平均分发延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_dispatch_ms
+          label: "最大分发延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_handling_ms
+          label: "平均处理延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_handling_ms
+          label: "最大处理延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_ack_ms
+          label: "平均 ACK 延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_total_ms
+          label: "平均总延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_total_ms
+          label: "最大总延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_e2e_ms
+          label: "平均端到端延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_e2e_ms
+          label: "最大端到端延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: rating
+          label: "评级"
+          type: string
     sql: |
       SELECT
         COUNT(*) as total_events,
@@ -160,8 +263,8 @@ steps:
         -- 评级
         CASE
           WHEN AVG(total_latency_dur) / 1e6 < 50 THEN '优秀 (<50ms)'
-          WHEN AVG(total_latency_dur) / 1e6 < 100 THEN '良好 (50-100ms)'
-          WHEN AVG(total_latency_dur) / 1e6 < 200 THEN '可接受 (100-200ms)'
+          WHEN AVG(total_latency_dur) / 1e6 < ${slow_event_threshold_ms|100} THEN '良好 (50-100ms)'
+          WHEN AVG(total_latency_dur) / 1e6 < ${critical_event_threshold_ms|200} THEN '可接受 (100-200ms)'
           ELSE '较差 (>200ms)'
         END as rating
       FROM android_input_events
@@ -192,6 +295,35 @@ steps:
       level: key
       layer: overview
       title: "各事件类型延迟"
+      columns:
+        - name: event_type
+          label: "事件类型"
+          type: string
+        - name: event_action
+          label: "事件动作"
+          type: string
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: avg_latency_ms
+          label: "平均延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_latency_ms
+          label: "最大延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_handling_ms
+          label: "平均处理延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: slow_events
+          label: "慢事件数"
+          type: number
     sql: |
       SELECT
         event_type,
@@ -201,7 +333,7 @@ steps:
         ROUND(MAX(total_latency_dur) / 1e6, 2) as max_latency_ms,
         ROUND(AVG(handling_latency_dur) / 1e6, 2) as avg_handling_ms,
         -- 慢事件数
-        SUM(CASE WHEN total_latency_dur / 1e6 > 100 THEN 1 ELSE 0 END) as slow_events
+        SUM(CASE WHEN total_latency_dur / 1e6 > ${slow_event_threshold_ms|100} THEN 1 ELSE 0 END) as slow_events
       FROM android_input_events
       WHERE process_name = '${target_process.data[0].process_name}'
         AND (${start_ts} IS NULL OR receive_ts + receive_dur > ${start_ts})
@@ -234,6 +366,76 @@ steps:
       level: key
       layer: list
       title: "慢输入事件详情 (>100ms)"
+      columns:
+        - name: event_type
+          label: "事件类型"
+          type: string
+        - name: event_action
+          label: "事件动作"
+          type: string
+        - name: event_channel
+          label: "事件通道"
+          type: string
+        - name: total_ms
+          label: "总延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: dispatch_ms
+          label: "分发延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: handling_ms
+          label: "处理延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: ack_ms
+          label: "ACK 延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: e2e_ms
+          label: "端到端延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: frame_id
+          label: "帧 ID"
+          type: number
+        - name: event_ts
+          label: "事件时间"
+          type: timestamp
+          clickAction: navigate_range
+          durationColumn: total_ms
+        - name: event_end_ts
+          label: "结束时间"
+          type: timestamp
+          clickAction: navigate_timeline
+          hidden: true
+        - name: perfetto_start
+          label: "Perfetto 开始"
+          type: timestamp
+          clickAction: navigate_timeline
+          hidden: true
+        - name: perfetto_end
+          label: "Perfetto 结束"
+          type: timestamp
+          clickAction: navigate_timeline
+          hidden: true
+        - name: severity
+          label: "严重程度"
+          type: enum
+        - name: main_bottleneck
+          label: "主要瓶颈"
+          type: string
     sql: |
       SELECT
         event_type,
@@ -254,8 +456,8 @@ steps:
         printf('%d', CAST(dispatch_ts - 20000000 AS INTEGER)) as perfetto_start,
         printf('%d', CAST(receive_ts + receive_dur + 20000000 AS INTEGER)) as perfetto_end,
         CASE
-          WHEN total_latency_dur / 1e6 > 200 THEN 'critical'
-          WHEN total_latency_dur / 1e6 > 100 THEN 'warning'
+          WHEN total_latency_dur / 1e6 > ${critical_event_threshold_ms|200} THEN 'critical'
+          WHEN total_latency_dur / 1e6 > ${slow_event_threshold_ms|100} THEN 'warning'
           ELSE 'notice'
         END as severity,
         -- 延迟主要来源
@@ -268,7 +470,7 @@ steps:
       WHERE process_name = '${target_process.data[0].process_name}'
         AND (${start_ts} IS NULL OR receive_ts + receive_dur > ${start_ts})
         AND (${end_ts} IS NULL OR dispatch_ts < ${end_ts})
-        AND total_latency_dur > 100000000  -- > 100ms
+        AND total_latency_dur > ${slow_event_threshold_ms|100} * 1000000  -- > slow threshold
       ORDER BY total_latency_dur DESC
       LIMIT 20
     save_as: slow_events
@@ -278,10 +480,31 @@ steps:
   - id: input_thread_state
     type: atomic
     name: "输入期间主线程状态"
+    optional: true
     display:
       level: detail
       layer: list
       title: "输入处理期间主线程状态"
+      columns:
+        - name: event_type
+          label: "事件类型"
+          type: string
+        - name: input_dur_ms
+          label: "输入延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: state
+          label: "线程状态"
+          type: string
+        - name: state_dur_ms
+          label: "状态持续时间"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: blocked_function
+          label: "阻塞函数"
+          type: string
     sql: |
       WITH main_thread AS (
         SELECT t.utid, p.name as process_name
@@ -301,7 +524,7 @@ steps:
         WHERE process_name = '${target_process.data[0].process_name}'
           AND (${start_ts} IS NULL OR receive_ts + receive_dur > ${start_ts})
           AND (${end_ts} IS NULL OR dispatch_ts < ${end_ts})
-          AND total_latency_dur > 50000000  -- > 50ms
+          AND total_latency_dur > ${thread_state_min_dur_ms|50} * 1000000  -- > thread state threshold
         ORDER BY total_latency_dur DESC
         LIMIT 10
       )
@@ -335,6 +558,30 @@ steps:
       level: detail
       layer: list
       title: "输入处理期间 Binder 调用"
+      columns:
+        - name: server_process
+          label: "服务进程"
+          type: string
+        - name: aidl_name
+          label: "AIDL 方法"
+          type: string
+        - name: call_count
+          label: "调用次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: main_thread_calls
+          label: "主线程调用"
+          type: number
     sql: |
       WITH slow_inputs AS (
         SELECT
@@ -345,7 +592,7 @@ steps:
         WHERE process_name = '${target_process.data[0].process_name}'
           AND (${start_ts} IS NULL OR receive_ts + receive_dur > ${start_ts})
           AND (${end_ts} IS NULL OR dispatch_ts < ${end_ts})
-          AND total_latency_dur > 50000000
+          AND total_latency_dur > ${thread_state_min_dur_ms|50} * 1000000
         ORDER BY total_latency_dur DESC
         LIMIT 10
       )
@@ -373,10 +620,39 @@ steps:
   - id: input_to_frame
     type: atomic
     name: "输入到帧关联"
+    optional: true
     display:
       level: detail
       layer: list
       title: "输入到帧渲染延迟"
+      columns:
+        - name: event_type
+          label: "事件类型"
+          type: string
+        - name: event_action
+          label: "事件动作"
+          type: string
+        - name: e2e_latency_ms
+          label: "端到端延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: frame_id
+          label: "帧 ID"
+          type: number
+        - name: frame_dur_ms
+          label: "帧耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: input_latency_ms
+          label: "输入延迟"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: rating
+          label: "评级"
+          type: enum
     sql: |
       SELECT
         ie.event_type,
@@ -388,9 +664,9 @@ steps:
         ie.total_latency_dur / 1e6 as input_latency_ms,
         -- 输入到首帧的延迟
         CASE
-          WHEN ie.end_to_end_latency_dur / 1e6 > 200 THEN 'critical'
-          WHEN ie.end_to_end_latency_dur / 1e6 > 100 THEN 'warning'
-          WHEN ie.end_to_end_latency_dur / 1e6 > 50 THEN 'notice'
+          WHEN ie.end_to_end_latency_dur / 1e6 > ${critical_event_threshold_ms|200} THEN 'critical'
+          WHEN ie.end_to_end_latency_dur / 1e6 > ${slow_event_threshold_ms|100} THEN 'warning'
+          WHEN ie.end_to_end_latency_dur / 1e6 > ${thread_state_min_dur_ms|50} THEN 'notice'
           ELSE 'good'
         END as rating
       FROM android_input_events ie
@@ -423,6 +699,18 @@ steps:
       level: summary
       layer: overview
       title: "输入延迟分布"
+      columns:
+        - name: latency_bucket
+          label: "延迟区间"
+          type: string
+        - name: count
+          label: "事件数"
+          type: number
+          format: compact
+        - name: percent
+          label: "占比"
+          type: percentage
+          format: percentage
     sql: |
       SELECT
         CASE
@@ -479,7 +767,7 @@ steps:
       process_name: process_name
       perfetto_start: perfetto_start
       perfetto_end: perfetto_end
-    condition: slow_events.data.length > 0
+    condition: slow_events.data.length > 0 && '${enable_per_event_detail|true}' !== 'false'
 
   # ========== 点击响应诊断 ==========
   - id: click_diagnosis
@@ -503,7 +791,7 @@ steps:
     inputs: [latency_overview, slow_events, input_thread_state, input_binder]
     rules:
       # 平均延迟过高
-      - condition: "latency_overview.data[0]?.avg_total_ms > 100"
+      - condition: "latency_overview.data[0]?.avg_total_ms > ${avg_latency_critical_ms|100}"
         severity: critical
         diagnosis: "平均输入延迟过高 (${latency_overview.data[0].avg_total_ms}ms)"
         confidence: high
@@ -513,7 +801,7 @@ steps:
           - "将耗时操作移到后台线程"
 
       # 应用处理延迟高
-      - condition: "latency_overview.data[0]?.avg_handling_ms > 50"
+      - condition: "latency_overview.data[0]?.avg_handling_ms > ${avg_handling_warning_ms|50}"
         severity: warning
         diagnosis: "应用处理延迟偏高 (${latency_overview.data[0].avg_handling_ms}ms)"
         confidence: high
@@ -522,7 +810,7 @@ steps:
           - "避免在事件处理中进行 IO 操作"
 
       # 系统分发延迟高
-      - condition: "latency_overview.data[0]?.avg_dispatch_ms > 20"
+      - condition: "latency_overview.data[0]?.avg_dispatch_ms > ${avg_dispatch_warning_ms|20}"
         severity: warning
         diagnosis: "系统分发延迟偏高 (${latency_overview.data[0].avg_dispatch_ms}ms)"
         confidence: medium
@@ -531,7 +819,7 @@ steps:
           - "检查输入系统是否有瓶颈"
 
       # 存在严重慢事件
-      - condition: "slow_events.data[0]?.total_ms > 200"
+      - condition: "slow_events.data[0]?.total_ms > ${critical_event_threshold_ms|200}"
         severity: critical
         diagnosis: "存在严重慢输入事件 (${slow_events.data[0].total_ms}ms)"
         confidence: high
@@ -540,7 +828,7 @@ steps:
           - "检查是否有 Binder/IO 阻塞"
 
       # Binder 阻塞
-      - condition: "input_binder.data[0]?.total_dur_ms > 30"
+      - condition: "input_binder.data[0]?.total_dur_ms > ${binder_blocking_threshold_ms|30}"
         severity: warning
         diagnosis: "输入期间存在 Binder 阻塞 (${input_binder.data[0].total_dur_ms}ms)"
         confidence: high
@@ -548,68 +836,5 @@ steps:
           - "将 Binder 调用移到后台线程"
           - "使用异步 Binder 接口"
 
-  # ========== AI 总结 ==========
-  - id: global_summary
-    type: ai_summary
-    name: "分析总结"
-    display:
-      level: key
-      layer: overview
-      title: "点击响应分析总结"
-    inputs: [input_check, latency_overview, latency_by_type, slow_events, analyze_slow_events, latency_distribution, click_diagnosis]
-    prompt: |
-      请基于以下点击响应分析结果，生成专业的性能评估总结。
-
-      ## 数据检查
-          input_check
-
-      ## 输入延迟概览
-          latency_overview
-
-      ## 各事件类型延迟
-          latency_by_type
-
-      ## 慢输入事件
-          slow_events
-
-      ## 逐个慢输入事件详细分析（大小核、四象限）
-          analyze_slow_events
-
-      ## 延迟分布
-          latency_distribution
-
-      ## 诊断结果
-          click_diagnosis
-
-      ## 专业分析要求
-
-      如果无输入事件数据，请输出：
-      "未检测到输入事件数据。
-
-      可能原因：
-      - Trace 未包含输入事件（需要启用 android.input 模块）
-      - 采集期间未进行点击操作
-
-      建议：如需分析点击响应，请确保 Trace 包含输入事件数据，并在采集期间进行点击操作。"
-
-      如果有数据，请分析并输出：
-      1. **整体评价**：
-         - 总延迟：<50ms优秀，50-100ms良好，100-200ms可接受，>200ms较差
-         - 区分系统分发延迟 vs 应用处理延迟
-      2. **延迟分解**：
-         - dispatch_latency: 系统分发耗时
-         - handling_latency: 应用处理耗时
-         - ack_latency: ACK 耗时
-      3. **四象限分析**：大核/小核 Running 占比，Runnable 等待时间
-      4. **瓶颈定位**：延迟主要来自哪个环节
-      5. **优化建议**：基于实际问题给出1-3条具体建议
-
-      ## 严格要求
-      - 只基于提供的实际数据分析
-      - 使用 Perfetto 标准的延迟分解术语
-      - 格式清晰，不超过400字
-
 output:
-  display:
-    level: key
-    format: summary
+  format: structured

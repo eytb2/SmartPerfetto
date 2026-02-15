@@ -29,10 +29,10 @@
 ┌────────────────────────────────────────────────────────────────────────────┐
 │ Backend (Node.js/Express)                                                   │
 │ routes/agentRoutes.ts                                                       │
-│ └── runAgentDrivenAnalysis() + AgentDrivenOrchestrator.analyze()           │
+│ └── runAgentDrivenAnalysis() + AgentRuntime.analyze()                       │
 │                                                                            │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
-│  │ AgentDrivenOrchestrator (Thin Coordinator)                            │  │
+│  │ AgentRuntime (Thin Coordinator)                                       │  │
 │  │ - trace-scoped SessionContext / TraceAgentState / EntityStore          │  │
 │  │ - Follow-up + Drill-down resolve + Incremental scope                   │  │
 │  │ - FocusStore + InterventionController + AnalysisPlan                   │  │
@@ -65,7 +65,7 @@
 
 ```mermaid
 flowchart TD
-    A[用户问题] --> B[AgentDrivenOrchestrator]
+    A[用户问题] --> B[AgentRuntime]
     B --> C{Follow-up 类型}
 
     C -->|clarify| C1[ClarifyExecutor]
@@ -130,7 +130,7 @@ flowchart LR
 
 ### 2.1 Orchestrator：薄协调层（Thin Coordinator）
 
-代码：`backend/src/agent/core/agentDrivenOrchestrator.ts`
+代码：`backend/src/agentv2/runtime/agentRuntime.ts`
 
 - **只做协调，不做重逻辑**：初始化基础设施（MessageBus / Registry / CircuitBreaker 等），决定“怎么跑”，不做“具体怎么分析”。
 - **多轮上下文入口**：通过 `sessionContextManager.getOrCreate(sessionId, traceId)` 获取 `EnhancedSessionContext`（严格 trace-scoped）。
@@ -338,7 +338,7 @@ flowchart LR
 
 更详细的拆解与设计复盘在 `docs/architecture-analysis/`：
 - `docs/architecture-analysis/README.md`
-- `docs/architecture-analysis/01-agent-driven-orchestrator.md`
+- `docs/architecture-analysis/01-agent-runtime.md`
 - `docs/architecture-analysis/02-multi-round-conversation.md`
 - `docs/architecture-analysis/03-memory-state-management.md`
 - `docs/architecture-analysis/04-strategy-system.md`

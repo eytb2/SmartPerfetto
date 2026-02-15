@@ -22,14 +22,14 @@
 ### 1.1 入口与路由
 
 - HTTP 入口：`backend/src/routes/agentRoutes.ts` (`/api/agent/analyze`)
-- 主协调器：`backend/src/agent/core/agentDrivenOrchestrator.ts`
+- 主协调器：`backend/src/agentv2/runtime/agentRuntime.ts`
 - 策略注册：`backend/src/agent/strategies/registry.ts`
 
 ### 1.2 执行分流图（当前真实）
 
 ```mermaid
 flowchart TD
-    A[User Query] --> B[AgentDrivenOrchestrator]
+A[User Query] --> B[AgentRuntime]
     B --> C{Follow-up Type}
 
     C -->|clarify/compare/extend| D[Conversation Executors]

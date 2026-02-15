@@ -356,6 +356,18 @@ function extractTriggerPatterns(strategy: StagedAnalysisStrategy): string[] {
         '流畅', 'smooth', '滚动'
       );
       break;
+    case 'startup':
+      patterns.push(
+        '启动', '冷启动', '温启动', '热启动', 'startup', 'launch',
+        'cold start', 'warm start', 'hot start', 'ttid', 'ttfd'
+      );
+      break;
+    case 'interaction':
+      patterns.push(
+        '点击', '触摸', '响应', '输入延迟', '点击慢', '响应慢', '点击卡顿',
+        'click', 'tap', 'touch', 'input latency', 'response time', 'click delay'
+      );
+      break;
     case 'scene_reconstruction':
     case 'scene_reconstruction_quick':
       patterns.push(
@@ -388,6 +400,10 @@ function extractRequiredCapabilities(strategy: StagedAnalysisStrategy): string[]
         capabilities.push('memory/GC data');
       } else if (task.domain === 'binder') {
         capabilities.push('Binder/IPC data');
+      } else if (task.domain === 'interaction') {
+        capabilities.push('input event data', 'Binder/IPC data', 'CPU scheduling data');
+      } else if (task.domain === 'startup') {
+        capabilities.push('startup event data', 'CPU scheduling data');
       }
     }
   }
@@ -401,6 +417,8 @@ function extractRequiredCapabilities(strategy: StagedAnalysisStrategy): string[]
 function getStrategyDescription(strategyId: string): string {
   const descriptions: Record<string, string> = {
     scrolling: '滑动/卡顿分析策略。用于分析列表滑动性能问题，包括掉帧检测、帧耗时分析、主线程/RenderThread 瓶颈定位。适用于：滑动卡顿、列表掉帧、FPS 低、动画不流畅等问题。',
+    startup: '启动分析策略。用于分析应用冷启动/温启动/热启动性能，包括各阶段耗时分解、Binder 调用、CPU 调度。适用于：启动慢、TTID/TTFD 优化。',
+    interaction: '点击响应/交互分析策略。用于分析用户点击延迟、触摸响应卡顿、页面导航耗时等交互问题。包括慢事件检测、响应阶段分解（分发/处理/ACK）、瓶颈定位。适用于：点击响应慢、交互延迟、导航卡顿。',
     scene_reconstruction: '场景重建策略。用于全面分析 trace 中发生的事件，重建应用行为场景。适用于：不知道问题在哪、需要整体概览、想了解发生了什么。',
     scene_reconstruction_quick: '快速场景重建策略。轻量级版本，快速获取 trace 概览。适用于：快速了解 trace 内容。',
   };

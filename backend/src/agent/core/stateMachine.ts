@@ -1,7 +1,7 @@
 /**
  * SmartPerfetto Agent State Machine
  *
- * @deprecated Not used in Agent-Driven architecture (v5.0). See agentDrivenOrchestrator.ts.
+ * @deprecated Not used in Agent-Driven architecture (v5.0). See agentv2/runtime/agentRuntime.ts.
  *
  * 状态机核心组件，负责：
  * 1. 管理 Agent 生命周期状态转换
@@ -53,7 +53,7 @@ const STATE_TRANSITIONS: Record<AgentPhase, AgentPhase[]> = {
  * - 事件钩子
  *
  * @deprecated This class is no longer used in the Agent-Driven architecture (v5.0).
- * The new architecture uses AgentDrivenOrchestrator with StrategyExecutor/HypothesisExecutor
+ * The new architecture uses AgentRuntime with strategy/hypothesis executors
  * which manage their own lifecycle internally. Retained for potential future integration
  * with session persistence. Will be removed in v6.0.
  */

@@ -1,5 +1,5 @@
 name: scrolling_analysis
-version: "3.1"
+version: "2.0"  # v2.0: refactored to use shared _cpu_topology VIEW
 type: composite
 
 meta:
@@ -45,6 +45,17 @@ inputs:
     description: "每个滑动区间最多分析的掉帧帧数（默认 8）"
 
 steps:
+  # ==========================================================================
+  # Step 0: 初始化共享 CPU 拓扑视图
+  # ==========================================================================
+  - id: init_cpu_topology
+    type: skill
+    name: "初始化 CPU 拓扑"
+    skill: cpu_topology_view
+    display:
+      level: hidden
+    optional: true
+
   # ==========================================================================
   # L0: 数据源检测 - FrameTimeline 是否可用
   # ==========================================================================
@@ -915,11 +926,13 @@ steps:
           label: "主线程开始"
           type: timestamp
           unit: ns
+          clickAction: navigate_timeline
           hidden: true
         - name: main_end_ts
           label: "主线程结束"
           type: timestamp
           unit: ns
+          clickAction: navigate_timeline
           hidden: true
         - name: main_dur
           label: "主线程耗时"
@@ -931,11 +944,13 @@ steps:
           label: "渲染开始"
           type: timestamp
           unit: ns
+          clickAction: navigate_timeline
           hidden: true
         - name: render_end_ts
           label: "渲染结束"
           type: timestamp
           unit: ns
+          clickAction: navigate_timeline
           hidden: true
         - name: render_dur
           label: "渲染耗时"
@@ -1315,6 +1330,7 @@ steps:
   - id: root_cause_classification
     type: atomic
     name: "根因分类"
+    optional: true
     synthesize:
       role: conclusion
       fields:
@@ -1435,27 +1451,18 @@ steps:
           (SELECT max_dur_ms FROM app_frames) as max_dur_ms,
           ROUND((SELECT vsync_period_ns FROM vsync_config) / 1e6, 2) as frame_budget_ms
       ),
-      cpu_info AS (
-        SELECT
-          id as cpu,
-          CASE
-            WHEN capacity >= 1000 THEN 'big'
-            ELSE 'little'
-          END as core_type
-        FROM cpu
-      ),
       -- 主线程四象限分析
       main_thread_analysis AS (
         SELECT
-          SUM(CASE WHEN ts.state = 'Running' AND c.core_type = 'big' THEN ts.dur ELSE 0 END) as q1_big_core_ns,
-          SUM(CASE WHEN ts.state = 'Running' AND c.core_type = 'little' THEN ts.dur ELSE 0 END) as q2_small_core_ns,
+          SUM(CASE WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('prime', 'big') THEN ts.dur ELSE 0 END) as q1_big_core_ns,
+          SUM(CASE WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('medium', 'little') THEN ts.dur ELSE 0 END) as q2_small_core_ns,
           SUM(CASE WHEN ts.state = 'R' THEN ts.dur ELSE 0 END) as q3_runnable_ns,
           SUM(CASE WHEN ts.state IN ('S', 'D', 'I') THEN ts.dur ELSE 0 END) as q4_sleep_ns,
           SUM(ts.dur) as total_dur_ns
         FROM thread_state ts
         JOIN thread t ON ts.utid = t.utid
         JOIN process p ON t.upid = p.upid
-        LEFT JOIN cpu_info c ON ts.cpu = c.cpu
+        LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
         WHERE (p.name GLOB '${package}*' OR '${package}' = '')
           AND p.name NOT LIKE '/system/%'
           AND t.tid = p.pid
@@ -1465,14 +1472,15 @@ steps:
       -- RenderThread 分析
       render_thread_analysis AS (
         SELECT
-          SUM(CASE WHEN ts.state = 'Running' AND ts.cpu >= 4 THEN ts.dur ELSE 0 END) as q1_big_core_ns,
-          SUM(CASE WHEN ts.state = 'Running' AND ts.cpu < 4 THEN ts.dur ELSE 0 END) as q2_small_core_ns,
+          SUM(CASE WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('prime', 'big') THEN ts.dur ELSE 0 END) as q1_big_core_ns,
+          SUM(CASE WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('medium', 'little') THEN ts.dur ELSE 0 END) as q2_small_core_ns,
           SUM(CASE WHEN ts.state = 'R' THEN ts.dur ELSE 0 END) as q3_runnable_ns,
           SUM(CASE WHEN ts.state IN ('S', 'D', 'I') THEN ts.dur ELSE 0 END) as q4_sleep_ns,
           SUM(ts.dur) as total_dur_ns
         FROM thread_state ts
         JOIN thread t ON ts.utid = t.utid
         JOIN process p ON t.upid = p.upid
+        LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
         WHERE (p.name GLOB '${package}*' OR '${package}' = '')
           AND p.name NOT LIKE '/system/%'
           AND t.name = 'RenderThread'

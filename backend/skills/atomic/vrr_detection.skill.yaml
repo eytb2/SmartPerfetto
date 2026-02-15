@@ -50,6 +50,26 @@ steps:
     display:
       level: detail
       title: "刷新率分布"
+      columns:
+        - name: refresh_rate_bucket
+          label: "刷新率"
+          type: string
+        - name: frame_count
+          label: "帧数"
+          type: number
+          format: compact
+        - name: percentage
+          label: "占比"
+          type: percentage
+          format: percentage
+        - name: total_duration_sec
+          label: "时长(秒)"
+          type: number
+        - name: avg_interval_ms
+          label: "平均间隔"
+          type: duration
+          format: duration_ms
+          unit: ms
     sql: |
       WITH
       time_bounds AS (
@@ -99,7 +119,7 @@ steps:
       SELECT
         refresh_rate_bucket,
         COUNT(*) as frame_count,
-        ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) as percentage,
+        ROUND(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER (), 0), 2) as percentage,
         ROUND(SUM(interval_ns) / 1e9, 2) as total_duration_sec,
         ROUND(AVG(interval_ns) / 1e6, 2) as avg_interval_ms,
         bucket_order
@@ -116,6 +136,24 @@ steps:
     display:
       level: summary
       title: "VRR/LTPO 状态"
+      columns:
+        - name: vrr_mode
+          label: "VRR模式"
+          type: string
+        - name: active_refresh_rates
+          label: "活跃刷新率数"
+          type: number
+        - name: dominant_rate_pct
+          label: "主导率占比"
+          type: percentage
+          format: percentage
+        - name: mode_description
+          label: "描述"
+          type: string
+        - name: sample_count
+          label: "样本数"
+          type: number
+          format: compact
     sql: |
       WITH
       vsync_intervals AS (
@@ -151,7 +189,7 @@ steps:
         SELECT
           COUNT(DISTINCT bucket) as distinct_buckets,
           (SELECT COUNT(*) FROM vsync_intervals WHERE interval_ns IS NOT NULL) as total_intervals,
-          (SELECT ROUND(100.0 * MAX(cnt) / SUM(cnt), 1) FROM bucket_counts) as dominant_pct
+          (SELECT ROUND(100.0 * MAX(cnt) / NULLIF(SUM(cnt), 0), 1) FROM bucket_counts) as dominant_pct
         FROM bucket_counts
       )
       SELECT
@@ -178,6 +216,14 @@ steps:
     display:
       level: detail
       title: "刷新率切换"
+      columns:
+        - name: transition
+          label: "切换"
+          type: string
+        - name: switch_count
+          label: "切换次数"
+          type: number
+          format: compact
     sql: |
       WITH
       vsync_intervals AS (

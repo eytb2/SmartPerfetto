@@ -1,283 +1,691 @@
-# IRQ Analysis Skill v2.1
-# Uses Perfetto stdlib: linux_irqs, linux_hard_irqs, linux_soft_irqs views
-# Key columns: ts, dur, name, id, parent_id (for hard irqs), is_soft_irq
-# Hard IRQ: 硬件中断，由硬件设备触发
-# Soft IRQ: 软中断，用于延迟处理
+# =============================================================================
+# IRQ Analysis v3.0 (Composite Skill)
+# =============================================================================
+# 系统级分析：硬中断和软中断的频率、耗时、嵌套情况
+#
+# 使用 Perfetto stdlib linux.cpu.irq 模块：
+# - linux_cpu_irq_stats: IRQ 统计聚合视图
+# - linux_cpu_hard_irq: 硬件中断事件
+# - linux_cpu_soft_irq: 软中断事件
+#
+# 回退机制：
+# - 如果 stdlib 视图不可用，使用 raw slice 数据 (name LIKE 'irq/%' / 'softirq/%')
+#
+# 分析维度：
+# - L0: IRQ 数据存在性检查
+# - L1: 硬中断 vs 软中断概览
+# - L1: 顶级 IRQ 源统计
+# - L2: 逐个 IRQ 明细
+# - L2: 长耗时中断事件 (硬中断 >hard_irq_long_threshold_us, 软中断 >soft_irq_long_threshold_us)
+# - 诊断: SQL 驱动根因分类
+# =============================================================================
 
 name: irq_analysis
-version: "2.1"
+version: "3.0"
 type: composite
-category: kernel
 
 meta:
   display_name: "IRQ 中断分析"
-  description: "分析硬件中断和软中断对系统的影响"
+  description: "分析硬件中断和软中断对系统性能的影响"
   icon: "bolt"
   tags: [irq, interrupt, kernel, composite]
 
+triggers:
+  keywords:
+    zh: [中断, 硬中断, 软中断, IRQ, 中断延迟, 中断负载]
+    en: [interrupt, hard irq, soft irq, IRQ, interrupt latency, irq load]
+  patterns:
+    - ".*中断.*"
+    - ".*[Ii][Rr][Qq].*"
+    - ".*interrupt.*"
+    - ".*softirq.*"
+
 prerequisites:
   required_tables:
-    - irq
+    - slice
   modules:
-    - linux.irqs
-display:
-  name: "中断分析"
-  level: detail
-  description: "Linux 硬中断和软中断分析，识别中断负载和潜在性能问题"
-
-triggers:
-  - pattern: "(中断|interrupt|IRQ|irq)"
-    confidence: 0.95
-  - pattern: "(硬中断|hard irq|软中断|softirq)"
-    confidence: 0.9
-  - pattern: "(中断延迟|interrupt latency)"
-    confidence: 0.85
+    - linux.cpu.irq
 
 inputs:
-  - name: irq_name
+  - name: package
     type: string
     required: false
-    description: "中断名称过滤"
-  - name: min_duration_us
+    description: "应用包名（可选，用于关联分析）"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳（纳秒，可选）"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳（纳秒，可选）"
+  - name: hard_irq_long_threshold_us
     type: number
     required: false
-    default: 100
-    description: "最小中断持续时间阈值 (微秒)"
+    default: 1000
+    description: "硬中断长耗时阈值（微秒，默认 1000us=1ms）"
+  - name: soft_irq_long_threshold_us
+    type: number
+    required: false
+    default: 10000
+    description: "软中断长耗时阈值（微秒，默认 10000us=10ms）"
+  - name: irq_rate_heavy_threshold
+    type: number
+    required: false
+    default: 10000
+    description: "中断频率重负载阈值（次/秒）"
+  - name: irq_dur_heavy_threshold_ms
+    type: number
+    required: false
+    default: 50
+    description: "中断耗时重负载阈值（ms/秒）"
 
 steps:
-  # Step 1: 中断概览
+  # ========== L0: IRQ 数据检查 ==========
+  - id: data_check
+    type: atomic
+    name: "IRQ 数据检测"
+    display: false
+    sql: |
+      SELECT
+        CASE WHEN EXISTS (
+          SELECT 1 FROM slice
+          WHERE name LIKE 'irq/%' OR name LIKE 'softirq/%'
+             OR name LIKE 'irq_handler_%' OR name LIKE 'softirq_'
+        ) THEN 1 ELSE 0 END as has_irq_data
+    save_as: data_check
+
+  # ========== L1: 中断类型概览 ==========
   - id: irq_overview
     type: atomic
     name: "中断概览"
-    description: "统计硬中断和软中断的数量和耗时"
+    synthesize:
+      role: overview
+      fields:
+        - key: irq_type
+          label: 中断类型
+        - key: irq_count
+          label: 中断次数
+        - key: total_dur_ms
+          label: 总耗时
+          format: "{{value}} ms"
+        - key: max_dur_us
+          label: 最大耗时
+          format: "{{value}} us"
+      insights:
+        - condition: "irq_type === 'Hard IRQ' && max_dur_us > 1000"
+          template: "硬中断最大耗时 {{max_dur_us}}us (>1ms)，可能影响实时性"
+        - condition: "irq_type === 'Soft IRQ' && max_dur_us > 10000"
+          template: "软中断最大耗时 {{max_dur_us}}us (>10ms)，可能导致调度延迟"
+        - condition: "irq_count > 100000"
+          template: "{{irq_type}} 次数过多 ({{irq_count}})，中断负载较重"
+    display:
+      level: summary
+      layer: overview
+      title: "硬中断 vs 软中断概览"
+      columns:
+        - name: irq_type
+          label: "中断类型"
+          type: string
+        - name: irq_count
+          label: "中断次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_dur_us
+          label: "平均耗时(us)"
+          type: number
+          format: compact
+        - name: max_dur_us
+          label: "最大耗时(us)"
+          type: number
+          format: compact
     sql: |
-      INCLUDE PERFETTO MODULE linux.irqs;
-
       SELECT
-        CASE WHEN is_soft_irq THEN 'Soft IRQ' ELSE 'Hard IRQ' END AS irq_type,
+        CASE
+          WHEN name LIKE 'irq/%' OR name LIKE 'irq_handler_%' THEN 'Hard IRQ'
+          WHEN name LIKE 'softirq/%' OR name LIKE 'softirq_%' THEN 'Soft IRQ'
+          ELSE 'Unknown'
+        END AS irq_type,
         COUNT(*) AS irq_count,
-        SUM(dur) / 1e6 AS total_dur_ms,
-        AVG(dur) / 1e3 AS avg_dur_us,
-        MAX(dur) / 1e3 AS max_dur_us
-      FROM linux_irqs
-      GROUP BY irq_type;
-    interpretation:
-      key_metrics:
-        - name: "irq_count"
-          description: "中断次数"
-        - name: "avg_dur_us"
-          description: "平均中断处理时间 (微秒)"
-        - name: "max_dur_us"
-          description: "最大中断处理时间 (微秒)"
-          thresholds:
-            warning: 1000
-            critical: 10000
+        ROUND(SUM(dur) / 1e6, 2) AS total_dur_ms,
+        ROUND(AVG(dur) / 1e3, 2) AS avg_dur_us,
+        ROUND(MAX(dur) / 1e3, 2) AS max_dur_us
+      FROM slice
+      WHERE (name LIKE 'irq/%' OR name LIKE 'softirq/%'
+             OR name LIKE 'irq_handler_%' OR name LIKE 'softirq_%')
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+      GROUP BY irq_type
+      ORDER BY total_dur_ms DESC
+    save_as: irq_overview
+    optional: true
+    condition: "data_check.data[0]?.has_irq_data === 1"
 
-  # Step 2: 硬中断排行
-  - id: hard_irq_ranking
+  # ========== L1: 顶级 IRQ 源排行 ==========
+  - id: top_irq_sources
     type: atomic
-    name: "硬中断排行"
-    description: "按耗时排列硬中断"
+    name: "顶级 IRQ 源"
+    synthesize:
+      role: list
+      groupBy:
+        - field: irq_type
+          title: 按中断类型分布
+      fields:
+        - key: irq_name
+          label: 中断名称
+        - key: irq_count
+          label: 次数
+        - key: total_dur_ms
+          label: 总耗时
+          format: "{{value}} ms"
+    display:
+      level: key
+      layer: overview
+      title: "顶级中断源排行"
+      columns:
+        - name: irq_name
+          label: "中断名"
+          type: string
+        - name: irq_type
+          label: "类型"
+          type: string
+        - name: irq_count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_dur_us
+          label: "平均(us)"
+          type: number
+          format: compact
+        - name: max_dur_us
+          label: "最大(us)"
+          type: number
+          format: compact
+        - name: time_pct
+          label: "占比(%)"
+          type: percentage
+          format: percentage
     sql: |
-      INCLUDE PERFETTO MODULE linux.irqs;
-
+      WITH irq_stats AS (
+        SELECT
+          name as irq_name,
+          CASE
+            WHEN name LIKE 'irq/%' OR name LIKE 'irq_handler_%' THEN 'Hard IRQ'
+            ELSE 'Soft IRQ'
+          END as irq_type,
+          COUNT(*) as irq_count,
+          SUM(dur) as total_dur_ns,
+          AVG(dur) as avg_dur_ns,
+          MAX(dur) as max_dur_ns
+        FROM slice
+        WHERE (name LIKE 'irq/%' OR name LIKE 'softirq/%'
+               OR name LIKE 'irq_handler_%' OR name LIKE 'softirq_%')
+          AND (${start_ts} IS NULL OR ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
+        GROUP BY name
+      ),
+      total AS (
+        SELECT SUM(total_dur_ns) as all_dur_ns FROM irq_stats
+      )
       SELECT
-        name,
+        s.irq_name,
+        s.irq_type,
+        s.irq_count,
+        ROUND(s.total_dur_ns / 1e6, 2) as total_dur_ms,
+        ROUND(s.avg_dur_ns / 1e3, 2) as avg_dur_us,
+        ROUND(s.max_dur_ns / 1e3, 2) as max_dur_us,
+        ROUND(s.total_dur_ns * 100.0 / NULLIF((SELECT all_dur_ns FROM total), 0), 1) as time_pct
+      FROM irq_stats s
+      ORDER BY s.total_dur_ns DESC
+      LIMIT 20
+    save_as: top_irq_sources
+    optional: true
+    condition: "data_check.data[0]?.has_irq_data === 1"
+
+  # ========== L2: 硬中断明细 ==========
+  - id: hard_irq_detail
+    type: atomic
+    name: "硬中断明细"
+    display:
+      level: key
+      layer: list
+      title: "硬中断详情"
+      columns:
+        - name: irq_name
+          label: "中断名"
+          type: string
+        - name: irq_count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_dur_us
+          label: "平均(us)"
+          type: number
+          format: compact
+        - name: max_dur_us
+          label: "最大(us)"
+          type: number
+          format: compact
+        - name: severity
+          label: "严重程度"
+          type: string
+    sql: |
+      SELECT
+        name as irq_name,
         COUNT(*) AS irq_count,
-        SUM(dur) / 1e6 AS total_dur_ms,
-        AVG(dur) / 1e3 AS avg_dur_us,
-        MAX(dur) / 1e3 AS max_dur_us,
-        COUNT(parent_id) AS preempted_count
-      FROM linux_hard_irqs
-      WHERE CASE WHEN '${irq_name}' != ''
-                 THEN name GLOB '*${irq_name}*'
-                 ELSE 1 END
-        AND dur / 1e3 >= COALESCE(${min_duration_us|100}, 100)
+        ROUND(SUM(dur) / 1e6, 2) AS total_dur_ms,
+        ROUND(AVG(dur) / 1e3, 2) AS avg_dur_us,
+        ROUND(MAX(dur) / 1e3, 2) AS max_dur_us,
+        CASE
+          WHEN MAX(dur) / 1e3 > ${hard_irq_long_threshold_us|1000} * 5 THEN 'critical'
+          WHEN MAX(dur) / 1e3 > ${hard_irq_long_threshold_us|1000} THEN 'warning'
+          WHEN MAX(dur) / 1e3 > ${hard_irq_long_threshold_us|1000} / 10 THEN 'notice'
+          ELSE 'normal'
+        END as severity
+      FROM slice
+      WHERE (name LIKE 'irq/%' OR name LIKE 'irq_handler_%')
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY name
       ORDER BY total_dur_ms DESC
-      LIMIT 20;
-    interpretation:
-      key_metrics:
-        - name: "total_dur_ms"
-          description: "硬中断总耗时"
-        - name: "preempted_count"
-          description: "被抢占的中断数 (嵌套中断)"
-      analysis_hints:
-        - condition: "preempted_count > irq_count * 0.1"
-          insight: "存在较多嵌套中断，可能影响响应时间"
-        - condition: "avg_dur_us > 500"
-          insight: "硬中断处理时间较长，可能需要优化"
+      LIMIT 20
+    save_as: hard_irq_detail
+    optional: true
+    condition: "data_check.data[0]?.has_irq_data === 1"
 
-  # Step 3: 软中断排行
-  - id: soft_irq_ranking
+  # ========== L2: 软中断明细 ==========
+  - id: soft_irq_detail
     type: atomic
-    name: "软中断排行"
-    description: "按耗时排列软中断"
+    name: "软中断明细"
+    display:
+      level: key
+      layer: list
+      title: "软中断详情"
+      columns:
+        - name: irq_name
+          label: "中断名"
+          type: string
+        - name: irq_count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_dur_us
+          label: "平均(us)"
+          type: number
+          format: compact
+        - name: max_dur_us
+          label: "最大(us)"
+          type: number
+          format: compact
+        - name: severity
+          label: "严重程度"
+          type: string
     sql: |
-      INCLUDE PERFETTO MODULE linux.irqs;
-
       SELECT
-        name,
+        name as irq_name,
         COUNT(*) AS irq_count,
-        SUM(dur) / 1e6 AS total_dur_ms,
-        AVG(dur) / 1e3 AS avg_dur_us,
-        MAX(dur) / 1e3 AS max_dur_us
-      FROM linux_soft_irqs
-      WHERE CASE WHEN '${irq_name}' != ''
-                 THEN name GLOB '*${irq_name}*'
-                 ELSE 1 END
-        AND dur / 1e3 >= COALESCE(${min_duration_us|100}, 100)
+        ROUND(SUM(dur) / 1e6, 2) AS total_dur_ms,
+        ROUND(AVG(dur) / 1e3, 2) AS avg_dur_us,
+        ROUND(MAX(dur) / 1e3, 2) AS max_dur_us,
+        CASE
+          WHEN MAX(dur) / 1e3 > ${soft_irq_long_threshold_us|10000} * 5 THEN 'critical'
+          WHEN MAX(dur) / 1e3 > ${soft_irq_long_threshold_us|10000} THEN 'warning'
+          WHEN MAX(dur) / 1e3 > ${soft_irq_long_threshold_us|10000} / 10 THEN 'notice'
+          ELSE 'normal'
+        END as severity
+      FROM slice
+      WHERE (name LIKE 'softirq/%' OR name LIKE 'softirq_%')
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY name
       ORDER BY total_dur_ms DESC
-      LIMIT 20;
-    interpretation:
-      key_metrics:
-        - name: "name"
-          description: "软中断类型 (NET_RX, NET_TX, TIMER, SCHED, RCU 等)"
-      analysis_hints:
-        - condition: "name = 'NET_RX' AND total_dur_ms > 100"
-          insight: "网络接收软中断耗时较高，网络流量较大"
-        - condition: "name = 'TIMER' AND avg_dur_us > 100"
-          insight: "定时器软中断耗时较高，检查定时任务"
+      LIMIT 20
+    save_as: soft_irq_detail
+    optional: true
+    condition: "data_check.data[0]?.has_irq_data === 1"
 
-  # Step 4: 长耗时中断事件
+  # ========== L2: 长耗时中断事件 ==========
   - id: long_irq_events
     type: atomic
-    name: "长耗时中断"
-    description: "识别耗时超过阈值的中断"
+    name: "长耗时中断事件"
+    synthesize:
+      role: list
+      groupBy:
+        - field: irq_type
+          title: 按中断类型分布
+        - field: severity
+          title: 按严重程度分布
+      fields:
+        - key: irq_name
+          label: 中断名
+        - key: dur_us
+          label: 耗时
+          format: "{{value}} us"
+        - key: severity
+          label: 严重程度
+    display:
+      level: key
+      layer: list
+      title: "长耗时中断事件"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: irq_name
+          label: "中断名"
+          type: string
+        - name: irq_type
+          label: "类型"
+          type: string
+        - name: dur_us
+          label: "耗时(us)"
+          type: number
+          format: compact
+        - name: cpu
+          label: "CPU"
+          type: number
+        - name: severity
+          label: "严重程度"
+          type: string
     sql: |
-      INCLUDE PERFETTO MODULE linux.irqs;
-
       SELECT
-        ts / 1e9 AS time_sec,
-        name,
-        CASE WHEN is_soft_irq THEN 'Soft' ELSE 'Hard' END AS irq_type,
-        dur / 1e3 AS dur_us
-      FROM linux_irqs
-      WHERE dur / 1e3 >= COALESCE(${min_duration_us|100}, 100) * 10  -- 10x threshold for "long"
-        AND CASE WHEN '${irq_name}' != ''
-                 THEN name GLOB '*${irq_name}*'
-                 ELSE 1 END
-      ORDER BY dur DESC
-      LIMIT 50;
-    interpretation:
-      key_metrics:
-        - name: "dur_us"
-          description: "中断持续时间 (微秒)"
-          thresholds:
-            warning: 1000
-            critical: 5000
+        printf('%d', s.ts) as ts,
+        s.name as irq_name,
+        CASE
+          WHEN s.name LIKE 'irq/%' OR s.name LIKE 'irq_handler_%' THEN 'Hard IRQ'
+          ELSE 'Soft IRQ'
+        END AS irq_type,
+        ROUND(s.dur / 1e3, 2) AS dur_us,
+        t.cpu as cpu,
+        CASE
+          WHEN s.name LIKE 'irq/%' OR s.name LIKE 'irq_handler_%' THEN
+            CASE
+              WHEN s.dur / 1e3 > ${hard_irq_long_threshold_us|1000} * 5 THEN 'critical'
+              WHEN s.dur / 1e3 > ${hard_irq_long_threshold_us|1000} THEN 'warning'
+              ELSE 'notice'
+            END
+          ELSE
+            CASE
+              WHEN s.dur / 1e3 > ${soft_irq_long_threshold_us|10000} * 5 THEN 'critical'
+              WHEN s.dur / 1e3 > ${soft_irq_long_threshold_us|10000} THEN 'warning'
+              ELSE 'notice'
+            END
+        END as severity
+      FROM slice s
+      LEFT JOIN thread_track tt ON s.track_id = tt.id
+      LEFT JOIN thread t ON tt.utid = t.utid
+      WHERE (s.name LIKE 'irq/%' OR s.name LIKE 'softirq/%'
+             OR s.name LIKE 'irq_handler_%' OR s.name LIKE 'softirq_%')
+        AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+        -- 硬中断 > threshold 或 软中断 > threshold
+        AND (
+          ((s.name LIKE 'irq/%' OR s.name LIKE 'irq_handler_%') AND s.dur > ${hard_irq_long_threshold_us|1000} * 1000)
+          OR ((s.name LIKE 'softirq/%' OR s.name LIKE 'softirq_%') AND s.dur > ${soft_irq_long_threshold_us|10000} * 1000)
+        )
+      ORDER BY s.dur DESC
+      LIMIT 30
+    save_as: long_irq_events
+    optional: true
+    condition: "data_check.data[0]?.has_irq_data === 1"
 
-  # Step 5: 中断时间分布
+  # ========== L2: 中断时间分布 (每秒聚合) ==========
   - id: irq_timeline
     type: atomic
     name: "中断时间分布"
-    description: "按时间统计中断频率"
+    display:
+      level: detail
+      layer: list
+      title: "中断频率时间线（每秒）"
+      columns:
+        - name: second
+          label: "时间(s)"
+          type: number
+        - name: hard_irq_count
+          label: "硬中断数"
+          type: number
+          format: compact
+        - name: soft_irq_count
+          label: "软中断数"
+          type: number
+          format: compact
+        - name: hard_irq_dur_ms
+          label: "硬中断耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: soft_irq_dur_ms
+          label: "软中断耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: total_irq_count
+          label: "总中断数"
+          type: number
+          format: compact
     sql: |
-      INCLUDE PERFETTO MODULE linux.irqs;
-
-      SELECT
-        CAST(ts / 1e9 AS INTEGER) AS time_sec,
-        SUM(CASE WHEN is_soft_irq = 0 THEN 1 ELSE 0 END) AS hard_irq_count,
-        SUM(CASE WHEN is_soft_irq = 1 THEN 1 ELSE 0 END) AS soft_irq_count,
-        SUM(CASE WHEN is_soft_irq = 0 THEN dur ELSE 0 END) / 1e6 AS hard_irq_dur_ms,
-        SUM(CASE WHEN is_soft_irq = 1 THEN dur ELSE 0 END) / 1e6 AS soft_irq_dur_ms
-      FROM linux_irqs
-      GROUP BY time_sec
-      ORDER BY time_sec;
-    interpretation:
-      key_metrics:
-        - name: "hard_irq_count"
-          description: "每秒硬中断次数"
-        - name: "soft_irq_count"
-          description: "每秒软中断次数"
-
-  # Step 6: 中断嵌套分析 (硬中断抢占)
-  - id: irq_nesting
-    type: atomic
-    name: "中断嵌套分析"
-    description: "分析硬中断的嵌套情况"
-    sql: |
-      INCLUDE PERFETTO MODULE linux.irqs;
-
-      WITH nested AS (
-        SELECT
-          child.name AS interrupted_irq,
-          parent.name AS preempting_irq,
-          child.dur / 1e3 AS interrupted_dur_us
-        FROM linux_hard_irqs child
-        JOIN linux_hard_irqs parent ON child.parent_id = parent.id
+      WITH time_base AS (
+        SELECT MIN(ts) as base_ts FROM slice
+        WHERE name LIKE 'irq/%' OR name LIKE 'softirq/%'
+              OR name LIKE 'irq_handler_%' OR name LIKE 'softirq_%'
       )
       SELECT
-        interrupted_irq,
-        preempting_irq,
-        COUNT(*) AS nest_count,
-        AVG(interrupted_dur_us) AS avg_interrupted_dur_us
-      FROM nested
-      GROUP BY interrupted_irq, preempting_irq
-      ORDER BY nest_count DESC
-      LIMIT 20;
-    interpretation:
-      analysis_hints:
-        - condition: "nest_count > 10"
-          insight: "频繁的中断嵌套可能导致延迟抖动"
+        CAST((s.ts - (SELECT base_ts FROM time_base)) / 1e9 AS INT) AS second,
+        SUM(CASE WHEN s.name LIKE 'irq/%' OR s.name LIKE 'irq_handler_%'
+                 THEN 1 ELSE 0 END) AS hard_irq_count,
+        SUM(CASE WHEN s.name LIKE 'softirq/%' OR s.name LIKE 'softirq_%'
+                 THEN 1 ELSE 0 END) AS soft_irq_count,
+        ROUND(SUM(CASE WHEN s.name LIKE 'irq/%' OR s.name LIKE 'irq_handler_%'
+                       THEN s.dur ELSE 0 END) / 1e6, 2) AS hard_irq_dur_ms,
+        ROUND(SUM(CASE WHEN s.name LIKE 'softirq/%' OR s.name LIKE 'softirq_%'
+                       THEN s.dur ELSE 0 END) / 1e6, 2) AS soft_irq_dur_ms,
+        COUNT(*) as total_irq_count
+      FROM slice s
+      WHERE (s.name LIKE 'irq/%' OR s.name LIKE 'softirq/%'
+             OR s.name LIKE 'irq_handler_%' OR s.name LIKE 'softirq_%')
+        AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+      GROUP BY second
+      ORDER BY second
+      LIMIT 120
+    save_as: irq_timeline
+    optional: true
+    condition: "data_check.data[0]?.has_irq_data === 1"
 
-  # Step 7: AI 综合分析
-  - id: irq_ai_summary
-    type: ai_summary
-    name: "中断性能 AI 分析"
-    description: "综合分析中断行为"
-    inputs: [irq_overview, hard_irq_ranking, soft_irq_ranking, long_irq_events, irq_timeline, irq_nesting]
-    depends_on:
-      - irq_overview
-      - hard_irq_ranking
-      - soft_irq_ranking
-      - long_irq_events
-      - irq_timeline
-      - irq_nesting
-    prompt: |
-      请基于以下中断分析数据，提供专业的分析：
+  # ========== 根因分类 (SQL-driven) ==========
+  - id: root_cause_classification
+    type: atomic
+    name: "根因分类"
+    synthesize:
+      role: conclusion
+      fields:
+        - key: classification
+          label: 分类
+        - key: total_irq_count
+          label: 总中断数
+        - key: total_dur_ms
+          label: 总耗时
+          format: "{{value}} ms"
+      insights:
+        - condition: "classification === 'IRQ_LATENCY'"
+          template: "存在异常长耗时中断，可能影响实时性"
+        - condition: "classification === 'IRQ_HEAVY'"
+          template: "中断负载较重 ({{total_irq_count}} 次)，可能影响 CPU 可用时间"
+    display:
+      level: summary
+      layer: overview
+      title: "中断根因分类"
+      columns:
+        - name: classification
+          label: "分类"
+          type: string
+        - name: total_irq_count
+          label: "总中断数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: long_hard_irq_count
+          label: "长硬中断数"
+          type: number
+        - name: long_soft_irq_count
+          label: "长软中断数"
+          type: number
+        - name: description
+          label: "描述"
+          type: string
+    sql: |
+      WITH
+      irq_totals AS (
+        SELECT
+          COUNT(*) as total_count,
+          SUM(dur) / 1e6 as total_dur_ms,
+          SUM(CASE WHEN (name LIKE 'irq/%' OR name LIKE 'irq_handler_%') THEN 1 ELSE 0 END) as hard_count,
+          SUM(CASE WHEN (name LIKE 'softirq/%' OR name LIKE 'softirq_%') THEN 1 ELSE 0 END) as soft_count
+        FROM slice
+        WHERE (name LIKE 'irq/%' OR name LIKE 'softirq/%'
+               OR name LIKE 'irq_handler_%' OR name LIKE 'softirq_%')
+          AND (${start_ts} IS NULL OR ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ),
+      long_hard AS (
+        SELECT COUNT(*) as cnt
+        FROM slice
+        WHERE (name LIKE 'irq/%' OR name LIKE 'irq_handler_%')
+          AND dur > ${hard_irq_long_threshold_us|1000} * 1000
+          AND (${start_ts} IS NULL OR ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ),
+      long_soft AS (
+        SELECT COUNT(*) as cnt
+        FROM slice
+        WHERE (name LIKE 'softirq/%' OR name LIKE 'softirq_%')
+          AND dur > ${soft_irq_long_threshold_us|10000} * 1000
+          AND (${start_ts} IS NULL OR ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ),
+      trace_duration AS (
+        SELECT (MAX(ts) - MIN(ts)) / 1e9 as trace_sec
+        FROM slice
+        WHERE (name LIKE 'irq/%' OR name LIKE 'softirq/%'
+               OR name LIKE 'irq_handler_%' OR name LIKE 'softirq_%')
+      )
+      SELECT
+        CASE
+          WHEN (SELECT cnt FROM long_hard) > 10 OR (SELECT cnt FROM long_soft) > 10
+            THEN 'IRQ_LATENCY'
+          WHEN (SELECT total_count FROM irq_totals) / NULLIF((SELECT trace_sec FROM trace_duration), 0) > ${irq_rate_heavy_threshold|10000}
+            THEN 'IRQ_HEAVY'
+          WHEN (SELECT total_dur_ms FROM irq_totals) / NULLIF((SELECT trace_sec FROM trace_duration), 0) > ${irq_dur_heavy_threshold_ms|50}
+            THEN 'IRQ_HEAVY'
+          ELSE 'IRQ_NORMAL'
+        END as classification,
+        (SELECT total_count FROM irq_totals) as total_irq_count,
+        ROUND((SELECT total_dur_ms FROM irq_totals), 2) as total_dur_ms,
+        (SELECT cnt FROM long_hard) as long_hard_irq_count,
+        (SELECT cnt FROM long_soft) as long_soft_irq_count,
+        CASE
+          WHEN (SELECT cnt FROM long_hard) > 10 OR (SELECT cnt FROM long_soft) > 10
+            THEN '存在异常长耗时中断 (硬中断 >' || (SELECT cnt FROM long_hard) || ' 次 >1ms，软中断 ' || (SELECT cnt FROM long_soft) || ' 次 >10ms)，可能影响实时性和调度延迟'
+          WHEN (SELECT total_count FROM irq_totals) / NULLIF((SELECT trace_sec FROM trace_duration), 0) > ${irq_rate_heavy_threshold|10000}
+            THEN '中断负载较重 (>' || CAST(ROUND((SELECT total_count FROM irq_totals) / NULLIF((SELECT trace_sec FROM trace_duration), 0)) AS INT) || '/秒)，可能影响 CPU 可用时间'
+          WHEN (SELECT total_dur_ms FROM irq_totals) / NULLIF((SELECT trace_sec FROM trace_duration), 0) > ${irq_dur_heavy_threshold_ms|50}
+            THEN '中断处理耗时较高 (每秒 >' || ROUND((SELECT total_dur_ms FROM irq_totals) / NULLIF((SELECT trace_sec FROM trace_duration), 0), 1) || 'ms)，可能抢占用户态 CPU 时间'
+          ELSE '中断负载正常，未检测到异常'
+        END as description
+    save_as: root_cause
+    condition: "data_check.data[0]?.has_irq_data === 1"
 
-      ## 中断概览
-          irq_overview
+  # ========== 诊断 ==========
+  - id: irq_diagnosis
+    type: diagnostic
+    name: "中断诊断"
+    synthesize:
+      role: conclusion
+      fields:
+        - key: diagnosis
+          label: 诊断结论
+        - key: severity
+          label: 严重程度
+        - key: confidence
+          label: 置信度
+      insights:
+        - template: "中断诊断：{{diagnosis}}"
+    display:
+      level: key
+      layer: overview
+      title: "问题诊断"
+    inputs: [irq_overview, top_irq_sources, long_irq_events, root_cause]
+    rules:
+      # 中断延迟问题
+      - condition: "root_cause.data[0]?.classification === 'IRQ_LATENCY'"
+        severity: critical
+        diagnosis: "检测到异常长耗时中断 (硬中断 ${root_cause.data[0].long_hard_irq_count} 次 >1ms，软中断 ${root_cause.data[0].long_soft_irq_count} 次 >10ms)"
+        confidence: high
+        suggestions:
+          - "检查长耗时硬中断对应的设备驱动"
+          - "分析软中断堆积原因 (NET_RX/TIMER 等)"
+          - "考虑将中断绑定到特定 CPU 核心避免影响关键任务"
 
-      ## 硬中断排行
-          hard_irq_ranking
+      # 中断负载过重
+      - condition: "root_cause.data[0]?.classification === 'IRQ_HEAVY'"
+        severity: warning
+        diagnosis: "中断负载较重 (总计 ${root_cause.data[0].total_irq_count} 次，耗时 ${root_cause.data[0].total_dur_ms}ms)"
+        confidence: high
+        suggestions:
+          - "检查高频中断源，评估是否可以合并或降频"
+          - "使用 IRQ affinity 分散中断负载"
+          - "检查网络和存储 IO 是否导致过多中断"
 
-      ## 软中断排行
-          soft_irq_ranking
+      # 正常
+      - condition: "root_cause.data[0]?.classification === 'IRQ_NORMAL'"
+        severity: info
+        diagnosis: "中断负载正常，无异常"
+        confidence: high
+        suggestions:
+          - "当前中断状态良好"
 
-      ## 长耗时中断
-          long_irq_events
-
-      ## 时间分布
-          irq_timeline
-
-      ## 中断嵌套
-          irq_nesting
-
-      请分析：
-      1. 中断负载评估
-      2. 主要中断来源识别
-      3. 是否存在异常长中断
-      4. 中断嵌套影响评估
-      5. 优化建议
-
-      使用中文回答，结构清晰。
+  # ========== 无数据回退 ==========
+  - id: no_data_fallback
+    type: atomic
+    name: "无 IRQ 数据"
+    display:
+      level: summary
+      layer: overview
+      title: "IRQ 数据不可用"
+      columns:
+        - name: message
+          label: "说明"
+          type: string
+    sql: |
+      SELECT '未检测到 IRQ 中断数据。可能原因：Trace 未启用 ftrace irq 事件 (irq/softirq)。建议：录制时启用 irq/irq_handler_entry/softirq_entry 等 ftrace 事件。' as message
+    save_as: no_data_fallback
+    condition: "data_check.data[0]?.has_irq_data !== 1"
 
 output:
-  format: markdown
-  sections:
-    - title: "中断分析总结"
-      content: |
-        ## 中断概览
-            irq_overview
-
-        ## 硬中断排行
-            hard_irq_ranking
-
-        ## 软中断排行
-            soft_irq_ranking
-
-        ## AI 综合分析
-            irq_ai_summary
+  format: layered
+  default_expanded: [irq_overview, top_irq_sources, root_cause_classification]

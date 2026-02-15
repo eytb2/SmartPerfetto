@@ -75,6 +75,45 @@ steps:
       level: summary
       layer: session
       title: "区间 ${session_id} - 完整滑动统计"
+      columns:
+        - name: session_id
+          label: "区间"
+          type: number
+        - name: total_frames
+          label: "总帧数"
+          type: number
+          format: compact
+        - name: janky_frames
+          label: "掉帧数"
+          type: number
+          format: compact
+        - name: jank_rate
+          label: "掉帧率"
+          type: percentage
+          format: percentage
+        - name: avg_frame_ms
+          label: "平均帧耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_frame_ms
+          label: "最大帧耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: min_frame_ms
+          label: "最小帧耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: estimated_fps
+          label: "估算 FPS"
+          type: number
+        - name: duration_ms
+          label: "持续时间"
+          type: duration
+          format: duration_ms
+          unit: ms
     sql: |
       WITH frames AS (
         SELECT
@@ -111,6 +150,40 @@ steps:
       level: detail
       layer: session
       title: "区间 ${session_id} - 按压滑动阶段"
+      columns:
+        - name: phase
+          label: "阶段"
+          type: string
+        - name: frame_count
+          label: "帧数"
+          type: number
+          format: compact
+        - name: janky_count
+          label: "掉帧数"
+          type: number
+          format: compact
+        - name: jank_rate
+          label: "掉帧率"
+          type: percentage
+          format: percentage
+        - name: avg_frame_ms
+          label: "平均帧耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_frame_ms
+          label: "最大帧耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: fps
+          label: "FPS"
+          type: number
+        - name: duration_ms
+          label: "持续时间"
+          type: duration
+          format: duration_ms
+          unit: ms
     sql: |
       WITH touch_frames AS (
         SELECT
@@ -118,7 +191,7 @@ steps:
           dur,
           dur / 1e6 AS dur_ms,
           CASE
-            WHEN dur > 16666666 * 2 THEN 1
+            WHEN dur > ${vsync_period_ns} * 2 THEN 1
             ELSE 0
           END AS is_janky
         FROM slice
@@ -148,6 +221,40 @@ steps:
       level: detail
       layer: session
       title: "区间 ${session_id} - Fling 阶段"
+      columns:
+        - name: phase
+          label: "阶段"
+          type: string
+        - name: frame_count
+          label: "帧数"
+          type: number
+          format: compact
+        - name: janky_count
+          label: "掉帧数"
+          type: number
+          format: compact
+        - name: jank_rate
+          label: "掉帧率"
+          type: percentage
+          format: percentage
+        - name: avg_frame_ms
+          label: "平均帧耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_frame_ms
+          label: "最大帧耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: fps
+          label: "FPS"
+          type: number
+        - name: duration_ms
+          label: "持续时间"
+          type: duration
+          format: duration_ms
+          unit: ms
     sql: |
       WITH fling_frames AS (
         SELECT
@@ -155,7 +262,7 @@ steps:
           dur,
           dur / 1e6 AS dur_ms,
           CASE
-            WHEN dur > 16666666 * 2 THEN 1
+            WHEN dur > ${vsync_period_ns} * 2 THEN 1
             ELSE 0
           END AS is_janky
         FROM slice
@@ -185,6 +292,29 @@ steps:
       level: detail
       layer: list
       title: "掉帧列表 (区间 ${session_id})"
+      columns:
+        - name: frame_number
+          label: "帧号"
+          type: number
+        - name: phase
+          label: "阶段"
+          type: string
+        - name: ts_str
+          label: "开始时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: dur_ms
+          label: "帧耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: jank_level
+          label: "卡顿等级"
+          type: string
+        - name: frames_dropped
+          label: "丢帧数"
+          type: number
     sql: |
       WITH frames AS (
         SELECT

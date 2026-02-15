@@ -1,361 +1,804 @@
-# =============================================================================
-# SurfaceFlinger 分析 Skill (SurfaceFlinger Analysis)
-# =============================================================================
-# 版本: 1.0.0
-# 作者: SmartPerfetto Team
-# 最后更新: 2024-12
-#
-# 本 Skill 用于分析 SurfaceFlinger 渲染合成，包括：
-# - 帧合成延迟
-# - GPU 合成分析
-# - VSYNC 分析
-# - Fence 等待时间
-# =============================================================================
-
 name: surfaceflinger_analysis
-version: "1.0.0"
+version: "3.0"
 type: composite
-category: rendering
-priority: high
 
-# -----------------------------------------------------------------------------
-# 元信息
-# -----------------------------------------------------------------------------
 meta:
   display_name: "SurfaceFlinger 分析"
-  description: "分析 SurfaceFlinger 帧合成、GPU 使用和 VSYNC 同步"
+  description: "分析 SurfaceFlinger 帧合成性能，包括 GPU/HWC 合成比例、慢合成检测和 Fence 等待"
   icon: "layers"
-  tags:
-    - surfaceflinger
-    - composition
-    - gpu
-    - vsync
-    - fence
-    - display
+  tags: [surfaceflinger, composition, gpu, vsync, fence, display]
 
-# -----------------------------------------------------------------------------
-# 触发条件
-# -----------------------------------------------------------------------------
 triggers:
   keywords:
-    zh:
-      - SurfaceFlinger
-      - 合成
-      - GPU合成
-      - VSYNC
-      - 显示
-      - 渲染
-      - fence
-    en:
-      - surfaceflinger
-      - composition
-      - gpu composition
-      - vsync
-      - display
-      - fence
-
+    zh: [SurfaceFlinger, SF, 合成, GPU合成, HWC合成, VSYNC, 显示合成, fence, 帧合成]
+    en: [surfaceflinger, sf, composition, gpu composition, hwc, vsync, display, fence]
   patterns:
     - ".*[Ss]urface[Ff]linger.*"
     - ".*合成.*"
-    - ".*VSYNC.*"
+    - ".*VSYNC.*同步.*"
     - ".*GPU.*合成.*"
 
-# -----------------------------------------------------------------------------
-# 前置检查
-# -----------------------------------------------------------------------------
 prerequisites:
-  required_tables:
-    - slice
-    - thread
-    - process
+  modules:
+    - android.frames.timeline
 
-  optional_tables:
-    - gfx_composition
-    - actual_frame_timeline_slice
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "应用包名（可选，用于关联应用与 SF 交互）"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳（纳秒，可选）"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳（纳秒，可选）"
+  - name: slow_composition_multiplier
+    type: number
+    required: false
+    default: 1.5
+    description: "慢合成判定倍数（超过 VSync 周期的该倍数视为慢合成）"
+  - name: composition_rating_poor_ms
+    type: number
+    required: false
+    default: 12
+    description: "合成评级-较差阈值（平均合成耗时 ms）"
+  - name: composition_rating_fair_ms
+    type: number
+    required: false
+    default: 8
+    description: "合成评级-一般阈值（平均合成耗时 ms）"
+  - name: composition_rating_good_ms
+    type: number
+    required: false
+    default: 4
+    description: "合成评级-良好阈值（平均合成耗时 ms）"
+  - name: long_fence_threshold_ms
+    type: number
+    required: false
+    default: 10
+    description: "长 Fence 等待阈值（ms）"
+  - name: fence_critical_ms
+    type: number
+    required: false
+    default: 16
+    description: "Fence 严重程度-critical 阈值（ms）"
+  - name: fence_warning_ms
+    type: number
+    required: false
+    default: 8
+    description: "Fence 严重程度-warning 阈值（ms）"
+  - name: slow_pct_threshold
+    type: number
+    required: false
+    default: 10
+    description: "慢合成占比阈值（百分比，超过则判定为合成延迟）"
+  - name: gpu_comp_ratio_threshold
+    type: number
+    required: false
+    default: 0.5
+    description: "GPU 合成比例阈值（超过该比例判定为 GPU 合成负载高）"
 
-# -----------------------------------------------------------------------------
-# 分析步骤
-# -----------------------------------------------------------------------------
 steps:
-  # Step 1: SurfaceFlinger 进程检测
-  - id: sf_process
-    name: "检测 SurfaceFlinger"
-    sql: |
-      SELECT upid, pid, name
-      FROM process
-      WHERE name = 'surfaceflinger'
-         OR name = '/system/bin/surfaceflinger'
-      LIMIT 1
-    save_as: sf_process
-    on_empty: "未找到 SurfaceFlinger 进程"
-
-  # Step 2: SF 帧合成事件
-  - id: sf_composition_events
-    name: "帧合成事件"
-    description: "分析 SurfaceFlinger 的帧合成"
+  # ==========================================================================
+  # L0: 数据源检测 - SurfaceFlinger 进程是否存在
+  # ==========================================================================
+  - id: data_check
+    type: atomic
+    name: "SurfaceFlinger 数据检测"
+    display: false
     sql: |
       SELECT
-        s.ts / 1e6 as ts_ms,
-        s.dur / 1e6 as dur_ms,
-        s.name as event_name,
-        s.depth
-      FROM slice s
-      JOIN thread_track tt ON s.track_id = tt.id
-      JOIN thread t ON tt.utid = t.utid
-      JOIN process p ON t.upid = p.upid
-      WHERE (p.name = 'surfaceflinger' OR p.name LIKE '%surfaceflinger%')
-        AND (s.name GLOB '*composite*'
-             OR s.name GLOB '*onMessageReceived*'
-             OR s.name GLOB '*latchBuffer*'
-             OR s.name GLOB '*present*')
-      ORDER BY s.ts ASC
-    save_as: sf_composition_events
+        CASE
+          WHEN EXISTS (
+            SELECT 1 FROM process
+            WHERE name = 'surfaceflinger'
+               OR name = '/system/bin/surfaceflinger'
+          ) THEN 1
+          ELSE 0
+        END as has_sf_process,
+        COALESCE(
+          (SELECT upid FROM process
+           WHERE name = 'surfaceflinger' OR name = '/system/bin/surfaceflinger'
+           LIMIT 1),
+          0
+        ) as sf_upid,
+        CASE
+          WHEN EXISTS (
+            SELECT 1 FROM slice s
+            JOIN thread_track tt ON s.track_id = tt.id
+            JOIN thread t ON tt.utid = t.utid
+            JOIN process p ON t.upid = p.upid
+            WHERE (p.name = 'surfaceflinger' OR p.name = '/system/bin/surfaceflinger')
+              AND (s.name GLOB '*onMessageInvalidate*'
+                   OR s.name GLOB '*onMessageRefresh*'
+                   OR s.name GLOB '*composite*'
+                   OR s.name GLOB '*Composite*')
+            LIMIT 1
+          ) THEN 1
+          ELSE 0
+        END as has_composition_data
+    save_as: data_check
 
-  # Step 3: GPU 合成统计
-  - id: gpu_composition_stats
-    name: "GPU 合成统计"
-    description: "统计使用 GPU 合成的帧"
+  # ==========================================================================
+  # L1: VSync 配置检测
+  # ==========================================================================
+  - id: vsync_config
+    type: atomic
+    name: "VSync 配置"
+    display:
+      level: summary
+      layer: overview
+      title: "显示配置"
+      columns:
+        - name: refresh_rate_hz
+          label: "刷新率"
+          type: number
+          format: compact
+        - name: vsync_period_ms
+          label: "VSync 周期"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: vsync_source
+          label: "来源"
+          type: string
     sql: |
+      WITH
+      sf_vsync_intervals AS (
+        SELECT
+          c.ts,
+          c.ts - LAG(c.ts) OVER (ORDER BY c.ts) as interval_ns
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE t.name = 'VSYNC-sf'
+          AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
+      ),
+      sf_vsync AS (
+        SELECT
+          CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER) as vsync_period_ns,
+          'sf_vsync_counter' as source
+        FROM sf_vsync_intervals
+        WHERE interval_ns > 4000000 AND interval_ns < 20000000
+      ),
+      raw_period AS (
+        SELECT
+          COALESCE((SELECT vsync_period_ns FROM sf_vsync WHERE vsync_period_ns > 0), 8333333) as period_ns,
+          COALESCE((SELECT source FROM sf_vsync WHERE vsync_period_ns > 0), 'default') as source
+      ),
+      snapped AS (
+        SELECT
+          CASE
+            WHEN period_ns < 4880000 THEN 240
+            WHEN period_ns < 6300000 THEN 175
+            WHEN period_ns < 7610000 THEN 144
+            WHEN period_ns < 9620000 THEN 120
+            WHEN period_ns < 13610000 THEN 90
+            WHEN period_ns < 23570000 THEN 60
+            WHEN period_ns < 37270000 THEN 30
+            ELSE 24
+          END as refresh_rate_hz,
+          source
+        FROM raw_period
+      )
       SELECT
-        COUNT(*) as total_frames,
-        SUM(CASE WHEN gpu_composition = 1 THEN 1 ELSE 0 END) as gpu_frames,
-        SUM(CASE WHEN gpu_composition = 0 THEN 1 ELSE 0 END) as client_frames,
-        AVG(dur) / 1e6 as avg_dur_ms,
-        MAX(dur) / 1e6 as max_dur_ms
-      FROM gfx_composition
+        refresh_rate_hz,
+        ROUND(1e9 / refresh_rate_hz / 1e6, 2) as vsync_period_ms,
+        CAST(ROUND(1e9 / refresh_rate_hz, 0) AS INTEGER) as vsync_period_ns,
+        source as vsync_source
+      FROM snapped
+    save_as: vsync_env
+    condition: "data_check.data[0]?.has_sf_process === 1"
+
+  # ==========================================================================
+  # L1: 合成概览 - GPU vs HWC 合成比例、总合成数
+  # ==========================================================================
+  - id: composition_overview
+    type: atomic
+    name: "合成概览"
+    synthesize:
+      role: overview
+      fields:
+        - key: total_compositions
+          label: 总合成数
+        - key: avg_composition_ms
+          label: 平均合成耗时
+          format: "{{value}} ms"
+        - key: gpu_composition_pct
+          label: GPU 合成比例
+          format: "{{value}}%"
+      insights:
+        - condition: "gpu_composition_pct > 50"
+          template: "GPU 合成比例 {{gpu_composition_pct}}%，较高，可能影响功耗"
+        - condition: "slow_composition_count > 5"
+          template: "检测到 {{slow_composition_count}} 次慢合成 (超过 1.5x VSync 周期)"
+        - condition: "avg_composition_ms > 8"
+          template: "平均合成耗时 {{avg_composition_ms}}ms，偏高"
+    display:
+      level: summary
+      layer: overview
+      title: "SurfaceFlinger 合成概览"
+      columns:
+        - name: total_compositions
+          label: "总合成数"
+          type: number
+          format: compact
+        - name: avg_composition_dur
+          label: "平均合成耗时"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: max_composition_dur
+          label: "最大合成耗时"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: p95_composition_dur
+          label: "P95 合成耗时"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: slow_composition_count
+          label: "慢合成次数"
+          type: number
+          format: compact
+        - name: rating
+          label: "评级"
+          type: string
+    sql: |
+      WITH
+      sf_compositions AS (
+        SELECT
+          s.ts,
+          s.dur,
+          s.name
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name = 'surfaceflinger' OR p.name = '/system/bin/surfaceflinger')
+          AND (s.name GLOB '*onMessageInvalidate*'
+               OR s.name GLOB '*onMessageRefresh*'
+               OR s.name GLOB '*composite*'
+               OR s.name GLOB '*Composite*')
+          AND s.dur > 0
+          AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+      )
+      SELECT
+        COUNT(*) as total_compositions,
+        CAST(ROUND(AVG(dur)) AS INTEGER) as avg_composition_dur,
+        MAX(dur) as max_composition_dur,
+        CAST(ROUND(PERCENTILE(dur, 0.95)) AS INTEGER) as p95_composition_dur,
+        ROUND(AVG(dur) / 1e6, 2) as avg_composition_ms,
+        SUM(CASE WHEN dur > ${vsync_env.data[0].vsync_period_ns} * ${slow_composition_multiplier|1.5} THEN 1 ELSE 0 END) as slow_composition_count,
+        CASE
+          WHEN AVG(dur) / 1e6 > ${composition_rating_poor_ms|12} THEN '较差'
+          WHEN AVG(dur) / 1e6 > ${composition_rating_fair_ms|8} THEN '一般'
+          WHEN AVG(dur) / 1e6 > ${composition_rating_good_ms|4} THEN '良好'
+          ELSE '优秀'
+        END as rating
+      FROM sf_compositions
+    save_as: composition_overview
+    condition: "data_check.data[0]?.has_composition_data === 1"
+
+  # ==========================================================================
+  # L1: GPU 合成 vs HWC 合成统计
+  # ==========================================================================
+  - id: gpu_hwc_stats
+    type: atomic
+    name: "GPU/HWC 合成统计"
     optional: true
-    save_as: gpu_composition_stats
-
-  # Step 4: VSYNC 分析
-  - id: vsync_events
-    name: "VSYNC 事件"
-    description: "分析 VSYNC 信号"
+    display:
+      level: summary
+      layer: overview
+      title: "GPU vs HWC 合成"
+      columns:
+        - name: composition_type
+          label: "合成方式"
+          type: string
+        - name: frame_count
+          label: "帧数"
+          type: number
+          format: compact
+        - name: pct
+          label: "占比"
+          type: percentage
+          format: percentage
+        - name: avg_dur
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: max_dur
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+          unit: ns
     sql: |
+      WITH
+      sf_slices AS (
+        SELECT
+          s.ts,
+          s.dur,
+          s.name,
+          CASE
+            WHEN s.name GLOB '*GPU*' OR s.name GLOB '*gpu*' OR s.name GLOB '*GLES*' THEN 'GPU'
+            WHEN s.name GLOB '*HWC*' OR s.name GLOB '*hwc*' OR s.name GLOB '*Client*' THEN 'HWC'
+            ELSE 'Other'
+          END as comp_type
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name = 'surfaceflinger' OR p.name = '/system/bin/surfaceflinger')
+          AND (s.name GLOB '*composite*' OR s.name GLOB '*Composite*'
+               OR s.name GLOB '*GPU*' OR s.name GLOB '*HWC*')
+          AND s.dur > 0
+          AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+      ),
+      total AS (
+        SELECT COUNT(*) as total_count FROM sf_slices
+      )
       SELECT
-        s.ts / 1e6 as ts_ms,
-        s.dur / 1e6 as dur_ms,
-        s.name as vsync_type
-      FROM slice s
-      JOIN thread_track tt ON s.track_id = tt.id
-      JOIN thread t ON tt.utid = t.utid
-      JOIN process p ON t.upid = p.upid
-      WHERE (p.name = 'surfaceflinger' OR p.name LIKE '%surfaceflinger%')
-        AND (s.name GLOB '*VSYNC*'
-             OR s.name GLOB '*vsync*'
-             OR s.name GLOB '*HWVsync*')
-      ORDER BY s.ts ASC
-    save_as: vsync_events
+        comp_type as composition_type,
+        COUNT(*) as frame_count,
+        ROUND(100.0 * COUNT(*) / NULLIF((SELECT total_count FROM total), 0), 1) as pct,
+        CAST(ROUND(AVG(dur)) AS INTEGER) as avg_dur,
+        MAX(dur) as max_dur
+      FROM sf_slices
+      GROUP BY comp_type
+      ORDER BY frame_count DESC
+    save_as: gpu_hwc_stats
+    condition: "data_check.data[0]?.has_composition_data === 1"
 
-  # Step 5: Fence 等待分析
-  - id: fence_waits
-    name: "Fence 等待"
-    description: "分析 GPU fence 等待时间"
-    sql: |
-      SELECT
-        s.ts / 1e6 as ts_ms,
-        s.dur / 1e6 as dur_ms,
-        s.name as fence_type
-      FROM slice s
-      JOIN thread_track tt ON s.track_id = tt.id
-      JOIN thread t ON tt.utid = t.utid
-      JOIN process p ON t.upid = p.upid
-      WHERE (p.name = 'surfaceflinger' OR p.name LIKE '%surfaceflinger%')
-        AND (s.name GLOB '*fence*'
-             OR s.name GLOB '*Fence*'
-             OR s.name GLOB '*wait*')
-        AND s.dur > 1000000  -- > 1ms
-      ORDER BY s.dur DESC
-      LIMIT 50
-    save_as: fence_waits
-
-  # Step 6: 慢帧合成检测
+  # ==========================================================================
+  # L2: 慢合成列表 (dur > 1.5x VSync 周期)
+  # ==========================================================================
   - id: slow_compositions
-    name: "慢帧合成"
-    description: "检测耗时过长的帧合成"
+    type: atomic
+    name: "慢合成列表"
+    display:
+      level: detail
+      layer: list
+      title: "慢合成事件 (>1.5x VSync)"
+      columns:
+        - name: start_ts
+          label: "开始时间"
+          type: timestamp
+          clickAction: navigate_range
+          durationColumn: dur
+        - name: dur
+          label: "合成耗时"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: event_name
+          label: "事件"
+          type: string
+        - name: vsync_missed
+          label: "错过 VSync 数"
+          type: number
+        - name: severity
+          label: "严重程度"
+          type: enum
     sql: |
       SELECT
-        s.ts / 1e6 as ts_ms,
-        s.dur / 1e6 as dur_ms,
-        s.name as event
+        printf('%d', s.ts) as start_ts,
+        s.dur,
+        s.name as event_name,
+        CAST(ROUND(s.dur * 1.0 / ${vsync_env.data[0].vsync_period_ns} - 1) AS INTEGER) as vsync_missed,
+        CASE
+          WHEN s.dur > ${vsync_env.data[0].vsync_period_ns} * 3.0 THEN 'critical'
+          WHEN s.dur > ${vsync_env.data[0].vsync_period_ns} * 2.0 THEN 'warning'
+          ELSE 'notice'
+        END as severity
       FROM slice s
       JOIN thread_track tt ON s.track_id = tt.id
       JOIN thread t ON tt.utid = t.utid
       JOIN process p ON t.upid = p.upid
-      WHERE (p.name = 'surfaceflinger' OR p.name LIKE '%surfaceflinger%')
-        AND s.name GLOB '*composite*'
-        AND s.dur > 16000000  -- > 16ms (missed vsync)
+      WHERE (p.name = 'surfaceflinger' OR p.name = '/system/bin/surfaceflinger')
+        AND (s.name GLOB '*onMessageInvalidate*'
+             OR s.name GLOB '*onMessageRefresh*'
+             OR s.name GLOB '*composite*'
+             OR s.name GLOB '*Composite*')
+        AND s.dur > ${vsync_env.data[0].vsync_period_ns} * ${slow_composition_multiplier|1.5}
+        AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR s.ts < ${end_ts})
       ORDER BY s.dur DESC
       LIMIT 30
     save_as: slow_compositions
+    condition: "data_check.data[0]?.has_composition_data === 1"
 
-  # Step 7: Layer 统计
+  # ==========================================================================
+  # L2: Fence 等待分析
+  # ==========================================================================
+  - id: fence_analysis
+    type: atomic
+    name: "Fence 等待分析"
+    optional: true
+    display:
+      level: detail
+      layer: list
+      title: "Fence 等待事件"
+      columns:
+        - name: start_ts
+          label: "时间"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: dur
+          label: "等待时间"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: fence_type
+          label: "Fence 类型"
+          type: string
+        - name: severity
+          label: "严重程度"
+          type: enum
+    sql: |
+      SELECT
+        printf('%d', s.ts) as start_ts,
+        s.dur,
+        s.name as fence_type,
+        CASE
+          WHEN s.dur > ${fence_critical_ms|16} * 1000000 THEN 'critical'
+          WHEN s.dur > ${fence_warning_ms|8} * 1000000 THEN 'warning'
+          ELSE 'notice'
+        END as severity
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE (p.name = 'surfaceflinger' OR p.name = '/system/bin/surfaceflinger')
+        AND (s.name GLOB '*fence*'
+             OR s.name GLOB '*Fence*'
+             OR s.name GLOB '*GPU completion*'
+             OR s.name GLOB '*Waiting for GPU*')
+        AND s.dur > 1000000  -- > 1ms
+        AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+      ORDER BY s.dur DESC
+      LIMIT 30
+    save_as: fence_analysis
+    condition: "data_check.data[0]?.has_sf_process === 1"
+
+  # ==========================================================================
+  # L2: 合成阶段耗时分布
+  # ==========================================================================
+  - id: composition_phases
+    type: atomic
+    name: "合成阶段分布"
+    optional: true
+    display:
+      level: detail
+      layer: list
+      title: "合成阶段耗时"
+      columns:
+        - name: phase
+          label: "合成阶段"
+          type: string
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_dur
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: avg_dur
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: max_dur
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: time_pct
+          label: "时间占比"
+          type: percentage
+          format: percentage
+    sql: |
+      WITH
+      sf_slices AS (
+        SELECT
+          s.dur,
+          CASE
+            WHEN s.name GLOB '*onMessageInvalidate*' THEN 'Invalidate'
+            WHEN s.name GLOB '*onMessageRefresh*' THEN 'Refresh'
+            WHEN s.name GLOB '*composite*' OR s.name GLOB '*Composite*' THEN 'Composite'
+            WHEN s.name GLOB '*latchBuffer*' OR s.name GLOB '*Latch*' THEN 'Latch Buffer'
+            WHEN s.name GLOB '*updateTexImage*' THEN 'Update Texture'
+            WHEN s.name GLOB '*postComposition*' THEN 'Post Composition'
+            WHEN s.name GLOB '*present*' OR s.name GLOB '*Present*' THEN 'Present'
+            WHEN s.name GLOB '*commit*' OR s.name GLOB '*Commit*' THEN 'Commit'
+            ELSE NULL
+          END as phase
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name = 'surfaceflinger' OR p.name = '/system/bin/surfaceflinger')
+          AND s.dur > 10000  -- > 10us
+          AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+      ),
+      total AS (
+        SELECT SUM(dur) as total_dur FROM sf_slices WHERE phase IS NOT NULL
+      )
+      SELECT
+        phase,
+        COUNT(*) as count,
+        SUM(dur) as total_dur,
+        CAST(ROUND(AVG(dur)) AS INTEGER) as avg_dur,
+        MAX(dur) as max_dur,
+        ROUND(100.0 * SUM(dur) / NULLIF((SELECT total_dur FROM total), 0), 1) as time_pct
+      FROM sf_slices
+      WHERE phase IS NOT NULL
+      GROUP BY phase
+      ORDER BY total_dur DESC
+    save_as: composition_phases
+    condition: "data_check.data[0]?.has_composition_data === 1"
+
+  # ==========================================================================
+  # L2: Layer 统计
+  # ==========================================================================
   - id: layer_stats
+    type: atomic
     name: "Layer 统计"
-    description: "统计各 Layer 的渲染情况"
+    optional: true
+    display:
+      level: detail
+      layer: list
+      title: "活跃 Layer 统计"
+      columns:
+        - name: layer_name
+          label: "Layer"
+          type: string
+        - name: frame_count
+          label: "帧数"
+          type: number
+          format: compact
+        - name: total_dur
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: avg_dur
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+          unit: ns
     sql: |
       SELECT
         s.name as layer_name,
         COUNT(*) as frame_count,
-        AVG(s.dur) / 1e6 as avg_dur_ms,
-        SUM(s.dur) / 1e6 as total_dur_ms
+        SUM(s.dur) as total_dur,
+        CAST(ROUND(AVG(s.dur)) AS INTEGER) as avg_dur
       FROM slice s
       JOIN thread_track tt ON s.track_id = tt.id
       JOIN thread t ON tt.utid = t.utid
       JOIN process p ON t.upid = p.upid
-      WHERE (p.name = 'surfaceflinger' OR p.name LIKE '%surfaceflinger%')
+      WHERE (p.name = 'surfaceflinger' OR p.name = '/system/bin/surfaceflinger')
         AND s.name GLOB '*Layer*'
+        AND s.dur > 0
+        AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR s.ts < ${end_ts})
       GROUP BY s.name
-      ORDER BY total_dur_ms DESC
+      ORDER BY total_dur DESC
       LIMIT 20
-    optional: true
     save_as: layer_stats
+    condition: "data_check.data[0]?.has_sf_process === 1"
 
-  # Step 8: 目标应用的 SF 交互
-  - id: app_sf_interaction
-    name: "应用 SF 交互"
-    description: "分析目标应用与 SurfaceFlinger 的交互"
+  # ==========================================================================
+  # Root Cause: SF 问题根因分类
+  # ==========================================================================
+  - id: root_cause_classification
+    type: atomic
+    name: "SF 根因分类"
+    synthesize:
+      role: conclusion
+      fields:
+        - key: sf_category
+          label: SF 状态
+        - key: confidence
+          label: 置信度
+          format: "{{value}}%"
+      insights:
+        - template: "SurfaceFlinger 诊断：{{sf_category}} - {{root_cause_summary}}"
+    display:
+      level: summary
+      layer: overview
+      title: "SurfaceFlinger 分析结论"
+      columns:
+        - name: sf_category
+          label: "问题分类"
+          type: enum
+        - name: confidence
+          label: "置信度"
+          type: percentage
+          format: percentage
+        - name: root_cause_summary
+          label: "根因总结"
+          type: string
+        - name: evidence
+          label: "关键证据"
+          type: string
+        - name: suggestion
+          label: "优化建议"
+          type: string
+    sql: |
+      WITH
+      -- 合成统计
+      sf_compositions AS (
+        SELECT
+          s.ts,
+          s.dur,
+          s.name
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name = 'surfaceflinger' OR p.name = '/system/bin/surfaceflinger')
+          AND (s.name GLOB '*onMessageInvalidate*'
+               OR s.name GLOB '*onMessageRefresh*'
+               OR s.name GLOB '*composite*'
+               OR s.name GLOB '*Composite*')
+          AND s.dur > 0
+          AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+      ),
+      composition_stats AS (
+        SELECT
+          COUNT(*) as total_count,
+          AVG(dur) / 1e6 as avg_dur_ms,
+          MAX(dur) / 1e6 as max_dur_ms,
+          SUM(CASE WHEN dur > ${vsync_env.data[0].vsync_period_ns} * ${slow_composition_multiplier|1.5} THEN 1 ELSE 0 END) as slow_count,
+          ROUND(100.0 * SUM(CASE WHEN dur > ${vsync_env.data[0].vsync_period_ns} * ${slow_composition_multiplier|1.5} THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) as slow_pct
+        FROM sf_compositions
+      ),
+      -- Fence 统计
+      fence_stats AS (
+        SELECT
+          COUNT(*) as fence_count,
+          AVG(s.dur) / 1e6 as avg_fence_ms,
+          MAX(s.dur) / 1e6 as max_fence_ms,
+          SUM(CASE WHEN s.dur > ${long_fence_threshold_ms|10} * 1000000 THEN 1 ELSE 0 END) as long_fence_count
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name = 'surfaceflinger' OR p.name = '/system/bin/surfaceflinger')
+          AND (s.name GLOB '*fence*' OR s.name GLOB '*Fence*')
+          AND s.dur > 1000000
+          AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+      ),
+      -- GPU 合成检测
+      gpu_comp_stats AS (
+        SELECT
+          COUNT(*) as gpu_comp_count
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name = 'surfaceflinger' OR p.name = '/system/bin/surfaceflinger')
+          AND (s.name GLOB '*GPU*' OR s.name GLOB '*gpu*' OR s.name GLOB '*GLES*')
+          AND s.dur > 0
+          AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+      ),
+      analysis AS (
+        SELECT
+          COALESCE((SELECT total_count FROM composition_stats), 0) as total_compositions,
+          COALESCE((SELECT slow_count FROM composition_stats), 0) as slow_compositions,
+          COALESCE((SELECT slow_pct FROM composition_stats), 0) as slow_pct,
+          COALESCE((SELECT avg_dur_ms FROM composition_stats), 0) as avg_dur_ms,
+          COALESCE((SELECT max_dur_ms FROM composition_stats), 0) as max_dur_ms,
+          COALESCE((SELECT long_fence_count FROM fence_stats), 0) as long_fence_count,
+          COALESCE((SELECT max_fence_ms FROM fence_stats), 0) as max_fence_ms,
+          COALESCE((SELECT gpu_comp_count FROM gpu_comp_stats), 0) as gpu_comp_count
+      )
+      SELECT
+        -- SF 问题分类
+        CASE
+          WHEN (SELECT slow_pct FROM analysis) > ${slow_pct_threshold|10} AND (SELECT avg_dur_ms FROM analysis) > ${composition_rating_poor_ms|12} THEN 'COMPOSITION_SLOW'
+          WHEN (SELECT gpu_comp_count FROM analysis) > (SELECT total_compositions FROM analysis) * ${gpu_comp_ratio_threshold|0.5}
+               AND (SELECT avg_dur_ms FROM analysis) > ${composition_rating_fair_ms|8} THEN 'GPU_COMPOSITION_HEAVY'
+          WHEN (SELECT long_fence_count FROM analysis) > 5
+               AND (SELECT max_fence_ms FROM analysis) > ${fence_critical_ms|16} THEN 'FENCE_TIMEOUT'
+          WHEN (SELECT slow_compositions FROM analysis) > 0 THEN 'OCCASIONAL_SLOW'
+          ELSE 'NORMAL'
+        END as sf_category,
+        -- 置信度
+        CASE
+          WHEN (SELECT slow_pct FROM analysis) > ${slow_pct_threshold|10} THEN 0.85
+          WHEN (SELECT long_fence_count FROM analysis) > 5 THEN 0.8
+          WHEN (SELECT gpu_comp_count FROM analysis) > (SELECT total_compositions FROM analysis) * ${gpu_comp_ratio_threshold|0.5} THEN 0.75
+          WHEN (SELECT slow_compositions FROM analysis) > 0 THEN 0.65
+          ELSE 0.6
+        END as confidence,
+        -- 根因总结
+        CASE
+          WHEN (SELECT slow_pct FROM analysis) > ${slow_pct_threshold|10} AND (SELECT avg_dur_ms FROM analysis) > ${composition_rating_poor_ms|12} THEN
+            '合成延迟: ' || (SELECT slow_compositions FROM analysis) || ' 次慢合成 (' || (SELECT slow_pct FROM analysis) || '%)，平均 ' || ROUND((SELECT avg_dur_ms FROM analysis), 1) || 'ms'
+          WHEN (SELECT gpu_comp_count FROM analysis) > (SELECT total_compositions FROM analysis) * ${gpu_comp_ratio_threshold|0.5}
+               AND (SELECT avg_dur_ms FROM analysis) > ${composition_rating_fair_ms|8} THEN
+            'GPU 合成负载高: GPU 合成 ' || (SELECT gpu_comp_count FROM analysis) || ' 次，平均合成耗时 ' || ROUND((SELECT avg_dur_ms FROM analysis), 1) || 'ms'
+          WHEN (SELECT long_fence_count FROM analysis) > 5 THEN
+            'Fence 超时: ' || (SELECT long_fence_count FROM analysis) || ' 次 Fence 等待超过 10ms，最大 ' || ROUND((SELECT max_fence_ms FROM analysis), 1) || 'ms'
+          WHEN (SELECT slow_compositions FROM analysis) > 0 THEN
+            '偶发慢合成: ' || (SELECT slow_compositions FROM analysis) || ' 次慢合成，最大 ' || ROUND((SELECT max_dur_ms FROM analysis), 1) || 'ms'
+          ELSE
+            'SurfaceFlinger 合成性能正常'
+        END as root_cause_summary,
+        -- 证据
+        '[' ||
+          '"总合成数: ' || (SELECT total_compositions FROM analysis) || '",' ||
+          '"慢合成数: ' || (SELECT slow_compositions FROM analysis) || ' (' || (SELECT slow_pct FROM analysis) || '%)",' ||
+          '"平均合成耗时: ' || ROUND(COALESCE((SELECT avg_dur_ms FROM analysis), 0), 1) || 'ms",' ||
+          '"最大合成耗时: ' || ROUND(COALESCE((SELECT max_dur_ms FROM analysis), 0), 1) || 'ms",' ||
+          '"长 Fence 次数: ' || (SELECT long_fence_count FROM analysis) || '",' ||
+          '"GPU 合成次数: ' || (SELECT gpu_comp_count FROM analysis) || '"' ||
+        ']' as evidence,
+        -- 优化建议
+        CASE
+          WHEN (SELECT slow_pct FROM analysis) > ${slow_pct_threshold|10} THEN
+            '减少同时可见的 Layer 数量，简化 Layer 特效'
+          WHEN (SELECT gpu_comp_count FROM analysis) > (SELECT total_compositions FROM analysis) * ${gpu_comp_ratio_threshold|0.5} THEN
+            '减少需要 GPU 合成的 Layer，检查是否可以使用 HWC 合成'
+          WHEN (SELECT long_fence_count FROM analysis) > 5 THEN
+            '检查 GPU 负载，可能 GPU 工作队列积压导致 Fence 延迟'
+          WHEN (SELECT slow_compositions FROM analysis) > 0 THEN
+            '偶发问题，检查慢合成时刻的系统负载'
+          ELSE
+            'SurfaceFlinger 运行正常，无需优化'
+        END as suggestion
+    save_as: conclusion
+    condition: "data_check.data[0]?.has_composition_data === 1"
+
+  # ==========================================================================
+  # Fallback: SF 数据不可用
+  # ==========================================================================
+  - id: fallback_no_sf_data
+    type: atomic
+    name: "SF 数据不可用"
+    condition: "data_check.data[0]?.has_sf_process === 0"
+    display:
+      level: summary
+      layer: overview
+      title: "SurfaceFlinger 分析 - 数据缺失"
+      columns:
+        - name: status
+          label: "状态"
+          type: string
+        - name: missing_data
+          label: "缺失数据"
+          type: string
+        - name: suggestion
+          label: "建议"
+          type: string
     sql: |
       SELECT
-        s.name as event,
-        s.ts / 1e6 as ts_ms,
-        s.dur / 1e6 as dur_ms
-      FROM slice s
-      JOIN thread_track tt ON s.track_id = tt.id
-      JOIN thread t ON tt.utid = t.utid
-      JOIN process p ON t.upid = p.upid
-      WHERE p.name GLOB '${package}*'
-        AND (s.name GLOB '*dequeueBuffer*'
-             OR s.name GLOB '*queueBuffer*'
-             OR s.name GLOB '*acquireBuffer*'
-             OR s.name GLOB '*releaseBuffer*')
-      ORDER BY s.ts ASC
-    save_as: app_sf_interaction
+        '无法执行 SurfaceFlinger 分析' as status,
+        'SurfaceFlinger 进程不存在' as missing_data,
+        '请确保 trace 采集时包含了 SurfaceFlinger 进程 (通常需要 system_server 和 surfaceflinger category)' as suggestion
+    save_as: fallback_info
 
-# -----------------------------------------------------------------------------
-# 判断标准
-# -----------------------------------------------------------------------------
-thresholds:
-  composition_time:
-    unit: ms
-    description: "帧合成时间"
-    levels:
-      excellent: { max: 4 }
-      good: { min: 4, max: 8 }
-      warning: { min: 8, max: 16 }
-      critical: { min: 16 }
-    suggestions:
-      warning: "帧合成时间偏长"
-      critical: "帧合成超过 VSYNC 周期，会导致丢帧"
-
-  gpu_composition_ratio:
-    unit: percent
-    description: "GPU 合成比例"
-    levels:
-      excellent: { max: 30 }
-      good: { min: 30, max: 50 }
-      warning: { min: 50, max: 80 }
-      critical: { min: 80 }
-    suggestions:
-      warning: "GPU 合成比例较高，可能影响功耗"
-      critical: "大量使用 GPU 合成，检查 Layer 配置"
-
-  fence_wait_time:
-    unit: ms
-    description: "Fence 等待时间"
-    levels:
-      excellent: { max: 2 }
-      good: { min: 2, max: 5 }
-      warning: { min: 5, max: 10 }
-      critical: { min: 10 }
-
-# -----------------------------------------------------------------------------
-# 输出格式
-# -----------------------------------------------------------------------------
 output:
-  title: "SurfaceFlinger 分析报告"
-
-  sections:
-    - id: overview
-      title: "合成概览"
-      type: summary
-      from: gpu_composition_stats
-      fields:
-        - { key: total_frames, label: "总帧数" }
-        - { key: gpu_frames, label: "GPU 合成帧" }
-        - { key: avg_dur_ms, label: "平均合成时间", unit: "ms" }
-
-    - id: composition_timeline
-      title: "合成时间线"
-      type: timeline
-      from: sf_composition_events
-      limit: 100
-      fields:
-        - { key: ts_ms, label: "时间", unit: "ms" }
-        - { key: dur_ms, label: "耗时", unit: "ms" }
-        - { key: event_name, label: "事件" }
-
-    - id: slow_frames
-      title: "慢帧列表"
-      type: table
-      from: slow_compositions
-      fields:
-        - { key: ts_ms, label: "时间", unit: "ms" }
-        - { key: dur_ms, label: "耗时", unit: "ms" }
-        - { key: event, label: "事件" }
-
-    - id: fence_analysis
-      title: "Fence 等待"
-      type: table
-      from: fence_waits
-      fields:
-        - { key: dur_ms, label: "等待时间", unit: "ms" }
-        - { key: fence_type, label: "类型" }
-
-    - id: app_buffers
-      title: "应用 Buffer 操作"
-      type: table
-      from: app_sf_interaction
-      limit: 30
-      fields:
-        - { key: event, label: "操作" }
-        - { key: dur_ms, label: "耗时", unit: "ms" }
-
-# -----------------------------------------------------------------------------
-# 诊断规则
-# -----------------------------------------------------------------------------
-diagnostics:
-  - id: slow_composition
-    condition: "slow_compositions.count > 5"
-    severity: warning
-    message: "检测到 ${count} 帧合成时间超过 16ms"
-    suggestions:
-      - "检查 Layer 数量和复杂度"
-      - "减少需要 GPU 合成的 Layer"
-      - "优化动画效果"
-
-  - id: high_gpu_composition
-    condition: "gpu_composition_stats.gpu_frames > gpu_composition_stats.total_frames * 0.7"
-    severity: info
-    message: "GPU 合成比例达到 ${gpu_frames}/${total_frames}"
-    suggestions:
-      - "检查是否有 Layer 使用了 GPU 密集型效果"
-      - "考虑使用硬件合成"
-
-  - id: long_fence_wait
-    condition: "fence_waits.any.dur_ms > 10"
-    severity: warning
-    message: "Fence 等待时间达到 ${dur_ms}ms"
-    suggestions:
-      - "GPU 负载可能过高"
-      - "检查 GPU 是否有瓶颈"
-
-# -----------------------------------------------------------------------------
-# 参考资料
-# -----------------------------------------------------------------------------
-references:
-  - title: "Android Graphics Architecture"
-    url: "https://source.android.com/devices/graphics/architecture"
-  - title: "SurfaceFlinger and WindowManager"
-    url: "https://source.android.com/devices/graphics/surfaceflinger-windowmanager"
-  - title: "Perfetto Graphics Analysis"
-    url: "https://perfetto.dev/docs/analysis/graphics"
+  format: layered
+  default_expanded: [overview, list]
+  conclusion:
+    category: $conclusion.sf_category
+    confidence: $conclusion.confidence
+    summary: $conclusion.root_cause_summary
+    evidence: $conclusion.evidence
+    suggestion: $conclusion.suggestion

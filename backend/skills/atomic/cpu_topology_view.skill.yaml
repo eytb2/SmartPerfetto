@@ -1,0 +1,131 @@
+# =============================================================================
+# CPU Topology View Initialization (Atomic Skill)
+# =============================================================================
+# Creates a reusable SQL VIEW `_cpu_topology` for CPU core classification.
+# Subsequent steps in the same trace_processor session can JOIN this view.
+#
+# Classification tiers:
+#   - prime: capacity >= MAX(capacity)
+#   - big:   capacity >= MAX(capacity) * 0.7
+#   - medium: capacity >= MAX(capacity) * 0.4
+#   - little: everything else
+#
+# Fallback chain (when capacity is unavailable):
+#   1. cpu.capacity (DRC values from kernel)
+#   2. cpufreq max frequency ranking
+#   3. CPU index position (last resort)
+#
+# Usage: Call this skill as a `type: skill` step at the beginning of any
+# composite skill that needs CPU topology. Then JOIN _cpu_topology in SQL:
+#   JOIN _cpu_topology ct ON ss.cpu = ct.cpu_id
+# =============================================================================
+
+name: cpu_topology_view
+version: "1.0"
+type: composite
+category: hardware
+
+meta:
+  display_name: "CPU 拓扑视图初始化"
+  description: "创建 CPU 拓扑分类视图，供后续 SQL JOIN 使用"
+  icon: "memory"
+  tags: [cpu, topology, cluster, view, atomic]
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间（可选，用于 cpufreq 回退检测）"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间（可选，用于 cpufreq 回退检测）"
+
+steps:
+  # Step 1: Create the topology view (DDL, returns no rows)
+  - id: create_topology_view
+    type: atomic
+    name: "创建 CPU 拓扑视图"
+    optional: true
+    display:
+      level: hidden
+    sql: |
+      CREATE VIEW IF NOT EXISTS _cpu_topology AS
+      WITH
+      cpu_capacity AS (
+        SELECT id as cpu_id, COALESCE(capacity, 0) as capacity
+        FROM cpu
+      ),
+      cpu_max_freq AS (
+        SELECT t.cpu as cpu_id, MAX(c.value) as max_freq
+        FROM counter c
+        JOIN cpu_counter_track t ON c.track_id = t.id
+        WHERE t.name = 'cpufreq'
+        GROUP BY t.cpu
+      ),
+      capacity_rank AS (
+        SELECT
+          MAX(capacity) as max_cap,
+          MAX(capacity) * 0.7 as big_threshold,
+          MAX(capacity) * 0.4 as medium_threshold
+        FROM cpu_capacity
+        WHERE capacity > 0
+      )
+      SELECT
+        cc.cpu_id,
+        cc.capacity,
+        CASE
+          -- Prefer capacity-based classification
+          WHEN (SELECT max_cap FROM capacity_rank) > 0 THEN
+            CASE
+              WHEN cc.capacity >= (SELECT max_cap FROM capacity_rank) THEN 'prime'
+              WHEN cc.capacity >= (SELECT big_threshold FROM capacity_rank) THEN 'big'
+              WHEN cc.capacity >= (SELECT medium_threshold FROM capacity_rank) THEN 'medium'
+              ELSE 'little'
+            END
+          -- Fallback to cpufreq max frequency
+          WHEN cf.max_freq IS NOT NULL THEN
+            CASE
+              WHEN cf.max_freq >= (SELECT MAX(max_freq) FROM cpu_max_freq) THEN 'prime'
+              WHEN cf.max_freq >= (SELECT MAX(max_freq) * 0.7 FROM cpu_max_freq) THEN 'big'
+              WHEN cf.max_freq >= (SELECT MAX(max_freq) * 0.4 FROM cpu_max_freq) THEN 'medium'
+              ELSE 'little'
+            END
+          -- Last resort: position-based (upper half → big)
+          ELSE
+            CASE
+              WHEN cc.cpu_id >= (SELECT COUNT(*) * 3 / 4 FROM cpu) THEN 'prime'
+              WHEN cc.cpu_id >= (SELECT COUNT(*) / 2 FROM cpu) THEN 'big'
+              ELSE 'little'
+            END
+        END as core_type
+      FROM cpu_capacity cc
+      LEFT JOIN cpu_max_freq cf ON cc.cpu_id = cf.cpu_id
+
+  # Step 2: Query the view (provides data for save_as and verification)
+  - id: read_topology
+    type: atomic
+    name: "读取 CPU 拓扑"
+    display:
+      level: summary
+      layer: overview
+      title: "CPU 拓扑"
+      columns:
+        - name: cpu_id
+          label: "CPU"
+          type: number
+        - name: capacity
+          label: "Capacity"
+          type: number
+        - name: core_type
+          label: "核心类型"
+          type: string
+    sql: |
+      SELECT cpu_id, capacity, core_type
+      FROM _cpu_topology
+      ORDER BY cpu_id
+    save_as: cpu_topology
+    optional: true
+
+output:
+  format: structured

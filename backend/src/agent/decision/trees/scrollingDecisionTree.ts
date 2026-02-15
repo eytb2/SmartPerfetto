@@ -105,7 +105,7 @@ export const scrollingDecisionTree: DecisionTree = {
       name: '分析 SurfaceFlinger 状态',
       action: {
         description: '检查 SurfaceFlinger 合成是否正常',
-        skill: 'sf_analysis',
+        skill: 'surfaceflinger_analysis',
         params: {},
         resultKey: 'sf_data',
       },
@@ -431,12 +431,88 @@ export const scrollingDecisionTree: DecisionTree = {
 
 // ===== 辅助函数：从 Skill 结果中提取数据 =====
 
+function toNumber(value: any): number {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') {
+    const parsed = parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function normalizeRows(value: any): Array<Record<string, any>> {
+  if (Array.isArray(value)) {
+    return value.filter((row): row is Record<string, any> =>
+      !!row && typeof row === 'object' && !Array.isArray(row)
+    );
+  }
+  if (!value || typeof value !== 'object') return [];
+  if (Array.isArray((value as any).data)) {
+    return normalizeRows((value as any).data);
+  }
+  const columns = Array.isArray((value as any).columns) ? (value as any).columns : [];
+  const rows = Array.isArray((value as any).rows) ? (value as any).rows : [];
+  if (columns.length > 0 && rows.length > 0) {
+    return rows
+      .filter((row: any) => Array.isArray(row))
+      .map((row: any[]) => {
+        const mapped: Record<string, any> = {};
+        for (let i = 0; i < columns.length; i++) {
+          mapped[columns[i]] = row[i];
+        }
+        return mapped;
+      });
+  }
+  return [];
+}
+
+function getOverviewRow(data: any, stepIds: string[]): Record<string, any> {
+  if (!data) return {};
+  for (const stepId of stepIds) {
+    const direct = normalizeRows((data as any)[stepId]);
+    if (direct.length > 0) return direct[0];
+    const fromLayers = normalizeRows(data.layers?.overview?.[stepId]);
+    if (fromLayers.length > 0) return fromLayers[0];
+  }
+  return {};
+}
+
+function getListRows(data: any, stepIds: string[]): Array<Record<string, any>> {
+  if (!data) return [];
+  for (const stepId of stepIds) {
+    const direct = normalizeRows((data as any)[`list_${stepId}`]);
+    if (direct.length > 0) return direct;
+    const alt = normalizeRows((data as any)[stepId]);
+    if (alt.length > 0) return alt;
+    const fromLayers = normalizeRows(data.layers?.list?.[stepId]);
+    if (fromLayers.length > 0) return fromLayers;
+  }
+  return [];
+}
+
+function getDeepRows(data: any, stepIds: string[]): Array<Record<string, any>> {
+  if (!data?.layers?.deep || typeof data.layers.deep !== 'object') return [];
+  const deep = data.layers.deep as Record<string, any>;
+  for (const stepId of stepIds) {
+    const legacy = normalizeRows(deep[stepId]);
+    if (legacy.length > 0) return legacy;
+  }
+  for (const session of Object.values(deep)) {
+    if (!session || typeof session !== 'object') continue;
+    for (const stepId of stepIds) {
+      const rows = normalizeRows((session as any)[stepId]);
+      if (rows.length > 0) return rows;
+    }
+  }
+  return [];
+}
+
 function extractAvgFps(data: any): number {
   if (!data) return 0;
-  // 尝试从不同的数据结构中提取 FPS
-  if (data.layers?.overview?.scroll_sessions_summary?.data?.[0]) {
-    return data.layers.overview.scroll_sessions_summary.data[0].avg_fps || 0;
-  }
+  if (toNumber(data.transformed?.avg_fps) > 0) return toNumber(data.transformed.avg_fps);
+  const summary = getOverviewRow(data, ['performance_summary', 'scroll_sessions_summary', 'scrolling_summary']);
+  const avg = toNumber(summary.actual_fps) || toNumber(summary.avg_fps);
+  if (avg > 0) return avg;
   if (data.avg_fps !== undefined) return data.avg_fps;
   if (data.summary?.avg_fps !== undefined) return data.summary.avg_fps;
   return 0;
@@ -444,9 +520,15 @@ function extractAvgFps(data: any): number {
 
 function extractMinFps(data: any): number {
   if (!data) return 0;
-  if (data.layers?.overview?.scroll_sessions_summary?.data?.[0]) {
-    return data.layers.overview.scroll_sessions_summary.data[0].min_fps || 0;
-  }
+  if (toNumber(data.transformed?.min_fps) > 0) return toNumber(data.transformed.min_fps);
+  const summary = getOverviewRow(data, ['performance_summary', 'scroll_sessions_summary', 'scrolling_summary']);
+  const fromSummary = toNumber(summary.min_fps);
+  if (fromSummary > 0) return fromSummary;
+  const sessions = getListRows(data, ['scroll_sessions']);
+  const fpsList = sessions
+    .map((s) => toNumber(s.session_fps) || toNumber(s.avg_fps))
+    .filter((v) => v > 0);
+  if (fpsList.length > 0) return Math.min(...fpsList);
   if (data.min_fps !== undefined) return data.min_fps;
   if (data.summary?.min_fps !== undefined) return data.summary.min_fps;
   return 0;
@@ -454,19 +536,26 @@ function extractMinFps(data: any): number {
 
 function extractJankRate(data: any): number {
   if (!data) return 0;
-  if (data.layers?.overview?.scroll_sessions_summary?.data?.[0]) {
-    const summary = data.layers.overview.scroll_sessions_summary.data[0];
-    const total = summary.total_frames || 1;
-    const jank = summary.janky_frames || 0;
-    return jank / total;
-  }
-  if (data.jank_rate !== undefined) return data.jank_rate;
+  const transformed = toNumber(data.transformed?.janky_rate) || toNumber(data.transformed?.jank_rate);
+  if (transformed > 0) return transformed > 1 ? transformed / 100 : transformed;
+  const summary = getOverviewRow(data, ['performance_summary', 'scroll_sessions_summary', 'scrolling_summary']);
+  const rawRate = toNumber(summary.jank_rate) || toNumber(summary.janky_rate);
+  if (rawRate > 0) return rawRate > 1 ? rawRate / 100 : rawRate;
+  const total = toNumber(summary.total_frames) || 1;
+  const jank = toNumber(summary.janky_frames);
+  if (jank > 0) return jank / total;
+  if (data.jank_rate !== undefined) return data.jank_rate > 1 ? data.jank_rate / 100 : data.jank_rate;
   if (data.summary?.jank_rate !== undefined) return data.summary.jank_rate;
   return 0;
 }
 
 function extractSfAvgDuration(data: any): number {
   if (!data) return 0;
+  const transformed = toNumber(data.transformed?.avg_composition_ms) || toNumber(data.transformed?.sf_avg_duration);
+  if (transformed > 0) return transformed;
+  const composition = getOverviewRow(data, ['composition_overview']);
+  if (toNumber(composition.avg_composition_ms) > 0) return toNumber(composition.avg_composition_ms);
+  if (toNumber(composition.avg_composition_dur) > 0) return toNumber(composition.avg_composition_dur) / 1e6;
   if (data.sf_avg_duration !== undefined) return data.sf_avg_duration;
   if (data.summary?.sf_composition_avg_ms !== undefined) {
     return data.summary.sf_composition_avg_ms;
@@ -476,8 +565,14 @@ function extractSfAvgDuration(data: any): number {
 
 function extractAvgRenderTime(data: any): number {
   if (!data) return 0;
-  if (data.layers?.overview?.frame_timing_summary?.data?.[0]) {
-    return data.layers.overview.frame_timing_summary.data[0].avg_render_thread_ms || 0;
+  const transformed = toNumber(data.transformed?.avg_render_time);
+  if (transformed > 0) return transformed;
+  const renderRows = getDeepRows(data, ['render_thread_slices', 'render_slices']);
+  if (renderRows.length > 0) {
+    const values = renderRows.map((r) => toNumber(r.dur_ms) || toNumber(r.total_ms)).filter((v) => v > 0);
+    if (values.length > 0) {
+      return values.reduce((sum, v) => sum + v, 0) / values.length;
+    }
   }
   if (data.avg_render_time !== undefined) return data.avg_render_time;
   return 0;
@@ -485,8 +580,14 @@ function extractAvgRenderTime(data: any): number {
 
 function extractAvgDoFrameTime(data: any): number {
   if (!data) return 0;
-  if (data.layers?.overview?.frame_timing_summary?.data?.[0]) {
-    return data.layers.overview.frame_timing_summary.data[0].avg_do_frame_ms || 0;
+  const transformed = toNumber(data.transformed?.avg_do_frame_time);
+  if (transformed > 0) return transformed;
+  const mainRows = getDeepRows(data, ['main_thread_slices', 'main_slices']);
+  if (mainRows.length > 0) {
+    const values = mainRows.map((r) => toNumber(r.dur_ms) || toNumber(r.total_ms)).filter((v) => v > 0);
+    if (values.length > 0) {
+      return values.reduce((sum, v) => sum + v, 0) / values.length;
+    }
   }
   if (data.avg_do_frame_time !== undefined) return data.avg_do_frame_time;
   return 0;
@@ -500,11 +601,18 @@ function extractAvgRunnableTime(data: any): number {
 
 function extractAppDeadlineMissedRatio(data: any): number {
   if (!data) return 0;
+  if (toNumber(data.transformed?.app_deadline_missed_ratio) > 0) {
+    return toNumber(data.transformed.app_deadline_missed_ratio);
+  }
+  const root = getDeepRows(data, ['root_cause_summary', 'root_cause'])[0];
+  if (root) {
+    const resp = String(root.jank_responsibility || '').toUpperCase();
+    const amp = String(root.amplification_path || '').toLowerCase();
+    if (resp === 'APP' || amp.includes('app_deadline')) return 1;
+  }
   if (data.layers?.overview?.jank_type_distribution?.data) {
     const types = data.layers.overview.jank_type_distribution.data;
-    const appMissed = types.filter((t: any) =>
-      t.jank_type?.includes('App Deadline Missed')
-    );
+    const appMissed = types.filter((t: any) => t.jank_type?.includes('App Deadline Missed'));
     const total = types.reduce((sum: number, t: any) => sum + (t.count || 0), 0);
     const missed = appMissed.reduce((sum: number, t: any) => sum + (t.count || 0), 0);
     return total > 0 ? missed / total : 0;
@@ -517,6 +625,15 @@ function extractAppDeadlineMissedRatio(data: any): number {
 
 function extractSfStuffingRatio(data: any): number {
   if (!data) return 0;
+  if (toNumber(data.transformed?.sf_stuffing_ratio) > 0) {
+    return toNumber(data.transformed.sf_stuffing_ratio);
+  }
+  const root = getDeepRows(data, ['root_cause_summary', 'root_cause'])[0];
+  if (root) {
+    const resp = String(root.jank_responsibility || '').toUpperCase();
+    const amp = String(root.amplification_path || '').toLowerCase();
+    if (resp === 'SF' || amp.includes('sf_consumer')) return 1;
+  }
   if (data.layers?.overview?.jank_type_distribution?.data) {
     const types = data.layers.overview.jank_type_distribution.data;
     const stuffing = types.filter((t: any) =>
@@ -534,12 +651,24 @@ function extractSfStuffingRatio(data: any): number {
 
 function checkBinderBlock(data: any): boolean {
   if (!data) return false;
+  if (data.transformed?.has_binder_block === true) return true;
   if (data.has_binder_block !== undefined) return data.has_binder_block;
+  const root = getDeepRows(data, ['root_cause_summary', 'root_cause'])[0];
+  if (root && String(root.reason_code || '').toLowerCase() === 'binder_sync_blocking') {
+    return true;
+  }
+  const binderRows = getDeepRows(data, ['binder_blocking', 'binder_blocking_data', 'binder_calls', 'binder_data']);
+  if (binderRows.some((r: any) => toNumber(r.max_block_ms) > 5 || toNumber(r.total_block_ms) > 5 || toNumber(r.dur_ms) > 5)) {
+    return true;
+  }
   // 检查是否有任何帧的 Binder 耗时超过阈值
   if (data.layers?.deep?.per_frame_data?.data) {
     const frames = data.layers.deep.per_frame_data.data;
     return frames.some((f: any) => (f.binder_duration_ms || 0) > 5);
   }
+  const diagnostics = Array.isArray(data.diagnostics) ? data.diagnostics : [];
+  const diagnosisText = diagnostics.map((d: any) => String(d?.message || d?.diagnosis || '')).join(' ').toLowerCase();
+  if (diagnosisText.includes('binder')) return true;
   return false;
 }
 

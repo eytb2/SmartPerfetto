@@ -21,10 +21,9 @@ import {
 import {
   registerCoreTools,
   StreamingUpdate,
-  // Agent-Driven Architecture (Phase 2-4)
-  AgentDrivenOrchestrator,
-  createAgentDrivenOrchestrator,
-  AgentDrivenAnalysisResult,
+  AgentRuntime,
+  createAgentRuntime,
+  AgentRuntimeAnalysisResult,
   ModelRouter,
   Hypothesis,
 } from '../agent';
@@ -83,11 +82,11 @@ const router = express.Router();
 // ============================================================================
 
 interface AnalysisSession {
-  orchestrator: AgentDrivenOrchestrator;
+  orchestrator: AgentRuntime;
   orchestratorUpdateHandler?: (update: StreamingUpdate) => void;
   sessionId: string;
   sseClients: express.Response[];
-  result?: AgentDrivenAnalysisResult;
+  result?: AgentRuntimeAnalysisResult;
   status: 'pending' | 'running' | 'awaiting_user' | 'completed' | 'failed';
   error?: string;
   traceId: string;
@@ -114,7 +113,6 @@ interface AnalysisSession {
 }
 const sessions = new Map<string, AnalysisSession>();
 
-// ModelRouter instance for agent-driven orchestrator
 let modelRouterInstance: ModelRouter | null = null;
 
 function getModelRouter(): ModelRouter {
@@ -273,7 +271,7 @@ function getLastCompletedTurn(context: EnhancedSessionContext): ConversationTurn
 function buildRecoveredResultFromContext(
   sessionId: string,
   context: EnhancedSessionContext
-): AgentDrivenAnalysisResult | null {
+): AgentRuntimeAnalysisResult | null {
   const turn = getLastCompletedTurn(context);
   if (!turn || !turn.result) {
     return null;
@@ -299,7 +297,7 @@ function buildRecoveredResultFromContext(
   };
 }
 
-function recoverResultForSessionIfNeeded(sessionId: string, session: AnalysisSession): AgentDrivenAnalysisResult | null {
+function recoverResultForSessionIfNeeded(sessionId: string, session: AnalysisSession): AgentRuntimeAnalysisResult | null {
   if (session.result) {
     return session.result;
   }
@@ -396,7 +394,7 @@ function isDedicatedSceneReplayRequest(query: string): boolean {
 /**
  * POST /api/agent/analyze
  *
- * Start analysis using AgentDrivenOrchestrator
+ * Start analysis using AgentRuntime
  *
  * Features:
  * - Agent-driven task graph planning
@@ -461,7 +459,7 @@ router.post('/analyze', async (req, res) => {
 
     // Check if we can reuse an existing session (multi-turn dialogue support)
     let sessionId: string;
-    let orchestrator: AgentDrivenOrchestrator;
+    let orchestrator: AgentRuntime;
     let logger: ReturnType<typeof createSessionLogger>;
     let isNewSession = true;
 
@@ -498,7 +496,7 @@ router.post('/analyze', async (req, res) => {
           if (restoredContext) {
             sessionContextManager.set(requestedSessionId, traceId, restoredContext);
 
-            const restoredOrchestrator = createAgentDrivenOrchestrator(getModelRouter(), {
+            const restoredOrchestrator = createAgentRuntime(getModelRouter(), {
               enableLogging: true,
             });
 
@@ -571,7 +569,7 @@ router.post('/analyze', async (req, res) => {
 
     if (isNewSession) {
       const modelRouter = getModelRouter();
-      orchestrator = createAgentDrivenOrchestrator(modelRouter, {
+      orchestrator = createAgentRuntime(modelRouter, {
         maxRounds: options.maxRounds ?? options.maxIterations ?? 5,
         maxConcurrentTasks: options.maxConcurrentTasks || 3,
         confidenceThreshold: options.confidenceThreshold ?? options.qualityThreshold ?? 0.7,
@@ -941,7 +939,7 @@ router.delete('/:sessionId', (req, res) => {
  *
  * Respond to an interactive session (e.g. continue/abort).
  *
- * Note: AgentDrivenOrchestrator currently does not pause for user input in v2;
+ * Note: AgentRuntime currently does not pause for user input in v2;
  * this endpoint mainly exists for API compatibility and future multi-turn UX.
  */
 router.post('/:sessionId/respond', async (req, res) => {
@@ -1443,7 +1441,7 @@ router.post('/resume', async (req, res) => {
 
     // Create a new orchestrator for this session
     const modelRouter = getModelRouter();
-    const orchestrator = createAgentDrivenOrchestrator(modelRouter, {
+    const orchestrator = createAgentRuntime(modelRouter, {
       enableLogging: true,
     });
 
@@ -1585,7 +1583,7 @@ router.post('/scene-reconstruct', async (req, res) => {
     const analysisId = `scene-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
     const modelRouter = getModelRouter();
-    const orchestrator = createAgentDrivenOrchestrator(modelRouter, {
+    const orchestrator = createAgentRuntime(modelRouter, {
       maxRounds: options.maxRounds ?? options.maxIterations ?? 5,
       maxConcurrentTasks: options.maxConcurrentTasks || 3,
       confidenceThreshold: options.confidenceThreshold ?? options.qualityThreshold ?? 0.7,
@@ -2665,7 +2663,7 @@ router.get('/:sessionId/report', (req, res) => {
       rounds: result.rounds,
     },
 
-    findings: result.findings.map((f) => ({
+    findings: result.findings.map((f: AgentRuntimeAnalysisResult['findings'][number]) => ({
       id: f.id,
       category: f.category,
       severity: f.severity,
@@ -2673,7 +2671,7 @@ router.get('/:sessionId/report', (req, res) => {
       description: f.description,
     })),
 
-    hypotheses: result.hypotheses.map((h) => ({
+    hypotheses: result.hypotheses.map((h: AgentRuntimeAnalysisResult['hypotheses'][number]) => ({
       id: h.id,
       description: h.description,
       status: h.status,
@@ -3613,7 +3611,7 @@ type ClientFindingPayload = {
 };
 
 function buildClientFindings(
-  findings: AgentDrivenAnalysisResult['findings'],
+  findings: AgentRuntimeAnalysisResult['findings'],
   scenes: DetectedScene[]
 ): ClientFindingPayload[] {
   const base: ClientFindingPayload[] = (findings || []).map((f: any) => ({
@@ -3939,7 +3937,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       rounds: result.rounds,
       totalDurationMs: result.totalDurationMs,
       findings: clientFindings,
-      hypotheses: result.hypotheses.map((h) => ({
+      hypotheses: result.hypotheses.map((h: AgentRuntimeAnalysisResult['hypotheses'][number]) => ({
         id: h.id,
         description: h.description,
         status: h.status,

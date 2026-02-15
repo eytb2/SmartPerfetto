@@ -79,18 +79,16 @@ describe('startup display unit contracts', () => {
     }
 
     const quadrantCols = getStep('quadrant_analysis').display?.columns || [];
-    for (const name of [
-      'q1_big_running_ms',
-      'q2_little_running_ms',
-      'q3_runnable_ms',
-      'q4_sleeping_ms',
-      'total_ms',
-    ]) {
-      const col = getColumn(quadrantCols, name);
-      expect(col.type).toBe('duration');
-      expect(col.format).toBe('duration_ms');
-      expect(col.unit).toBe('ms');
-    }
+    const quadrantDur = getColumn(quadrantCols, 'dur_ms');
+    expect(quadrantDur.type).toBe('duration');
+    expect(quadrantDur.format).toBe('duration_ms');
+    expect(quadrantDur.unit).toBe('ms');
+
+    const quadrantName = getColumn(quadrantCols, 'quadrant');
+    expect(quadrantName.type).toBe('string');
+
+    const percentage = getColumn(quadrantCols, 'percentage');
+    expect(percentage.type).toBe('percentage');
+    expect(percentage.format).toBe('percentage');
   });
 });
-

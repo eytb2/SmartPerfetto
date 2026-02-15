@@ -30,6 +30,43 @@ steps:
   - id: app_production_stats
     type: atomic
     name: "应用帧生产统计"
+    display:
+      level: summary
+      format: table
+      columns:
+        - name: total_produced_frames
+          label: "总帧数"
+          type: number
+          format: compact
+        - name: duration_ms
+          label: "持续时间"
+          type: duration
+          format: duration_ms
+        - name: on_time_frames
+          label: "按时帧"
+          type: number
+          format: compact
+        - name: janky_frames
+          label: "掉帧数"
+          type: number
+          format: compact
+        - name: app_jank_rate
+          label: "掉帧率"
+          type: percentage
+        - name: production_fps
+          label: "生产 FPS"
+          type: number
+        - name: expected_fps
+          label: "期望 FPS"
+          type: number
+        - name: avg_frame_dur_ms
+          label: "平均帧耗时"
+          type: duration
+          format: duration_ms
+        - name: max_frame_dur_ms
+          label: "最大帧耗时"
+          type: duration
+          format: duration_ms
     sql: |
       WITH
       time_bounds AS (
@@ -91,56 +128,3 @@ steps:
       FROM production_stats
     save_as: app_production
 
-output:
-  format: single_row
-  display:
-    level: summary
-    format: table
-    columns:
-      - name: total_produced_frames
-        label: "总帧数"
-        type: number
-        format: compact
-      - name: duration_ms
-        label: "持续时间"
-        type: duration
-        format: duration_ms
-      - name: on_time_frames
-        label: "按时帧"
-        type: number
-        format: compact
-      - name: janky_frames
-        label: "掉帧数"
-        type: number
-        format: compact
-      - name: app_jank_rate
-        label: "掉帧率"
-        type: percentage
-        format: percentage
-      - name: production_fps
-        label: "生产 FPS"
-        type: number
-      - name: expected_fps
-        label: "期望 FPS"
-        type: number
-      - name: avg_frame_dur_ms
-        label: "平均帧耗时"
-        type: duration
-        format: duration_ms
-      - name: max_frame_dur_ms
-        label: "最大帧耗时"
-        type: duration
-        format: duration_ms
-  fields:
-    - name: total_produced_frames
-      type: integer
-      description: "应用生产的总帧数"
-    - name: production_fps
-      type: number
-      description: "生产端 FPS"
-    - name: expected_fps
-      type: number
-      description: "期望 FPS"
-    - name: app_jank_rate
-      type: number
-      description: "应用掉帧率 %"

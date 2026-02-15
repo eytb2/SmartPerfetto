@@ -148,20 +148,21 @@ describe('scrolling_analysis skill', () => {
       it('should return jank type distribution', async () => {
         const result = await evaluator.executeStep('jank_type_stats');
 
-        // 这个步骤可能因为没有 jank 而返回空数组，所以只检查成功
         expect(result.success).toBe(true);
+        // app_aosp_scrolling_heavy_jank.pftrace is a heavy-jank fixture; empty means extraction regressed.
+        expect(result.data.length).toBeGreaterThan(0);
       }, 30000);
 
-      it('should have valid jank type categories when data exists', async () => {
+      it('should have valid jank type categories', async () => {
         const result = await evaluator.executeStep('jank_type_stats');
+        expect(result.success).toBe(true);
+        expect(result.data.length).toBeGreaterThan(0);
 
-        if (result.data.length > 0) {
-          for (const stat of result.data) {
-            expect(stat.jank_type).toBeDefined();
-            expect(typeof stat.jank_type).toBe('string');
-            expect(stat.count).toBeGreaterThan(0);
-            expect(['应用', 'SF', '缓冲区', '无(可能漏检)', '其他']).toContain(stat.responsibility);
-          }
+        for (const stat of result.data) {
+          expect(stat.jank_type).toBeDefined();
+          expect(typeof stat.jank_type).toBe('string');
+          expect(stat.count).toBeGreaterThan(0);
+          expect(['应用', 'SF', '缓冲区', '无(可能漏检)', '其他']).toContain(stat.responsibility);
         }
       }, 30000);
     });
@@ -183,49 +184,47 @@ describe('scrolling_analysis skill', () => {
 
       it('should have valid session structure', async () => {
         const result = await evaluator.executeStep('scroll_sessions');
+        expect(result.success).toBe(true);
+        expect(result.data.length).toBeGreaterThan(0);
+        const session = result.data[0];
 
-        if (result.data.length > 0) {
-          const session = result.data[0];
+        // 必需字段
+        expect(session.session_id).toBeDefined();
+        expect(session.process_name).toBeDefined();
+        expect(session.start_ts).toBeDefined();
+        expect(session.end_ts).toBeDefined();
 
-          // 必需字段
-          expect(session.session_id).toBeDefined();
-          expect(session.process_name).toBeDefined();
-          expect(session.start_ts).toBeDefined();
-          expect(session.end_ts).toBeDefined();
+        // 帧数应该 >= 10 (因为 HAVING COUNT(*) >= 10)
+        expect(session.frame_count).toBeGreaterThanOrEqual(10);
 
-          // 帧数应该 >= 10 (因为 HAVING COUNT(*) >= 10)
-          expect(session.frame_count).toBeGreaterThanOrEqual(10);
-
-          // 时长应该 > 200ms (因为 HAVING duration > 200000000ns)
-          expect(session.duration_ms).toBeGreaterThan(200);
-        }
+        // 时长应该 > 200ms (因为 HAVING duration > 200000000ns)
+        expect(session.duration_ms).toBeGreaterThan(200);
       }, 30000);
 
       it('should have valid timestamps', async () => {
         const result = await evaluator.executeStep('scroll_sessions');
+        expect(result.success).toBe(true);
+        expect(result.data.length).toBeGreaterThan(0);
+        const session = result.data[0];
 
-        if (result.data.length > 0) {
-          const session = result.data[0];
+        // start_ts 和 end_ts 应该是可解析的大整数字符串
+        const startTs = BigInt(session.start_ts);
+        const endTs = BigInt(session.end_ts);
 
-          // start_ts 和 end_ts 应该是可解析的大整数字符串
-          const startTs = BigInt(session.start_ts);
-          const endTs = BigInt(session.end_ts);
-
-          expect(startTs).toBeGreaterThan(0n);
-          expect(endTs).toBeGreaterThan(startTs);
-        }
+        expect(startTs).toBeGreaterThan(0n);
+        expect(endTs).toBeGreaterThan(startTs);
       }, 30000);
 
       it('should have valid FPS per session', async () => {
         const result = await evaluator.executeStep('scroll_sessions');
+        expect(result.success).toBe(true);
+        expect(result.data.length).toBeGreaterThan(0);
 
-        if (result.data.length > 0) {
-          for (const session of result.data) {
-            // session_fps 应该是正数，在合理范围内
-            if (session.session_fps !== null) {
-              expect(session.session_fps).toBeGreaterThan(0);
-              expect(session.session_fps).toBeLessThanOrEqual(200);
-            }
+        for (const session of result.data) {
+          // session_fps 应该是正数，在合理范围内
+          if (session.session_fps !== null) {
+            expect(session.session_fps).toBeGreaterThan(0);
+            expect(session.session_fps).toBeLessThanOrEqual(200);
           }
         }
       }, 30000);

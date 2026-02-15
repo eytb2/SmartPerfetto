@@ -118,6 +118,16 @@ describe('conclusionGenerator', () => {
     );
   });
 
+  test('emits answer_token stream updates for final conclusion text', async () => {
+    await invokeGenerateConclusion({ options: { turnCount: 0 } });
+
+    const tokenEvents = emittedUpdates.filter((u) => u.type === 'answer_token');
+    expect(tokenEvents.length).toBeGreaterThan(0);
+    expect(tokenEvents[tokenEvents.length - 1].content).toEqual(
+      expect.objectContaining({ done: true })
+    );
+  });
+
   test('uses focused-answer prompt when turnCount >= 1', async () => {
     const conclusion = await invokeGenerateConclusion({
       currentIntent: { ...intent, followUpType: 'extend' },
@@ -165,6 +175,41 @@ describe('conclusionGenerator', () => {
     expect(calledPrompt).toContain('TTID/TTFD');
     expect(calledPrompt).toContain('clusters 可按时间阶段/样本分组给出；若无聚类证据可传空数组');
     expect(calledPrompt).not.toContain('候选包括：业务负载重 / 小核摆放 / 大核低频 / 调度延迟 / Binder 同步阻塞 / 频率爬升慢');
+  });
+
+  test('filters startup framework-wrapper findings when actionable startup finding exists', async () => {
+    const startupFindings: Finding[] = [
+      {
+        id: 'startup-old-wrapper',
+        severity: 'warning',
+        title: '[温启动 #2] 主线程操作 \'clientTransactionExecuted\' 最长耗时 844.5ms',
+        description: '旧结论：框架包裹层切片',
+        source: 'direct_skill:startup_detail',
+        confidence: 0.95,
+      },
+      {
+        id: 'startup-actionable',
+        severity: 'warning',
+        title: '[温启动 #2] 主线程可操作热点 \'LoadSimulator_ActivityInit\' 最长耗时 710.1ms（占比 53%）',
+        description: '应用初始化阶段任务过重',
+        source: 'direct_skill:startup_detail',
+        confidence: 0.9,
+      },
+    ];
+
+    await invokeGenerateConclusion({
+      currentFindings: startupFindings,
+      currentIntent: {
+        ...intent,
+        primaryGoal: '分析启动性能',
+        aspects: ['startup'],
+      },
+      options: { turnCount: 2, historyContext: 'HISTORY' },
+    });
+
+    const calledPrompt = (mockModelRouter.callWithFallback as jest.Mock).mock.calls[0][0] as string;
+    expect(calledPrompt).toContain('LoadSimulator_ActivityInit');
+    expect(calledPrompt).not.toContain('主线程操作 \'clientTransactionExecuted\'');
   });
 
   test('applies single-frame drill-down guardrails and suppresses history carry-over hints', async () => {

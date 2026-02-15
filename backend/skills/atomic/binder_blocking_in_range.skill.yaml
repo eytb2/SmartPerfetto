@@ -22,12 +22,12 @@ prerequisites:
 inputs:
   - name: start_ts
     type: timestamp
-    required: true
-    description: "分析起始时间戳(ns)"
+    required: false
+    description: "分析起始时间戳(ns，可选)"
   - name: end_ts
     type: timestamp
-    required: true
-    description: "分析结束时间戳(ns)"
+    required: false
+    description: "分析结束时间戳(ns，可选)"
   - name: package
     type: string
     required: false
@@ -80,7 +80,8 @@ sql: |
     ROUND(MAX(bt.client_dur) / 1e6, 2) as max_block_ms,
     MAX(CASE WHEN bt.client_tid IN (SELECT tid FROM target_main_thread) THEN 1 ELSE 0 END) as is_main_blocked
   FROM android_binder_txns bt
-  WHERE bt.client_ts >= ${start_ts} AND bt.client_ts < ${end_ts}
+  WHERE (${start_ts} IS NULL OR bt.client_ts >= ${start_ts})
+    AND (${end_ts} IS NULL OR bt.client_ts < ${end_ts})
     AND bt.is_sync = 1  -- 只关注同步调用
     AND (bt.client_process GLOB '${package}*' OR '${package}' = '')
     AND bt.client_dur > 500000  -- > 0.5ms

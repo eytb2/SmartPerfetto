@@ -26,7 +26,7 @@
 #    - 活动率分析
 
 name: anr_detail
-version: "1.0"
+version: "2.0"
 type: composite
 category: app_lifecycle
 
@@ -81,6 +81,17 @@ inputs:
 
 steps:
   # ============================================================================
+  # CPU 拓扑视图初始化
+  # ============================================================================
+  - id: init_cpu_topology
+    type: skill
+    name: "初始化 CPU 拓扑"
+    skill: cpu_topology_view
+    display:
+      level: hidden
+    optional: true
+
+  # ============================================================================
   # ANR 基本信息
   # ============================================================================
   - id: anr_info
@@ -90,6 +101,39 @@ steps:
       level: key
       layer: deep
       title: "ANR 详情"
+      columns:
+        - name: process_name
+          label: "进程名"
+          type: string
+        - name: pid
+          label: "PID"
+          type: number
+        - name: anr_type
+          label: "ANR 类型"
+          type: string
+        - name: anr_dur_ms
+          label: "ANR 持续时间"
+          type: duration
+          format: duration_ms
+        - name: timeout_ms
+          label: "超时时间"
+          type: duration
+          format: duration_ms
+        - name: anr_ts
+          label: "ANR 时间"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: perfetto_start
+          label: "区间开始"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: perfetto_end
+          label: "区间结束"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: type_display
+          label: "类型说明"
+          type: string
     sql: |
       SELECT
         '${process_name}' as process_name,
@@ -116,6 +160,7 @@ steps:
   - id: main_thread_quadrant
     type: atomic
     name: "主线程四象限分析"
+    optional: true
     display:
       level: key
       layer: deep
@@ -151,64 +196,8 @@ steps:
         - name: status_verdict
           label: "状态判断"
           type: string
-        - name: classify_method
-          label: "核判定来源"
-          type: string
     sql: |
-      WITH 
-      cpu_cap AS (
-        SELECT id as cpu, capacity
-        FROM cpu
-      ),
-      cpu_freq AS (
-        SELECT
-          cpu,
-          MAX(freq) as max_freq_khz
-        FROM cpu_frequency_counters
-        GROUP BY cpu
-      ),
-      cpu_rank AS (
-        SELECT
-          c.cpu,
-          c.capacity,
-          f.max_freq_khz,
-          ROW_NUMBER() OVER (
-            ORDER BY COALESCE(f.max_freq_khz, 0) DESC, COALESCE(c.capacity, 0) DESC, c.cpu DESC
-          ) as perf_rank,
-          COUNT(*) OVER () as cpu_count,
-          SUM(CASE WHEN f.max_freq_khz IS NOT NULL THEN 1 ELSE 0 END) OVER () as freq_known_count,
-          AVG(CASE WHEN c.capacity IS NOT NULL THEN c.capacity END) OVER () as avg_capacity
-        FROM cpu_cap c
-        LEFT JOIN cpu_freq f ON c.cpu = f.cpu
-      ),
-      cpu_info AS (
-        SELECT
-          cpu,
-          CASE
-            WHEN freq_known_count >= 2 THEN
-              CASE
-                WHEN perf_rank <= CASE
-                  WHEN cpu_count >= 8 THEN 3
-                  WHEN cpu_count >= 6 THEN 2
-                  ELSE 1
-                END THEN 'big'
-                ELSE 'little'
-              END
-            WHEN capacity IS NOT NULL AND capacity > 0 THEN
-              CASE
-                WHEN capacity >= COALESCE(avg_capacity, capacity) THEN 'big'
-                ELSE 'little'
-              END
-            ELSE
-              CASE WHEN cpu >= 4 THEN 'big' ELSE 'little' END
-          END as cluster,
-          CASE
-            WHEN freq_known_count >= 2 THEN 'freq_rank'
-            WHEN capacity IS NOT NULL AND capacity > 0 THEN 'capacity_fallback'
-            ELSE 'cpu_id_fallback'
-          END as classify_method
-        FROM cpu_rank
-      ),
+      WITH
       main_thread AS (
         SELECT t.utid, t.tid
         FROM thread t
@@ -226,8 +215,7 @@ steps:
       thread_states AS (
         SELECT
           ts.state,
-          COALESCE(ci.cluster, 'little') as cluster,
-          COALESCE(ci.classify_method, 'cpu_id_fallback') as classify_method,
+          COALESCE(ct.core_type, 'little') as core_type,
           ts.blocked_function,
           SUM(
             MIN(ts.ts + ts.dur, aw.end_ts) - MAX(ts.ts, aw.start_ts)
@@ -235,22 +223,21 @@ steps:
         FROM thread_state ts
         JOIN main_thread mt ON ts.utid = mt.utid
         CROSS JOIN anr_window aw
-        LEFT JOIN cpu_info ci ON ts.cpu = ci.cpu
+        LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
         WHERE ts.ts < aw.end_ts
           AND ts.ts + ts.dur > aw.start_ts
-        GROUP BY ts.state, ci.cluster, ci.classify_method, ts.blocked_function
+        GROUP BY ts.state, ct.core_type, ts.blocked_function
       ),
       quadrant_data AS (
         SELECT
           CASE
-            WHEN state = 'Running' AND cluster = 'big' THEN 'Q1_big_running'
-            WHEN state = 'Running' AND cluster != 'big' THEN 'Q2_little_running'
+            WHEN state = 'Running' AND core_type IN ('prime', 'big') THEN 'Q1_big_running'
+            WHEN state = 'Running' AND core_type IN ('medium', 'little') THEN 'Q2_little_running'
             WHEN state IN ('R', 'R+') THEN 'Q3_runnable'
             WHEN state IN ('S', 'D', 'I') THEN 'Q4_sleeping'
             ELSE 'other'
           END as quadrant,
           dur_ns,
-          classify_method,
           blocked_function
         FROM thread_states
       )
@@ -276,8 +263,7 @@ steps:
           WHEN 100.0 * SUM(CASE WHEN quadrant IN ('Q1_big_running', 'Q2_little_running') THEN dur_ns ELSE 0 END) /
                NULLIF(SUM(dur_ns), 0) > 70 THEN 'busy_running'
           ELSE 'mixed'
-        END as status_verdict,
-        GROUP_CONCAT(DISTINCT classify_method) as classify_method
+        END as status_verdict
       FROM quadrant_data
     save_as: quadrant
 
@@ -309,6 +295,21 @@ steps:
       level: key
       layer: deep
       title: "RenderThread 状态"
+      columns:
+        - name: type
+          label: "类型"
+          type: string
+        - name: name
+          label: "名称"
+          type: string
+        - name: dur_ms
+          label: "耗时"
+          type: duration
+          format: duration_ms
+        - name: pct
+          label: "占比"
+          type: percentage
+          format: percentage
     sql: |
       WITH render_thread AS (
         SELECT t.utid, t.tid
@@ -436,6 +437,33 @@ steps:
       level: key
       layer: deep
       title: "锁竞争"
+      columns:
+        - name: blocking_method
+          label: "持锁方法"
+          type: string
+        - name: blocking_thread_name
+          label: "持锁线程"
+          type: string
+        - name: blocked_method
+          label: "等锁方法"
+          type: string
+        - name: blocked_thread_name
+          label: "等锁线程"
+          type: string
+        - name: blocked_type
+          label: "等锁类型"
+          type: string
+        - name: wait_ms
+          label: "等待时间"
+          type: duration
+          format: duration_ms
+        - name: waiter_count
+          label: "等待者数"
+          type: number
+          format: compact
+        - name: severity
+          label: "严重程度"
+          type: string
     sql: |
       WITH anr_window AS (
         SELECT
@@ -473,10 +501,30 @@ steps:
   - id: app_freeze_check
     type: atomic
     name: "应用冻结检测"
+    optional: true
     display:
       level: detail
       layer: deep
       title: "应用活动状态"
+      columns:
+        - name: thread_type
+          label: "线程类型"
+          type: string
+        - name: running_ms
+          label: "运行时间"
+          type: duration
+          format: duration_ms
+        - name: total_ms
+          label: "总时间"
+          type: duration
+          format: duration_ms
+        - name: activity_pct
+          label: "活动率"
+          type: percentage
+          format: percentage
+        - name: status
+          label: "状态"
+          type: string
     sql: |
       WITH target_threads AS (
         SELECT t.utid, t.tid, t.name as thread_name, p.pid,
@@ -542,6 +590,32 @@ steps:
       level: detail
       layer: deep
       title: "唤醒链"
+      columns:
+        - name: waker_thread
+          label: "唤醒线程"
+          type: string
+        - name: waker_process
+          label: "唤醒进程"
+          type: string
+        - name: blocked_function
+          label: "阻塞函数"
+          type: string
+        - name: wakeup_count
+          label: "唤醒次数"
+          type: number
+          format: compact
+        - name: avg_sleep_ms
+          label: "平均睡眠"
+          type: duration
+          format: duration_ms
+        - name: max_sleep_ms
+          label: "最大睡眠"
+          type: duration
+          format: duration_ms
+        - name: total_sleep_ms
+          label: "总睡眠"
+          type: duration
+          format: duration_ms
     sql: |
       WITH main_thread AS (
         SELECT t.utid
@@ -633,8 +707,8 @@ steps:
           - "检查系统是否有高负载进程"
           - "考虑提高线程优先级"
 
-      # 主线程活跃但大核占比偏低（仅在判定来源可信且有调度佐证时触发）
-      - condition: "quadrant.data[0]?.running_pct > 50 && quadrant.data[0]?.q1_big_running_ms < quadrant.data[0]?.q2_little_running_ms * 0.3 && quadrant.data[0]?.runnable_pct > 10 && (sched_delay.data[0]?.severe_count || 0) > 0 && !(quadrant.data[0]?.classify_method || '').includes('cpu_id_fallback')"
+      # 主线程活跃但大核占比偏低（需调度佐证）
+      - condition: "quadrant.data[0]?.running_pct > 50 && quadrant.data[0]?.q1_big_running_ms < quadrant.data[0]?.q2_little_running_ms * 0.3 && quadrant.data[0]?.runnable_pct > 10 && (sched_delay.data[0]?.severe_count || 0) > 0"
         severity: warning
         diagnosis: "主线程大核占比偏低且存在调度等待（Runnable ${quadrant.data[0].runnable_pct}%），可能有 CPU 供给不足"
         confidence: medium
@@ -642,14 +716,6 @@ steps:
           - "检查高优先级线程是否占用大核"
           - "检查是否有高优先级任务抢占大核"
           - "可能触发温控策略"
-
-      # 核判定来源不可靠时，避免把大小核结论当根因
-      - condition: "(quadrant.data[0]?.classify_method || '').includes('cpu_id_fallback')"
-        severity: info
-        diagnosis: "核类型判定回退到 CPU 编号阈值，大小核相关结论置信度有限"
-        confidence: medium
-        suggestions:
-          - "补充或检查 cpu_frequency/cpu capacity 数据后再判断大小核调度问题"
 
       # === Binder 阻塞诊断 ===
 

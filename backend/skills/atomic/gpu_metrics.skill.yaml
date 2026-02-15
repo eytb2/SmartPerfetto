@@ -45,6 +45,27 @@ steps:
     display:
       level: summary
       title: "GPU 频率"
+      columns:
+        - name: avg_freq_mhz
+          label: "平均频率"
+          type: number
+        - name: max_freq_mhz
+          label: "最大频率"
+          type: number
+        - name: min_freq_mhz
+          label: "最小频率"
+          type: number
+        - name: median_freq_mhz
+          label: "中位频率"
+          type: number
+        - name: sample_count
+          label: "样本数"
+          type: number
+          format: compact
+        - name: freq_counters
+          label: "计数器"
+          type: string
+          format: truncate
     sql: |
       WITH
       time_bounds AS (
@@ -92,6 +113,27 @@ steps:
     display:
       level: summary
       title: "GPU 利用率"
+      columns:
+        - name: avg_utilization_pct
+          label: "平均利用率"
+          type: percentage
+          format: percentage
+        - name: max_utilization_pct
+          label: "最大利用率"
+          type: percentage
+          format: percentage
+        - name: min_utilization_pct
+          label: "最小利用率"
+          type: percentage
+          format: percentage
+        - name: p95_utilization_pct
+          label: "P95利用率"
+          type: percentage
+          format: percentage
+        - name: sample_count
+          label: "样本数"
+          type: number
+          format: compact
     sql: |
       WITH
       time_bounds AS (
@@ -130,6 +172,34 @@ steps:
     display:
       level: detail
       title: "GPU 渲染耗时"
+      columns:
+        - name: gpu_operation
+          label: "操作"
+          type: string
+        - name: occurrence_count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_time_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_time_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_time_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: p95_time_ms
+          label: "P95耗时"
+          type: duration
+          format: duration_ms
+          unit: ms
     sql: |
       WITH
       time_bounds AS (
@@ -176,6 +246,43 @@ steps:
     display:
       level: detail
       title: "GPU Fence 等待"
+      columns:
+        - name: total_fence_waits
+          label: "等待次数"
+          type: number
+          format: compact
+        - name: total_wait_ms
+          label: "总等待"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: avg_wait_ms
+          label: "平均等待"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_wait_ms
+          label: "最大等待"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: p95_wait_ms
+          label: "P95等待"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: vsync_period_ms
+          label: "VSync周期"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: waits_over_vsync
+          label: "超周期次数"
+          type: number
+          format: compact
+        - name: gpu_status
+          label: "GPU状态"
+          type: string
     sql: |
       WITH
       time_bounds AS (
@@ -235,6 +342,19 @@ steps:
     display:
       level: summary
       title: "GPU 状态汇总"
+      columns:
+        - name: freq_data
+          label: "频率数据"
+          type: string
+        - name: util_data
+          label: "利用率数据"
+          type: string
+        - name: slice_data
+          label: "切片数据"
+          type: string
+        - name: total_metrics
+          label: "可用指标数"
+          type: number
     sql: |
       WITH available_metrics AS (
         SELECT

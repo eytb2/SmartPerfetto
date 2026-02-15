@@ -13,11 +13,8 @@ import {
   Intent,
   Finding,
   StreamingUpdate,
-  Evaluation,
 } from '../types';
 import {
-  AgentTask,
-  AgentResponse,
   Hypothesis,
   SharedAgentContext,
 } from '../types/agentProtocol';
@@ -52,7 +49,7 @@ export const AGENT_IDS = {
 // Configuration
 // =============================================================================
 
-export interface AgentDrivenOrchestratorConfig {
+export interface AgentRuntimeConfig {
   /** Maximum analysis rounds */
   maxRounds: number;
   /**
@@ -75,7 +72,7 @@ export interface AgentDrivenOrchestratorConfig {
   streamingCallback?: (update: StreamingUpdate) => void;
 }
 
-export const DEFAULT_CONFIG: AgentDrivenOrchestratorConfig = {
+export const DEFAULT_CONFIG: AgentRuntimeConfig = {
   maxRounds: 5,
   maxConcurrentTasks: 3,
   confidenceThreshold: 0.7,
@@ -255,6 +252,7 @@ export interface AnalysisPlanPayload {
 
 export interface StreamingEventPayloads {
   degraded: { module: string; fallback: string; error?: string };
+  answer_token: AnswerTokenPayload;
   stage_transition: {
     stageIndex: number;
     totalStages: number;
@@ -420,6 +418,16 @@ export interface IncrementalScopePayload {
   relevantAgents: string[];
 }
 
+/**
+ * Payload for answer_token event.
+ * Streams final answer text incrementally to the frontend.
+ */
+export interface AnswerTokenPayload {
+  token?: string;
+  done?: boolean;
+  totalChars?: number;
+}
+
 type StreamingEventType = StreamingUpdate['type'];
 
 /**
@@ -475,7 +483,7 @@ export interface ExecutionContext {
    * instead of re-running full analysis on every turn.
    */
   incrementalScope?: IncrementalScope;
-  config: AgentDrivenOrchestratorConfig;
+  config: AgentRuntimeConfig;
 }
 
 // =============================================================================

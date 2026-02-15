@@ -21,13 +21,48 @@ prerequisites:
 inputs:
   - name: start_ts
     type: timestamp
-    required: true
+    required: false
+    description: "分析起始时间戳(ns，可选)"
   - name: end_ts
     type: timestamp
-    required: true
+    required: false
+    description: "分析结束时间戳(ns，可选)"
   - name: package
     type: string
     required: false
+
+display:
+  level: detail
+  format: table
+  columns:
+    - name: thread_name
+      label: "线程"
+      type: string
+    - name: process_name
+      label: "进程"
+      type: string
+    - name: is_main_thread
+      label: "主线程"
+      type: boolean
+    - name: running_ms
+      label: "运行时间"
+      type: duration
+      format: duration_ms
+    - name: runnable_ms
+      label: "等待调度"
+      type: duration
+      format: duration_ms
+    - name: sleeping_ms
+      label: "休眠时间"
+      type: duration
+      format: duration_ms
+    - name: max_runnable_ms
+      label: "最大等待"
+      type: duration
+      format: duration_ms
+    - name: long_runnable_count
+      label: "长等待次数"
+      type: number
 
 sql: |
   WITH target_threads AS (
@@ -43,8 +78,8 @@ sql: |
       ts.dur,
       ts.ts
     FROM thread_state ts
-    WHERE ts.ts >= ${start_ts}
-      AND ts.ts < ${end_ts}
+    WHERE (${start_ts} IS NULL OR ts.ts >= ${start_ts})
+      AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
       AND ts.utid IN (SELECT utid FROM target_threads)
   )
   SELECT
@@ -62,47 +97,3 @@ sql: |
   HAVING running_ms > 0 OR runnable_ms > 0
   ORDER BY runnable_ms DESC
 
-output:
-  display:
-    level: detail
-    format: table
-    columns:
-      - name: thread_name
-        label: "线程"
-        type: string
-      - name: process_name
-        label: "进程"
-        type: string
-      - name: is_main_thread
-        label: "主线程"
-        type: boolean
-      - name: running_ms
-        label: "运行时间"
-        type: duration
-        format: duration_ms
-      - name: runnable_ms
-        label: "等待调度"
-        type: duration
-        format: duration_ms
-      - name: sleeping_ms
-        label: "休眠时间"
-        type: duration
-        format: duration_ms
-      - name: max_runnable_ms
-        label: "最大等待"
-        type: duration
-        format: duration_ms
-      - name: long_runnable_count
-        label: "长等待次数"
-        type: number
-  fields:
-    - name: thread_name
-      label: "线程"
-    - name: is_main_thread
-      label: "主线程"
-    - name: running_ms
-      label: "运行(ms)"
-    - name: runnable_ms
-      label: "可运行(ms)"
-    - name: max_runnable_ms
-      label: "最大等待(ms)"

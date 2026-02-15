@@ -1,0 +1,103 @@
+# =============================================================================
+# GC Events in Range (Atomic Skill)
+# =============================================================================
+# Queries GC events for a given process and optional time range.
+# Centralizes the 3-clause GLOB filter and GC type classification logic
+# that was previously duplicated across 7+ steps in memory_analysis.
+#
+# GC Detection Pattern (unified):
+#   s.name GLOB '*GC*' OR s.name GLOB '*gc*' OR s.name GLOB '*ConcurrentCopying*'
+#
+# GC Type Classification:
+#   ConcurrentCopying, MarkSweep, Explicit, Alloc, Background, Young, Full, Other
+#
+# Usage: Call via `type: skill` step, then reference ${gc_base.data} or
+# use the saved data for subsequent aggregation steps.
+# =============================================================================
+
+name: gc_events_in_range
+version: "1.0"
+type: atomic
+category: memory
+
+meta:
+  display_name: "GC 事件查询"
+  description: "查询 GC 事件并分类，供后续分析步骤复用"
+  icon: "memory"
+  tags: [gc, memory, events, atomic]
+
+inputs:
+  - name: package
+    type: string
+    required: true
+    description: "应用包名"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳（纳秒，可选）"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳（纳秒，可选）"
+
+display:
+  level: detail
+  layer: list
+  title: "GC 事件"
+  columns:
+    - name: ts
+      label: "时间戳"
+      type: timestamp
+      clickAction: navigate_timeline
+    - name: dur
+      label: "持续时间"
+      type: duration
+      format: duration_ms
+      unit: ns
+    - name: gc_name
+      label: "GC 名称"
+      type: string
+    - name: gc_type
+      label: "GC 类型"
+      type: string
+    - name: thread_name
+      label: "线程"
+      type: string
+    - name: is_main_thread
+      label: "主线程"
+      type: number
+
+sql: |
+  SELECT
+    s.ts,
+    s.dur,
+    s.name as gc_name,
+    t.name as thread_name,
+    t.tid,
+    p.pid,
+    p.name as process_name,
+    CASE WHEN t.tid = p.pid THEN 1 ELSE 0 END as is_main_thread,
+    CASE
+      WHEN s.name GLOB '*ConcurrentCopying*' THEN 'ConcurrentCopying'
+      WHEN s.name GLOB '*MarkSweep*' THEN 'MarkSweep'
+      WHEN s.name GLOB '*Explicit*' THEN 'Explicit'
+      WHEN s.name GLOB '*Alloc*' THEN 'Alloc'
+      WHEN s.name GLOB '*Background*' THEN 'Background'
+      WHEN s.name GLOB '*young*' OR s.name GLOB '*Young*' THEN 'Young'
+      WHEN s.name GLOB '*full*' OR s.name GLOB '*Full*' THEN 'Full'
+      ELSE 'Other'
+    END as gc_type
+  FROM slice s
+  JOIN thread_track tt ON s.track_id = tt.id
+  JOIN thread t ON tt.utid = t.utid
+  JOIN process p ON t.upid = p.upid
+  WHERE p.name GLOB '${package}*'
+    AND (s.name GLOB '*GC*' OR s.name GLOB '*gc*' OR s.name GLOB '*ConcurrentCopying*')
+    AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+    AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+  ORDER BY s.ts
+
+save_as: gc_events
+
+output:
+  format: structured

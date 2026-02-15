@@ -38,7 +38,7 @@ flowchart TD
   A --> E[DrillDown Skill Registry]
   A --> F[Evidence Checklist Registry]
 
-  B --> G[AgentDrivenOrchestrator]
+B --> G[AgentRuntime]
   C --> H[sceneReconstructionStrategy]
   D --> I[intentUnderstanding + followUpHandler]
   E --> J[drillDownResolver + DirectDrillDownExecutor]
