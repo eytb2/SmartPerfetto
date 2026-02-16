@@ -108,6 +108,40 @@ validate_ui_lockfile() {
   return 0
 }
 
+hash_sha256() {
+  local file="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+    return 0
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+    return 0
+  fi
+  python3 - "$file" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+}
+
+is_ui_deps_current() {
+  local lockfile="$UI_DIR/pnpm-lock.yaml"
+  local marker="$UI_DIR/node_modules/.last_install"
+
+  if [ ! -f "$lockfile" ] || [ ! -f "$marker" ]; then
+    return 1
+  fi
+
+  local expected
+  local actual
+  expected=$(hash_sha256 "$lockfile")
+  actual=$(tr -d '[:space:]' < "$marker")
+  [ "$expected" = "$actual" ]
+}
+
 # Extract frontend version directory from Perfetto index.html
 # e.g. data-perfetto_version='{"stable":"v53.0-xxxx"}'
 extract_frontend_version() {
@@ -293,7 +327,10 @@ if [ "$SKIP_BUILD" = false ]; then
   # Install UI build dependencies (uses Perfetto's bundled pnpm v8)
   # .last_install is a marker file created by install-build-deps containing lockfile hash
   echo "Checking UI build dependencies..."
-  if [ ! -f "$UI_DIR/node_modules/.last_install" ]; then
+  if ! is_ui_deps_current; then
+    if [ -f "$UI_DIR/node_modules/.last_install" ]; then
+      echo "UI dependency marker is stale. Reinstalling dependencies..."
+    fi
     if ! install_ui_deps; then
       exit 1
     fi
