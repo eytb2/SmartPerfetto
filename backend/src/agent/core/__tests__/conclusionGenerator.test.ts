@@ -2,7 +2,12 @@
  * ConclusionGenerator Unit Tests
  */
 
-import { generateConclusion } from '../conclusionGenerator';
+import {
+  deriveConclusionContract,
+  generateConclusion,
+  normalizeConclusionOutput,
+  renderConclusionContractMarkdown,
+} from '../conclusionGenerator';
 import type { Finding, Intent } from '../../types';
 import type { SharedAgentContext } from '../../types/agentProtocol';
 import type { ProgressEmitter } from '../orchestratorTypes';
@@ -175,6 +180,58 @@ describe('conclusionGenerator', () => {
     expect(calledPrompt).toContain('TTID/TTFD');
     expect(calledPrompt).toContain('clusters 可按时间阶段/样本分组给出；若无聚类证据可传空数组');
     expect(calledPrompt).not.toContain('候选包括：业务负载重 / 小核摆放 / 大核低频 / 调度延迟 / Binder 同步阻塞 / 频率爬升慢');
+    expect(calledPrompt).not.toContain('## 掉帧归因裁决（规则预判）');
+    expect(calledPrompt).not.toContain('## 根因机制拆解（直接原因/资源问题/放大因素）');
+  });
+
+  test('normalizeConclusionOutput keeps generic cluster heading without scene hints', () => {
+    const normalized = normalizeConclusionOutput(`结论: 启动阶段存在初始化耗时
+clusters: S1: 初始化阶段（3帧, 75%）
+证据链: C1: 首帧延迟`);
+
+    expect(normalized).toContain('## 聚类（先看大头）');
+    expect(normalized).not.toContain('## 掉帧聚类（先看大头）');
+  });
+
+  test('deriveConclusionContract infers jank sceneId from markdown heading', () => {
+    const contract = deriveConclusionContract(`## 结论（按可能性排序）
+1. 存在掉帧
+
+## 掉帧聚类（先看大头）
+- K1: 主线程耗时（4帧, 66.7%）
+
+## 证据链（对应上述结论）
+- C1: ev_0123456789ab
+
+## 不确定性与反例
+- 暂无
+
+## 下一步（最高信息增益）
+- 继续下钻`);
+
+    expect(contract?.metadata?.sceneId).toBe('jank');
+  });
+
+  test('deriveConclusionContract applies sceneId hint for generic cluster heading', () => {
+    const contract = deriveConclusionContract(`## 结论（按可能性排序）
+1. 存在掉帧
+
+## 聚类（先看大头）
+- K1: 主线程耗时（4帧, 66.7%）
+
+## 证据链（对应上述结论）
+- C1: ev_0123456789ab
+
+## 不确定性与反例
+- 暂无
+
+## 下一步（最高信息增益）
+- 继续下钻`, {
+      sceneId: 'jank',
+    });
+
+    expect(contract?.metadata?.sceneId).toBe('jank');
+    expect(renderConclusionContractMarkdown(contract!)).toContain('## 掉帧聚类（先看大头）');
   });
 
   test('filters startup framework-wrapper findings when actionable startup finding exists', async () => {
@@ -562,9 +619,10 @@ analysis_metadata:
             frameCount: 22,
             percentage: 34.9,
             triggerFactor: '主线程耗时操作',
-            supplyConstraint: '负载主导（供给约束弱）',
+            supplyConstraint: '负载主导（资源问题弱）',
             amplificationPath: 'SF 消费端背压',
             causeType: 'slice',
+            frameIds: ['1435500'],
             representativeFrames: ['1435500'],
             samplePrimaryCauses: ['主线程耗时操作'],
           },
@@ -579,8 +637,172 @@ analysis_metadata:
     });
 
     expect(conclusion).toContain('负载主导簇: K1（22帧, 34.9%）');
-    expect(conclusion).toContain('代表帧: 1435500');
+    expect(conclusion).toContain('聚合帧: 1435500');
     expect(conclusion).toContain('关键切片: 主线程耗时操作');
+  });
+
+  test('injects all dropped-frame ids grouped by clusters in conclusion', async () => {
+    mockModelRouter.callWithFallback = jest.fn().mockResolvedValue(createMockModelResponse(`## 结论（按可能性排序）
+1. 示例
+
+## 掉帧聚类（先看大头）
+- K1: 示例
+
+## 证据链（对应上述结论）
+- C1: 示例
+
+## 不确定性与反例
+- 无
+
+## 下一步（最高信息增益）
+- 示例`));
+
+    const contextWithClusterFrameIds = {
+      ...sharedContext,
+      jankCauseSummary: {
+        totalJankFrames: 6,
+        primaryCause: {
+          causeType: 'slice',
+          label: '主线程耗时操作',
+          frameCount: 4,
+          percentage: 66.7,
+          severity: 'critical',
+          exampleCauses: ['主线程耗时操作'],
+        },
+        secondaryCauses: [],
+        allCauses: [
+          {
+            causeType: 'slice',
+            label: '主线程耗时操作',
+            frameCount: 4,
+            percentage: 66.7,
+            severity: 'critical',
+            exampleCauses: ['主线程耗时操作'],
+          },
+        ],
+        clusters: [
+          {
+            clusterId: 'K1',
+            frameCount: 4,
+            percentage: 66.7,
+            triggerFactor: '主线程耗时操作',
+            supplyConstraint: '频率不足',
+            amplificationPath: 'SF 消费端背压',
+            causeType: 'slice',
+            frameIds: ['1435500', '1435508', '1435517', '1435526'],
+            representativeFrames: ['1435500', '1435508', '1435517', '1435526'],
+            samplePrimaryCauses: ['主线程耗时操作'],
+          },
+          {
+            clusterId: 'K2',
+            frameCount: 2,
+            percentage: 33.3,
+            triggerFactor: '主线程阻塞',
+            supplyConstraint: '阻塞等待',
+            amplificationPath: 'SF 消费端背压',
+            causeType: 'blocking',
+            frameIds: ['1435601', '1435609'],
+            representativeFrames: ['1435601', '1435609'],
+            samplePrimaryCauses: ['Binder 同步阻塞'],
+          },
+        ],
+        summaryText: 'K1 4 帧；K2 2 帧',
+      },
+    };
+
+    const conclusion = await invokeGenerateConclusion({
+      context: contextWithClusterFrameIds as SharedAgentContext,
+      options: { turnCount: 0 },
+    });
+
+    expect(conclusion).toContain('聚类帧聚合（全量帧，覆盖 6 帧）');
+    expect(conclusion).toContain('K1（4帧）: 1435500 / 1435508 / 1435517 / 1435526');
+    expect(conclusion).toContain('K2（2帧）: 1435601 / 1435609');
+  });
+
+  test('applies payload guard when cluster frame list exceeds configured full-mode limit', async () => {
+    mockModelRouter.callWithFallback = jest.fn().mockResolvedValue(createMockModelResponse(`## 结论（按可能性排序）
+1. 示例
+
+## 掉帧聚类（先看大头）
+- K1: 示例
+
+## 证据链（对应上述结论）
+- C1: 示例
+
+## 不确定性与反例
+- 无
+
+## 下一步（最高信息增益）
+- 示例`));
+
+    const frameIds = Array.from({ length: 130 }, (_, idx) => String(1435000 + idx));
+    const contextWithLongClusterFrames = {
+      ...sharedContext,
+      jankCauseSummary: {
+        totalJankFrames: 130,
+        primaryCause: {
+          causeType: 'slice',
+          label: '主线程耗时操作',
+          frameCount: 130,
+          percentage: 100,
+          severity: 'critical',
+          exampleCauses: ['主线程耗时操作'],
+        },
+        secondaryCauses: [],
+        allCauses: [
+          {
+            causeType: 'slice',
+            label: '主线程耗时操作',
+            frameCount: 130,
+            percentage: 100,
+            severity: 'critical',
+            exampleCauses: ['主线程耗时操作'],
+          },
+        ],
+        clusters: [
+          {
+            clusterId: 'K1',
+            frameCount: 130,
+            percentage: 100,
+            triggerFactor: '主线程耗时操作',
+            supplyConstraint: '频率不足',
+            amplificationPath: 'SF 消费端背压',
+            causeType: 'slice',
+            frameIds,
+            representativeFrames: frameIds,
+            samplePrimaryCauses: ['主线程耗时操作'],
+          },
+        ],
+        summaryText: 'K1 130 帧',
+      },
+    };
+
+    const conclusion = await invokeGenerateConclusion({
+      context: contextWithLongClusterFrames as SharedAgentContext,
+      options: { turnCount: 0 },
+    });
+
+    expect(conclusion).toContain('聚类帧聚合（全量帧，覆盖 130 帧）');
+    expect(conclusion).toContain('其余 10 帧省略');
+  });
+
+  test('uses generic cluster heading for non-jank scenes to avoid scene leakage', async () => {
+    mockModelRouter.callWithFallback = jest.fn().mockResolvedValue(createMockModelResponse(`{"schema_version":"conclusion_contract_v1","mode":"initial_report","conclusion":[{"rank":1,"statement":"启动阶段存在初始化耗时"}],"clusters":[{"cluster":"S1","description":"启动阶段分组","frames":3,"percentage":75}],"evidence_chain":[{"conclusion_id":"C1","text":"证据"}],"uncertainties":["无"],"next_steps":["继续下钻"],"metadata":{"confidence":80,"rounds":1}}`));
+
+    const startupIntent: Intent = {
+      ...intent,
+      primaryGoal: '分析冷启动慢原因',
+      aspects: ['startup'],
+    };
+
+    const conclusion = await invokeGenerateConclusion({
+      currentIntent: startupIntent,
+      options: { turnCount: 0 },
+    });
+
+    expect(conclusion).toContain('## 聚类（先看大头）');
+    expect(conclusion).not.toContain('## 掉帧聚类（先看大头）');
   });
 
   test('keeps SF attribution guardrail when only SF-dominant signal exists', async () => {
@@ -859,6 +1081,7 @@ analysis_metadata:
             supplyConstraint: '频率不足',
             amplificationPath: 'SF 消费端背压',
             causeType: 'slice',
+            frameIds: ['1435517'],
             representativeFrames: ['1435517'],
             samplePrimaryCauses: ['主线程耗时操作'],
           },
@@ -870,6 +1093,7 @@ analysis_metadata:
             supplyConstraint: '核心摆放偏小核',
             amplificationPath: 'APP 截止超时',
             causeType: 'sched_latency',
+            frameIds: ['1435500'],
             representativeFrames: ['1435500'],
             samplePrimaryCauses: ['Runnable 等待'],
           },

@@ -52,6 +52,12 @@ export function buildScenePromptHintsFromTemplate(
     outputRequirementLines,
     nextStepLine,
     requireTopClusters: Boolean(template.requireTopClusters),
+    clusterPolicy: {
+      outputMode: template.clusterOutputMode || (template.requireTopClusters ? 'required' : 'optional'),
+      frameListMode: template.clusterFrameListMode || 'none',
+      maxFramesPerCluster: template.maxFramesPerCluster,
+      injectClusterFrameAggregation: Boolean(template.injectClusterFrameAggregation),
+      injectWorkloadDominantMarker: Boolean(template.injectWorkloadDominantMarker),
+    },
   };
 }
-

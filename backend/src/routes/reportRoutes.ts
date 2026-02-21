@@ -62,8 +62,10 @@ router.get('/:reportId', (req, res) => {
       `);
     }
 
-    // Set HTML content type
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     res.send(report.html);
   } catch (error: any) {
     console.error('[ReportRoutes] Get report error:', error);

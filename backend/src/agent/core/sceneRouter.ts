@@ -85,6 +85,10 @@ export function routeSceneTemplate(params: {
       outputRequirementTemplates: ['- 结论必须绑定明确证据，避免抽象术语堆砌。'],
       nextStepLine: '- “下一步”给出 1-2 个最高信息增益动作，并与当前证据直接对应。',
       requireTopClusters: false,
+      clusterOutputMode: 'optional',
+      clusterFrameListMode: 'none',
+      injectClusterFrameAggregation: false,
+      injectWorkloadDominantMarker: false,
     };
     return {
       selectedTemplate: fallback,
@@ -134,4 +138,3 @@ export function routeSceneTemplate(params: {
     candidates,
   };
 }
-

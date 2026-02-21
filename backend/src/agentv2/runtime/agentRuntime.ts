@@ -42,6 +42,8 @@ import { StrategyExecutor } from '../../agent/core/executors/strategyExecutor';
 import { HypothesisExecutor } from '../../agent/core/executors/hypothesisExecutor';
 import { applyCapturedEntities } from '../../agent/core/entityCapture';
 import { deriveConclusionContract, generateConclusion } from '../../agent/core/conclusionGenerator';
+import { resolveConclusionScene } from '../../agent/core/conclusionSceneTemplates';
+import { DEEP_REASON_LABEL } from '../../utils/analysisNarrative';
 import {
   IncrementalAnalyzer,
   type IncrementalScope,
@@ -80,6 +82,18 @@ export class AgentRuntime extends EventEmitter {
   private readonly circuitBreaker: CircuitBreaker;
   private readonly focusStore: FocusStore;
   private readonly interventionController: InterventionController;
+
+  private resolveSceneIdHint(intent: Intent, findings: Finding[]): string | undefined {
+    try {
+      return resolveConclusionScene({
+        intent,
+        findings,
+        deepReasonLabel: DEEP_REASON_LABEL,
+      }).selectedTemplate.id;
+    } catch {
+      return undefined;
+    }
+  }
 
   constructor(modelRouter: ModelRouter, config?: Partial<AgentRuntimeConfig>) {
     super();
@@ -422,6 +436,7 @@ export class AgentRuntime extends EventEmitter {
       conclusionContract: deriveConclusionContract(conclusion, {
         mode: runtimeContext.sessionContext.getAllTurns().length > 0 ? 'focused_answer' : 'initial_report',
         singleFrameDrillDown: false,
+        sceneId: this.resolveSceneIdHint(runtimeContext.intent, mergedFindings),
       }) || undefined,
       confidence: executorResult.confidence,
       rounds: executorResult.rounds,
@@ -558,6 +573,7 @@ export class AgentRuntime extends EventEmitter {
       conclusionContract: deriveConclusionContract(conclusion, {
         mode: runtimeContext.sessionContext.getAllTurns().length > 0 ? 'focused_answer' : 'initial_report',
         singleFrameDrillDown,
+        sceneId: this.resolveSceneIdHint(runtimeContext.intent, mergedFindings),
       }) || undefined,
       confidence: executorResult.confidence,
       rounds: executorResult.rounds,

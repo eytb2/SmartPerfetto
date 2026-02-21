@@ -34,6 +34,11 @@ const FALLBACK_SCENE_TEMPLATES: SceneTemplateRecord[] = [
     ],
     nextStepLine: '- “下一步”优先给出口径对齐、聚类下钻、同窗验证动作。',
     requireTopClusters: true,
+    clusterOutputMode: 'required',
+    clusterFrameListMode: 'full',
+    maxFramesPerCluster: 120,
+    injectClusterFrameAggregation: true,
+    injectWorkloadDominantMarker: true,
   },
   {
     id: 'startup',
@@ -44,6 +49,10 @@ const FALLBACK_SCENE_TEMPLATES: SceneTemplateRecord[] = [
     outputRequirementTemplates: ['- 启动场景至少给出 1 个阶段耗时或启动指标（TTID/TTFD）。'],
     nextStepLine: '- “下一步”优先对最慢启动阶段下钻。',
     requireTopClusters: false,
+    clusterOutputMode: 'optional',
+    clusterFrameListMode: 'none',
+    injectClusterFrameAggregation: false,
+    injectWorkloadDominantMarker: false,
   },
   {
     id: 'generic',
@@ -54,6 +63,10 @@ const FALLBACK_SCENE_TEMPLATES: SceneTemplateRecord[] = [
     outputRequirementTemplates: ['- 结论必须绑定明确证据，避免抽象术语堆砌。'],
     nextStepLine: '- “下一步”给出 1-2 个最高信息增益动作，并与当前证据直接对应。',
     requireTopClusters: false,
+    clusterOutputMode: 'optional',
+    clusterFrameListMode: 'none',
+    injectClusterFrameAggregation: false,
+    injectWorkloadDominantMarker: false,
   },
 ];
 
@@ -137,6 +150,15 @@ function applySceneTemplatePatch(
     ...(patch.outputRequirementTemplates !== undefined ? { outputRequirementTemplates: patch.outputRequirementTemplates } : {}),
     ...(patch.nextStepLine !== undefined ? { nextStepLine: patch.nextStepLine } : {}),
     ...(patch.requireTopClusters !== undefined ? { requireTopClusters: patch.requireTopClusters } : {}),
+    ...(patch.clusterOutputMode !== undefined ? { clusterOutputMode: patch.clusterOutputMode } : {}),
+    ...(patch.clusterFrameListMode !== undefined ? { clusterFrameListMode: patch.clusterFrameListMode } : {}),
+    ...(patch.maxFramesPerCluster !== undefined ? { maxFramesPerCluster: patch.maxFramesPerCluster } : {}),
+    ...(patch.injectClusterFrameAggregation !== undefined
+      ? { injectClusterFrameAggregation: patch.injectClusterFrameAggregation }
+      : {}),
+    ...(patch.injectWorkloadDominantMarker !== undefined
+      ? { injectWorkloadDominantMarker: patch.injectWorkloadDominantMarker }
+      : {}),
   };
 
   if (!merged.sceneName) merged.sceneName = base.sceneName || patch.id;
@@ -144,6 +166,15 @@ function applySceneTemplatePatch(
     merged.outputRequirementTemplates = base.outputRequirementTemplates;
   }
   if (!merged.nextStepLine) merged.nextStepLine = base.nextStepLine;
+  if (!merged.clusterOutputMode) merged.clusterOutputMode = base.clusterOutputMode;
+  if (!merged.clusterFrameListMode) merged.clusterFrameListMode = base.clusterFrameListMode;
+  if (merged.maxFramesPerCluster === undefined) merged.maxFramesPerCluster = base.maxFramesPerCluster;
+  if (merged.injectClusterFrameAggregation === undefined) {
+    merged.injectClusterFrameAggregation = base.injectClusterFrameAggregation;
+  }
+  if (merged.injectWorkloadDominantMarker === undefined) {
+    merged.injectWorkloadDominantMarker = base.injectWorkloadDominantMarker;
+  }
 
   templateMap.set(patch.id, merged);
 }
