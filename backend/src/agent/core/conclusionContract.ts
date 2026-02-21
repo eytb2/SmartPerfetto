@@ -1,4 +1,6 @@
 export type ConclusionOutputMode = 'initial_report' | 'focused_answer' | 'need_input';
+export type ConclusionClusterOutputMode = 'required' | 'optional' | 'none';
+export type ConclusionClusterFrameListMode = 'none' | 'top' | 'full';
 
 export interface ConclusionContractConclusionItem {
   rank: number;
@@ -14,6 +16,14 @@ export interface ConclusionContractClusterItem {
   description?: string;
   frames?: number;
   percentage?: number;
+  frameRefs?: string[];
+  omittedFrameRefs?: number;
+}
+
+export interface ConclusionContractClusterPolicy {
+  outputMode: ConclusionClusterOutputMode;
+  frameListMode: ConclusionClusterFrameListMode;
+  maxFramesPerCluster?: number;
 }
 
 export interface ConclusionContractEvidenceItem {
@@ -24,6 +34,8 @@ export interface ConclusionContractEvidenceItem {
 export interface ConclusionContractMetadata {
   confidencePercent?: number;
   rounds?: number;
+  clusterPolicy?: ConclusionContractClusterPolicy;
+  sceneId?: string;
 }
 
 export interface ConclusionContract {
@@ -36,4 +48,3 @@ export interface ConclusionContract {
   nextSteps: string[];
   metadata?: ConclusionContractMetadata;
 }
-

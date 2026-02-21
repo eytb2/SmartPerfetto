@@ -18,6 +18,7 @@ import * as path from 'path';
 // Paths
 const projectRoot = path.resolve(__dirname, '../..');
 const backendContractPath = path.join(projectRoot, 'backend/src/types/dataContract.ts');
+const conclusionContractPath = path.join(projectRoot, 'backend/src/agent/core/conclusionContract.ts');
 const frontendOutputPath = path.join(
   projectRoot,
   'perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/generated/data_contract.types.ts'
@@ -58,6 +59,7 @@ function extractConstArrayValues(content: string, constName: string): string[] {
 // Read backend contract
 console.log('Reading backend data contract...');
 const backendContent = fs.readFileSync(backendContractPath, 'utf-8');
+const conclusionContractContent = fs.readFileSync(conclusionContractPath, 'utf-8').trim();
 
 // Transform content for frontend
 console.log('Transforming for frontend compatibility...');
@@ -86,6 +88,13 @@ parts.push(`/**
  * @version 2.0.0 - DataEnvelope refactoring
  * @generated ${new Date().toISOString()}
  */
+`);
+
+parts.push(`// =============================================================================
+// Conclusion Contract Types
+// =============================================================================
+
+${conclusionContractContent}
 `);
 
 // Column Types Section
@@ -493,13 +502,38 @@ export interface ProgressEvent {
 }
 
 /**
+ * Conversation Step Event - Strictly ordered timeline step for assistant-like UX
+ */
+export interface ConversationStepEvent {
+  type: 'conversation_step';
+  id: string;
+  data: {
+    eventId: string;
+    sessionId: string;
+    traceId: string;
+    phase: 'progress' | 'thinking' | 'tool' | 'result' | 'error';
+    role: 'agent' | 'system';
+    ordinal: number;
+    content: {
+      text: string;
+    };
+    metadata?: Record<string, unknown>;
+    source?: {
+      eventType?: string;
+      phase?: string;
+    };
+  };
+  timestamp: number;
+}
+
+/**
  * Analysis Completed Event - SSE payload for final result
  */
 export interface AnalysisCompletedEvent {
   type: 'analysis_completed';
   data: {
     summary: string;
-    conclusionContract?: unknown;
+    conclusionContract?: ConclusionContract;
     reportUrl?: string;
     findings: DiagnosticFinding[];
     suggestions: string[];
@@ -515,6 +549,7 @@ export type SSEEvent =
   | SkillDataEvent
   | FindingEvent
   | ProgressEvent
+  | ConversationStepEvent
   | AnalysisCompletedEvent;
 
 // =============================================================================

@@ -11,10 +11,13 @@ import { SharedAgentContext } from '../types/agentProtocol';
 import { ModelRouter } from './modelRouter';
 import { ProgressEmitter } from './orchestratorTypes';
 import { formatJankSummaryForPrompt } from './jankCauseSummarizer';
-import type { CauseTypeStats, JankCauseSummary, JankCluster } from './jankCauseSummarizer';
+import type { JankCauseSummary, JankCluster } from './jankCauseSummarizer';
 import type {
+  ConclusionClusterFrameListMode,
+  ConclusionClusterOutputMode,
   ConclusionContract,
   ConclusionContractClusterItem,
+  ConclusionContractClusterPolicy,
   ConclusionContractConclusionItem,
   ConclusionContractEvidenceItem,
   ConclusionContractMetadata,
@@ -31,6 +34,7 @@ import {
   parseTriadParts,
   stripTriadPrefix,
   SUPPLY_NONE_CURRENT_FRAME_TEXT,
+  SUPPLY_WORKLOAD_WEAK_TEXT,
   TRIAD_EVIDENCE_LABELS,
   TRIAD_HEADING,
   TRIAD_LABELS,
@@ -54,6 +58,7 @@ export interface ConclusionGenerationOptions {
 
 interface ContractRenderOptions {
   singleFrameDrillDown: boolean;
+  scenePromptHints?: ConclusionScenePromptHints;
 }
 
 const DISABLED_FLAG_VALUES = new Set(['0', 'false', 'off', 'no']);
@@ -80,6 +85,18 @@ const PROMPT_FINDING_EVIDENCE_ITEMS_LIMIT = 4;
 const PROMPT_FINDING_EVIDENCE_MAX_CHARS = 120;
 const STARTUP_WRAPPER_SLICE_RE = /\b(clientTransactionExecuted|activityStart|bindApplication|performCreate:)/i;
 const STARTUP_ACTIONABLE_HINT_RE = /\b(LoadSimulator_|ChaosTask|SimulateInflation|RealInflation|AppInit|ActivityInit)\b/i;
+const DEFAULT_TOP_CLUSTER_FRAME_RENDER_LIMIT = 5;
+const DEFAULT_FULL_CLUSTER_FRAME_RENDER_LIMIT = 120;
+
+function isJankSceneId(sceneId?: string): boolean {
+  return String(sceneId || '').trim().toLowerCase() === 'jank';
+}
+
+function resolveClusterSectionHeading(sceneId?: string): string {
+  return isJankSceneId(sceneId)
+    ? '## 掉帧聚类（先看大头）'
+    : '## 聚类（先看大头）';
+}
 
 function normalizeFindingTitleKey(title: string): string {
   return String(title || '')
@@ -682,7 +699,7 @@ function getWorkloadDominantCluster(
   clusterId: string;
   frameCount: number;
   percentage: number;
-  representativeFrames: string[];
+  frameIds: string[];
   samplePrimaryCauses: string[];
 } | null {
   const clusters = jankSummary?.clusters;
@@ -691,8 +708,8 @@ function getWorkloadDominantCluster(
   }
 
   const dominant = clusters.find((cluster: JankCluster) => {
-    const supply = String(cluster?.supplyConstraint || '');
-    return supply.includes('负载主导');
+    const supply = String(cluster?.supplyConstraint || '').trim();
+    return supply === SUPPLY_WORKLOAD_WEAK_TEXT;
   });
 
   if (!dominant) {
@@ -703,13 +720,114 @@ function getWorkloadDominantCluster(
     clusterId: String(dominant.clusterId || 'K?'),
     frameCount: toFiniteNumber(dominant.frameCount),
     percentage: toFiniteNumber(dominant.percentage),
-    representativeFrames: Array.isArray(dominant.representativeFrames)
-      ? dominant.representativeFrames.map((v: unknown) => String(v)).filter(Boolean).slice(0, 3)
-      : [],
+    frameIds: readClusterFrameIds(dominant),
     samplePrimaryCauses: Array.isArray(dominant.samplePrimaryCauses)
       ? dominant.samplePrimaryCauses.map((v: unknown) => String(v)).filter(Boolean).slice(0, 2)
       : [],
   };
+}
+
+function readClusterFrameIds(cluster: Pick<JankCluster, 'representativeFrames'> & { frameIds?: unknown }): string[] {
+  const rawFrameIds = Array.isArray(cluster.frameIds)
+    ? cluster.frameIds
+    : (Array.isArray(cluster.representativeFrames) ? cluster.representativeFrames : []);
+  return Array.from(new Set(rawFrameIds.map((v: unknown) => String(v)).filter(Boolean)));
+}
+
+function resolveClusterFrameLimit(
+  mode: ConclusionClusterFrameListMode,
+  maxFramesPerCluster?: number
+): number {
+  if (mode === 'none') return 0;
+  if (Number.isFinite(maxFramesPerCluster) && (maxFramesPerCluster || 0) > 0) {
+    return Math.round(maxFramesPerCluster as number);
+  }
+  return mode === 'top'
+    ? DEFAULT_TOP_CLUSTER_FRAME_RENDER_LIMIT
+    : DEFAULT_FULL_CLUSTER_FRAME_RENDER_LIMIT;
+}
+
+function applyClusterFrameListMode(
+  frameIds: string[],
+  mode: ConclusionClusterFrameListMode,
+  maxFramesPerCluster?: number
+): { frameIds: string[]; omittedCount: number } {
+  if (mode === 'none') return { frameIds: [], omittedCount: 0 };
+  const limit = resolveClusterFrameLimit(mode, maxFramesPerCluster);
+  const selected = frameIds.slice(0, limit);
+  return {
+    frameIds: selected,
+    omittedCount: Math.max(0, frameIds.length - selected.length),
+  };
+}
+
+function buildClusterFrameAggregationLines(
+  jankSummary: JankCauseSummary | undefined,
+  frameListMode: ConclusionClusterFrameListMode,
+  maxFramesPerCluster?: number
+): string[] {
+  if (frameListMode === 'none') {
+    return [];
+  }
+  const clusters = jankSummary?.clusters;
+  if (!Array.isArray(clusters) || clusters.length === 0) {
+    return [];
+  }
+
+  const totalFrames = toFiniteNumber(jankSummary?.totalJankFrames);
+  const lines: string[] = [];
+  const modeLabel = frameListMode === 'full' ? '全量帧' : 'Top帧';
+  lines.push(`- 聚类帧聚合（${modeLabel}，覆盖 ${totalFrames} 帧）`);
+
+  for (const cluster of clusters) {
+    const clusterId = String(cluster.clusterId || 'K?');
+    const clusterFrameCount = toFiniteNumber(cluster.frameCount);
+    const selection = applyClusterFrameListMode(
+      readClusterFrameIds(cluster),
+      frameListMode,
+      maxFramesPerCluster
+    );
+    const frameList = selection.frameIds.length > 0 ? selection.frameIds.join(' / ') : '无可用帧ID';
+    const omissionHint = selection.omittedCount > 0
+      ? `（其余 ${selection.omittedCount} 帧省略）`
+      : '';
+    lines.push(`- ${clusterId}（${clusterFrameCount}帧）: ${frameList}${omissionHint}`);
+  }
+
+  return lines;
+}
+
+function injectAllJankFrameAggregation(
+  markdown: string,
+  jankSummary: JankCauseSummary | undefined,
+  frameListMode: ConclusionClusterFrameListMode,
+  maxFramesPerCluster?: number
+): string {
+  if (/聚类帧聚合（/.test(markdown)) {
+    return markdown;
+  }
+
+  const aggregationLines = buildClusterFrameAggregationLines(
+    jankSummary,
+    frameListMode,
+    maxFramesPerCluster
+  );
+  if (aggregationLines.length === 0) {
+    return markdown;
+  }
+
+  const clusterSection = findMarkdownSection(
+    String(markdown || ''),
+    /^##\s*(?:掉帧聚类（先看大头）|掉帧聚类|聚类（先看大头）|聚类)\s*$/m
+  );
+  if (!clusterSection) {
+    return markdown;
+  }
+
+  const originalBody = clusterSection.body;
+  const trimmedBody = originalBody.trimStart();
+  const nextBody = `${aggregationLines.join('\n')}\n${trimmedBody}`;
+  return `${markdown.slice(0, clusterSection.bodyStart)}${nextBody}${markdown.slice(clusterSection.bodyEnd)}`;
 }
 
 function injectWorkloadDominantClusterMarker(
@@ -725,8 +843,8 @@ function injectWorkloadDominantClusterMarker(
     return markdown;
   }
 
-  const repFramesText = cluster.representativeFrames.length > 0
-    ? `；代表帧: ${cluster.representativeFrames.join(' / ')}`
+  const repFramesText = cluster.frameIds.length > 0
+    ? `；聚合帧: ${cluster.frameIds.join(' / ')}`
     : '';
   const sampleCauseText = cluster.samplePrimaryCauses.length > 0
     ? `；关键切片: ${cluster.samplePrimaryCauses.join('；')}`
@@ -1068,7 +1186,7 @@ function generateAttributionSafeFallback(
   lines.push(`- ${TRIAD_LABELS.amplification}: ${mechanismTriad.amplification}`);
   lines.push('');
 
-  lines.push('## 掉帧聚类（先看大头）');
+  lines.push('## 聚类（先看大头）');
   if (clusterHints.length > 0) {
     for (const hint of clusterHints) {
       lines.push(`- ${hint}`);
@@ -1109,7 +1227,7 @@ function finalizeConclusionMarkdown(
   markdown: string,
   findings: Finding[],
   jankSummary?: JankCauseSummary,
-  options: { singleFrameDrillDown?: boolean } = {}
+  options: { singleFrameDrillDown?: boolean; scenePromptHints?: ConclusionScenePromptHints } = {}
 ): string {
   const withPerConclusionMapping = injectPerConclusionEvidenceMapping(markdown, findings);
   const withEvidenceIndex = injectEvidenceIndexIntoEvidenceChain(withPerConclusionMapping, findings);
@@ -1123,7 +1241,19 @@ function finalizeConclusionMarkdown(
     ? injectSingleFrameHumanReadableConclusion(withEvidenceAligned, findings)
     : withEvidenceAligned;
   const withDeepReason = injectDeepReasonIntoConclusionSection(withHumanReadable, findings);
-  return injectWorkloadDominantClusterMarker(withDeepReason, jankSummary);
+  const shouldInjectClusterAggregation = Boolean(options.scenePromptHints?.clusterPolicy.injectClusterFrameAggregation);
+  const withClusterAggregation = shouldInjectClusterAggregation
+    ? injectAllJankFrameAggregation(
+      withDeepReason,
+      jankSummary,
+      options.scenePromptHints?.clusterPolicy.frameListMode || 'none',
+      options.scenePromptHints?.clusterPolicy.maxFramesPerCluster
+    )
+    : withDeepReason;
+  const shouldInjectWorkloadDominant = Boolean(options.scenePromptHints?.clusterPolicy.injectWorkloadDominantMarker);
+  return shouldInjectWorkloadDominant
+    ? injectWorkloadDominantClusterMarker(withClusterAggregation, jankSummary)
+    : withClusterAggregation;
 }
 
 function normalizeHintText(text: string): string {
@@ -1645,6 +1775,7 @@ function parseClusterItemFromRecord(record: Record<string, unknown>): Conclusion
   const rankPrefix = typeof rank === 'number' && rank > 0 ? `K${Math.round(rank)}` : '';
   const frames = parseNumberFromUnknown(readSemanticNumber(record, 'cluster_frames'));
   const percentage = parseNumberFromUnknown(readSemanticNumber(record, 'cluster_percentage'));
+  const frameRefs = parseClusterFrameRefs(record);
 
   let resolvedCluster = cluster;
   if (!resolvedCluster && rankPrefix) resolvedCluster = rankPrefix;
@@ -1659,7 +1790,46 @@ function parseClusterItemFromRecord(record: Record<string, unknown>): Conclusion
     description: description || undefined,
     frames: typeof frames === 'number' && frames > 0 ? frames : undefined,
     percentage: typeof percentage === 'number' ? percentage : undefined,
+    frameRefs: frameRefs.length > 0 ? frameRefs : undefined,
   };
+}
+
+function parseFrameRefsFromUnknown(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return Array.from(new Set(raw.map((v: unknown) => String(v).trim()).filter(Boolean)));
+  }
+  if (typeof raw !== 'string') {
+    return [];
+  }
+  const text = raw.trim();
+  if (!text) return [];
+  const normalized = text.replace(/[（(]\s*其余\s*\d+\s*帧省略\s*[）)]/g, '').trim();
+  const tokens = normalized.split(/[\/|,，;；\s]+/g)
+    .map(t => t.trim())
+    .filter(Boolean)
+    .filter(t => /^\d{3,}$/.test(t));
+  return Array.from(new Set(tokens));
+}
+
+function parseClusterFrameRefs(record: Record<string, unknown>): string[] {
+  const direct = readValueFromAliases(record, [
+    'frameRefs',
+    'frame_refs',
+    'frameIds',
+    'frame_ids',
+    'cluster_frame_refs',
+    'clusterFrameRefs',
+    'cluster_frames_list',
+    'clusterFramesList',
+    '聚合帧',
+    '帧列表',
+    '帧ID列表',
+  ]);
+  const directRefs = parseFrameRefsFromUnknown(direct);
+  if (directRefs.length > 0) return directRefs;
+
+  const clusterDescription = readSemanticText(record, 'cluster_description');
+  return parseFrameRefsFromUnknown(clusterDescription);
 }
 
 function parseEvidenceItemsFromRecord(record: Record<string, unknown>, fallbackRank: number): ConclusionContractEvidenceItem[] {
@@ -1777,11 +1947,14 @@ function parseClusterItemsFromMarkdownSection(sectionBody: string): ConclusionCo
     }
     if (!clusterText) continue;
     const m = clusterText.match(/^(K\d+)\s*[:：]\s*(.+)$/i);
+    const description = m ? m[2] : undefined;
+    const frameRefs = parseFrameRefsFromUnknown(description);
     clusters.push({
       cluster: m ? m[1] : clusterText,
-      description: m ? m[2] : undefined,
+      description,
       frames: Number.isFinite(frames) ? frames : undefined,
       percentage: Number.isFinite(percentage) ? percentage : undefined,
+      frameRefs: frameRefs.length > 0 ? frameRefs : undefined,
     });
   }
   return clusters;
@@ -1828,6 +2001,61 @@ function parseMetadataFromMarkdownSection(sectionBody: string): ConclusionContra
   return {
     confidencePercent,
     rounds: typeof rounds === 'number' && Number.isFinite(rounds) ? Math.max(1, Math.round(rounds)) : undefined,
+  };
+}
+
+function normalizeSceneId(raw: unknown, fallback?: string): string | undefined {
+  const direct = String(raw || '').trim().toLowerCase();
+  if (direct) return direct;
+  const fallbackText = String(fallback || '').trim().toLowerCase();
+  return fallbackText || undefined;
+}
+
+function normalizeClusterOutputMode(
+  raw: unknown,
+  fallback: ConclusionClusterOutputMode = 'optional'
+): ConclusionClusterOutputMode {
+  const text = String(raw || '').trim().toLowerCase();
+  if (text === 'required' || text === 'optional' || text === 'none') return text;
+  return fallback;
+}
+
+function normalizeClusterFrameListMode(
+  raw: unknown,
+  fallback: ConclusionClusterFrameListMode = 'none'
+): ConclusionClusterFrameListMode {
+  const text = String(raw || '').trim().toLowerCase();
+  if (text === 'full' || text === 'top' || text === 'none') return text;
+  return fallback;
+}
+
+function normalizeClusterPolicy(
+  raw: unknown,
+  fallback?: ConclusionContractClusterPolicy
+): ConclusionContractClusterPolicy | undefined {
+  const source = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+  const outputMode = normalizeClusterOutputMode(
+    readValueFromAliases(source, ['outputMode', 'output_mode']),
+    fallback?.outputMode || 'optional'
+  );
+  const frameListMode = normalizeClusterFrameListMode(
+    readValueFromAliases(source, ['frameListMode', 'frame_list_mode']),
+    fallback?.frameListMode || 'none'
+  );
+  const maxFramesPerCluster = parseNumberFromUnknown(
+    readValueFromAliases(source, ['maxFramesPerCluster', 'max_frames_per_cluster'])
+  );
+  const resolvedMax = Number.isFinite(maxFramesPerCluster) && (maxFramesPerCluster || 0) > 0
+    ? Math.round(maxFramesPerCluster as number)
+    : fallback?.maxFramesPerCluster;
+
+  const hasSignal = Boolean(raw) || Boolean(fallback);
+  if (!hasSignal) return undefined;
+
+  return {
+    outputMode,
+    frameListMode,
+    maxFramesPerCluster: resolvedMax,
   };
 }
 
@@ -1887,6 +2115,16 @@ function sanitizeConclusionContract(
       };
     });
 
+  const scenePolicy = options.scenePromptHints
+    ? {
+        outputMode: options.scenePromptHints.clusterPolicy.outputMode,
+        frameListMode: options.scenePromptHints.clusterPolicy.frameListMode,
+        maxFramesPerCluster: options.scenePromptHints.clusterPolicy.maxFramesPerCluster,
+      }
+    : undefined;
+  const clusterPolicy = normalizeClusterPolicy(contract.metadata?.clusterPolicy, scenePolicy);
+  const sceneId = normalizeSceneId(contract.metadata?.sceneId, options.scenePromptHints?.sceneId);
+
   const clusters = options.singleFrameDrillDown
     ? []
     : contract.clusters
@@ -1897,8 +2135,24 @@ function sanitizeConclusionContract(
             ? Math.round(item.frames)
             : undefined,
           percentage: clampPercent(item.percentage),
+          frameRefs: parseFrameRefsFromUnknown(item.frameRefs),
         }))
         .filter(item => item.cluster)
+        .map(item => {
+          const selection = applyClusterFrameListMode(
+            item.frameRefs,
+            clusterPolicy?.frameListMode || 'top',
+            clusterPolicy?.maxFramesPerCluster
+          );
+          return {
+            cluster: item.cluster,
+            description: item.description,
+            frames: item.frames,
+            percentage: item.percentage,
+            frameRefs: selection.frameIds.length > 0 ? selection.frameIds : undefined,
+            omittedFrameRefs: selection.omittedCount > 0 ? selection.omittedCount : undefined,
+          };
+        })
         .slice(0, 5);
 
   const evidenceChain = contract.evidenceChain
@@ -1918,8 +2172,10 @@ function sanitizeConclusionContract(
         rounds: typeof contract.metadata.rounds === 'number' && Number.isFinite(contract.metadata.rounds)
           ? Math.max(1, Math.round(contract.metadata.rounds))
           : undefined,
+        clusterPolicy,
+        sceneId,
       }
-    : undefined;
+    : ((clusterPolicy || sceneId) ? { ...(clusterPolicy ? { clusterPolicy } : {}), ...(sceneId ? { sceneId } : {}) } : undefined);
 
   return {
     schemaVersion: 'conclusion_contract_v1',
@@ -1933,7 +2189,12 @@ function sanitizeConclusionContract(
     evidenceChain,
     uncertainties,
     nextSteps,
-    metadata: metadata && (metadata.confidencePercent !== undefined || metadata.rounds !== undefined)
+    metadata: metadata && (
+      metadata.confidencePercent !== undefined ||
+      metadata.rounds !== undefined ||
+      metadata.clusterPolicy !== undefined ||
+      metadata.sceneId !== undefined
+    )
       ? metadata
       : undefined,
   };
@@ -1955,7 +2216,8 @@ function renderConclusionContract(
   lines.push('');
 
   if (!options.singleFrameDrillDown) {
-    lines.push('## 掉帧聚类（先看大头）');
+    const sceneId = options.scenePromptHints?.sceneId || contract.metadata?.sceneId;
+    lines.push(resolveClusterSectionHeading(sceneId));
     if (contract.clusters.length === 0) {
       lines.push('- 暂无');
     } else {
@@ -1966,7 +2228,12 @@ function renderConclusionContract(
         const metrics: string[] = [];
         if (typeof cluster.frames === 'number') metrics.push(`${Math.round(cluster.frames)}帧`);
         if (typeof cluster.percentage === 'number') metrics.push(`${cluster.percentage.toFixed(1)}%`);
-        lines.push(`- ${prefix}${metrics.length > 0 ? `（${metrics.join(', ')}）` : ''}`);
+        const frameRefs = parseFrameRefsFromUnknown(cluster.frameRefs);
+        const frameRefText = frameRefs.length > 0 ? `；帧: ${frameRefs.join(' / ')}` : '';
+        const omissionHint = typeof cluster.omittedFrameRefs === 'number' && cluster.omittedFrameRefs > 0
+          ? `（其余 ${Math.round(cluster.omittedFrameRefs)} 帧省略）`
+          : '';
+        lines.push(`- ${prefix}${metrics.length > 0 ? `（${metrics.join(', ')}）` : ''}${frameRefText}${omissionHint}`);
       });
     }
     lines.push('');
@@ -2020,7 +2287,10 @@ function parseMarkdownToConclusionContract(
   const conclusionSection =
     findMarkdownSection(text, /^##\s*结论[（(]按可能性排序[）)]\s*$/m) ||
     findMarkdownSection(text, /^##\s*分析结论\s*$/m);
-  const clusterSection = findMarkdownSection(text, /^##\s*掉帧聚类[（(]先看大头[）)]\s*$/m);
+  const clusterSection =
+    findMarkdownSection(text, /^##\s*掉帧聚类[（(]先看大头[）)]\s*$/m)
+    || findMarkdownSection(text, /^##\s*聚类[（(]先看大头[）)]\s*$/m)
+    || findMarkdownSection(text, /^##\s*聚类\s*$/m);
   const evidenceSection = findMarkdownSection(text, /^##\s*证据链[（(]对应上述结论[）)]\s*$/m);
   const uncertaintySection = findMarkdownSection(text, /^##\s*不确定性与反例\s*$/m);
   const nextStepSection = findMarkdownSection(text, /^##\s*下一步[（(]最高信息增益[）)]\s*$/m);
@@ -2030,6 +2300,15 @@ function parseMarkdownToConclusionContract(
     conclusionSection || clusterSection || evidenceSection || uncertaintySection || nextStepSection || metadataSection
   );
   if (!hasSignal) return null;
+
+  const clusterHeader = clusterSection
+    ? text.slice(clusterSection.headerStart, clusterSection.headerEnd)
+    : '';
+  const inferredSceneId = /掉帧聚类/.test(clusterHeader) ? 'jank' : undefined;
+  const parsedMetadata = metadataSection ? parseMetadataFromMarkdownSection(metadataSection.body) : undefined;
+  const metadata = inferredSceneId
+    ? { ...(parsedMetadata || {}), sceneId: inferredSceneId }
+    : parsedMetadata;
 
   const contract: ConclusionContract = {
     schemaVersion: 'conclusion_contract_v1',
@@ -2043,7 +2322,7 @@ function parseMarkdownToConclusionContract(
     nextSteps: nextStepSection
       ? extractListEntriesFromSectionBody(nextStepSection.body).map(normalizeNextStepWording)
       : [],
-    metadata: metadataSection ? parseMetadataFromMarkdownSection(metadataSection.body) : undefined,
+    metadata,
   };
 
   return sanitizeConclusionContract(contract, options);
@@ -2150,6 +2429,14 @@ function parseJsonToConclusionContract(
   const nextSteps = toStringArray(nextStepSource).map(normalizeNextStepWording);
 
   const metadataRecord = toRecord(metadataSource);
+  const metadataClusterPolicy = normalizeClusterPolicy(
+    metadataRecord ? readValueFromAliases(metadataRecord, ['clusterPolicy', 'cluster_policy']) : undefined
+  );
+  const rootClusterPolicy = normalizeClusterPolicy(readValueFromAliases(root, ['clusterPolicy', 'cluster_policy']));
+  const metadataSceneId = normalizeSceneId(
+    metadataRecord ? readValueFromAliases(metadataRecord, ['sceneId', 'scene_id', 'scene']) : undefined
+  );
+  const rootSceneId = normalizeSceneId(readValueFromAliases(root, ['sceneId', 'scene_id', 'scene']));
   const metadata: ConclusionContractMetadata | undefined = metadataRecord
     ? {
         confidencePercent: clampPercent(readSemanticNumber(metadataRecord, 'confidence')),
@@ -2157,6 +2444,8 @@ function parseJsonToConclusionContract(
           const rounds = readSemanticNumber(metadataRecord, 'rounds');
           return typeof rounds === 'number' && Number.isFinite(rounds) ? Math.round(rounds) : undefined;
         })(),
+        clusterPolicy: metadataClusterPolicy || rootClusterPolicy,
+        sceneId: metadataSceneId || rootSceneId,
       }
     : {
         confidencePercent: clampPercent(readSemanticNumber(root, 'confidence')),
@@ -2164,6 +2453,8 @@ function parseJsonToConclusionContract(
           const rounds = readSemanticNumber(root, 'rounds');
           return typeof rounds === 'number' && Number.isFinite(rounds) ? Math.round(rounds) : undefined;
         })(),
+        clusterPolicy: rootClusterPolicy,
+        sceneId: rootSceneId,
       };
 
   const contract: ConclusionContract = {
@@ -2215,20 +2506,33 @@ export function deriveConclusionContract(
   options: {
     mode?: ConclusionOutputMode;
     singleFrameDrillDown?: boolean;
+    sceneId?: string;
   } = {}
 ): ConclusionContract | null {
   const mode = options.mode || 'initial_report';
   const renderOptions: ContractRenderOptions = {
     singleFrameDrillDown: Boolean(options.singleFrameDrillDown),
   };
+  const sceneIdHint = normalizeSceneId(options.sceneId);
   const text = String(rawText || '').trim();
   if (!text) return null;
 
+  const applySceneIdHint = (contract: ConclusionContract): ConclusionContract => {
+    if (!sceneIdHint || contract.metadata?.sceneId) return contract;
+    return {
+      ...contract,
+      metadata: {
+        ...(contract.metadata || {}),
+        sceneId: sceneIdHint,
+      },
+    };
+  };
+
   const contractFromJson = parseJsonToConclusionContract(text, mode, renderOptions);
-  if (contractFromJson) return contractFromJson;
+  if (contractFromJson) return applySceneIdHint(contractFromJson);
 
   const markdownCandidates: string[] = [text];
-  const normalizedJsonLike = convertJsonLikeSectionsToMarkdown(text);
+  const normalizedJsonLike = convertJsonLikeSectionsToMarkdown(text, renderOptions);
   if (normalizedJsonLike) {
     markdownCandidates.push(normalizedJsonLike);
   }
@@ -2240,7 +2544,7 @@ export function deriveConclusionContract(
 
   for (const candidate of markdownCandidates) {
     const contract = parseMarkdownToConclusionContract(candidate, mode, renderOptions);
-    if (contract) return contract;
+    if (contract) return applySceneIdHint(contract);
   }
 
   return null;
@@ -2407,12 +2711,17 @@ export async function generateConclusion(
 
   // Build structured jank summary section (from per-frame analysis)
   const jankSummarySection = formatJankSummaryForPrompt(scopedJankSummary);
-  const attributionAssessmentSection = buildAttributionAssessmentPromptSection(attributionAssessment);
-  const mechanismTriadSection = buildMechanismTriadPromptSection(
-    attributionAssessment,
-    scopedJankSummary,
-    frameMechanismRecords
-  );
+  const includeAttributionPrompt = isJankSceneId(scenePromptHints.sceneId);
+  const attributionAssessmentSection = includeAttributionPrompt
+    ? buildAttributionAssessmentPromptSection(attributionAssessment)
+    : '';
+  const mechanismTriadSection = includeAttributionPrompt
+    ? buildMechanismTriadPromptSection(
+      attributionAssessment,
+      scopedJankSummary,
+      frameMechanismRecords
+    )
+    : '';
   const sceneFocusPromptSection = [
     '## 场景化分析焦点',
     `- 当前场景: ${scenePromptHints.sceneName}`,
@@ -2422,12 +2731,20 @@ export async function generateConclusion(
     ...scenePromptHints.outputRequirementLines,
     scenePromptHints.nextStepLine,
   ].join('\n');
-  const nonInsightClusterGoalLine = scenePromptHints.requireTopClusters
-    ? '6. 掉帧聚类 Top3（按帧数降序，先给 K1 大头）'
-    : '6. 若有分组证据可给出 Top 分组；若无可省略聚类并说明原因';
-  const nonInsightClusterConstraint = scenePromptHints.requireTopClusters
-    ? '- 必须输出聚类信息（K1/K2/K3），并给出每类的帧数和占比'
-    : '- 当前场景 clusters 可按时间阶段/样本分组给出；若无聚类证据可传空数组';
+  const nonInsightClusterGoalLine = scenePromptHints.clusterPolicy.outputMode === 'required'
+    ? '6. 聚类/分组 Top3（按样本规模降序，先给 K1 大头）'
+    : (scenePromptHints.clusterPolicy.outputMode === 'none'
+      ? '6. 当前场景无需聚类分组，请省略 clusters 并说明原因'
+      : '6. 若有分组证据可给出 Top 分组；若无可省略聚类并说明原因');
+  const nonInsightClusterConstraint = scenePromptHints.clusterPolicy.outputMode === 'required'
+    ? '- 必须输出 clusters（K1/K2/K3），并给出每类样本数和占比'
+    : (scenePromptHints.clusterPolicy.outputMode === 'none'
+      ? '- 当前场景 clusters 必须传空数组，不要虚构聚类'
+      : '- 当前场景 clusters 可按时间阶段/样本分组给出；若无聚类证据可传空数组');
+  const nonInsightConflictRulesSection = buildNonInsightConflictRulesSection(
+    scenePromptHints,
+    sharedContext.traceConfig
+  );
 
   // Debug: Log whether jank summary is being included
   if (scopedJankSummary) {
@@ -2491,17 +2808,166 @@ ${nonInsightClusterGoalLine}
 ${sceneOutputRequirementSection}
 - 可给出最多 2 条与“${DEEP_REASON_LABEL}”一一对应的优化方向，避免泛化建议
 - ${nonInsightClusterConstraint}
+${nonInsightConflictRulesSection}
 
-## 刷新率与帧预算
-${sharedContext.traceConfig ? (sharedContext.traceConfig.isVRR
-  ? `- **VRR/LTPO 模式: ${sharedContext.traceConfig.vrrMode}**
-- **主导刷新率: ${sharedContext.traceConfig.refreshRateHz}Hz**（用于大部分帧的判断）
-- **帧预算范围: ${sharedContext.traceConfig.minFrameBudgetMs || sharedContext.traceConfig.vsyncPeriodMs}ms - ${sharedContext.traceConfig.maxFrameBudgetMs || sharedContext.traceConfig.vsyncPeriodMs}ms**
-- ⚠️ VRR 设备帧预算动态变化，使用最严格标准（${sharedContext.traceConfig.minFrameBudgetMs || sharedContext.traceConfig.vsyncPeriodMs}ms）判断 jank`
-  : `- **检测到的刷新率: ${sharedContext.traceConfig.refreshRateHz}Hz**
-- **帧预算: ${sharedContext.traceConfig.vsyncPeriodMs}ms**
-- 数据来源: ${sharedContext.traceConfig.vsyncSource}`)
-: `- 刷新率未检测到，默认使用 120Hz（8.33ms）作为帧预算`}
+## 输出格式要求（必须严格遵守）
+- **只输出 Markdown 格式的纯文本**，方便人类阅读
+- **禁止输出 JSON**，不要用 {} 或 [] 包装内容
+- **禁止输出代码块**，不要用 \`\`\` 包装
+- 使用 ## 作为标题，使用 - 作为列表项
+- 示例格式：
+  ## 根因分析
+  主要问题是 XXX，置信度 85%。
+
+	  ## 证据支撑
+	  - 发现1：XXX
+	  - 发现2：XXX`;
+
+  const contractRenderOptions: ContractRenderOptions = {
+    singleFrameDrillDown,
+    scenePromptHints,
+  };
+
+  try {
+    const response = await modelRouter.callWithFallback(prompt, 'synthesis', {
+      jsonMode: insightEnabled,
+      onToken: onModelToken,
+      sessionId: sharedContext.sessionId,
+      traceId: sharedContext.traceId,
+      maxTokens: insightEnabled ? 3000 : 2000,
+      promptId: insightEnabled
+        ? `agent.conclusionGenerator.insight.${outputMode}`
+        : (turnCount >= 1 ? 'agent.conclusionGenerator.dialogue' : 'agent.conclusionGenerator'),
+      promptVersion: '2.0.0',
+      contractVersion: insightEnabled
+        ? 'conclusion_contract_json@1.0.0'
+        : (turnCount >= 1 ? 'conclusion_dialogue_text@1.0.0' : 'conclusion_text@1.0.0'),
+    });
+
+    let conclusion = toDeterministicConclusionMarkdown(
+      response.response,
+      outputMode,
+      contractRenderOptions,
+      emitter
+    );
+
+    // Ensure evidence IDs appear in the evidence-chain section when available.
+    // This makes the output auditable even if the LLM forgets to cite.
+    conclusion = finalizeConclusionMarkdown(
+      conclusion,
+      finalFindings,
+      scopedJankSummary,
+      { singleFrameDrillDown, scenePromptHints }
+    );
+
+    if (isConclusionContradictingAttributionVerdict(conclusion, attributionAssessment)) {
+      emitter.log('[conclusionGenerator] LLM conclusion contradicts attribution verdict, switching to rule-based safe fallback');
+      emitter.emitUpdate('degraded', {
+        module: 'conclusionGenerator',
+        fallback: 'rule-based attribution-safe conclusion',
+      });
+      const safeFallback = generateAttributionSafeFallback(
+        attributionAssessment,
+        finalFindings,
+        contradictionReasons,
+        stopReason,
+        scopedJankSummary,
+        frameMechanismRecords
+      );
+      const deterministicFallback = toDeterministicConclusionMarkdown(
+        safeFallback,
+        outputMode,
+        contractRenderOptions,
+        emitter
+      );
+      const finalizedFallback = finalizeConclusionMarkdown(
+        deterministicFallback,
+        finalFindings,
+        scopedJankSummary,
+        { singleFrameDrillDown, scenePromptHints }
+      );
+      return streamConclusionAndReturn(finalizedFallback);
+    }
+
+    return streamConclusionAndReturn(conclusion);
+  } catch (error) {
+    emitter.log(`Failed to generate conclusion: ${error}`);
+    emitter.emitUpdate('degraded', {
+      module: 'conclusionGenerator',
+      fallback: insightEnabled ? `rule-based insight (${outputMode})` : (turnCount >= 1 ? 'rule-based dialogue' : 'rule-based summary'),
+    });
+  }
+
+  if (insightEnabled) {
+    const fallbackEvidenceFindings = outputMode === 'need_input' ? sortedFindings : finalFindings;
+    const fallback = outputMode === 'need_input'
+      ? generateInsightFallback(
+          outputMode,
+          sortedFindings,
+          confirmedHypotheses.map(h => h.description),
+          stopReason,
+          historyContext,
+          contradictionReasons
+        )
+      : generateAttributionSafeFallback(
+          attributionAssessment,
+          finalFindings,
+          contradictionReasons,
+          stopReason,
+          scopedJankSummary,
+          frameMechanismRecords
+        );
+    const deterministicFallback = toDeterministicConclusionMarkdown(
+      fallback,
+      outputMode,
+      contractRenderOptions,
+      emitter
+    );
+    const finalizedFallback = finalizeConclusionMarkdown(
+      deterministicFallback,
+      fallbackEvidenceFindings,
+      scopedJankSummary,
+      { singleFrameDrillDown, scenePromptHints }
+    );
+    return streamConclusionAndReturn(finalizedFallback);
+  }
+
+  const plainFallback = turnCount >= 1
+    ? generateDialogueFallback(sortedFindings, intent, stopReason, historyContext)
+    : generateSimpleConclusion(sortedFindings, stopReason);
+  return streamConclusionAndReturn(plainFallback);
+}
+
+function buildJankFrameBudgetSection(traceConfig?: SharedAgentContext['traceConfig']): string {
+  const content = traceConfig
+    ? (traceConfig.isVRR
+      ? `- **VRR/LTPO 模式: ${traceConfig.vrrMode}**
+- **主导刷新率: ${traceConfig.refreshRateHz}Hz**（用于大部分帧的判断）
+- **帧预算范围: ${traceConfig.minFrameBudgetMs || traceConfig.vsyncPeriodMs}ms - ${traceConfig.maxFrameBudgetMs || traceConfig.vsyncPeriodMs}ms**
+- ⚠️ VRR 设备帧预算动态变化，使用最严格标准（${traceConfig.minFrameBudgetMs || traceConfig.vsyncPeriodMs}ms）判断 jank`
+      : `- **检测到的刷新率: ${traceConfig.refreshRateHz}Hz**
+- **帧预算: ${traceConfig.vsyncPeriodMs}ms**
+- 数据来源: ${traceConfig.vsyncSource}`)
+    : '- 刷新率未检测到，默认使用 120Hz（8.33ms）作为帧预算';
+
+  return `## 刷新率与帧预算
+${content}`;
+}
+
+function buildNonInsightConflictRulesSection(
+  scenePromptHints: ConclusionScenePromptHints,
+  traceConfig?: SharedAgentContext['traceConfig']
+): string {
+  if (!isJankSceneId(scenePromptHints.sceneId)) {
+    return `## 矛盾数据处理规则
+如果发现多个 findings 之间存在矛盾，请按以下规则处理：
+
+1. 同口径 + 同时间窗 + 同对象（进程/线程/实体）冲突，才标记为真实矛盾。
+2. 若统计口径或时间窗不同，先解释差异来源，不要直接下“互相否定”结论。
+3. 优先采信置信度更高且证据链更完整的 Finding，并明确说明取舍理由。`;
+  }
+
+  return `${buildJankFrameBudgetSection(traceConfig)}
 
 ## 矛盾数据处理规则
 如果发现多个 findings 之间存在矛盾，请按以下规则处理：
@@ -2536,132 +3002,7 @@ ${sharedContext.traceConfig ? (sharedContext.traceConfig.isVRR
    - 大核频率 < 1.2GHz 时，耗时问题可能是功耗策略导致
    - 此时应指出"CPU 调度/频率不足"而非"代码耗时"
 
-6. **优先采信置信度更高的 Finding**，但必须说明理由
-
-## 输出格式要求（必须严格遵守）
-- **只输出 Markdown 格式的纯文本**，方便人类阅读
-- **禁止输出 JSON**，不要用 {} 或 [] 包装内容
-- **禁止输出代码块**，不要用 \`\`\` 包装
-- 使用 ## 作为标题，使用 - 作为列表项
-- 示例格式：
-  ## 根因分析
-  主要问题是 XXX，置信度 85%。
-
-	  ## 证据支撑
-	  - 发现1：XXX
-	  - 发现2：XXX`;
-
-  const contractRenderOptions: ContractRenderOptions = { singleFrameDrillDown };
-
-  try {
-    const response = await modelRouter.callWithFallback(prompt, 'synthesis', {
-      jsonMode: insightEnabled,
-      onToken: onModelToken,
-      sessionId: sharedContext.sessionId,
-      traceId: sharedContext.traceId,
-      maxTokens: insightEnabled ? 3000 : 2000,
-      promptId: insightEnabled
-        ? `agent.conclusionGenerator.insight.${outputMode}`
-        : (turnCount >= 1 ? 'agent.conclusionGenerator.dialogue' : 'agent.conclusionGenerator'),
-      promptVersion: '2.0.0',
-      contractVersion: insightEnabled
-        ? 'conclusion_contract_json@1.0.0'
-        : (turnCount >= 1 ? 'conclusion_dialogue_text@1.0.0' : 'conclusion_text@1.0.0'),
-    });
-
-    let conclusion = toDeterministicConclusionMarkdown(
-      response.response,
-      outputMode,
-      contractRenderOptions,
-      emitter
-    );
-
-    // Ensure evidence IDs appear in the evidence-chain section when available.
-    // This makes the output auditable even if the LLM forgets to cite.
-    conclusion = finalizeConclusionMarkdown(
-      conclusion,
-      finalFindings,
-      scopedJankSummary,
-      { singleFrameDrillDown }
-    );
-
-    if (isConclusionContradictingAttributionVerdict(conclusion, attributionAssessment)) {
-      emitter.log('[conclusionGenerator] LLM conclusion contradicts attribution verdict, switching to rule-based safe fallback');
-      emitter.emitUpdate('degraded', {
-        module: 'conclusionGenerator',
-        fallback: 'rule-based attribution-safe conclusion',
-      });
-      const safeFallback = generateAttributionSafeFallback(
-        attributionAssessment,
-        finalFindings,
-        contradictionReasons,
-        stopReason,
-        scopedJankSummary,
-        frameMechanismRecords
-      );
-      const deterministicFallback = toDeterministicConclusionMarkdown(
-        safeFallback,
-        outputMode,
-        contractRenderOptions,
-        emitter
-      );
-      const finalizedFallback = finalizeConclusionMarkdown(
-        deterministicFallback,
-        finalFindings,
-        scopedJankSummary,
-        { singleFrameDrillDown }
-      );
-      return streamConclusionAndReturn(finalizedFallback);
-    }
-
-    return streamConclusionAndReturn(conclusion);
-  } catch (error) {
-    emitter.log(`Failed to generate conclusion: ${error}`);
-    emitter.emitUpdate('degraded', {
-      module: 'conclusionGenerator',
-      fallback: insightEnabled ? `rule-based insight (${outputMode})` : (turnCount >= 1 ? 'rule-based dialogue' : 'rule-based summary'),
-    });
-  }
-
-  if (insightEnabled) {
-    const fallbackEvidenceFindings = outputMode === 'need_input' ? sortedFindings : finalFindings;
-    const fallback = outputMode === 'need_input'
-      ? generateInsightFallback(
-          outputMode,
-          sortedFindings,
-          confirmedHypotheses.map(h => h.description),
-          intent,
-          stopReason,
-          historyContext,
-          contradictionReasons
-        )
-      : generateAttributionSafeFallback(
-          attributionAssessment,
-          finalFindings,
-          contradictionReasons,
-          stopReason,
-          scopedJankSummary,
-          frameMechanismRecords
-        );
-    const deterministicFallback = toDeterministicConclusionMarkdown(
-      fallback,
-      outputMode,
-      contractRenderOptions,
-      emitter
-    );
-    const finalizedFallback = finalizeConclusionMarkdown(
-      deterministicFallback,
-      fallbackEvidenceFindings,
-      scopedJankSummary,
-      { singleFrameDrillDown }
-    );
-    return streamConclusionAndReturn(finalizedFallback);
-  }
-
-  const plainFallback = turnCount >= 1
-    ? generateDialogueFallback(sortedFindings, intent, stopReason, historyContext)
-    : generateSimpleConclusion(sortedFindings, stopReason);
-  return streamConclusionAndReturn(plainFallback);
+6. **优先采信置信度更高的 Finding**，但必须说明理由`;
 }
 
 /**
@@ -2806,35 +3147,41 @@ function buildInsightFirstPrompt(params: {
     parts.push('');
   }
 
-  parts.push(buildAttributionAssessmentPromptSection(params.attributionAssessment));
-  parts.push('');
+  const includeAttributionPrompt = isJankSceneId(params.scenePromptHints.sceneId);
+  if (includeAttributionPrompt) {
+    parts.push(buildAttributionAssessmentPromptSection(params.attributionAssessment));
+    parts.push('');
 
-  parts.push(buildMechanismTriadPromptSection(
-    params.attributionAssessment,
-    params.jankSummary,
-    params.frameMechanismRecords
-  ));
-  parts.push('');
+    parts.push(buildMechanismTriadPromptSection(
+      params.attributionAssessment,
+      params.jankSummary,
+      params.frameMechanismRecords
+    ));
+    parts.push('');
+  }
 
   parts.push('## 场景化分析焦点');
   parts.push(`- 当前场景: ${params.scenePromptHints.sceneName}`);
   parts.push(...params.scenePromptHints.focusLines);
   parts.push('');
 
-  if (params.attributionAssessment.verdict === 'APP_TRIGGER' || params.attributionAssessment.verdict === 'MIXED') {
+  if (
+    includeAttributionPrompt &&
+    (params.attributionAssessment.verdict === 'APP_TRIGGER' || params.attributionAssessment.verdict === 'MIXED')
+  ) {
     parts.push('## 归因提示');
     parts.push('- 逐帧根因显示主线程/APP 侧耗时信号占主导（例如 cause_type=slice）。');
     parts.push('- 若同时看到“消费端掉帧”，请区分：消费端是症状层，主线程长耗时是潜在触发层。');
     parts.push('');
   }
 
-  if (params.attributionAssessment.verdict === 'SF_CONSUMER') {
+  if (includeAttributionPrompt && params.attributionAssessment.verdict === 'SF_CONSUMER') {
     parts.push('## 归因护栏');
     parts.push('- 当前证据显示 SF/消费端责任占主导。');
     parts.push('- 在该前提下，不要直接给出“主线程/Choreographer 是主要根因”的高置信度结论。');
     parts.push('- 若判定 App 主因，必须引用同一时间窗/同一帧的直接证据链（App Deadline Missed + 主线程耗时切片）。');
     parts.push('');
-  } else if (params.attributionAssessment.verdict === 'INSUFFICIENT') {
+  } else if (includeAttributionPrompt && params.attributionAssessment.verdict === 'INSUFFICIENT') {
     parts.push('## 归因护栏');
     parts.push('- 当前证据不足以形成单侧归因，禁止输出“唯一根因”式结论。');
     parts.push('- 若需要给出方向，必须明确“证据不足”并说明待补数据。');
@@ -2850,19 +3197,24 @@ function buildInsightFirstPrompt(params: {
   parts.push(`- 可给出最多 2 条与“${DEEP_REASON_LABEL}”一一对应的优化方向，避免泛化建议。`);
   parts.push('- JSON 顶层字段固定为：schema_version, mode, conclusion, clusters, evidence_chain, uncertainties, next_steps, metadata。');
   parts.push(`- mode 必须是 "${params.mode}"。schema_version 必须是 "conclusion_contract_v1"。`);
-  parts.push('- 结论最终会渲染为“## 结论（按可能性排序）/## 掉帧聚类（先看大头）/## 证据链（对应上述结论）/## 不确定性与反例/## 下一步（最高信息增益）”。');
+  parts.push('- 结论最终会渲染为“## 结论（按可能性排序）/## 聚类（先看大头）/## 证据链（对应上述结论）/## 不确定性与反例/## 下一步（最高信息增益）”。');
   parts.push('- conclusion 数组最多 3 项，每项包含：rank, statement, confidence, trigger, supply, amplification。');
+  parts.push('- clusters 每项包含：cluster, description, frames, percentage；若有帧级证据可额外提供 frame_refs(string[])。');
   parts.push(`- trigger/supply/amplification 需要能映射为：${TRIAD_LABELS.trigger}/${TRIAD_LABELS.supply}/${TRIAD_LABELS.amplification}。`);
   parts.push(`- statement 建议包含可读三元组短句，例如：${TRIAD_LABELS.trigger}: ...；${TRIAD_LABELS.supply}: ...；${TRIAD_LABELS.amplification}: ...`);
-  if (!singleFrameDrillDown && params.scenePromptHints.requireTopClusters) {
-    parts.push('- clusters 必须按帧数降序列出 Top3 聚类（K1/K2/K3），并标注帧数与占比。');
-  } else if (!singleFrameDrillDown) {
+  if (!singleFrameDrillDown && params.scenePromptHints.clusterPolicy.outputMode === 'required') {
+    parts.push('- clusters 必须按样本数降序列出 Top3（K1/K2/K3），并标注样本数与占比。');
+  } else if (!singleFrameDrillDown && params.scenePromptHints.clusterPolicy.outputMode === 'optional') {
     parts.push('- 当前场景 clusters 可按时间阶段/样本分组给出；若无聚类证据可传空数组。');
+  } else if (!singleFrameDrillDown) {
+    parts.push('- 当前场景 clusters 必须传空数组，不要虚构聚类。');
   } else {
     parts.push('- 单帧 drill-down 禁止复用历史 K1/K2/K3；clusters 传空数组。');
   }
   parts.push('- evidence_chain 必须按 C1/C2/C3 对齐（C1=结论1）：每项包含 conclusion_id 和 evidence 文本，且包含至少 1 个 evidence id（ev_xxxxxxxxxxxx）。');
   parts.push('- metadata 可包含 confidence（0-100 或 0-1）与 rounds（正整数）。');
+  parts.push('- metadata 可包含 cluster_policy 对象：{ output_mode: required|optional|none, frame_list_mode: none|top|full, max_frames_per_cluster?: number }。');
+  parts.push('- metadata 可包含 scene_id（例如 jank/startup），用于前端场景化标题渲染。');
 
   if (params.mode === 'focused_answer') {
     parts.push('- 本轮是 follow-up：优先直接回答用户本轮焦点，不要复述历史长文；总长度尽量控制在 25 行以内。');
@@ -2883,7 +3235,6 @@ function generateInsightFallback(
   mode: ConclusionOutputMode,
   findings: Finding[],
   hypothesisDescriptions: string[],
-  intent: Intent,
   stopReason?: string,
   historyContext?: string,
   contradictionReasons?: string[]
@@ -3291,7 +3642,7 @@ export function normalizeConclusionOutput(rawText: string): string {
   }
 
   const converted = convertJsonToMarkdown(rawText);
-  const fromJsonLike = convertJsonLikeSectionsToMarkdown(rawText);
+  const fromJsonLike = convertJsonLikeSectionsToMarkdown(rawText, contractOptions);
   const preferredMarkdown = looksLikeMarkdownConclusion(converted)
     ? converted
     : (fromJsonLike || converted);
@@ -3312,7 +3663,10 @@ function looksLikeMarkdownConclusion(text: string): boolean {
   return /^##\s*结论/m.test(t) || /^##\s*分析结论/m.test(t);
 }
 
-function convertJsonLikeSectionsToMarkdown(rawText: string): string | null {
+function convertJsonLikeSectionsToMarkdown(
+  rawText: string,
+  options: ContractRenderOptions = { singleFrameDrillDown: false }
+): string | null {
   const sections = parseJsonLikeSections(rawText);
   if (!sections) return null;
 
@@ -3472,7 +3826,7 @@ function convertJsonLikeSectionsToMarkdown(rawText: string): string | null {
   }
   lines.push('');
 
-  lines.push('## 掉帧聚类（先看大头）');
+  lines.push(resolveClusterSectionHeading(options.scenePromptHints?.sceneId));
   if (clusterLines.length === 0) {
     lines.push('- 暂无');
   } else {
@@ -3920,7 +4274,10 @@ function formatClusterLineFromJsonLikeObject(obj: Record<string, unknown>): stri
     metrics.push(`${percentage.toFixed(1)}%`);
   }
 
-  return `- ${clusterLabel}${metrics.length > 0 ? `（${metrics.join(', ')}）` : ''}`;
+  const frameRefs = parseClusterFrameRefs(obj);
+  const frameRefText = frameRefs.length > 0 ? `；帧: ${frameRefs.join(' / ')}` : '';
+
+  return `- ${clusterLabel}${metrics.length > 0 ? `（${metrics.join(', ')}）` : ''}${frameRefText}`;
 }
 
 function stripBulletPrefix(text: string): string {
