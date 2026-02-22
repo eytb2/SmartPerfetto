@@ -60,6 +60,56 @@ describe('HTMLReportGenerator', () => {
     expect(generator.formatLayeredCellValue(1500, 'startup_time_ms')).toBe('1500.00ms');
   });
 
+  test('renders ordered conversation timeline in report', () => {
+    const generator = new HTMLReportGenerator();
+    const html = generator.generateAgentDrivenHTML({
+      traceId: 'trace-2',
+      query: '分析启动慢',
+      timestamp: Date.now(),
+      hypotheses: [],
+      dialogue: [],
+      conversationTimeline: [
+        {
+          eventId: 'evt-2',
+          ordinal: 2,
+          phase: 'tool',
+          role: 'agent',
+          text: '执行关键 SQL',
+          timestamp: Date.now(),
+          sourceEventType: 'tool_call',
+        },
+        {
+          eventId: 'evt-1',
+          ordinal: 1,
+          phase: 'progress',
+          role: 'system',
+          text: '进入阶段 discovery',
+          timestamp: Date.now() - 10,
+          sourceEventType: 'stage_transition',
+        },
+      ],
+      agentResponses: [],
+      dataEnvelopes: [],
+      result: {
+        sessionId: 'session-2',
+        success: true,
+        findings: [],
+        hypotheses: [],
+        conclusion: 'ok',
+        confidence: 0.9,
+        rounds: 1,
+        totalDurationMs: 800,
+      },
+    });
+
+    expect(html).toContain('🧵 对话时间线');
+    expect(html).toContain('#1');
+    expect(html).toContain('#2');
+    expect(html).toContain('进入阶段 discovery');
+    expect(html).toContain('执行关键 SQL');
+    expect(html.indexOf('进入阶段 discovery')).toBeLessThan(html.indexOf('执行关键 SQL'));
+  });
+
   test('renders legacy duration_us format as ms', () => {
     const generator = new HTMLReportGenerator() as any;
     const formatted = generator.formatCellValueFromDefinition(

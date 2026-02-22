@@ -97,6 +97,9 @@ export class DirectSkillExecutor {
       agents: [...new Set(tasks.map(t => t.template.agentId))],
       message: `直接执行 ${tasks.length} 个 Skill（跳过 Agent LLM）`,
     });
+    emitter.emitUpdate('thought', {
+      content: `进入直接技能执行模式，本轮将运行 ${tasks.length} 个技能任务`,
+    });
 
     const responses: AgentResponse[] = [];
     const batches = this.chunk(tasks, this.concurrency);
@@ -129,6 +132,15 @@ export class DirectSkillExecutor {
 
     const skillId = template.directSkillId;
     if (!skillId) {
+      emitter.emitUpdate('tool_call', {
+        phase: 'task_completed',
+        taskId,
+        agentId: template.agentId,
+        toolName: 'unknown_direct_skill',
+        scopeLabel,
+        success: false,
+        summary: 'direct_skill 模板缺少 directSkillId',
+      });
       return this.buildErrorResponse(template.agentId, taskId, startTime,
         `No directSkillId specified for direct_skill template`, {
           executionMode: 'direct_skill',
@@ -142,14 +154,46 @@ export class DirectSkillExecutor {
       const params = this.buildParams(template, interval);
 
       emitter.log(`DirectSkill[${skillId}]: executing for ${scopeLabel}`);
+      emitter.emitUpdate('thought', {
+        content: `准备执行 ${skillId}（${scopeLabel}）`,
+      });
+      emitter.emitUpdate('tool_call', {
+        phase: 'task_dispatched',
+        taskId,
+        agentId: template.agentId,
+        toolName: skillId,
+        scopeLabel,
+        message: `调用技能 ${skillId}`,
+      });
 
       // 2. Execute skill (SkillExecutor creates isolated context per call)
       const result = await skillExecutor.execute(skillId, this.traceId, params);
 
       // 3. Convert to AgentResponse
-      return this.buildResponse(result, template, taskId, startTime, scopeLabel, interval);
+      const response = this.buildResponse(result, template, taskId, startTime, scopeLabel, interval);
+      emitter.emitUpdate('tool_call', {
+        phase: 'task_completed',
+        taskId,
+        agentId: template.agentId,
+        toolName: skillId,
+        scopeLabel,
+        success: response.success,
+        summary: response.success
+          ? `技能 ${skillId} 执行完成（发现 ${response.findings.length} 条）`
+          : `技能 ${skillId} 执行失败`,
+      });
+      return response;
     } catch (error: any) {
       emitter.log(`DirectSkill[${skillId}]: error for ${scopeLabel}: ${error.message}`);
+      emitter.emitUpdate('tool_call', {
+        phase: 'task_completed',
+        taskId,
+        agentId: template.agentId,
+        toolName: skillId,
+        scopeLabel,
+        success: false,
+        summary: `技能 ${skillId} 执行异常: ${error.message}`,
+      });
       return this.buildErrorResponse(template.agentId, taskId, startTime, error.message, {
         executionMode: 'direct_skill',
         kind: 'skill',

@@ -25,6 +25,7 @@ import * as crypto from 'crypto';
 // Paths
 const projectRoot = path.resolve(__dirname, '../..');
 const backendContractPath = path.join(projectRoot, 'backend/src/types/dataContract.ts');
+const conclusionContractPath = path.join(projectRoot, 'backend/src/agent/core/conclusionContract.ts');
 const frontendTypesPath = path.join(
   projectRoot,
   'perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/generated/data_contract.types.ts'
@@ -156,6 +157,38 @@ function extractTypeDefinitions(content: string): string {
   return JSON.stringify(extractedTypes);
 }
 
+interface ConclusionContractSyncExpectation {
+  hasConclusionContractInterface: boolean;
+  hasMetadataSceneId: boolean;
+  hasMetadataClusterPolicy: boolean;
+  analysisCompletedUsesConclusionContract: boolean;
+}
+
+function extractConclusionContractExpectations(content: string): ConclusionContractSyncExpectation {
+  const metadataBlockMatch = content.match(/export interface ConclusionContractMetadata\s*\{([\s\S]*?)\n\}/m);
+  const metadataBlock = metadataBlockMatch ? metadataBlockMatch[1] : '';
+
+  return {
+    hasConclusionContractInterface: /export interface ConclusionContract\s*\{/.test(content),
+    hasMetadataSceneId: /\bsceneId\s*\?:\s*string\s*;/.test(metadataBlock),
+    hasMetadataClusterPolicy: /\bclusterPolicy\s*\?:\s*ConclusionContractClusterPolicy\s*;/.test(metadataBlock),
+    analysisCompletedUsesConclusionContract: /\bconclusionContract\s*\?:\s*ConclusionContract\s*;/.test(content),
+  };
+}
+
+function buildExpectedConclusionContractSync(
+  backendContractContent: string,
+  conclusionContractContent: string
+): ConclusionContractSyncExpectation {
+  return {
+    hasConclusionContractInterface: /export interface ConclusionContract\s*\{/.test(conclusionContractContent),
+    hasMetadataSceneId: /\bsceneId\s*\?:\s*string\s*;/.test(conclusionContractContent),
+    hasMetadataClusterPolicy: /\bclusterPolicy\s*\?:\s*ConclusionContractClusterPolicy\s*;/.test(conclusionContractContent),
+    analysisCompletedUsesConclusionContract:
+      /\bconclusionContract\s*\?:\s*import\('\.\.\/agent\/core\/conclusionContract'\)\.ConclusionContract\s*;/.test(backendContractContent),
+  };
+}
+
 /**
  * Main check function
  */
@@ -174,8 +207,14 @@ async function checkTypesSync(): Promise<boolean> {
     process.exit(1);
   }
 
+  if (!fs.existsSync(conclusionContractPath)) {
+    console.error(`❌ Conclusion contract file not found: ${conclusionContractPath}`);
+    process.exit(2);
+  }
+
   // Read files
   const backendContent = fs.readFileSync(backendContractPath, 'utf-8');
+  const conclusionContractContent = fs.readFileSync(conclusionContractPath, 'utf-8');
   const frontendContent = fs.readFileSync(frontendTypesPath, 'utf-8');
 
   // Extract and compare type definitions
@@ -202,6 +241,26 @@ async function checkTypesSync(): Promise<boolean> {
     return false;
   }
 
+  const expectedConclusionSync = buildExpectedConclusionContractSync(
+    backendContent,
+    conclusionContractContent
+  );
+  const actualConclusionSync = extractConclusionContractExpectations(frontendContent);
+  const mismatchedConclusionKeys = Object.keys(expectedConclusionSync).filter((key) => {
+    const typedKey = key as keyof ConclusionContractSyncExpectation;
+    return expectedConclusionSync[typedKey] !== actualConclusionSync[typedKey];
+  });
+
+  if (mismatchedConclusionKeys.length > 0) {
+    console.log('❌ ConclusionContract typing is OUT OF SYNC!\n');
+    for (const key of mismatchedConclusionKeys) {
+      const typedKey = key as keyof ConclusionContractSyncExpectation;
+      console.log(`  ${key}: expected=${expectedConclusionSync[typedKey]} actual=${actualConclusionSync[typedKey]}`);
+    }
+    console.log('\n👉 Run: npm run generate:frontend-types');
+    return false;
+  }
+
   // Additional check: verify file was generated (not manually edited)
   const hasAutoGenComment = frontendContent.includes('AUTO-GENERATED from backend/src/types/dataContract.ts');
   if (!hasAutoGenComment) {
@@ -220,6 +279,7 @@ async function checkTypesSync(): Promise<boolean> {
   console.log(`  DisplayLayer: ${types.displayLayers.split(' | ').length} values`);
   console.log(`  DisplayLevel: ${types.displayLevels.split(' | ').length} values`);
   console.log(`  DisplayFormat: ${types.displayFormats.split(' | ').length} values`);
+  console.log('  ConclusionContract: synced (sceneId/clusterPolicy + analysis_completed reference)');
 
   return true;
 }

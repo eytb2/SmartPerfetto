@@ -94,6 +94,9 @@ describe('conclusionSceneTemplates', () => {
 
     expect(hints.sceneId).toBe('jank');
     expect(hints.requireTopClusters).toBe(true);
+    expect(hints.clusterPolicy.outputMode).toBe('required');
+    expect(hints.clusterPolicy.frameListMode).toBe('full');
+    expect(hints.clusterPolicy.maxFramesPerCluster).toBe(120);
     expect(hints.outputRequirementLines.join('\n')).toContain('为什么慢');
   });
 
@@ -147,6 +150,9 @@ scenes:
       - "- 需要补充 {{deep_reason_label}} 的测试约束。"
     next_step_line: "- 测试配置下一步。"
     require_top_clusters: false
+    cluster_output_mode: optional
+    cluster_frame_list_mode: top
+    max_frames_per_cluster: 3
   - id: generic
     scene_name: 通用性能（测试配置）
     aspect_hints: []
@@ -172,6 +178,8 @@ scenes:
     expect(hints.focusLines.join('\n')).toContain('测试配置：启动链路聚焦');
     expect(hints.outputRequirementLines.join('\n')).toContain('为什么慢');
     expect(hints.nextStepLine).toContain('测试配置下一步');
+    expect(hints.clusterPolicy.frameListMode).toBe('top');
+    expect(hints.clusterPolicy.maxFramesPerCluster).toBe(3);
 
     fs.rmSync(tempDir, { recursive: true, force: true });
   });

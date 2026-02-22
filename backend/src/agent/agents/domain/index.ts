@@ -71,6 +71,30 @@ export type DomainAgentType =
   | 'anr_agent'
   | 'system_agent';
 
+export type DomainAgentFactory = (modelRouter: ModelRouter) => BaseAgent;
+
+interface RegisterFactoryOptions {
+  replace?: boolean;
+  initialize?: boolean;
+}
+
+export interface CreateDomainAgentRegistryOptions {
+  extraFactories?: Record<string, DomainAgentFactory>;
+  disabledAgentIds?: string[];
+  initialize?: boolean;
+}
+
+const DEFAULT_AGENT_FACTORIES: Record<DomainAgentType, DomainAgentFactory> = {
+  frame_agent: (modelRouter) => new FrameAgent(modelRouter),
+  cpu_agent: (modelRouter) => new CPUAgent(modelRouter),
+  binder_agent: (modelRouter) => new BinderAgent(modelRouter),
+  memory_agent: (modelRouter) => new MemoryAgent(modelRouter),
+  startup_agent: (modelRouter) => new StartupAgent(modelRouter),
+  interaction_agent: (modelRouter) => new InteractionAgent(modelRouter),
+  anr_agent: (modelRouter) => new ANRAgent(modelRouter),
+  system_agent: (modelRouter) => new SystemAgent(modelRouter),
+};
+
 /**
  * Domain Agent Registry
  *
@@ -78,24 +102,74 @@ export type DomainAgentType =
  */
 export class DomainAgentRegistry {
   private agents: Map<string, BaseAgent> = new Map();
+  private agentFactories: Map<string, DomainAgentFactory> = new Map();
   private modelRouter: ModelRouter;
 
   constructor(modelRouter: ModelRouter) {
     this.modelRouter = modelRouter;
+    this.registerDefaultFactories();
+  }
+
+  private registerDefaultFactories(): void {
+    for (const [agentId, factory] of Object.entries(DEFAULT_AGENT_FACTORIES)) {
+      this.registerFactory(agentId, factory, { replace: true, initialize: false });
+    }
+  }
+
+  registerFactory(
+    agentId: string,
+    factory: DomainAgentFactory,
+    options: RegisterFactoryOptions = {}
+  ): void {
+    const replace = options.replace === true;
+    const initialize = options.initialize !== false;
+
+    if (!replace && this.agentFactories.has(agentId)) {
+      throw new Error(`Domain agent factory already registered: ${agentId}`);
+    }
+    this.agentFactories.set(agentId, factory);
+
+    if (initialize) {
+      const agent = factory(this.modelRouter);
+      this.registerAgent(agent, { replace });
+    }
+  }
+
+  registerAgent(agent: BaseAgent, options: { replace?: boolean } = {}): void {
+    const replace = options.replace === true;
+    if (!replace && this.agents.has(agent.config.id)) {
+      throw new Error(`Domain agent already registered: ${agent.config.id}`);
+    }
+    this.agents.set(agent.config.id, agent);
+  }
+
+  unregisterAgent(agentId: string): void {
+    this.agents.delete(agentId);
+  }
+
+  unregisterFactory(agentId: string): void {
+    this.agentFactories.delete(agentId);
+    this.agents.delete(agentId);
+  }
+
+  getRegisteredFactoryIds(): string[] {
+    return Array.from(this.agentFactories.keys());
   }
 
   /**
    * Initialize all domain agents
    */
-  initialize(): void {
-    this.agents.set('frame_agent', new FrameAgent(this.modelRouter));
-    this.agents.set('cpu_agent', new CPUAgent(this.modelRouter));
-    this.agents.set('binder_agent', new BinderAgent(this.modelRouter));
-    this.agents.set('memory_agent', new MemoryAgent(this.modelRouter));
-    this.agents.set('startup_agent', new StartupAgent(this.modelRouter));
-    this.agents.set('interaction_agent', new InteractionAgent(this.modelRouter));
-    this.agents.set('anr_agent', new ANRAgent(this.modelRouter));
-    this.agents.set('system_agent', new SystemAgent(this.modelRouter));
+  initialize(agentIds?: string[]): void {
+    const idsToInitialize = Array.isArray(agentIds) && agentIds.length > 0
+      ? agentIds
+      : this.getRegisteredFactoryIds();
+
+    for (const agentId of idsToInitialize) {
+      const factory = this.agentFactories.get(agentId);
+      if (!factory) continue;
+      if (this.agents.has(agentId)) continue;
+      this.agents.set(agentId, factory(this.modelRouter));
+    }
 
     console.log(`[DomainAgentRegistry] Initialized ${this.agents.size} domain agents`);
   }
@@ -197,7 +271,31 @@ export class DomainAgentRegistry {
  * Create a domain agent registry
  */
 export function createDomainAgentRegistry(modelRouter: ModelRouter): DomainAgentRegistry {
+  return createDomainAgentRegistryWithOptions(modelRouter);
+}
+
+export function createDomainAgentRegistryWithOptions(
+  modelRouter: ModelRouter,
+  options: CreateDomainAgentRegistryOptions = {}
+): DomainAgentRegistry {
   const registry = new DomainAgentRegistry(modelRouter);
-  registry.initialize();
+  const {
+    extraFactories = {},
+    disabledAgentIds = [],
+    initialize = true,
+  } = options;
+
+  for (const [agentId, factory] of Object.entries(extraFactories)) {
+    registry.registerFactory(agentId, factory, { replace: false, initialize: false });
+  }
+
+  if (initialize) {
+    const disabled = new Set(disabledAgentIds);
+    const enabledAgentIds = registry
+      .getRegisteredFactoryIds()
+      .filter(agentId => !disabled.has(agentId));
+    registry.initialize(enabledAgentIds);
+  }
+
   return registry;
 }

@@ -250,8 +250,11 @@ describe('JankCauseSummarizer', () => {
       expect(summary.clusters).toHaveLength(2);
       expect(summary.clusters[0].frameCount).toBe(2);
       expect(summary.clusters[0].supplyConstraint).toBe('频率不足');
+      expect(summary.clusters[0].frameIds).toEqual(['1', '2']);
+      expect(summary.clusters[0].representativeFrames).toEqual(['1', '2']);
       expect(summary.clusters[1].frameCount).toBe(1);
       expect(summary.clusters[1].supplyConstraint).toBe('调度延迟');
+      expect(summary.clusters[1].frameIds).toEqual(['3']);
     });
 
     it('should derive record severity from findings when available', () => {

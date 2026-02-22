@@ -14,6 +14,11 @@ export interface SceneTemplatePatch {
   outputRequirementTemplates?: string[];
   nextStepLine?: string;
   requireTopClusters?: boolean;
+  clusterOutputMode?: 'required' | 'optional' | 'none';
+  clusterFrameListMode?: 'none' | 'top' | 'full';
+  maxFramesPerCluster?: number;
+  injectClusterFrameAggregation?: boolean;
+  injectWorkloadDominantMarker?: boolean;
 }
 
 interface SceneTemplateYamlRecord {
@@ -31,6 +36,16 @@ interface SceneTemplateYamlRecord {
   nextStepLine?: unknown;
   require_top_clusters?: unknown;
   requireTopClusters?: unknown;
+  cluster_output_mode?: unknown;
+  clusterOutputMode?: unknown;
+  cluster_frame_list_mode?: unknown;
+  clusterFrameListMode?: unknown;
+  max_frames_per_cluster?: unknown;
+  maxFramesPerCluster?: unknown;
+  inject_cluster_frame_aggregation?: unknown;
+  injectClusterFrameAggregation?: unknown;
+  inject_workload_dominant_marker?: unknown;
+  injectWorkloadDominantMarker?: unknown;
 }
 
 interface SceneTemplateYamlConfig {
@@ -55,7 +70,20 @@ const ALLOWED_SCENE_RECORD_KEYS = new Set<string>([
   'nextStepLine',
   'require_top_clusters',
   'requireTopClusters',
+  'cluster_output_mode',
+  'clusterOutputMode',
+  'cluster_frame_list_mode',
+  'clusterFrameListMode',
+  'max_frames_per_cluster',
+  'maxFramesPerCluster',
+  'inject_cluster_frame_aggregation',
+  'injectClusterFrameAggregation',
+  'inject_workload_dominant_marker',
+  'injectWorkloadDominantMarker',
 ]);
+
+const CLUSTER_OUTPUT_MODE_VALUES = new Set(['required', 'optional', 'none']);
+const CLUSTER_FRAME_LIST_MODE_VALUES = new Set(['none', 'top', 'full']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -160,6 +188,46 @@ function parseOptionalBoolean(
   return undefined;
 }
 
+function parseOptionalEnum(
+  value: unknown,
+  warnings: string[],
+  context: SceneTemplateValidationContext,
+  fieldName: string,
+  sceneId: string,
+  index: number,
+  allowedValues: Set<string>
+): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const text = String(value).trim().toLowerCase();
+  if (!text) return undefined;
+  if (allowedValues.has(text)) return text;
+  pushWarning(
+    warnings,
+    context,
+    `${fieldName} must be one of: ${Array.from(allowedValues).join(', ')}`,
+    sceneId,
+    index
+  );
+  return undefined;
+}
+
+function parseOptionalPositiveInt(
+  value: unknown,
+  warnings: string[],
+  context: SceneTemplateValidationContext,
+  fieldName: string,
+  sceneId: string,
+  index: number
+): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) {
+    pushWarning(warnings, context, `${fieldName} must be a positive number`, sceneId, index);
+    return undefined;
+  }
+  return Math.round(num);
+}
+
 function parseSceneTemplatePatchRecord(
   value: unknown,
   warnings: string[],
@@ -261,6 +329,66 @@ function parseSceneTemplatePatchRecord(
     index
   );
   if (requireTopClusters !== undefined) patch.requireTopClusters = requireTopClusters;
+
+  const clusterOutputMode = parseOptionalEnum(
+    firstDefined(source, ['cluster_output_mode', 'clusterOutputMode']),
+    warnings,
+    context,
+    'cluster_output_mode',
+    id,
+    index,
+    CLUSTER_OUTPUT_MODE_VALUES
+  );
+  if (clusterOutputMode !== undefined) {
+    patch.clusterOutputMode = clusterOutputMode as 'required' | 'optional' | 'none';
+  }
+
+  const clusterFrameListMode = parseOptionalEnum(
+    firstDefined(source, ['cluster_frame_list_mode', 'clusterFrameListMode']),
+    warnings,
+    context,
+    'cluster_frame_list_mode',
+    id,
+    index,
+    CLUSTER_FRAME_LIST_MODE_VALUES
+  );
+  if (clusterFrameListMode !== undefined) {
+    patch.clusterFrameListMode = clusterFrameListMode as 'none' | 'top' | 'full';
+  }
+
+  const maxFramesPerCluster = parseOptionalPositiveInt(
+    firstDefined(source, ['max_frames_per_cluster', 'maxFramesPerCluster']),
+    warnings,
+    context,
+    'max_frames_per_cluster',
+    id,
+    index
+  );
+  if (maxFramesPerCluster !== undefined) patch.maxFramesPerCluster = maxFramesPerCluster;
+
+  const injectClusterFrameAggregation = parseOptionalBoolean(
+    firstDefined(source, ['inject_cluster_frame_aggregation', 'injectClusterFrameAggregation']),
+    warnings,
+    context,
+    'inject_cluster_frame_aggregation',
+    id,
+    index
+  );
+  if (injectClusterFrameAggregation !== undefined) {
+    patch.injectClusterFrameAggregation = injectClusterFrameAggregation;
+  }
+
+  const injectWorkloadDominantMarker = parseOptionalBoolean(
+    firstDefined(source, ['inject_workload_dominant_marker', 'injectWorkloadDominantMarker']),
+    warnings,
+    context,
+    'inject_workload_dominant_marker',
+    id,
+    index
+  );
+  if (injectWorkloadDominantMarker !== undefined) {
+    patch.injectWorkloadDominantMarker = injectWorkloadDominantMarker;
+  }
 
   const hasExplicitField = Object.keys(patch).some(key => key !== 'id');
   if (!hasExplicitField) {
