@@ -107,6 +107,28 @@ export class HypothesisExecutor implements AnalysisExecutor {
     })();
 
     while (currentRound < hardMaxRounds) {
+      const preflightDecision = this.services.circuitBreaker.canExecute();
+      if (preflightDecision.action === 'ask_user') {
+        stopReason = preflightDecision.reason || 'Circuit breaker blocked hypothesis loop';
+        emitter.log(`[CircuitBreaker] ${stopReason}`);
+        emitter.emitUpdate('circuit_breaker', {
+          agentId: 'hypothesis_loop',
+          reason: stopReason,
+        });
+        break;
+      }
+
+      const iterationDecision = this.services.circuitBreaker.recordIteration('hypothesis_loop');
+      if (iterationDecision.action === 'ask_user') {
+        stopReason = iterationDecision.reason || 'Circuit breaker iteration budget reached';
+        emitter.log(`[CircuitBreaker] ${stopReason}`);
+        emitter.emitUpdate('circuit_breaker', {
+          agentId: 'hypothesis_loop',
+          reason: stopReason,
+        });
+        break;
+      }
+
       currentRound++;
       emitter.log(`=== Round ${currentRound}/${hardMaxRounds}${softMaxRounds !== hardMaxRounds ? ` (soft=${softMaxRounds})` : ''} ===`);
 

@@ -14,6 +14,8 @@ import {
 import { getHTMLReportGenerator } from '../services/htmlReportGenerator';
 import { reportStore } from './reportRoutes';
 import { SessionPersistenceService } from '../services/sessionPersistenceService';
+import { authenticate } from '../middleware/auth';
+import { featureFlagsConfig } from '../config';
 import {
   sessionContextManager,
   EnhancedSessionContext,
@@ -32,6 +34,8 @@ import {
   normalizeConclusionOutput,
   shouldNormalizeConclusionOutput,
 } from '../agent/core/conclusionGenerator';
+import { resolveConclusionScene } from '../agent/core/conclusionSceneTemplates';
+import { DEEP_REASON_LABEL } from '../utils/analysisNarrative';
 import { sanitizeNarrativeForClient } from './narrativeSanitizer';
 // Agent-Driven Architecture v2.0 - Intervention & Focus
 import type { UserDecision, AnalysisDirective } from '../agent/core/interventionController';
@@ -73,7 +77,7 @@ import {
   TEACHING_STEP_IDS,
   TEACHING_FEATURES,
 } from '../config/teaching.config';
-import type { ConversationTurn } from '../agent/types';
+import type { ConversationTurn, Finding, Intent } from '../agent/types';
 
 const router = express.Router();
 
@@ -109,6 +113,16 @@ interface AnalysisSession {
     agentId: string;
     response: any;
     timestamp: number;
+  }>;
+  conversationOrdinal: number;
+  conversationSteps: Array<{
+    eventId: string;
+    ordinal: number;
+    phase: 'progress' | 'thinking' | 'tool' | 'result' | 'error';
+    role: 'agent' | 'system';
+    text: string;
+    timestamp: number;
+    sourceEventType?: string;
   }>;
 }
 const sessions = new Map<string, AnalysisSession>();
@@ -319,6 +333,53 @@ function recoverResultForSessionIfNeeded(sessionId: string, session: AnalysisSes
     session.query = latestTurn.query;
   }
   return recovered;
+}
+
+function buildFallbackIntentFromQuery(query?: string): Intent | null {
+  const primaryGoal = String(query || '').trim();
+  if (!primaryGoal) return null;
+
+  return {
+    primaryGoal,
+    aspects: [],
+    expectedOutputType: 'summary',
+    complexity: 'simple',
+    followUpType: 'initial',
+  };
+}
+
+function resolveConclusionSceneIdHint(params: {
+  sessionId: string;
+  query?: string;
+  findings?: Finding[];
+  intent?: Intent;
+}): string | undefined {
+  const findings = Array.isArray(params.findings) ? params.findings : [];
+  let intent = params.intent;
+
+  if (!intent) {
+    const resolved = resolveSessionContextForReview(params.sessionId);
+    const turn = resolved ? getLastCompletedTurn(resolved.context) : null;
+    if (turn?.intent) {
+      intent = turn.intent;
+    }
+  }
+
+  if (!intent) {
+    intent = buildFallbackIntentFromQuery(params.query) || undefined;
+  }
+
+  if (!intent) return undefined;
+
+  try {
+    return resolveConclusionScene({
+      intent,
+      findings,
+      deepReasonLabel: DEEP_REASON_LABEL,
+    }).selectedTemplate.id;
+  } catch {
+    return undefined;
+  }
 }
 
 // =============================================================================
@@ -541,6 +602,8 @@ router.post('/analyze', async (req, res) => {
               agentDialogue: [],
               dataEnvelopes: [],
               agentResponses: [],
+              conversationOrdinal: 0,
+              conversationSteps: [],
             });
 
             sessionId = requestedSessionId;
@@ -572,6 +635,7 @@ router.post('/analyze', async (req, res) => {
       orchestrator = createAgentRuntime(modelRouter, {
         maxRounds: options.maxRounds ?? options.maxIterations ?? 5,
         maxConcurrentTasks: options.maxConcurrentTasks || 3,
+        taskTimeoutMs: options.taskTimeoutMs,
         confidenceThreshold: options.confidenceThreshold ?? options.qualityThreshold ?? 0.7,
         maxNoProgressRounds: options.maxNoProgressRounds ?? 2,
         maxFailureRounds: options.maxFailureRounds ?? 2,
@@ -595,6 +659,8 @@ router.post('/analyze', async (req, res) => {
         agentDialogue: [],
         dataEnvelopes: [],
         agentResponses: [],
+        conversationOrdinal: 0,
+        conversationSteps: [],
       });
     }
 
@@ -644,6 +710,7 @@ router.post('/analyze', async (req, res) => {
  *
  * Events:
  * - connected: SSE connection established
+ * - conversation_step: Ordered conversational timeline step
  * - progress: Progress updates (task graph, rounds, strategy)
  * - data: DataEnvelope(s) from skill execution
  * - agent_task_dispatched: Task sent to domain agent
@@ -761,10 +828,16 @@ router.get('/:sessionId/status', (req, res) => {
     const recoveredResult = recoverResultForSessionIfNeeded(sessionId, session);
     if (recoveredResult) {
       const conclusion = normalizeNarrativeForClient(recoveredResult.conclusion);
+      const sceneIdHint = resolveConclusionSceneIdHint({
+        sessionId,
+        query: session.query,
+        findings: recoveredResult.findings,
+      });
       const conclusionContract =
         recoveredResult.conclusionContract ||
         deriveConclusionContract(conclusion, {
           mode: recoveredResult.rounds > 1 ? 'focused_answer' : 'initial_report',
+          sceneId: sceneIdHint,
         }) ||
         undefined;
       response.result = {
@@ -1490,6 +1563,8 @@ router.post('/resume', async (req, res) => {
       agentDialogue: [],
       dataEnvelopes: [],
       agentResponses: [],
+      conversationOrdinal: 0,
+      conversationSteps: [],
     });
 
     return res.json({
@@ -1530,6 +1605,17 @@ router.post('/resume', async (req, res) => {
 // ============================================================================
 // Scene Reconstruction Endpoints
 // ============================================================================
+
+router.use('/scene-reconstruct', (_req, res, next) => {
+  if (!featureFlagsConfig.enableAgentSceneReconstruct) {
+    return res.status(503).json({
+      success: false,
+      error: 'Scene reconstruction feature is disabled by FEATURE_AGENT_SCENE_RECONSTRUCT',
+      code: 'FEATURE_DISABLED',
+    });
+  }
+  next();
+});
 
 /**
  * POST /api/agent/scene-reconstruct
@@ -1611,6 +1697,8 @@ router.post('/scene-reconstruct', async (req, res) => {
       agentResponses: [],
       scenes: [],
       trackEvents: [],
+      conversationOrdinal: 0,
+      conversationSteps: [],
     });
 
     // Start analysis in background
@@ -2678,6 +2766,16 @@ router.get('/:sessionId/report', (req, res) => {
       confidence: h.confidence,
     })),
 
+    conversationTimeline: session.conversationSteps.map((step) => ({
+      eventId: step.eventId,
+      ordinal: step.ordinal,
+      phase: step.phase,
+      role: step.role,
+      text: step.text,
+      timestamp: step.timestamp,
+      sourceEventType: step.sourceEventType,
+    })),
+
     // Log file path for debugging
     logFile: session.logger.getLogFilePath(),
   };
@@ -2722,11 +2820,17 @@ async function runAgentDrivenAnalysis(
   const handleUpdate = (update: StreamingUpdate) => {
     console.log(`[AgentRoutes.AgentDriven] Received event: ${update.type}`, update.content?.phase);
     logger.debug('Stream', `Update: ${update.type}`, update.content);
+    const normalizedUpdate = normalizeAgentDrivenUpdate(update);
+    const conversationStep = buildConversationStepUpdate(session, normalizedUpdate);
+    if (conversationStep) {
+      appendConversationStep(session, conversationStep);
+      broadcastToAgentDrivenClients(sessionId, conversationStep);
+    }
 
     // Derive TrackEvent(s) for scene reconstruction sessions from emitted DataEnvelopes.
     // This keeps the TrackEvent feature while unifying on the agent-driven architecture.
-    if (shouldGenerateTracks && update.type === 'data') {
-      const envelopes = (Array.isArray(update.content) ? update.content : [update.content])
+    if (shouldGenerateTracks && normalizedUpdate.type === 'data') {
+      const envelopes = (Array.isArray(normalizedUpdate.content) ? normalizedUpdate.content : [normalizedUpdate.content])
         .filter((e): e is DataEnvelope => !!e && typeof e === 'object');
       const changed = updateSceneReconstructionArtifactsFromEnvelopes(session, envelopes);
       if (changed) {
@@ -2743,32 +2847,32 @@ async function runAgentDrivenAnalysis(
     }
 
     // Track agent dialogue events
-    if (update.content?.phase === 'task_dispatched' || update.content?.phase === 'task_completed') {
+    if (normalizedUpdate.content?.phase === 'task_dispatched' || normalizedUpdate.content?.phase === 'task_completed') {
       session.agentDialogue.push({
-        agentId: update.content.agentId || 'master',
-        type: update.content.phase === 'task_dispatched' ? 'task' : 'response',
-        content: update.content,
-        timestamp: update.timestamp,
+        agentId: normalizedUpdate.content.agentId || 'master',
+        type: normalizedUpdate.content.phase === 'task_dispatched' ? 'task' : 'response',
+        content: normalizedUpdate.content,
+        timestamp: normalizedUpdate.timestamp,
       });
 
       // Collect full agent responses for HTML report enrichment
-      if (update.content.phase === 'task_completed') {
+      if (normalizedUpdate.content.phase === 'task_completed') {
         session.agentResponses.push({
-          taskId: update.content.taskId || '',
-          agentId: update.content.agentId || 'unknown',
-          response: update.content.response || update.content,
-          timestamp: update.timestamp,
+          taskId: normalizedUpdate.content.taskId || '',
+          agentId: normalizedUpdate.content.agentId || 'unknown',
+          response: normalizedUpdate.content.response || normalizedUpdate.content,
+          timestamp: normalizedUpdate.timestamp,
         });
       }
     }
 
     // Broadcast specialized events for frontend visualization
-    const eventType = mapToAgentDrivenEventType(update);
+    const eventType = mapToAgentDrivenEventType(normalizedUpdate);
     broadcastToAgentDrivenClients(sessionId, {
       type: eventType,
-      content: update.content,
-      timestamp: update.timestamp,
-      id: update.id,
+      content: normalizedUpdate.content,
+      timestamp: normalizedUpdate.timestamp,
+      id: normalizedUpdate.id,
     });
   };
 
@@ -2786,6 +2890,8 @@ async function runAgentDrivenAnalysis(
         traceProcessorService: options.traceProcessorService,
         packageName: options.packageName,
         timeRange: options.timeRange,
+        taskTimeoutMs: options.taskTimeoutMs,
+        blockedStrategyIds: options.blockedStrategyIds,
         adb: options.adb,
       });
     });
@@ -2908,11 +3014,283 @@ async function runAgentDrivenAnalysis(
   }
 }
 
+function sanitizeConversationText(value: unknown, maxLen = 240): string {
+  return String(value ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLen);
+}
+
+function appendConversationStep(session: AnalysisSession, update: StreamingUpdate): void {
+  if (update.type !== 'conversation_step') return;
+
+  const payload =
+    update.content && typeof update.content === 'object' && !Array.isArray(update.content)
+      ? (update.content as Record<string, any>)
+      : {};
+  const contentRecord =
+    payload.content && typeof payload.content === 'object' && !Array.isArray(payload.content)
+      ? (payload.content as Record<string, any>)
+      : {};
+
+  const text = sanitizeConversationText(contentRecord.text);
+  const ordinal = Number(payload.ordinal);
+  if (!text || !Number.isFinite(ordinal) || ordinal <= 0) return;
+
+  const phaseRaw = sanitizeConversationText(payload.phase, 24) as AnalysisSession['conversationSteps'][number]['phase'];
+  const phase = ((
+    phaseRaw === 'thinking' ||
+    phaseRaw === 'tool' ||
+    phaseRaw === 'result' ||
+    phaseRaw === 'error'
+  ) ? phaseRaw : 'progress');
+
+  const roleRaw = sanitizeConversationText(payload.role, 16) as AnalysisSession['conversationSteps'][number]['role'];
+  const role = roleRaw === 'system' ? 'system' : 'agent';
+
+  const eventId =
+    sanitizeConversationText(payload.eventId, 128) ||
+    sanitizeConversationText(update.id, 128) ||
+    `conversation-step-${session.sessionId}-${ordinal}`;
+
+  if (session.conversationSteps.some((step) => step.eventId === eventId || step.ordinal === ordinal)) {
+    return;
+  }
+
+  session.conversationSteps.push({
+    eventId,
+    ordinal,
+    phase,
+    role,
+    text,
+    timestamp: typeof update.timestamp === 'number' && Number.isFinite(update.timestamp)
+      ? update.timestamp
+      : Date.now(),
+    sourceEventType: sanitizeConversationText(payload?.source?.eventType, 48) || undefined,
+  });
+
+  session.conversationSteps.sort((a, b) => a.ordinal - b.ordinal);
+  if (session.conversationSteps.length > 400) {
+    session.conversationSteps.splice(0, session.conversationSteps.length - 400);
+  }
+}
+
+function buildConversationStepUpdate(
+  session: AnalysisSession,
+  update: StreamingUpdate
+): StreamingUpdate | null {
+  if (update.type === 'conversation_step') return null;
+
+  const contentRecord =
+    update.content && typeof update.content === 'object' && !Array.isArray(update.content)
+      ? (update.content as Record<string, any>)
+      : {};
+
+  let phase: 'progress' | 'thinking' | 'tool' | 'result' | 'error' = 'progress';
+  let role: 'agent' | 'system' = 'agent';
+  let text = '';
+
+  switch (update.type) {
+    case 'progress':
+    case 'stage_transition':
+    case 'round_start':
+    case 'strategy_decision':
+    case 'synthesis_complete':
+    case 'hypothesis_generated':
+      phase = 'progress';
+      role = 'system';
+      text =
+        sanitizeConversationText(contentRecord.message) ||
+        sanitizeConversationText(contentRecord.reasoning) ||
+        sanitizeConversationText(contentRecord.phase && `阶段: ${contentRecord.phase}`);
+      if (!text && update.type === 'hypothesis_generated' && Array.isArray(contentRecord.hypotheses)) {
+        text = `形成 ${contentRecord.hypotheses.length} 个待验证假设`;
+      }
+      break;
+    case 'thought':
+    case 'worker_thought':
+      phase = 'thinking';
+      role = update.type === 'worker_thought' ? 'system' : 'agent';
+      text =
+        sanitizeConversationText(contentRecord.content) ||
+        sanitizeConversationText(contentRecord.message);
+      break;
+    case 'tool_call':
+    case 'agent_task_dispatched':
+    case 'agent_dialogue':
+      phase = 'tool';
+      role = 'agent';
+      text =
+        sanitizeConversationText(contentRecord.message) ||
+        sanitizeConversationText(contentRecord.summary) ||
+        sanitizeConversationText(contentRecord.taskTitle) ||
+        sanitizeConversationText(contentRecord.toolName);
+      break;
+    case 'agent_response':
+    case 'finding':
+      phase = 'result';
+      role = 'agent';
+      if (update.type === 'finding' && Array.isArray(contentRecord.findings)) {
+        const firstFinding = contentRecord.findings.find(
+          (entry) => entry && typeof entry === 'object'
+        ) as Record<string, any> | undefined;
+        const firstTitle = sanitizeConversationText(firstFinding?.title || firstFinding?.description);
+        text = firstTitle
+          ? `新增发现 ${contentRecord.findings.length} 条: ${firstTitle}`
+          : `新增发现 ${contentRecord.findings.length} 条`;
+      } else {
+        text =
+          sanitizeConversationText(contentRecord.summary) ||
+          sanitizeConversationText(contentRecord.message);
+      }
+      break;
+    case 'data': {
+      phase = 'result';
+      role = 'system';
+      const envelopes = (Array.isArray(update.content) ? update.content : [update.content])
+        .filter((entry) => entry && typeof entry === 'object') as Array<Record<string, any>>;
+      if (envelopes.length > 0) {
+        const titles = envelopes
+          .map((env) => sanitizeConversationText(env?.display?.title || env?.meta?.stepId || env?.meta?.source))
+          .filter(Boolean)
+          .slice(0, 2);
+        text = titles.length > 0
+          ? `收到 ${envelopes.length} 份数据结果: ${titles.join(' / ')}`
+          : `收到 ${envelopes.length} 份数据结果`;
+      }
+      break;
+    }
+    case 'conclusion':
+      phase = 'result';
+      role = 'agent';
+      text =
+        sanitizeConversationText(contentRecord.summary) ||
+        sanitizeConversationText(contentRecord.message) ||
+        '最终结论已生成';
+      break;
+    case 'answer_token':
+      if (contentRecord.done === true) {
+        phase = 'result';
+        role = 'agent';
+        text = '最终回答生成完成';
+      }
+      break;
+    case 'error':
+      phase = 'error';
+      role = 'system';
+      text =
+        sanitizeConversationText(contentRecord.message) ||
+        sanitizeConversationText(contentRecord.error) ||
+        '分析过程中发生错误';
+      break;
+    default:
+      return null;
+  }
+
+  if (!text) return null;
+
+  session.conversationOrdinal = (Number.isFinite(session.conversationOrdinal) ? session.conversationOrdinal : 0) + 1;
+  const ordinal = session.conversationOrdinal;
+  const eventId = generateEventId('conversation_step', session.sessionId);
+
+  const metadata: Record<string, unknown> = {};
+  if (typeof contentRecord.round === 'number' && Number.isFinite(contentRecord.round)) {
+    metadata.round = contentRecord.round;
+  }
+  if (typeof contentRecord.strategyId === 'string' && contentRecord.strategyId.trim()) {
+    metadata.strategyId = contentRecord.strategyId.trim();
+  }
+
+  return {
+    type: 'conversation_step',
+    id: eventId,
+    timestamp: update.timestamp || Date.now(),
+    content: {
+      eventId,
+      sessionId: session.sessionId,
+      traceId: session.traceId,
+      phase,
+      role,
+      ordinal,
+      content: {
+        text,
+      },
+      metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+      source: {
+        eventType: update.type,
+        phase: typeof contentRecord.phase === 'string' ? contentRecord.phase : undefined,
+      },
+    },
+  };
+}
+
 /**
- * Map orchestrator update types to agent-driven SSE event types
+ * Normalize orchestrator updates before mapping/broadcasting
  */
+function normalizeAgentDrivenUpdate(update: StreamingUpdate): StreamingUpdate {
+  const rawContent = update.content;
+  if (!rawContent || typeof rawContent !== 'object' || Array.isArray(rawContent)) {
+    return update;
+  }
+
+  const content: Record<string, any> = { ...(rawContent as Record<string, any>) };
+
+  if (update.type === 'stage_transition') {
+    const stageName = typeof content.stageName === 'string' ? content.stageName : 'unknown';
+    const hasStageIndex = typeof content.stageIndex === 'number' && Number.isFinite(content.stageIndex);
+    const hasTotalStages = typeof content.totalStages === 'number' && Number.isFinite(content.totalStages) && content.totalStages > 0;
+    const skipped = content.skipped === true;
+    const skipReason = typeof content.skipReason === 'string' ? content.skipReason.trim() : '';
+    const stageSeq = hasStageIndex && hasTotalStages
+      ? ` (${content.stageIndex + 1}/${content.totalStages})`
+      : '';
+    if (typeof content.phase !== 'string' || !content.phase.trim()) {
+      content.phase = 'stage_transition';
+    }
+    if (typeof content.message !== 'string' || !content.message.trim()) {
+      const prefix = skipped ? '跳过阶段' : '进入阶段';
+      const reason = skipped && skipReason ? `: ${skipReason}` : '';
+      content.message = `${prefix} ${stageName}${stageSeq}${reason}`;
+    }
+  }
+
+  if (update.type === 'tool_call') {
+    const phase = typeof content.phase === 'string' ? content.phase : '';
+    const phaseLower = phase.toLowerCase();
+    const isDone = phaseLower.includes('completed') || phaseLower.includes('done') || phaseLower.includes('finished');
+    if (typeof content.phase !== 'string' || !content.phase.trim()) {
+      content.phase = isDone ? 'task_completed' : 'task_dispatched';
+    }
+    if (typeof content.message !== 'string' || !content.message.trim()) {
+      const taskTitle = typeof content.taskTitle === 'string' ? content.taskTitle : '';
+      const toolName = typeof content.toolName === 'string' ? content.toolName : '';
+      const displayName = taskTitle || toolName || '工具任务';
+      content.message = isDone ? `完成 ${displayName}` : `调用 ${displayName}`;
+    }
+  }
+
+  return {
+    ...update,
+    content,
+  };
+}
+
 function mapToAgentDrivenEventType(update: StreamingUpdate): StreamingUpdate['type'] {
   const phase = update.content?.phase;
+
+  if (update.type === 'conversation_step') {
+    return 'conversation_step';
+  }
+
+  if (update.type === 'stage_transition') {
+    return 'progress';
+  }
+
+  if (update.type === 'tool_call') {
+    const phaseText = typeof phase === 'string' ? phase.toLowerCase() : '';
+    const isComplete = phaseText.includes('completed') || phaseText.includes('done') || phaseText.includes('finished');
+    return isComplete ? 'agent_response' : 'agent_dialogue';
+  }
 
   switch (phase) {
     case 'starting':
@@ -2987,12 +3365,14 @@ function broadcastToAgentDrivenClients(sessionId: string, update: StreamingUpdat
   } else if (isLegacySkillEvent(eventType)) {
     eventData = JSON.stringify({
       type: update.type,
+      id: update.id || generateEventId('sse', sessionId),
       data: update.content,
       timestamp: update.timestamp,
     });
   } else {
     eventData = JSON.stringify({
       type: update.type,
+      id: update.id || generateEventId('sse', sessionId),
       data: update.content,
       timestamp: update.timestamp,
     });
@@ -3857,6 +4237,13 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
   const normalizedConclusion = replayOnlyScene
     ? buildSceneReplayNarrative(session.scenes || [])
     : normalizeNarrativeForClient(result.conclusion);
+  const sceneIdHint = replayOnlyScene
+    ? undefined
+    : resolveConclusionSceneIdHint({
+      sessionId: session.sessionId,
+      query: session.query,
+      findings: result.findings,
+    });
   // Fallback: re-derive contract if the orchestrator didn't populate it.
   // Note: mode heuristic uses rounds (available here) as proxy for turnCount
   // (which only the orchestrator knows). Both signal "multi-interaction" analysis.
@@ -3866,6 +4253,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       result.conclusionContract ||
       deriveConclusionContract(normalizedConclusion, {
         mode: result.rounds > 1 ? 'focused_answer' : 'initial_report',
+        sceneId: sceneIdHint,
       }) ||
       undefined
     );
@@ -3890,6 +4278,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       result: resultForClient,
       hypotheses: session.hypotheses,
       dialogue: session.agentDialogue,
+      conversationTimeline: session.conversationSteps,
       dataEnvelopes: session.dataEnvelopes,
       agentResponses: session.agentResponses,
       timestamp: Date.now(),
@@ -3901,6 +4290,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       findingsCount: result.findings?.length || 0,
       hypothesesCount: session.hypotheses?.length || 0,
       dialogueCount: session.agentDialogue?.length || 0,
+      conversationStepCount: session.conversationSteps?.length || 0,
       dataEnvelopesCount: session.dataEnvelopes?.length || 0,
       agentResponsesCount: session.agentResponses?.length || 0,
     });
@@ -3908,7 +4298,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
     const html = generator.generateAgentDrivenHTML(reportData);
 
     // Store report
-    const reportId = `agent-report-${session.sessionId}`;
+    const reportId = `agent-report-${session.sessionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     reportStore.set(reportId, {
       html,
       generatedAt: Date.now(),
@@ -3946,6 +4336,8 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
         contradictingEvidence: h.contradictingEvidence,
       })),
       agentDialogueCount: session.agentDialogue.length,
+      conversationTimelineCount: session.conversationSteps.length,
+      conversationTimeline: session.conversationSteps,
       reportUrl,
       reportError,
     },
@@ -3988,6 +4380,20 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
 // ============================================================================
 // Session Logs Endpoints (for debugging)
 // ============================================================================
+
+router.use('/logs', (_req, res, next) => {
+  if (!featureFlagsConfig.enableAgentLogsApi) {
+    return res.status(503).json({
+      success: false,
+      error: 'Agent logs API is disabled by FEATURE_AGENT_LOGS_API',
+      code: 'FEATURE_DISABLED',
+    });
+  }
+  next();
+});
+
+// Protect debug log APIs with API-key auth (or dev mock user when auth is not configured).
+router.use('/logs', authenticate);
 
 /**
  * GET /api/agent/logs

@@ -26,6 +26,10 @@ import skillRoutes from './routes/skillRoutes';
 import skillAdminRoutes from './routes/skillAdminRoutes';
 import reportRoutes from './routes/reportRoutes';
 import agentRoutes from './routes/agentRoutes';
+import {
+  assertTraceAnalysisConfiguredForStartup,
+  getTraceAnalysisConfigurationStatus,
+} from './services/traceAnalysisSkill';
 
 // Import cleanup utilities
 import { TraceProcessorFactory, killOrphanProcessors } from './services/workingTraceProcessor';
@@ -34,6 +38,9 @@ import { getPortPool, resetPortPool } from './services/portPool';
 const app = express();
 const PORT = serverConfig.port;
 const NODE_ENV = serverConfig.nodeEnv;
+
+// Fail fast for trace-analysis-specific credentials when strict startup validation is enabled.
+assertTraceAnalysisConfiguredForStartup();
 
 // Middleware
 app.use(cors({
@@ -51,6 +58,7 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     environment: NODE_ENV,
     version: '1.0.0',
+    traceAnalysis: getTraceAnalysisConfigurationStatus(),
   });
 });
 
@@ -58,7 +66,6 @@ app.get('/health', (req, res) => {
 app.get('/debug', (req, res) => {
   res.json({
     hasDeepSeekKey: !!process.env.DEEPSEEK_API_KEY,
-    deepSeekKeyPrefix: process.env.DEEPSEEK_API_KEY?.substring(0, 10) + '...',
     deepSeekBaseUrl: process.env.DEEPSEEK_BASE_URL,
     deepSeekModel: process.env.DEEPSEEK_MODEL,
     aiService: process.env.AI_SERVICE,
@@ -70,7 +77,7 @@ app.get('/debug', (req, res) => {
 app.use('/api/sql', sqlRoutes);
 app.use('/api/trace', traceRoutes);
 app.use('/api/traces', simpleTraceRoutes);
-app.use('/chat', aiChatRoutes); // Separate endpoint for AI chat without auth
+app.use('/chat', aiChatRoutes);
 app.use('/api/ai', advancedAIRoutes);
 app.use('/api/perfetto', perfettoLocalRoutes);
 app.use('/api/auto-analysis', autoAnalysisRoutes);

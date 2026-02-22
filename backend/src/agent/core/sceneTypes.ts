@@ -2,6 +2,17 @@ import { Finding, Intent } from '../types';
 
 export type ConclusionSceneId = string;
 
+export type ClusterOutputMode = 'required' | 'optional' | 'none';
+export type ClusterFrameListMode = 'none' | 'top' | 'full';
+
+export interface SceneClusterPresentationPolicy {
+  outputMode: ClusterOutputMode;
+  frameListMode: ClusterFrameListMode;
+  maxFramesPerCluster?: number;
+  injectClusterFrameAggregation: boolean;
+  injectWorkloadDominantMarker: boolean;
+}
+
 export interface ConclusionScenePromptHints {
   sceneId: ConclusionSceneId;
   sceneName: string;
@@ -9,6 +20,7 @@ export interface ConclusionScenePromptHints {
   outputRequirementLines: string[];
   nextStepLine: string;
   requireTopClusters: boolean;
+  clusterPolicy: SceneClusterPresentationPolicy;
 }
 
 export interface SceneTemplateRecord {
@@ -20,6 +32,11 @@ export interface SceneTemplateRecord {
   outputRequirementTemplates: string[];
   nextStepLine: string;
   requireTopClusters: boolean;
+  clusterOutputMode?: ClusterOutputMode;
+  clusterFrameListMode?: ClusterFrameListMode;
+  maxFramesPerCluster?: number;
+  injectClusterFrameAggregation?: boolean;
+  injectWorkloadDominantMarker?: boolean;
 }
 
 export interface SceneRouteCandidate {
@@ -41,4 +58,3 @@ export interface BuildScenePromptHintsInput {
   findings: Finding[];
   deepReasonLabel: string;
 }
-

@@ -56,7 +56,10 @@ export type {
 } from './orchestratorTypes';
 export type {
   ConclusionContract,
+  ConclusionClusterOutputMode,
+  ConclusionClusterFrameListMode,
   ConclusionOutputMode,
+  ConclusionContractClusterPolicy,
   ConclusionContractConclusionItem,
   ConclusionContractClusterItem,
   ConclusionContractEvidenceItem,

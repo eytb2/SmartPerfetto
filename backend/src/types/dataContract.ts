@@ -437,6 +437,7 @@ export const SSE_EVENT_TYPES = [
   // Common events
   'finding',
   'progress',
+  'conversation_step',
   'error',
   'analysis_completed',
   'thought',
@@ -703,6 +704,31 @@ export interface ProgressEvent {
 }
 
 /**
+ * Conversation Step Event - Strictly ordered timeline step for assistant-like UX
+ */
+export interface ConversationStepEvent {
+  type: 'conversation_step';
+  id: string;
+  data: {
+    eventId: string;
+    sessionId: string;
+    traceId: string;
+    phase: 'progress' | 'thinking' | 'tool' | 'result' | 'error';
+    role: 'agent' | 'system';
+    ordinal: number;
+    content: {
+      text: string;
+    };
+    metadata?: Record<string, any>;
+    source?: {
+      eventType?: string;
+      phase?: string;
+    };
+  };
+  timestamp: number;
+}
+
+/**
  * Analysis Completed Event - SSE payload for final result
  */
 export interface AnalysisCompletedEvent {
@@ -724,6 +750,7 @@ export type SSEEvent =
   | SkillDataEvent
   | FindingEvent
   | ProgressEvent
+  | ConversationStepEvent
   | AnalysisCompletedEvent;
 
 // =============================================================================

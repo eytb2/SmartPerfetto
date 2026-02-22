@@ -101,6 +101,15 @@ export interface AgentDrivenReportData {
     content: any;
     timestamp: number;
   }>;
+  conversationTimeline?: Array<{
+    eventId: string;
+    ordinal: number;
+    phase: 'progress' | 'thinking' | 'tool' | 'result' | 'error';
+    role: 'agent' | 'system';
+    text: string;
+    timestamp: number;
+    sourceEventType?: string;
+  }>;
   dataEnvelopes?: DataEnvelope[];
   agentResponses?: Array<{
     taskId: string;
@@ -3971,10 +3980,14 @@ export class HTMLReportGenerator {
    * Generate HTML report from agent runtime result (Phase 2-4 architecture)
    */
   generateAgentDrivenHTML(data: AgentDrivenReportData): string {
-    const { traceId, query, result, hypotheses, dialogue, timestamp } = data;
+    const { traceId, query, result, hypotheses, dialogue, conversationTimeline, timestamp } = data;
     const dataEnvelopes = this.prepareAgentDrivenEnvelopes(data.dataEnvelopes || []);
     const agentResponses = data.agentResponses || [];
     const traceStartNs = data.traceStartNs ? this.parseNs(data.traceStartNs) : null;
+    const normalizedConversationTimeline = this.normalizeConversationTimeline(
+      conversationTimeline || [],
+      dialogue || []
+    );
 
     return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -4081,6 +4094,52 @@ export class HTMLReportGenerator {
       background: #f8f9fa; padding: 20px; border-radius: 8px;
       white-space: pre-wrap; font-size: 15px; line-height: 1.8;
     }
+    .timeline-list {
+      display: flex; flex-direction: column; gap: 10px;
+      max-height: 420px; overflow-y: auto; padding-right: 4px;
+    }
+    .timeline-toolbar {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; margin-bottom: 10px;
+    }
+    .timeline-filters {
+      display: flex; flex-wrap: wrap; gap: 6px;
+    }
+    .timeline-filter-btn, .timeline-collapse-btn {
+      border: 1px solid #d1d5db; background: white; color: #374151;
+      border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+    }
+    .timeline-filter-btn.active {
+      background: #eef2ff; color: #4338ca; border-color: #c7d2fe; font-weight: 600;
+    }
+    .timeline-item {
+      display: grid; grid-template-columns: 64px 180px 1fr;
+      gap: 12px; align-items: center; padding: 10px 12px;
+      border-radius: 8px; border: 1px solid #e5e7eb; background: #f8fafc;
+    }
+    .timeline-item.timeline-hidden { display: none; }
+    .timeline-step {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px; color: #475569;
+    }
+    .timeline-meta {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    }
+    .timeline-phase {
+      display: inline-block; padding: 2px 8px; border-radius: 999px;
+      font-size: 11px; font-weight: 600; color: #334155; background: #e2e8f0;
+    }
+    .timeline-role {
+      font-size: 12px; color: #475569;
+    }
+    .timeline-item.phase-progress .timeline-phase { background: #dbeafe; color: #1d4ed8; }
+    .timeline-item.phase-thinking .timeline-phase { background: #ede9fe; color: #6d28d9; }
+    .timeline-item.phase-tool .timeline-phase { background: #cffafe; color: #0e7490; }
+    .timeline-item.phase-result .timeline-phase { background: #dcfce7; color: #166534; }
+    .timeline-item.phase-error .timeline-phase { background: #fee2e2; color: #b91c1c; }
+    .timeline-text {
+      font-size: 13px; color: #1f2937; line-height: 1.5;
+    }
     .table-container { overflow-x: auto; }
     .table-container table {
       width: 100%; border-collapse: collapse; font-size: 12px;
@@ -4160,6 +4219,8 @@ export class HTMLReportGenerator {
     </div>
 
     ${this.renderHypothesesSection(hypotheses)}
+
+    ${this.renderConversationTimelineSection(normalizedConversationTimeline)}
 
     ${this.renderDataEnvelopesSection(dataEnvelopes, traceStartNs)}
 
@@ -4242,6 +4303,56 @@ export class HTMLReportGenerator {
           ? '<span class="expand-icon">▲</span> 收起'
           : '<span class="expand-icon">▼</span> 展开';
       });
+    }
+
+    function filterConversationTimeline(sectionId, phase, triggerBtn) {
+      var section = document.getElementById(sectionId);
+      if (!section) return;
+
+      var items = section.querySelectorAll('.timeline-item');
+      var filterButtons = section.querySelectorAll('.timeline-filter-btn');
+
+      filterButtons.forEach(function(btn) {
+        btn.classList.remove('active');
+      });
+      if (triggerBtn && triggerBtn.classList) {
+        triggerBtn.classList.add('active');
+      }
+
+      items.forEach(function(item) {
+        var itemPhase = item.getAttribute('data-phase') || 'progress';
+        var matchesPhase = phase === 'all' || itemPhase === phase;
+        var isCollapsed = item.classList.contains('timeline-collapsed') && !item.classList.contains('timeline-expanded');
+        if (matchesPhase && !isCollapsed) {
+          item.classList.remove('timeline-hidden');
+        } else {
+          item.classList.add('timeline-hidden');
+        }
+      });
+    }
+
+    function toggleConversationTimelineCollapse(sectionId, btn) {
+      var section = document.getElementById(sectionId);
+      if (!section) return;
+
+      var collapsedItems = section.querySelectorAll('.timeline-item.timeline-collapsed');
+      if (collapsedItems.length === 0) return;
+
+      var expanding = btn.getAttribute('data-expanded') !== 'true';
+      collapsedItems.forEach(function(item) {
+        if (expanding) {
+          item.classList.add('timeline-expanded');
+        } else {
+          item.classList.remove('timeline-expanded');
+        }
+      });
+
+      btn.setAttribute('data-expanded', expanding ? 'true' : 'false');
+      btn.textContent = expanding ? '收起' : '展开全部';
+
+      var activeFilterBtn = section.querySelector('.timeline-filter-btn.active');
+      var phase = activeFilterBtn ? (activeFilterBtn.getAttribute('data-phase') || 'all') : 'all';
+      filterConversationTimeline(sectionId, phase, activeFilterBtn);
     }
   </script>
 </body>
@@ -4493,6 +4604,157 @@ export class HTMLReportGenerator {
             <div style="width: 60px; height: 4px; background: #e5e7eb; border-radius: 2px; overflow: hidden;">
               <div style="width: ${h.confidence * 100}%; height: 100%; background: ${h.status === 'confirmed' ? '#059669' : '#6366f1'};"></div>
             </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+    `;
+  }
+
+  private normalizeConversationTimeline(
+    timeline: Array<{
+      eventId?: string;
+      ordinal?: number;
+      phase?: string;
+      role?: string;
+      text?: string;
+      timestamp?: number;
+      sourceEventType?: string;
+    }>,
+    dialogue: Array<{ agentId: string; type: 'task' | 'response' | 'question'; content: any; timestamp: number }>
+  ): Array<{
+    eventId: string;
+    ordinal: number;
+    phase: 'progress' | 'thinking' | 'tool' | 'result' | 'error';
+    role: 'agent' | 'system';
+    text: string;
+    timestamp: number;
+    sourceEventType?: string;
+  }> {
+    const normalized: Array<{
+      eventId: string;
+      ordinal: number;
+      phase: 'progress' | 'thinking' | 'tool' | 'result' | 'error';
+      role: 'agent' | 'system';
+      text: string;
+      timestamp: number;
+      sourceEventType?: string;
+    }> = [];
+
+    if (Array.isArray(timeline) && timeline.length > 0) {
+      for (const item of timeline) {
+        const text = String(item?.text || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+        const ordinal = Number(item?.ordinal);
+        if (!text || !Number.isFinite(ordinal) || ordinal <= 0) continue;
+        const phaseRaw = String(item?.phase || '').toLowerCase();
+        const phase = (
+          phaseRaw === 'thinking' ||
+          phaseRaw === 'tool' ||
+          phaseRaw === 'result' ||
+          phaseRaw === 'error'
+        ) ? phaseRaw : 'progress';
+        const role = String(item?.role || '').toLowerCase() === 'system' ? 'system' : 'agent';
+        const eventId = String(item?.eventId || `conversation-${ordinal}`).trim();
+        normalized.push({
+          eventId,
+          ordinal,
+          phase,
+          role,
+          text,
+          timestamp: Number.isFinite(Number(item?.timestamp)) ? Number(item?.timestamp) : 0,
+          sourceEventType: item?.sourceEventType ? String(item.sourceEventType) : undefined,
+        });
+      }
+    } else if (Array.isArray(dialogue) && dialogue.length > 0) {
+      for (let i = 0; i < dialogue.length; i++) {
+        const item = dialogue[i];
+        const content = item?.content || {};
+        const text = String(
+          content.message ||
+          content.summary ||
+          content.taskTitle ||
+          content.phase ||
+          ''
+        ).replace(/\s+/g, ' ').trim().slice(0, 240);
+        if (!text) continue;
+        const phase = item.type === 'task' ? 'tool' : item.type === 'response' ? 'result' : 'thinking';
+        normalized.push({
+          eventId: `dialogue-${i + 1}`,
+          ordinal: i + 1,
+          phase,
+          role: 'agent',
+          text,
+          timestamp: Number(item.timestamp) || 0,
+          sourceEventType: 'agent_dialogue',
+        });
+      }
+    }
+
+    const byOrdinal = new Map<number, typeof normalized[number]>();
+    for (const item of normalized) {
+      if (!byOrdinal.has(item.ordinal)) {
+        byOrdinal.set(item.ordinal, item);
+      }
+    }
+    return [...byOrdinal.values()].sort((a, b) => a.ordinal - b.ordinal);
+  }
+
+  private getConversationPhaseLabel(phase: 'progress' | 'thinking' | 'tool' | 'result' | 'error'): string {
+    switch (phase) {
+      case 'thinking':
+        return '思考';
+      case 'tool':
+        return '工具';
+      case 'result':
+        return '结果';
+      case 'error':
+        return '错误';
+      case 'progress':
+      default:
+        return '进度';
+    }
+  }
+
+  private renderConversationTimelineSection(
+    timeline: Array<{
+      eventId: string;
+      ordinal: number;
+      phase: 'progress' | 'thinking' | 'tool' | 'result' | 'error';
+      role: 'agent' | 'system';
+      text: string;
+      timestamp: number;
+      sourceEventType?: string;
+    }>
+  ): string {
+    if (!Array.isArray(timeline) || timeline.length === 0) return '';
+
+    const sectionId = 'conversation_timeline_section';
+    const defaultVisibleCount = 12;
+    const shouldCollapse = timeline.length > defaultVisibleCount;
+
+    return `
+    <div class="section" id="${sectionId}">
+      <h2 class="section-title">🧵 对话时间线</h2>
+      <div class="timeline-toolbar">
+        <div class="timeline-filters">
+          <button class="timeline-filter-btn active" type="button" data-phase="all" onclick="filterConversationTimeline('${sectionId}', 'all', this)">全部</button>
+          <button class="timeline-filter-btn" type="button" data-phase="progress" onclick="filterConversationTimeline('${sectionId}', 'progress', this)">进度</button>
+          <button class="timeline-filter-btn" type="button" data-phase="thinking" onclick="filterConversationTimeline('${sectionId}', 'thinking', this)">思考</button>
+          <button class="timeline-filter-btn" type="button" data-phase="tool" onclick="filterConversationTimeline('${sectionId}', 'tool', this)">工具</button>
+          <button class="timeline-filter-btn" type="button" data-phase="result" onclick="filterConversationTimeline('${sectionId}', 'result', this)">结果</button>
+          <button class="timeline-filter-btn" type="button" data-phase="error" onclick="filterConversationTimeline('${sectionId}', 'error', this)">错误</button>
+        </div>
+        ${shouldCollapse ? `<button class="timeline-collapse-btn" type="button" onclick="toggleConversationTimelineCollapse('${sectionId}', this)">展开全部</button>` : ''}
+      </div>
+      <div class="timeline-list">
+        ${timeline.map((item, idx) => `
+          <div class="timeline-item phase-${item.phase}${shouldCollapse && idx >= defaultVisibleCount ? ' timeline-hidden timeline-collapsed' : ''}" data-phase="${this.escapeHtml(item.phase)}" data-collapsed="${shouldCollapse && idx >= defaultVisibleCount ? 'true' : 'false'}">
+            <div class="timeline-step">#${item.ordinal}</div>
+            <div class="timeline-meta">
+              <span class="timeline-phase">${this.escapeHtml(this.getConversationPhaseLabel(item.phase))}</span>
+              <span class="timeline-role">${this.escapeHtml(item.role === 'system' ? '系统' : '助手')}</span>
+            </div>
+            <div class="timeline-text">${this.escapeHtml(item.text)}</div>
           </div>
         `).join('')}
       </div>

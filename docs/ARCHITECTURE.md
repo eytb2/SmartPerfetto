@@ -332,6 +332,24 @@ flowchart LR
 - **用户偏好闭环**：偏好（输出视图、预算、关注点）进入 `TraceAgentState.preferences`，并在每轮 prompt 中显式呈现。
 - **长期记忆**：目前严格 trace-scoped；若要跨 trace，需要显式用户授权 + 设计隔离（不建议默认开启）。
 
+### 7.1 新增 Domain Agent（无需改核心硬编码）
+
+从 `backend/src/agent/agents/domain/index.ts` 开始，`DomainAgentRegistry` 已支持运行时注册：
+
+- `registerFactory(agentId, factory)`：注册新 agent 工厂
+- `initialize([agentIds...])`：按需初始化指定 agent
+- `createDomainAgentRegistryWithOptions(..., { extraFactories, disabledAgentIds })`：创建时插入扩展并禁用默认 agent
+
+这样新增 agent 可以落在独立模块，通过工厂注入，不再要求修改 registry 的固定初始化列表。
+
+### 7.2 运行时灰度开关
+
+关键路由已支持 feature flag（环境变量）：
+
+- `FEATURE_AGENT_SCENE_RECONSTRUCT`：控制 `/api/agent/scene-reconstruct*`
+- `FEATURE_AGENT_LOGS_API`：控制 `/api/agent/logs*`
+- `SMARTPERFETTO_ALLOW_AGENT_ADB_FULL_MODE`：控制 agent 是否可进入 ADB full 模式（仍需请求上下文显式批准）
+
 ---
 
 ## 8. 深度文档（与代码对齐）
@@ -350,12 +368,17 @@ flowchart LR
 
 ## 9. 回归与真实 Trace 自验证（当前默认流程）
 
-为避免“仅单测通过但真实 trace 流程退化”，当前默认加入真实 trace 技能评测：
+为避免“仅单测通过但真实 trace 流程退化”，默认门禁已整合为一条命令：
 
-- 命令：`cd backend && npm run test:skill-eval:real-traces`
+- 命令：`cd backend && npm run test:gate`
+- 其中包含：
+  - `npm run test:core`
+  - `npm run test:skill-eval:real-traces`
+  - `npm run test:scene-trace-regression`
 - 启动 trace：`test-traces/app_start_heavy.pftrace`
 - 滑动 trace：`test-traces/app_aosp_scrolling_heavy_jank.pftrace`
 
 对应实现：
-- `backend/package.json`（新增 `test:skill-eval:real-traces`）
+- `backend/package.json`（`test:gate` 统一门禁）
+- `.github/workflows/backend-agent-regression-gate.yml`（CI 自动执行）
 - `backend/tests/skill-eval/runner.ts`（递归注册 skill/iterator/parallel/conditional 依赖）

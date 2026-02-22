@@ -278,6 +278,8 @@ describe('HypothesisExecutor', () => {
       expect(result.rounds).toBe(1);
       expect(result.findings).toHaveLength(1);
       expect(result.stopReason).toBeNull();
+      expect(services.circuitBreaker.canExecute).toHaveBeenCalled();
+      expect(services.circuitBreaker.recordIteration).toHaveBeenCalledWith('hypothesis_loop');
       expect(services.messageBus.dispatchTasksParallel).toHaveBeenCalled();
     });
 
@@ -523,6 +525,23 @@ describe('HypothesisExecutor', () => {
       // Should stop early due to failure ratio
       expect(result.stopReason).toContain('失败');
       expect(result.rounds).toBeLessThan(10);
+    });
+
+    it('stops before dispatch when circuit breaker preflight blocks execution', async () => {
+      const ctx = createMockExecutionContext();
+      (services.circuitBreaker.canExecute as jest.Mock<any>).mockReturnValueOnce({
+        action: 'ask_user',
+        reason: 'Circuit breaker open',
+      });
+
+      const result = await executor.execute(ctx, emitter);
+
+      expect(result.rounds).toBe(0);
+      expect(result.stopReason).toContain('Circuit breaker open');
+      expect(services.messageBus.dispatchTasksParallel).not.toHaveBeenCalled();
+
+      const circuitBreakerUpdate = emittedUpdates.find(u => u.type === 'circuit_breaker');
+      expect(circuitBreakerUpdate).toBeDefined();
     });
 
     it('stops on circuit breaker trip', async () => {

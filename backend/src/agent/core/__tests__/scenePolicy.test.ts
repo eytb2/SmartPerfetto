@@ -17,6 +17,8 @@ describe('scenePolicy', () => {
     const hints = buildScenePromptHintsFromTemplate(template, '为什么慢');
     expect(hints.outputRequirementLines.join('\n')).toContain('为什么慢');
     expect(hints.requireTopClusters).toBe(true);
+    expect(hints.clusterPolicy.outputMode).toBe('required');
+    expect(hints.clusterPolicy.frameListMode).toBe('none');
   });
 
   test('uses fallback lines when template is incomplete', () => {
@@ -36,6 +38,6 @@ describe('scenePolicy', () => {
     expect(hints.focusLines.length).toBeGreaterThan(0);
     expect(hints.outputRequirementLines.length).toBeGreaterThan(0);
     expect(hints.nextStepLine).toContain('下一步');
+    expect(hints.clusterPolicy.outputMode).toBe('optional');
   });
 });
-

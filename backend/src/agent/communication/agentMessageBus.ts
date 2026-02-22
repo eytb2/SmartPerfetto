@@ -62,7 +62,7 @@ export interface MessageBusConfig {
 
 const DEFAULT_CONFIG: MessageBusConfig = {
   maxPendingMessages: 100,
-  messageTimeoutMs: 60000,
+  messageTimeoutMs: 180000,
   enableLogging: true,
   maxConcurrentTasks: 3,
 };
@@ -71,10 +71,18 @@ const DEFAULT_CONFIG: MessageBusConfig = {
  * Pending message entry
  */
 interface PendingMessage {
-  message: AgentMessage;
-  resolve: (response: any) => void;
-  reject: (error: Error) => void;
-  timeoutId: NodeJS.Timeout;
+  task: AgentTask;
+  enqueuedAt: number;
+}
+
+class TaskTimeoutError extends Error {
+  readonly timeoutMs: number;
+
+  constructor(taskId: string, timeoutMs: number) {
+    super(`Task ${taskId} timed out after ${timeoutMs}ms`);
+    this.name = 'TaskTimeoutError';
+    this.timeoutMs = timeoutMs;
+  }
 }
 
 /**
@@ -132,7 +140,7 @@ export class AgentMessageBus extends EventEmitter {
   private config: MessageBusConfig;
   private agents: Map<string, BaseAgent> = new Map();
   private pendingMessages: Map<string, PendingMessage> = new Map();
-  private messageQueue: AgentMessage[] = [];
+  private messageQueue: string[] = [];
   private sharedContext: SharedAgentContext | null = null;
   private isProcessing: boolean = false;
   private taskSemaphore: Semaphore;
@@ -264,21 +272,56 @@ export class AgentMessageBus extends EventEmitter {
       throw new Error('Shared context not initialized. Call createSharedContext() first.');
     }
 
-    // Wait for semaphore (proper async concurrency limiting)
-    await this.taskSemaphore.acquire();
+    if (this.pendingMessages.size >= this.config.maxPendingMessages) {
+      const reason = `Task queue limit exceeded (${this.pendingMessages.size}/${this.config.maxPendingMessages})`;
+      this.log(`[Backpressure] Rejected task ${task.id} for ${task.targetAgentId}: ${reason}`);
+      this.emit('task_rejected', {
+        taskId: task.id,
+        agentId: task.targetAgentId,
+        reason,
+      });
+      return this.buildRejectedResponse(task, reason);
+    }
+
+    this.pendingMessages.set(task.id, {
+      task,
+      enqueuedAt: Date.now(),
+    });
+    this.messageQueue.push(task.id);
+    this.isProcessing = true;
+
+    let globalPermit = false;
+    let agentPermit = false;
     const agentSemaphore = this.perAgentSemaphore.get(task.targetAgentId) || new Semaphore(1);
     this.perAgentSemaphore.set(task.targetAgentId, agentSemaphore);
-    await agentSemaphore.acquire();
-    this.log(`Dispatching task ${task.id} to ${task.targetAgentId}`);
 
     try {
+      // Wait for semaphore (proper async concurrency limiting)
+      await this.taskSemaphore.acquire();
+      globalPermit = true;
+      await agentSemaphore.acquire();
+      agentPermit = true;
+
+      this.log(`Dispatching task ${task.id} to ${task.targetAgentId}`);
+      const dispatchStartedAt = Date.now();
+
       this.emit('task_dispatched', { taskId: task.id, agentId: task.targetAgentId });
 
       // Ensure shared context is set on agent
       agent.setSharedContext(this.sharedContext);
 
-      // Execute task
-      const response = await agent.executeTask(task, this.sharedContext);
+      let response: AgentResponse;
+      try {
+        response = await this.executeTaskWithTimeout(agent, task);
+      } catch (error: any) {
+        response = this.buildFailedResponse(task, error, dispatchStartedAt);
+        this.emit('task_failed', {
+          taskId: task.id,
+          agentId: task.targetAgentId,
+          error: response.toolResults?.[0]?.error,
+          timeout: error instanceof TaskTimeoutError,
+        });
+      }
 
       // Process response
       this.processAgentResponse(response);
@@ -287,8 +330,16 @@ export class AgentMessageBus extends EventEmitter {
 
       return response;
     } finally {
-      agentSemaphore.release();
-      this.taskSemaphore.release();
+      if (agentPermit) {
+        agentSemaphore.release();
+      }
+      if (globalPermit) {
+        this.taskSemaphore.release();
+      }
+
+      this.pendingMessages.delete(task.id);
+      this.messageQueue = this.messageQueue.filter((id) => id !== task.id);
+      this.isProcessing = this.pendingMessages.size > 0;
     }
   }
 
@@ -333,6 +384,7 @@ export class AgentMessageBus extends EventEmitter {
         additionalData: question.context,
       },
       dependencies: [],
+      timeout: this.config.messageTimeoutMs,
       createdAt: Date.now(),
     };
 
@@ -487,10 +539,6 @@ export class AgentMessageBus extends EventEmitter {
    */
   reset(): void {
     // Clear pending messages
-    for (const pending of this.pendingMessages.values()) {
-      clearTimeout(pending.timeoutId);
-      pending.reject(new Error('Message bus reset'));
-    }
     this.pendingMessages.clear();
 
     // Clear queue
@@ -516,6 +564,87 @@ export class AgentMessageBus extends EventEmitter {
     if (this.config.enableLogging) {
       console.log(`[AgentMessageBus] ${message}`);
     }
+  }
+
+  private resolveTaskTimeout(task: AgentTask): number {
+    const timeout = Number(task.timeout);
+    if (Number.isFinite(timeout) && timeout > 0) {
+      return Math.floor(timeout);
+    }
+    return this.config.messageTimeoutMs;
+  }
+
+  private async executeTaskWithTimeout(agent: BaseAgent, task: AgentTask): Promise<AgentResponse> {
+    const timeoutMs = this.resolveTaskTimeout(task);
+    if (timeoutMs <= 0) {
+      return agent.executeTask(task, this.sharedContext as SharedAgentContext);
+    }
+
+    let timer: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new TaskTimeoutError(task.id, timeoutMs)), timeoutMs);
+    });
+
+    try {
+      return await Promise.race([
+        agent.executeTask(task, this.sharedContext as SharedAgentContext),
+        timeoutPromise,
+      ]);
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
+  }
+
+  private buildFailedResponse(task: AgentTask, error: any, startedAt: number): AgentResponse {
+    const errorMessage = error instanceof TaskTimeoutError
+      ? error.message
+      : (error?.message || 'Task execution failed');
+    const elapsedMs = Date.now() - startedAt;
+
+    return {
+      agentId: task.targetAgentId,
+      taskId: task.id,
+      success: false,
+      findings: [],
+      confidence: 0,
+      executionTimeMs: elapsedMs,
+      suggestions: [errorMessage],
+      toolResults: [
+        {
+          success: false,
+          error: errorMessage,
+          executionTimeMs: elapsedMs,
+          metadata: {
+            timeoutMs: error instanceof TaskTimeoutError ? error.timeoutMs : undefined,
+          },
+        },
+      ],
+    };
+  }
+
+  private buildRejectedResponse(task: AgentTask, reason: string): AgentResponse {
+    return {
+      agentId: task.targetAgentId,
+      taskId: task.id,
+      success: false,
+      findings: [],
+      confidence: 0,
+      executionTimeMs: 0,
+      suggestions: [reason],
+      toolResults: [
+        {
+          success: false,
+          error: reason,
+          executionTimeMs: 0,
+          metadata: {
+            rejected: true,
+            maxPendingMessages: this.config.maxPendingMessages,
+          },
+        },
+      ],
+    };
   }
 }
 

@@ -58,7 +58,7 @@ export interface JankCluster {
   amplificationPath: string;
   /** Representative cause_type key for this cluster. */
   causeType: string;
-  /** Optional representative frame IDs for drill-down. */
+  frameIds: string[];
   representativeFrames: string[];
   /** Optional short examples from primary_cause. */
   samplePrimaryCauses: string[];
@@ -345,7 +345,7 @@ function buildClustersFromRecords(records: NormalizedFrameRecord[]): JankCluster
   const clusters = Array.from(groups.values())
     .map((items) => {
       const first = items[0];
-      const representativeFrames = [...new Set(items.map(i => i.frameId))].slice(0, 5);
+      const representativeFrames = [...new Set(items.map(i => i.frameId))];
       const samplePrimaryCauses = [...new Set(items.map(i => i.primaryCause).filter(Boolean) as string[])].slice(0, 2);
       return {
         clusterId: '',
@@ -355,6 +355,7 @@ function buildClustersFromRecords(records: NormalizedFrameRecord[]): JankCluster
         supplyConstraint: resolveClusterSupplyLabel(first.causeType, first.supplyConstraint),
         amplificationPath: AMPLIFICATION_PATH_LABELS[first.amplificationPath] || first.amplificationPath,
         causeType: first.causeType,
+        frameIds: representativeFrames,
         representativeFrames,
         samplePrimaryCauses,
       } as JankCluster;
@@ -398,6 +399,7 @@ function buildClustersFromFindings(findings: Finding[]): JankCluster[] {
       supplyConstraint: SUPPLY_NONE_TEXT,
       amplificationPath: AMPLIFICATION_UNKNOWN_TEXT,
       causeType,
+      frameIds: [],
       representativeFrames: [],
       samplePrimaryCauses: bucket.samples,
     } as JankCluster))

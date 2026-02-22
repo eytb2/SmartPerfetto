@@ -323,6 +323,7 @@ export interface StreamingUpdate {
    * - 'answer_token': Incremental final answer text stream
    * - 'conclusion': Analysis conclusion
    * - 'error': Error message
+   * - 'conversation_step': Strictly ordered conversational timeline event
    *
    * Agent-Driven Events (Phase 2-4):
    * - 'hypothesis_generated': Initial hypotheses created
@@ -334,6 +335,7 @@ export interface StreamingUpdate {
    * - 'strategy_decision': Next iteration strategy decided
    */
   type: 'data' | 'thought' | 'tool_call' | 'finding' | 'progress' | 'answer_token' | 'conclusion' | 'error' | 'scene_detected' | 'track_data' | 'skill_layered_result' | 'worker_thought' | 'architecture_detected'
+    | 'conversation_step'
     | 'hypothesis_generated' | 'agent_task_dispatched' | 'agent_dialogue' | 'agent_response' | 'round_start' | 'synthesis_complete' | 'strategy_decision'
     | 'degraded' | 'stage_transition' | 'circuit_breaker'
     // Agent-Driven Architecture v2.0 events
@@ -347,7 +349,7 @@ export interface StreamingUpdate {
   timestamp: number;
   /**
    * Optional unique event ID for deduplication (v2.0)
-   * Used with 'data' events to prevent duplicate rendering on frontend
+   * Used by frontend to deduplicate events across retries/reconnects.
    */
   id?: string;
 }

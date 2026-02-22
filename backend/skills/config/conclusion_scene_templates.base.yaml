@@ -55,6 +55,11 @@ scenes:
       - "- 术语边界：CPU限频/调度延迟/核心摆放/阻塞等待 只能放在资源问题，不要写到放大因素。"
     next_step_line: "- “下一步”优先给出口径对齐、聚类下钻、同窗验证动作；若已有逐帧数据，禁止写“补充XXX数据”。"
     require_top_clusters: true
+    cluster_output_mode: required
+    cluster_frame_list_mode: full
+    max_frames_per_cluster: 120
+    inject_cluster_frame_aggregation: true
+    inject_workload_dominant_marker: true
 
   - id: anr
     scene_name: ANR/卡死

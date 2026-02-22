@@ -27,6 +27,35 @@ export async function executeTaskGraph(
   emitter: ProgressEmitter,
   circuitBreaker?: CircuitBreaker
 ): Promise<AgentResponse[]> {
+  const emitTaskDispatched = (task: AgentTask, fallback = false) => {
+    emitter.emitUpdate('tool_call', {
+      phase: 'task_dispatched',
+      taskId: task.id,
+      agentId: task.targetAgentId,
+      taskTitle: task.description,
+      dependencies: task.dependencies || [],
+      message: fallback
+        ? `派发任务（依赖降级）: ${task.description}`
+        : `派发任务: ${task.description}`,
+    });
+  };
+
+  const emitTaskCompleted = (response: AgentResponse) => {
+    const findingsCount = Array.isArray(response.findings) ? response.findings.length : 0;
+    const toolResultCount = Array.isArray(response.toolResults) ? response.toolResults.length : 0;
+    emitter.emitUpdate('tool_call', {
+      phase: 'task_completed',
+      taskId: response.taskId,
+      agentId: response.agentId,
+      success: response.success,
+      findingsCount,
+      toolResultCount,
+      summary: response.success
+        ? `任务完成，发现 ${findingsCount} 条，工具返回 ${toolResultCount} 个`
+        : '任务失败，请查看后续诊断信息',
+    });
+  };
+
   const pending = new Map<string, AgentTask>(tasks.map(task => [task.id, task]));
   const completed = new Set<string>();
   const responses: AgentResponse[] = [];
@@ -45,15 +74,19 @@ export async function executeTaskGraph(
         message: '任务依赖无法满足，继续执行剩余任务',
       });
 
+      remaining.forEach((task) => emitTaskDispatched(task, true));
       const fallbackResponses = await messageBus.dispatchTasksParallel(remaining);
       responses.push(...fallbackResponses);
+      fallbackResponses.forEach((response) => emitTaskCompleted(response));
       fallbackResponses.forEach(r => completed.add(r.taskId));
       pending.clear();
       break;
     }
 
+    ready.forEach((task) => emitTaskDispatched(task));
     const batchResponses = await messageBus.dispatchTasksParallel(ready);
     responses.push(...batchResponses);
+    batchResponses.forEach((response) => emitTaskCompleted(response));
     batchResponses.forEach(r => completed.add(r.taskId));
     ready.forEach(task => pending.delete(task.id));
   }

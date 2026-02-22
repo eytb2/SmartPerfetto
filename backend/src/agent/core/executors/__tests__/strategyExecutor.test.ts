@@ -119,6 +119,8 @@ function createMockServices(): AnalysisServices {
       subscribe: jest.fn(),
     } as any,
     circuitBreaker: {
+      canExecute: jest.fn().mockReturnValue({ action: 'continue' }),
+      recordIteration: jest.fn().mockReturnValue({ action: 'continue' }),
       recordFailure: jest.fn().mockReturnValue({ action: 'continue' }),
       recordSuccess: jest.fn(),
       forceClose: jest.fn(),
@@ -1119,6 +1121,48 @@ describe('StrategyExecutor', () => {
         (call[0] as string).includes('Detection failed')
       );
       expect(errorLog).toBeDefined();
+    });
+  });
+
+  describe('Circuit Breaker Integration', () => {
+    it('halts stage execution when canExecute requests user intervention', async () => {
+      (mockServices.circuitBreaker.canExecute as jest.Mock).mockReturnValueOnce({
+        action: 'ask_user',
+        reason: 'Circuit breaker is open',
+      });
+
+      const stage0 = createOverviewStageDefinition();
+      const strategy = createMockStrategy([stage0]);
+      const executor = new StrategyExecutor(strategy, mockServices);
+      const ctx = createMockExecutionContext();
+
+      const result = await executor.execute(ctx, mockEmitter);
+
+      expect(result.stopReason).toContain('Circuit breaker is open');
+      expect(executeTaskGraph).not.toHaveBeenCalled();
+      const emitCalls = (mockEmitter.emitUpdate as jest.Mock).mock.calls;
+      const breakerEvent = emitCalls.find((call: any[]) => call[0] === 'circuit_breaker');
+      expect(breakerEvent).toBeDefined();
+    });
+
+    it('halts stage execution when stage iteration budget is reached', async () => {
+      (mockServices.circuitBreaker.recordIteration as jest.Mock).mockReturnValueOnce({
+        action: 'ask_user',
+        reason: 'Stage iteration budget reached',
+      });
+
+      const stage0 = createOverviewStageDefinition();
+      const strategy = createMockStrategy([stage0]);
+      const executor = new StrategyExecutor(strategy, mockServices);
+      const ctx = createMockExecutionContext();
+
+      const result = await executor.execute(ctx, mockEmitter);
+
+      expect(result.stopReason).toContain('Stage iteration budget reached');
+      expect(executeTaskGraph).not.toHaveBeenCalled();
+      const emitCalls = (mockEmitter.emitUpdate as jest.Mock).mock.calls;
+      const breakerEvent = emitCalls.find((call: any[]) => call[0] === 'circuit_breaker');
+      expect(breakerEvent).toBeDefined();
     });
   });
 
