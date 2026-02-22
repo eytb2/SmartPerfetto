@@ -16,6 +16,40 @@ import { TraceProcessorService } from './traceProcessorService';
 import PromptTemplateService from './promptTemplateService';
 import { redactTextForLLM } from '../utils/llmPrivacy';
 
+const TRACE_ANALYSIS_REQUIRED_ENVS = ['DEEPSEEK_API_KEY'] as const;
+
+function parseBooleanEnv(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes';
+}
+
+export interface TraceAnalysisConfigurationStatus {
+  configured: boolean;
+  missingEnv: string[];
+  strictStartup: boolean;
+}
+
+export function getTraceAnalysisConfigurationStatus(): TraceAnalysisConfigurationStatus {
+  const missingEnv = TRACE_ANALYSIS_REQUIRED_ENVS.filter((envKey) => !process.env[envKey]);
+  const strictStartup = parseBooleanEnv(process.env.TRACE_ANALYSIS_STRICT_STARTUP);
+  return {
+    configured: missingEnv.length === 0,
+    missingEnv,
+    strictStartup,
+  };
+}
+
+export function assertTraceAnalysisConfiguredForStartup(): void {
+  const status = getTraceAnalysisConfigurationStatus();
+  if (!status.strictStartup || status.configured) {
+    return;
+  }
+  throw new Error(
+    `TraceAnalysisSkill startup validation failed: missing environment variables: ${status.missingEnv.join(', ')}`
+  );
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -70,6 +104,7 @@ export class TraceAnalysisSkill {
     // Initialize OpenAI client (optional)
     const apiKey = process.env.DEEPSEEK_API_KEY;
     const baseURL = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
+    const configStatus = getTraceAnalysisConfigurationStatus();
 
     if (apiKey) {
       this.openai = new OpenAI({
@@ -78,7 +113,11 @@ export class TraceAnalysisSkill {
       });
       this.isConfigured = true;
     } else {
-      console.warn('TraceAnalysisSkill: DEEPSEEK_API_KEY not configured, analysis features will be disabled');
+      const message = `TraceAnalysisSkill: missing required env (${configStatus.missingEnv.join(', ')}), analysis features disabled`;
+      if (configStatus.strictStartup) {
+        throw new Error(message);
+      }
+      console.warn(message);
       this.isConfigured = false;
     }
   }
