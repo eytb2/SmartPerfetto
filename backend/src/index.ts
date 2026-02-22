@@ -26,6 +26,10 @@ import skillRoutes from './routes/skillRoutes';
 import skillAdminRoutes from './routes/skillAdminRoutes';
 import reportRoutes from './routes/reportRoutes';
 import agentRoutes from './routes/agentRoutes';
+import {
+  assertTraceAnalysisConfiguredForStartup,
+  getTraceAnalysisConfigurationStatus,
+} from './services/traceAnalysisSkill';
 
 // Import cleanup utilities
 import { TraceProcessorFactory, killOrphanProcessors } from './services/workingTraceProcessor';
@@ -34,6 +38,9 @@ import { getPortPool, resetPortPool } from './services/portPool';
 const app = express();
 const PORT = serverConfig.port;
 const NODE_ENV = serverConfig.nodeEnv;
+
+// Fail fast for trace-analysis-specific credentials when strict startup validation is enabled.
+assertTraceAnalysisConfiguredForStartup();
 
 // Middleware
 app.use(cors({
@@ -51,6 +58,7 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     environment: NODE_ENV,
     version: '1.0.0',
+    traceAnalysis: getTraceAnalysisConfigurationStatus(),
   });
 });
 
