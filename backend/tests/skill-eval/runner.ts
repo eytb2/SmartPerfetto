@@ -280,12 +280,23 @@ export class SkillEvaluator {
     }
 
     return {
-      success: stepResult.success,
+      success: !this.isConditionNotMet(stepResult) && stepResult.success,
       stepId,
       data: this.extractStepData(stepResult),
-      error: stepResult.error,
+      error: this.isConditionNotMet(stepResult) ? 'Condition not met' : stepResult.error,
       executionTimeMs: stepResult.executionTimeMs || 0,
     };
+  }
+
+  private isConditionNotMet(stepResult: StepResult): boolean {
+    if (typeof stepResult.error === 'string' && stepResult.error.includes('Condition not met')) {
+      return true;
+    }
+    const payload = stepResult.data;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return false;
+    }
+    return (payload as Record<string, unknown>).reason === 'condition_not_met';
   }
 
   private extractStepData(stepResult: StepResult): any[] {

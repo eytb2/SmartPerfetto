@@ -36,13 +36,17 @@ export interface TraceProcessor {
   destroy(): void;
 }
 
+interface UploadState {
+  filePath: string;
+  pendingWrite: Promise<void>;
+}
+
 /**
  * Manages trace files and processors using the actual Perfetto Trace Processor WASM
  */
 export class TraceProcessorService extends EventEmitter {
   private traces: Map<string, TraceInfo> = new Map();
-  private processors: Map<string, TraceProcessor> = new Map();
-  private uploads: Map<string, any> = new Map();
+  private uploads: Map<string, UploadState> = new Map();
   private uploadDir: string;
 
   constructor(uploadDir = './uploads/traces') {
@@ -104,26 +108,33 @@ export class TraceProcessorService extends EventEmitter {
 
     const filePath = this.getTraceFilePath(traceId);
 
-    // Create write stream if not exists
-    if (!this.uploads.has(traceId)) {
-      const writeStream = fs.createWriteStream(filePath, { flags: 'w' });
-      this.uploads.set(traceId, writeStream);
+    if (!Number.isFinite(offset) || offset < 0) {
+      throw new Error(`Invalid chunk offset: ${offset}`);
     }
 
-    const writeStream = this.uploads.get(traceId);
-
-    // Write chunk at specific offset
-    return new Promise((resolve, reject) => {
-      // For simplicity, we'll append chunks
-      // In production, you might want to use random access for better performance
-      writeStream.write(chunk, (error: any) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve();
-        }
+    // Create upload state if not exists
+    if (!this.uploads.has(traceId)) {
+      this.uploads.set(traceId, {
+        filePath,
+        pendingWrite: Promise.resolve(),
       });
+    }
+
+    const uploadState = this.uploads.get(traceId)!;
+    uploadState.pendingWrite = uploadState.pendingWrite.then(async () => {
+      if (!fs.existsSync(uploadState.filePath)) {
+        fs.writeFileSync(uploadState.filePath, Buffer.alloc(0));
+      }
+
+      const fileHandle = await fs.promises.open(uploadState.filePath, 'r+');
+      try {
+        await fileHandle.write(chunk, 0, chunk.length, offset);
+      } finally {
+        await fileHandle.close();
+      }
     });
+
+    return uploadState.pendingWrite;
   }
 
   /**
@@ -135,10 +146,10 @@ export class TraceProcessorService extends EventEmitter {
       throw new Error(`Trace ${traceId} not found`);
     }
 
-    // Close write stream
-    const writeStream = this.uploads.get(traceId);
-    if (writeStream) {
-      writeStream.end();
+    // Wait until all pending chunk writes are flushed to disk
+    const uploadState = this.uploads.get(traceId);
+    if (uploadState) {
+      await uploadState.pendingWrite;
       this.uploads.delete(traceId);
     }
 
@@ -160,7 +171,6 @@ export class TraceProcessorService extends EventEmitter {
     try {
       // Create a processor instance
       const processor = await this.createProcessor(traceId);
-      this.processors.set(traceId, processor);
 
       // Extract metadata
       const metadata = await this.extractMetadata(processor);
@@ -185,9 +195,6 @@ export class TraceProcessorService extends EventEmitter {
 
     // Use the working trace processor
     const processor = await TraceProcessorFactory.create(traceId, filePath);
-
-    // Store reference
-    this.processors.set(traceId, processor);
 
     return processor;
   }
@@ -238,7 +245,7 @@ export class TraceProcessorService extends EventEmitter {
    * Execute a SQL query on a trace
    */
   public async query(traceId: string, sql: string): Promise<QueryResult> {
-    const processor = this.processors.get(traceId);
+    const processor = this.getProcessor(traceId);
     if (!processor) {
       throw new Error(`No processor for trace ${traceId}`);
     }
@@ -273,7 +280,7 @@ export class TraceProcessorService extends EventEmitter {
    * Only returns port if the processor is actually ready
    */
   public getProcessorPort(traceId: string): number | undefined {
-    const processor = this.processors.get(traceId) as WorkingTraceProcessor | undefined;
+    const processor = this.getProcessor(traceId) as WorkingTraceProcessor | undefined;
     // Only return port if processor is ready
     if (processor?.status === 'ready') {
       // Touch trace to prevent cleanup while frontend is using it
@@ -291,7 +298,7 @@ export class TraceProcessorService extends EventEmitter {
     const trace = this.traces.get(traceId);
     if (!trace) return undefined;
 
-    const processor = this.processors.get(traceId) as WorkingTraceProcessor | undefined;
+    const processor = this.getProcessor(traceId) as WorkingTraceProcessor | undefined;
     // Only return port if processor is actually ready (not in error state)
     const port = (processor?.status === 'ready') ? processor.httpPort : undefined;
 
@@ -331,8 +338,7 @@ export class TraceProcessorService extends EventEmitter {
     this.traces.set(traceId, traceInfo);
 
     // Create a proxy processor that uses the existing HTTP RPC connection
-    const processor = await TraceProcessorFactory.createFromExternalRpc(traceId, port);
-    this.processors.set(traceId, processor);
+    await TraceProcessorFactory.createFromExternalRpc(traceId, port);
 
     console.log(`[TraceProcessorService] External RPC registered successfully: ${traceId}`);
     this.emit('trace-processed', traceInfo);
@@ -388,8 +394,7 @@ export class TraceProcessorService extends EventEmitter {
       this.traces.set(traceId, traceInfo);
 
       // Create processor
-      const processor = await this.createProcessor(traceId);
-      this.processors.set(traceId, processor);
+      await this.createProcessor(traceId);
 
       console.log(`[TraceProcessorService] Loaded trace from disk: ${traceId}`);
       return traceInfo;
@@ -425,11 +430,7 @@ export class TraceProcessorService extends EventEmitter {
     if (!trace) return;
 
     // Destroy processor
-    const processor = this.processors.get(traceId);
-    if (processor) {
-      processor.destroy();
-      this.processors.delete(traceId);
-    }
+    TraceProcessorFactory.remove(traceId);
 
     // Delete file
     const filePath = this.getTraceFilePath(traceId);
@@ -482,6 +483,10 @@ export class TraceProcessorService extends EventEmitter {
    */
   private getTraceFilePath(traceId: string): string {
     return path.join(this.uploadDir, `${traceId}.trace`);
+  }
+
+  private getProcessor(traceId: string): TraceProcessor | undefined {
+    return TraceProcessorFactory.get(traceId) as unknown as TraceProcessor | undefined;
   }
 
   /**

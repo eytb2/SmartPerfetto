@@ -127,6 +127,7 @@ interface AnalysisSession {
     timestamp: number;
     sourceEventType?: string;
   }>;
+  activeRunPromise?: Promise<void>;
 }
 const sessions = new Map<string, AnalysisSession>();
 
@@ -546,6 +547,14 @@ router.post('/analyze', async (req, res) => {
     if (requestedSessionId) {
       const existingSession = sessions.get(requestedSessionId);
       if (existingSession && existingSession.traceId === traceId) {
+        if (existingSession.activeRunPromise || existingSession.status === 'running' || existingSession.status === 'awaiting_user') {
+          return res.status(409).json({
+            success: false,
+            error: `Session is busy (status: ${existingSession.status})`,
+            code: 'SESSION_BUSY',
+            status: existingSession.status,
+          });
+        }
         sessionId = requestedSessionId;
         orchestrator = existingSession.orchestrator;
         logger = existingSession.logger;
@@ -555,6 +564,8 @@ router.post('/analyze', async (req, res) => {
           previousQuery: existingSession.query,
         });
         existingSession.query = query;
+        existingSession.result = undefined;
+        existingSession.error = undefined;
         existingSession.status = 'pending';
         existingSession.lastActivityAt = Date.now();
         console.log(`[AgentRoutes] Reusing agent session ${sessionId} for multi-turn dialogue`);
@@ -625,6 +636,7 @@ router.post('/analyze', async (req, res) => {
               agentResponses: [],
               conversationOrdinal: 0,
               conversationSteps: [],
+              activeRunPromise: undefined,
             });
 
             sessionId = requestedSessionId;
@@ -683,6 +695,7 @@ router.post('/analyze', async (req, res) => {
         agentResponses: [],
         conversationOrdinal: 0,
         conversationSteps: [],
+        activeRunPromise: undefined,
       });
     }
 
@@ -691,11 +704,31 @@ router.post('/analyze', async (req, res) => {
       ...(Array.isArray(options.blockedStrategyIds) ? options.blockedStrategyIds : []),
     ]));
 
-    runAgentDrivenAnalysis(sessionId, query, traceId, {
+    const sessionForRun = sessions.get(sessionId);
+    if (!sessionForRun) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to initialize session',
+      });
+    }
+
+    if (sessionForRun.activeRunPromise) {
+      return res.status(409).json({
+        success: false,
+        error: `Session is busy (status: ${sessionForRun.status})`,
+        code: 'SESSION_BUSY',
+        status: sessionForRun.status,
+      });
+    }
+
+    const analysisPromise = runAgentDrivenAnalysis(sessionId, query, traceId, {
       ...options,
       blockedStrategyIds,
       traceProcessorService,
-    }).catch((error) => {
+    });
+    sessionForRun.activeRunPromise = analysisPromise;
+
+    analysisPromise.catch((error) => {
       const session = sessions.get(sessionId);
       if (session) {
         session.logger.error('AgentRoutes', 'Agent-driven analysis failed', error);
@@ -706,6 +739,11 @@ router.post('/analyze', async (req, res) => {
           content: { message: error.message },
           timestamp: Date.now(),
         });
+      }
+    }).finally(() => {
+      const session = sessions.get(sessionId);
+      if (session && session.activeRunPromise === analysisPromise) {
+        session.activeRunPromise = undefined;
       }
     });
 
@@ -771,11 +809,6 @@ router.get('/:sessionId/stream', (req, res) => {
     timestamp: Date.now(),
   })}\n\n`);
 
-  // Add client to session
-  session.sseClients.push(res);
-  session.lastActivityAt = Date.now();
-  console.log(`[AgentRoutes] SSE client connected for ${sessionId}`);
-
   // If analysis is already completed, send the result.
   // Resumed sessions may not have session.result in memory; recover from persisted turn context.
   if (session.status === 'completed') {
@@ -799,15 +832,10 @@ router.get('/:sessionId/stream', (req, res) => {
     return;
   }
 
-  // Handle client disconnect
-  req.on('close', () => {
-    console.log(`[AgentRoutes] SSE client disconnected for ${sessionId}`);
-    const idx = session.sseClients.indexOf(res);
-    if (idx !== -1) {
-      session.sseClients.splice(idx, 1);
-    }
-    session.lastActivityAt = Date.now();
-  });
+  // Add client to session for active streaming states only.
+  session.sseClients.push(res);
+  session.lastActivityAt = Date.now();
+  console.log(`[AgentRoutes] SSE client connected for ${sessionId}`);
 
   // Keep-alive ping
   const keepAlive = setInterval(() => {
@@ -819,6 +847,12 @@ router.get('/:sessionId/stream', (req, res) => {
   }, 30000);
 
   req.on('close', () => {
+    console.log(`[AgentRoutes] SSE client disconnected for ${sessionId}`);
+    const idx = session.sseClients.indexOf(res);
+    if (idx !== -1) {
+      session.sseClients.splice(idx, 1);
+    }
+    session.lastActivityAt = Date.now();
     clearInterval(keepAlive);
   });
 });
@@ -1062,13 +1096,8 @@ router.post('/:sessionId/respond', async (req, res) => {
     });
   }
 
-  if (action === 'abort') {
-    session.status = 'failed';
-    session.error = 'Aborted by user';
-    return res.json({ success: true, sessionId, status: session.status });
-  }
+  const interventionController = session.orchestrator.getInterventionController();
 
-  // continue
   if (session.status !== 'awaiting_user') {
     return res.status(400).json({
       success: false,
@@ -1076,8 +1105,28 @@ router.post('/:sessionId/respond', async (req, res) => {
     });
   }
 
-  session.status = 'running';
-  return res.json({ success: true, sessionId, status: session.status });
+  const pendingIntervention = interventionController.getPendingIntervention(sessionId);
+  if (!pendingIntervention) {
+    return res.status(400).json({
+      success: false,
+      error: 'No pending intervention for this session',
+    });
+  }
+
+  const directive = interventionController.handleUserDecision({
+    interventionId: pendingIntervention.id,
+    action: action as UserDecision['action'],
+  });
+
+  if (directive.action === 'abort') {
+    session.status = 'failed';
+    session.error = 'Aborted by user';
+  } else {
+    session.status = 'running';
+    session.error = undefined;
+  }
+
+  return res.json({ success: true, sessionId, status: session.status, directive });
 });
 
 // =============================================================================
@@ -1727,14 +1776,21 @@ router.post('/scene-reconstruct', async (req, res) => {
       trackEvents: [],
       conversationOrdinal: 0,
       conversationSteps: [],
+      activeRunPromise: undefined,
     });
 
     // Start analysis in background
-    runAgentDrivenAnalysis(analysisId, query, traceId, {
+    const analysisPromise = runAgentDrivenAnalysis(analysisId, query, traceId, {
       ...options,
       generateTracks,
       traceProcessorService,
-    }).catch((error) => {
+    });
+    const createdSession = sessions.get(analysisId);
+    if (createdSession) {
+      createdSession.activeRunPromise = analysisPromise;
+    }
+
+    analysisPromise.catch((error) => {
       console.error(`[AgentRoutes] Scene reconstruction (agent-driven) error for ${analysisId}:`, error);
       const session = sessions.get(analysisId);
       if (session) {
@@ -1746,6 +1802,11 @@ router.post('/scene-reconstruct', async (req, res) => {
           content: { message: error.message },
           timestamp: Date.now(),
         });
+      }
+    }).finally(() => {
+      const session = sessions.get(analysisId);
+      if (session && session.activeRunPromise === analysisPromise) {
+        session.activeRunPromise = undefined;
       }
     });
 
@@ -1798,11 +1859,6 @@ router.get('/scene-reconstruct/:analysisId/stream', (req, res) => {
     timestamp: Date.now(),
   })}\n\n`);
 
-  // Add client to session
-  session.sseClients.push(res);
-  session.lastActivityAt = Date.now();
-  console.log(`[AgentRoutes] Scene SSE client connected for ${analysisId}`);
-
   // If analysis is already completed, send the result
   if (session.status === 'completed' && session.result) {
     sendAgentDrivenResult(res, session);
@@ -1822,15 +1878,10 @@ router.get('/scene-reconstruct/:analysisId/stream', (req, res) => {
     return;
   }
 
-  // Handle client disconnect
-  req.on('close', () => {
-    console.log(`[AgentRoutes] Scene SSE client disconnected for ${analysisId}`);
-    const idx = session.sseClients.indexOf(res);
-    if (idx !== -1) {
-      session.sseClients.splice(idx, 1);
-    }
-    session.lastActivityAt = Date.now();
-  });
+  // Add client to session for active streaming states only.
+  session.sseClients.push(res);
+  session.lastActivityAt = Date.now();
+  console.log(`[AgentRoutes] Scene SSE client connected for ${analysisId}`);
 
   // Keep-alive ping
   const keepAlive = setInterval(() => {
@@ -1842,6 +1893,12 @@ router.get('/scene-reconstruct/:analysisId/stream', (req, res) => {
   }, 30000);
 
   req.on('close', () => {
+    console.log(`[AgentRoutes] Scene SSE client disconnected for ${analysisId}`);
+    const idx = session.sseClients.indexOf(res);
+    if (idx !== -1) {
+      session.sseClients.splice(idx, 1);
+    }
+    session.lastActivityAt = Date.now();
     clearInterval(keepAlive);
   });
 });
@@ -2853,6 +2910,16 @@ async function runAgentDrivenAnalysis(
     console.log(`[AgentRoutes.AgentDriven] Received event: ${update.type}`, update.content?.phase);
     logger.debug('Stream', `Update: ${update.type}`, update.content);
     const normalizedUpdate = normalizeAgentDrivenUpdate(update);
+    if (normalizedUpdate.type === 'intervention_required') {
+      session.status = 'awaiting_user';
+    } else if (
+      normalizedUpdate.type === 'intervention_resolved' ||
+      normalizedUpdate.type === 'intervention_timeout'
+    ) {
+      if (session.status === 'awaiting_user') {
+        session.status = 'running';
+      }
+    }
     const conversationStep = buildConversationStepUpdate(session, normalizedUpdate);
     if (conversationStep) {
       appendConversationStep(session, conversationStep);

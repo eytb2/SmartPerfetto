@@ -157,8 +157,8 @@ Respond in JSON format:
     } catch (error: any) {
       return {
         name: 'topicsCovered',
-        score: 0.5,
-        passed: true,
+        score: 0,
+        passed: false,
         message: `Could not evaluate topics: ${error.message}`,
         details: { error: error.message },
       };
@@ -211,8 +211,8 @@ Respond in JSON format:
     } catch (error: any) {
       return {
         name: 'topicsAvoided',
-        score: 0.5,
-        passed: true,
+        score: 0,
+        passed: false,
         message: `Could not evaluate avoided topics: ${error.message}`,
         details: { error: error.message },
       };
@@ -275,8 +275,8 @@ Respond in JSON format:
     } catch (error: any) {
       return {
         name: 'answerCriteria',
-        score: 0.5,
-        passed: true,
+        score: 0,
+        passed: false,
         message: `Could not evaluate answer criteria: ${error.message}`,
         details: { error: error.message },
       };
@@ -347,8 +347,8 @@ Respond in JSON format:
     } catch (error: any) {
       return {
         name: 'rubricGrade',
-        score: 0.5,
-        passed: true,
+        score: 0,
+        passed: false,
         message: `Could not evaluate with rubric: ${error.message}`,
         details: { error: error.message },
       };
@@ -410,8 +410,8 @@ Respond in JSON format:
     } catch (error: any) {
       return {
         name: 'overallQuality',
-        score: 0.5,
-        passed: true,
+        score: 0,
+        passed: false,
         message: `Could not evaluate overall quality: ${error.message}`,
         details: { error: error.message },
       };

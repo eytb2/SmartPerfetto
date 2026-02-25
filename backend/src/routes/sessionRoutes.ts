@@ -12,8 +12,10 @@
 
 import express from 'express';
 import { SessionPersistenceService } from '../services/sessionPersistenceService';
+import { authenticate } from '../middleware/auth';
 
 const router = express.Router();
+router.use(authenticate);
 
 // Lazy initialization of service
 let _sessionPersistenceService: any = null;

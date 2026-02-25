@@ -527,7 +527,7 @@ steps:
         END as window_source
       FROM frame_bounds
     save_as: expert_window
-    condition: "enable_expert_probes !== false && frame_timeline.data[0]?.has_frame_timeline === 1 && environment.data[0]?.has_data === 1"
+    condition: "enable_expert_probes !== false && enable_expert_probes !== 'false' && frame_timeline.data[0]?.has_frame_timeline === 1 && environment.data[0]?.has_data === 1"
     optional: true
 
   - id: frame_variance_probe
@@ -569,8 +569,8 @@ steps:
           label: "波动等级"
           type: string
     save_as: frame_variance_probe
-    condition: "enable_expert_probes !== false && frame_timeline.data[0]?.has_frame_timeline === 1 && (perf_summary?.data?.[0]?.janky_frames || 0) >= (frame_variance_probe_min_janky_frames || 5)"
-    optional: true
+    condition: "enable_expert_probes !== false && enable_expert_probes !== 'false' && frame_timeline.data[0]?.has_frame_timeline === 1 && (perf_summary?.data?.[0]?.janky_frames || 0) >= (frame_variance_probe_min_janky_frames || 5)"
+    optional: false
 
   # ==========================================================================
   # L1: 掉帧分析 - 消费端 vs App 报告对比

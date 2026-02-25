@@ -327,7 +327,7 @@ export class EvaluationRunner {
     // Different endpoint for skill mode vs agent mode
     const endpoint =
       input.mode === 'skill'
-        ? `${this.options.backendUrl}/api/skill/analyze`
+        ? `${this.options.backendUrl}/api/skills/analyze`
         : `${this.options.backendUrl}/api/agent/analyze`;
 
     const response = await fetch(endpoint, {

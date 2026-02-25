@@ -338,60 +338,73 @@ export class InterventionController extends EventEmitter {
     sessionState.history.push(intervention);
     sessionState.pending = null;
 
-    // Emit resolution event
-    this.emit('interventionResolved', {
-      interventionId: decision.interventionId,
-      action: decision.action,
-      sessionId: intervention.sessionId,
-    });
-
     // Build directive based on action
+    let directive: AnalysisDirective;
     switch (decision.action) {
       case 'continue':
-        return {
+        directive = {
           action: 'continue',
           reason: '用户选择继续分析',
           params: decision.params,
         };
+        break;
 
-      case 'focus':
+      case 'focus': {
         const focusOption = intervention.options.find(o => o.id === decision.selectedOptionId);
-        return {
+        directive = {
           action: 'focus',
           reason: `用户选择聚焦: ${focusOption?.label || '自定义方向'}`,
           focusDirections: focusOption?.params?.directions || [decision.customInput].filter(Boolean),
           params: { ...focusOption?.params, ...decision.params },
         };
+        break;
+      }
 
       case 'abort':
-        return {
+        directive = {
           action: 'abort',
           reason: '用户选择中止分析',
         };
+        break;
 
-      case 'select_option':
+      case 'select_option': {
         const selectedOption = intervention.options.find(o => o.id === decision.selectedOptionId);
         if (!selectedOption) {
-          return {
+          directive = {
             action: 'abort',
             reason: '无效的选项',
           };
+          break;
         }
-        return this.handleOptionAction(selectedOption, decision);
+        directive = this.handleOptionAction(selectedOption, decision);
+        break;
+      }
 
       case 'custom':
-        return {
+        directive = {
           action: 'continue',
           reason: `用户自定义输入: ${decision.customInput}`,
           params: { customInput: decision.customInput, ...decision.params },
         };
+        break;
 
       default:
-        return {
+        directive = {
           action: 'abort',
           reason: '未知的用户决策',
         };
+        break;
     }
+
+    // Emit resolution event
+    this.emit('intervention_resolved', {
+      interventionId: decision.interventionId,
+      action: decision.action,
+      sessionId: intervention.sessionId,
+      directive,
+    });
+
+    return directive;
   }
 
   /**
@@ -423,7 +436,7 @@ export class InterventionController extends EventEmitter {
     }
 
     if (state.pending) {
-      this.emit('interventionCancelled', {
+      this.emit('intervention_cancelled', {
         interventionId: state.pending.id,
         sessionId,
       });
@@ -628,7 +641,7 @@ export class InterventionController extends EventEmitter {
     }, intervention.timeout);
 
     // Emit event
-    this.emit('interventionRequired', intervention);
+    this.emit('intervention_required', intervention);
   }
 
   /**
@@ -641,10 +654,11 @@ export class InterventionController extends EventEmitter {
     }
 
     // Apply default action
-    this.emit('interventionTimeout', {
+    this.emit('intervention_timeout', {
       interventionId: intervention.id,
       sessionId: intervention.sessionId,
       defaultAction: intervention.defaultAction,
+      timeoutMs: intervention.timeout,
     });
 
     // Resolve with default action

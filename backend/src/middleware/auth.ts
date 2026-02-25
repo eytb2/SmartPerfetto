@@ -26,6 +26,10 @@ const getProvidedApiKey = (req: Request): string | undefined => {
   if (typeof headerKey === 'string' && headerKey.trim().length > 0) {
     return headerKey.trim();
   }
+  const queryKey = req.query?.api_key ?? req.query?.apiKey;
+  if (typeof queryKey === 'string' && queryKey.trim().length > 0) {
+    return queryKey.trim();
+  }
   return undefined;
 };
 
