@@ -8,7 +8,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "jest",
-    "test:core": "jest --runInBand --forceExit src/agent/communication/__tests__/agentMessageBus.test.ts src/agent/core/executors/__tests__/strategyExecutor.test.ts src/agent/core/executors/__tests__/hypothesisExecutor.test.ts src/agent/context/__tests__/enhancedSessionContext.test.ts src/tests/adbTools.test.ts src/services/__tests__/sessionLogger.test.ts src/services/__tests__/traceAnalysisSkillConfig.test.ts src/services/__tests__/traceProcessorServiceUploadChunk.test.ts src/agent/agents/domain/__tests__/registry.test.ts",
+    "test:core": "jest --runInBand --forceExit src/agent/communication/__tests__/agentMessageBus.test.ts src/agent/core/executors/__tests__/strategyExecutor.test.ts src/agent/core/executors/__tests__/hypothesisExecutor.test.ts src/agent/core/__tests__/interventionController.test.ts src/agent/context/__tests__/enhancedSessionContext.test.ts src/tests/adbTools.test.ts src/services/__tests__/sessionLogger.test.ts src/services/__tests__/traceAnalysisSkillConfig.test.ts src/services/__tests__/traceProcessorServiceUploadChunk.test.ts src/agent/agents/domain/__tests__/registry.test.ts",
     "test:agentv2": "jest --runInBand --forceExit src/agentv2/__tests__/principleEngine.test.ts src/agentv2/__tests__/operationPlanner.test.ts src/agentv2/__tests__/runtimeParity.test.ts src/agentv2/__tests__/operationExecutor.test.ts src/agentv2/runtime/__tests__/runtimeModeExecutor.test.ts src/agentv2/runtime/__tests__/initialModeHandler.test.ts src/agentv2/runtime/__tests__/runtimeUpdateBridge.test.ts",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",

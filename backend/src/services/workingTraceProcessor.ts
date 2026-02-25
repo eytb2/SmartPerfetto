@@ -285,6 +285,9 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
           console.log(`[TraceProcessor] Process exited with code ${code}`);
         }
         this.serverReady = false;
+        if (!this.isDestroyed) {
+          this.status = 'error';
+        }
         if (!resolved) {
           resolved = true;
           clearTimeout(timeout);

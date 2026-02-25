@@ -325,20 +325,19 @@ export class TraceProcessorService extends EventEmitter {
     console.log(`[TraceProcessorService] Registering external RPC: ${traceId} on port ${port}`);
 
     const now = new Date();
-    // Create a trace info entry for this external connection
+    // Create a proxy processor that uses the existing HTTP RPC connection
+    await TraceProcessorFactory.createFromExternalRpc(traceId, port);
+
+    // Register trace state only after processor verification succeeds.
     const traceInfo: TraceInfo = {
       id: traceId,
       filename: traceName,
       size: 0, // Unknown size for external traces
       uploadTime: now,
-      lastAccessTime: now, // Set initial access time
-      status: 'ready', // Assume it's ready since frontend is already connected
+      lastAccessTime: now,
+      status: 'ready',
     };
-
     this.traces.set(traceId, traceInfo);
-
-    // Create a proxy processor that uses the existing HTTP RPC connection
-    await TraceProcessorFactory.createFromExternalRpc(traceId, port);
 
     console.log(`[TraceProcessorService] External RPC registered successfully: ${traceId}`);
     this.emit('trace-processed', traceInfo);
@@ -390,11 +389,12 @@ export class TraceProcessorService extends EventEmitter {
         };
       }
 
-      // Register in memory
-      this.traces.set(traceId, traceInfo);
-
-      // Create processor
+      // Create processor first to avoid leaving stale in-memory trace entries
+      // when trace processor initialization fails.
       await this.createProcessor(traceId);
+
+      // Register in memory only after processor is healthy.
+      this.traces.set(traceId, traceInfo);
 
       console.log(`[TraceProcessorService] Loaded trace from disk: ${traceId}`);
       return traceInfo;

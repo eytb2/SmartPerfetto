@@ -340,11 +340,26 @@ export class SkillAnalysisAdapter {
         const displayResults = this.convertLayeredResultToDisplayResults(layeredResult!);
         console.log('[SkillAnalysisAdapter] convertLayeredResultToDisplayResults completed with', displayResults.length, 'items');
 
+        const layeredSuccess =
+          typeof layeredResult?.success === 'boolean'
+            ? layeredResult.success
+            : this.isLayeredResultSuccessful(layeredResult!);
+        const layeredErrors = Array.isArray(layeredResult?.errors)
+          ? layeredResult.errors.filter((msg): msg is string => typeof msg === 'string' && msg.length > 0)
+          : [];
+        const layeredDiagnostics = layeredErrors.map((message, index) => ({
+          id: `layered_error_${index + 1}`,
+          severity: 'critical',
+          diagnosis: message,
+          suggestions: [],
+        }));
+
         result = {
-          success: true,
+          success: layeredSuccess,
           displayResults,
-          diagnostics: [],
+          diagnostics: layeredDiagnostics,
           executionTimeMs: 0,
+          error: layeredSuccess ? undefined : layeredErrors[0] || 'Required step failed',
         };
       } catch (error) {
         console.error('[SkillAnalysisAdapter] executeCompositeSkill failed:', error);
@@ -564,6 +579,33 @@ export class SkillAnalysisAdapter {
 
     console.log(`[convertLayeredResultToDisplayResults] Completed. Converted to ${displayResults.length} displayResults`);
     return displayResults;
+  }
+
+  private isLayeredResultSuccessful(layeredResult: LayeredResult): boolean {
+    const { layers } = layeredResult;
+    const collectStepResults = (): any[] => {
+      const results: any[] = [];
+      if (layers.overview) {
+        results.push(...Object.values(layers.overview));
+      }
+      if (layers.list) {
+        results.push(...Object.values(layers.list));
+      }
+      if (layers.session) {
+        for (const steps of Object.values(layers.session)) {
+          results.push(...Object.values(steps || {}));
+        }
+      }
+      if (layers.deep) {
+        for (const frames of Object.values(layers.deep)) {
+          results.push(...Object.values(frames || {}));
+        }
+      }
+      return results;
+    };
+
+    const stepResults = collectStepResults();
+    return stepResults.every((step) => step?.success !== false);
   }
 
   /**

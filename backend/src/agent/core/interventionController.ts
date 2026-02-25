@@ -308,16 +308,24 @@ export class InterventionController extends EventEmitter {
    * @param decision - User's decision
    * @returns Directive for how to proceed with analysis
    */
-  handleUserDecision(decision: UserDecision): AnalysisDirective {
+  handleUserDecision(decision: UserDecision, expectedSessionId?: string): AnalysisDirective {
     // Find the intervention
     let intervention: InterventionPoint | null = null;
     let sessionState: InterventionState | null = null;
 
-    for (const [sessionId, state] of this.sessions) {
-      if (state.pending?.id === decision.interventionId) {
-        intervention = state.pending;
-        sessionState = state;
-        break;
+    if (expectedSessionId) {
+      const scopedState = this.sessions.get(expectedSessionId);
+      if (scopedState?.pending?.id === decision.interventionId) {
+        intervention = scopedState.pending;
+        sessionState = scopedState;
+      }
+    } else {
+      for (const [, state] of this.sessions) {
+        if (state.pending?.id === decision.interventionId) {
+          intervention = state.pending;
+          sessionState = state;
+          break;
+        }
       }
     }
 
@@ -412,7 +420,7 @@ export class InterventionController extends EventEmitter {
    */
   hasPendingIntervention(sessionId: string): boolean {
     const state = this.sessions.get(sessionId);
-    return state?.pending !== null;
+    return Boolean(state?.pending);
   }
 
   /**

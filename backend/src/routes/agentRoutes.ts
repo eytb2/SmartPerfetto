@@ -1061,6 +1061,8 @@ router.delete('/:sessionId', (req, res) => {
     } catch {}
   });
 
+  session.orchestrator.getInterventionController().resetSession(sessionId);
+  sessionContextManager.remove(sessionId, session.traceId);
   session.orchestrator.reset();
   sessions.delete(sessionId);
 
@@ -1116,7 +1118,7 @@ router.post('/:sessionId/respond', async (req, res) => {
   const directive = interventionController.handleUserDecision({
     interventionId: pendingIntervention.id,
     action: action as UserDecision['action'],
-  });
+  }, sessionId);
 
   if (directive.action === 'abort') {
     session.status = 'failed';
@@ -1188,25 +1190,41 @@ router.post('/:sessionId/intervene', async (req, res) => {
   try {
     const interventionController = session.orchestrator.getInterventionController();
 
-    // Check if there's a pending intervention
-    if (!interventionController.hasPendingIntervention(sessionId)) {
+    if (session.status !== 'awaiting_user') {
+      return res.status(400).json({
+        success: false,
+        error: `Session is not awaiting user input (current status: ${session.status})`,
+      });
+    }
+
+    // Check if there's a pending intervention and ensure the request targets it.
+    const pendingIntervention = interventionController.getPendingIntervention(sessionId);
+    if (!pendingIntervention) {
       return res.status(400).json({
         success: false,
         error: 'No pending intervention for this session',
       });
     }
 
+    if (pendingIntervention.id !== interventionId) {
+      return res.status(409).json({
+        success: false,
+        error: 'Intervention mismatch for this session',
+        expectedInterventionId: pendingIntervention.id,
+      });
+    }
+
     // Build user decision
     const decision: UserDecision = {
-      interventionId,
+      interventionId: pendingIntervention.id,
       action,
       selectedOptionId,
       customInput,
       params,
     };
 
-    // Process the decision (interventionId is used internally to find the session)
-    const directive = interventionController.handleUserDecision(decision);
+    // Process the decision scoped to this session.
+    const directive = interventionController.handleUserDecision(decision, sessionId);
 
     // Update session status if needed
     if (directive.action === 'abort') {

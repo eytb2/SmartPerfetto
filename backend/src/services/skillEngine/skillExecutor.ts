@@ -95,6 +95,10 @@ export interface LayeredResult {
     version: string;
     executedAt: string;
   };
+  /** Whether all required steps succeeded */
+  success?: boolean;
+  /** Blocking errors from required steps */
+  errors?: string[];
   /** YAML 中标记为 synthesize: true 的步骤数据，用于最终总结 */
   synthesizeData?: SynthesizeData[];
 }
@@ -1192,6 +1196,26 @@ export class SkillExecutor {
             }
             const stepExec = await this.executeStepBasedSkill(skill, skillId, context, displayResults, diagnostics, synthesizeData);
             aiSummary = stepExec.aiSummary;
+            if (!stepExec.success) {
+              this.emit({
+                type: 'skill_error',
+                skillId,
+                data: { error: stepExec.error },
+              });
+
+              return {
+                skillId,
+                skillName: skill.meta.display_name,
+                success: false,
+                displayResults,
+                diagnostics,
+                aiSummary,
+                synthesizeData: synthesizeData.length > 0 ? synthesizeData : undefined,
+                rawResults: context.results,
+                executionTimeMs: Date.now() - startTime,
+                error: stepExec.error || 'Required step failed',
+              };
+            }
           }
           break;
 
@@ -1214,6 +1238,26 @@ export class SkillExecutor {
             }
             const stepExec = await this.executeStepBasedSkill(skill, skillId, context, displayResults, diagnostics, synthesizeData);
             aiSummary = stepExec.aiSummary;
+            if (!stepExec.success) {
+              this.emit({
+                type: 'skill_error',
+                skillId,
+                data: { error: stepExec.error },
+              });
+
+              return {
+                skillId,
+                skillName: skill.meta.display_name,
+                success: false,
+                displayResults,
+                diagnostics,
+                aiSummary,
+                synthesizeData: synthesizeData.length > 0 ? synthesizeData : undefined,
+                rawResults: context.results,
+                executionTimeMs: Date.now() - startTime,
+                error: stepExec.error || 'Required step failed',
+              };
+            }
           }
           break;
       }
@@ -1311,11 +1355,12 @@ export class SkillExecutor {
     displayResults: DisplayResult[],
     diagnostics: DiagnosticResult[],
     synthesizeData: SynthesizeData[]
-  ): Promise<{ aiSummary?: string }> {
+  ): Promise<{ aiSummary?: string; success: boolean; error?: string }> {
     let aiSummary: string | undefined;
+    let blockingError: string | undefined;
 
     if (!skill.steps) {
-      return { aiSummary };
+      return { aiSummary, success: true };
     }
 
     for (const step of skill.steps) {
@@ -1390,10 +1435,20 @@ export class SkillExecutor {
         if ((step as any).type === 'ai_summary' && stepResult.data?.summary) {
           aiSummary = stepResult.data.summary;
         }
+      } else {
+        context.results[step.id] = stepResult;
+        const isOptional = Boolean((step as any).optional);
+        if (!isOptional && !blockingError) {
+          blockingError = `${step.id}: ${stepResult.error || 'Step failed'}`;
+        }
       }
     }
 
-    return { aiSummary };
+    return {
+      aiSummary,
+      success: !blockingError,
+      error: blockingError,
+    };
   }
 
   /**
@@ -1422,7 +1477,8 @@ export class SkillExecutor {
           skillName: skill.name,
           version: skill.version || '1.0.0',
           executedAt: new Date().toISOString()
-        }
+        },
+        success: true,
       };
     }
 
@@ -1442,9 +1498,29 @@ export class SkillExecutor {
       execContext.moduleIncludes = await this.resolveAvailableModules(execContext.traceId, prerequisiteModules);
     }
 
+    if (execContext.traceId) {
+      const prereqCheck = await this.checkPrerequisites(skill, execContext.traceId);
+      if (!prereqCheck.success) {
+        return {
+          layers: {
+            overview: {}, list: {}, session: {}, deep: {},
+          },
+          defaultExpanded: ['overview', 'list'],
+          metadata: {
+            skillName: skill.name,
+            version: skill.version || '1.0.0',
+            executedAt: new Date().toISOString(),
+          },
+          success: false,
+          errors: [prereqCheck.error || 'Prerequisite check failed'],
+        };
+      }
+    }
+
     // Execute all steps and collect synthesize-marked data
     const stepResults: StepResult[] = [];
     const synthesizeData: SynthesizeData[] = [];
+    const blockingErrors: string[] = [];
 
     if (skill.steps) {
       for (let i = 0; i < skill.steps.length; i++) {
@@ -1459,6 +1535,8 @@ export class SkillExecutor {
           if ('save_as' in step && step.save_as) {
             execContext.variables[step.save_as] = this.extractSaveAsValue(stepResult);
           }
+        } else if (!(step as any).optional) {
+          blockingErrors.push(`${step.id}: ${stepResult.error || 'Step failed'}`);
         }
 
         // IMPORTANT: Add display config from step definition to stepResult
@@ -1543,6 +1621,8 @@ export class SkillExecutor {
           version: skill.version || '1.0.0',
           executedAt: new Date().toISOString()
         },
+        success: blockingErrors.length === 0,
+        errors: blockingErrors.length > 0 ? blockingErrors : undefined,
         // 添加收集的 synthesize 数据
         synthesizeData: synthesizeData.length > 0 ? synthesizeData : undefined,
       };
@@ -1859,8 +1939,10 @@ export class SkillExecutor {
       return { success: true };
     } catch (e: any) {
       console.error(`[SkillExecutor] Failed to check prerequisites: ${e.message}`);
-      //为了健壮性，查询失败时不阻止执行，可能是 traceProcessor 问题
-      return { success: true };
+      return {
+        success: false,
+        error: `Failed to check prerequisites: ${e.message}`,
+      };
     }
   }
 
@@ -2005,10 +2087,12 @@ export class SkillExecutor {
       });
     }
 
+    const allItemsSuccess = results.every((entry: any) => entry.result?.success !== false);
+
     return {
       stepId: step.id,
       stepType: 'iterator',
-      success: true,
+      success: allItemsSuccess,
       data: results,
       executionTimeMs: Date.now() - startTime,
     };

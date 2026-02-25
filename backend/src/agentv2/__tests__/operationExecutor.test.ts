@@ -157,4 +157,61 @@ describe('OperationExecutor approval gating', () => {
     expect(execution.result.conclusion).toContain('aborted during approval step');
     expect(analyzeWithRuntimeEngine).not.toHaveBeenCalled();
   });
+
+  it('rejects execution when requested domains violate policy guardrails', async () => {
+    const executor = new OperationExecutor(new ApprovalController(new InterventionController()));
+    const analyzeWithRuntimeEngine = jest.fn(async () => successfulResult);
+
+    const decision: PrincipleDecision = {
+      outcome: 'allow',
+      reasonCodes: ['policy.blocked_domain'],
+      matchedPrincipleIds: ['p-guard'],
+      policy: {
+        ...basePolicy,
+        blockedDomains: ['frame'],
+      },
+    };
+
+    const execution = await executor.execute({
+      query: 'analyze',
+      sessionId: 'session-1',
+      traceId: 'trace-1',
+      context: baseContext,
+      decision,
+      plan: basePlan,
+      analyzeWithRuntimeEngine,
+      emitUpdate: jest.fn(),
+    });
+
+    expect(execution.result.success).toBe(false);
+    expect(execution.result.conclusion).toContain('Policy blocked requested domains');
+    expect(analyzeWithRuntimeEngine).not.toHaveBeenCalled();
+  });
+
+  it('enforces require_more_evidence when runtime returns no findings', async () => {
+    const executor = new OperationExecutor(new ApprovalController(new InterventionController()));
+    const analyzeWithRuntimeEngine = jest.fn(async () => successfulResult);
+
+    const decision: PrincipleDecision = {
+      outcome: 'require_more_evidence',
+      reasonCodes: ['policy.insufficient_evidence'],
+      matchedPrincipleIds: ['p-evidence'],
+      policy: basePolicy,
+    };
+
+    const execution = await executor.execute({
+      query: 'analyze',
+      sessionId: 'session-1',
+      traceId: 'trace-1',
+      context: baseContext,
+      decision,
+      plan: basePlan,
+      analyzeWithRuntimeEngine,
+      emitUpdate: jest.fn(),
+    });
+
+    expect(execution.result.success).toBe(false);
+    expect(execution.result.conclusion).toContain('requires more evidence');
+    expect(analyzeWithRuntimeEngine).toHaveBeenCalledTimes(1);
+  });
 });

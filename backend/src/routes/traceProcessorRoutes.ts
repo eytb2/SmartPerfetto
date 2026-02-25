@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import express, { Router } from 'express';
 import {
   initializeUpload,
   handleUpload,
@@ -16,7 +16,10 @@ import path from 'path';
 
 const router = Router();
 
-// Public routes
+// Protect all trace-processor routes.
+router.use(authenticate);
+
+// Trace routes
 router.get('/', listTraces);
 router.get('/:traceId/status', getTraceStatus);
 router.get('/:traceId/metadata', getTraceMetadata);
@@ -33,13 +36,17 @@ router.get('/:traceId/file', (req, res) => {
   });
 });
 
-// Protected routes (require authentication)
-router.use(authenticate);
-
 // Upload routes
 router.post('/initialize', initializeUpload);
 router.post('/upload', uploadTrace, handleUpload);
-router.post('/:traceId/upload', uploadChunk);
+router.post(
+  '/:traceId/upload',
+  express.raw({
+    type: () => true,
+    limit: '1gb',
+  }),
+  uploadChunk
+);
 router.post('/:traceId/complete', completeUpload);
 
 // Trace management

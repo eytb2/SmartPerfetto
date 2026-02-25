@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import { getPortPool } from '../services/portPool';
 import { TraceProcessorFactory } from '../services/workingTraceProcessor';
+import { authenticate } from '../middleware/auth';
 
 const router = Router();
 
@@ -18,6 +19,9 @@ router.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+// Require authentication for all trace operations.
+router.use(authenticate);
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -37,7 +41,7 @@ const upload = multer({
   },
 });
 
-// POST /api/traces/upload - Simple upload without auth
+// POST /api/traces/upload - Simple upload
 router.post('/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
