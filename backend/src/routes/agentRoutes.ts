@@ -295,6 +295,15 @@ function buildRecoveredResultFromContext(
     return null;
   }
 
+  const completedTurns = context
+    .getAllTurns()
+    .filter((candidate) => candidate.completed && !!candidate.result);
+  const recoveredRounds = completedTurns.length > 0 ? completedTurns.length : 1;
+  const recoveredDurationMs = completedTurns.reduce((sum, candidate) => {
+    const executionTimeMs = candidate.result?.executionTimeMs;
+    return sum + (typeof executionTimeMs === 'number' ? executionTimeMs : 0);
+  }, 0);
+
   const conclusion = typeof turn.result.message === 'string' && turn.result.message.trim().length > 0
     ? turn.result.message
     : `已恢复会话历史。可通过 /api/agent/${sessionId}/turns 查看历史轮次。`;
@@ -310,8 +319,8 @@ function buildRecoveredResultFromContext(
     hypotheses: [],
     conclusion,
     confidence,
-    rounds: 1,
-    totalDurationMs: 0,
+    rounds: recoveredRounds,
+    totalDurationMs: recoveredDurationMs,
   };
 }
 
@@ -337,6 +346,93 @@ function recoverResultForSessionIfNeeded(sessionId: string, session: AnalysisSes
     session.query = latestTurn.query;
   }
   return recovered;
+}
+
+function persistSessionStateForRecovery(params: {
+  sessionId: string;
+  traceId: string;
+  query: string;
+  session: AnalysisSession;
+  outcome: 'completed' | 'failed';
+}): void {
+  const { sessionId, traceId, query, session, outcome } = params;
+  const { logger } = session;
+
+  try {
+    const persistenceService = SessionPersistenceService.getInstance();
+    const sessionContext = sessionContextManager.get(sessionId, traceId);
+    if (!sessionContext) {
+      logger.warn('AgentDrivenAnalysis', 'Skip persistence: session context unavailable', {
+        sessionId,
+        traceId,
+        outcome,
+      });
+      return;
+    }
+
+    const existingSession = persistenceService.getSession(sessionId);
+    const sessionSaved = persistenceService.saveSession(
+      existingSession
+        ? {
+            ...existingSession,
+            traceId,
+            traceName: existingSession.traceName || traceId,
+            question: query,
+            updatedAt: Date.now(),
+            messages: Array.isArray(existingSession.messages) ? existingSession.messages : [],
+          }
+        : {
+            id: sessionId,
+            traceId,
+            traceName: traceId,
+            question: query,
+            messages: [],
+            createdAt: session.createdAt,
+            updatedAt: Date.now(),
+          }
+    );
+    if (!sessionSaved) {
+      logger.warn('AgentDrivenAnalysis', 'Failed to persist session metadata', { sessionId, outcome });
+      return;
+    }
+
+    const contextSaved = persistenceService.saveSessionContext(sessionId, sessionContext);
+    if (contextSaved) {
+      logger.info('AgentDrivenAnalysis', 'Session context persisted to DB', {
+        sessionId,
+        outcome,
+        entityStoreStats: sessionContext.getEntityStore().getStats(),
+      });
+    }
+
+    const focusSaved = persistenceService.saveFocusStore(sessionId, session.orchestrator.getFocusStore());
+    if (focusSaved) {
+      logger.info('AgentDrivenAnalysis', 'FocusStore persisted to DB', {
+        sessionId,
+        outcome,
+        focusStats: session.orchestrator.getFocusStore().getStats(),
+      });
+    }
+
+    const traceAgentState = sessionContext.getTraceAgentState();
+    if (traceAgentState) {
+      const stateSaved = persistenceService.saveTraceAgentState(sessionId, traceAgentState);
+      if (stateSaved) {
+        logger.info('AgentDrivenAnalysis', 'TraceAgentState persisted to DB', {
+          sessionId,
+          outcome,
+          version: traceAgentState.version,
+          updatedAt: traceAgentState.updatedAt,
+        });
+      }
+    }
+  } catch (persistError: any) {
+    logger.warn('AgentDrivenAnalysis', 'Failed to persist session context', {
+      sessionId,
+      outcome,
+      error: persistError?.message || String(persistError),
+    });
+  }
 }
 
 function buildFallbackIntentFromQuery(query?: string): Intent | null {
@@ -570,9 +666,21 @@ router.post('/analyze', async (req, res) => {
         existingSession.lastActivityAt = Date.now();
         console.log(`[AgentRoutes] Reusing agent session ${sessionId} for multi-turn dialogue`);
       } else {
-        // Try restoring requested session from persistence before falling back to new session.
-        const persistenceService = SessionPersistenceService.getInstance();
-        const persistedSession = persistenceService.getSession(requestedSessionId);
+        // Try restoring requested session from persistence.
+        let persistenceService: SessionPersistenceService;
+        let persistedSession: ReturnType<SessionPersistenceService['getSession']>;
+        try {
+          persistenceService = SessionPersistenceService.getInstance();
+          persistedSession = persistenceService.getSession(requestedSessionId);
+        } catch (persistError: any) {
+          return res.status(503).json({
+            success: false,
+            error: 'Session persistence unavailable',
+            hint: 'Retry later, or start a new chat without sessionId.',
+            code: 'SESSION_PERSISTENCE_UNAVAILABLE',
+            details: persistError?.message || String(persistError),
+          });
+        }
 
         if (persistedSession && persistedSession.traceId !== traceId) {
           return res.status(400).json({
@@ -651,12 +759,20 @@ router.post('/analyze', async (req, res) => {
             });
             console.log(`[AgentRoutes] Restored agent session ${sessionId} from persistence for multi-turn dialogue`);
           } else {
-            console.log(`[AgentRoutes] Requested session ${requestedSessionId} has no persisted context, creating new session`);
-            sessionId = `agent-${Date.now()}-${Math.random().toString(36).substr(2, 8)}`;
+            return res.status(409).json({
+              success: false,
+              error: 'Session context snapshot not found for requested session',
+              hint: 'Resume is unavailable for this session. Start a new chat without sessionId.',
+              code: 'SESSION_CONTEXT_MISSING',
+            });
           }
         } else {
-          console.log(`[AgentRoutes] Requested session ${requestedSessionId} not found, creating new session`);
-          sessionId = `agent-${Date.now()}-${Math.random().toString(36).substr(2, 8)}`;
+          return res.status(404).json({
+            success: false,
+            error: 'Requested session not found',
+            hint: 'Use /api/agent/sessions to choose a valid session, or omit sessionId to start a new chat.',
+            code: 'SESSION_NOT_FOUND',
+          });
         }
       }
     } else {
@@ -3030,65 +3146,13 @@ async function runAgentDrivenAnalysis(
       findingsCount: result.findings.length,
       hypothesesCount: result.hypotheses.length,
     });
-
-    // Persist session context (including EntityStore) for cross-restart recovery
-    try {
-      const persistenceService = SessionPersistenceService.getInstance();
-      const sessionContext = sessionContextManager.get(sessionId, traceId);
-      if (sessionContext) {
-        // First, ensure the session exists in persistence
-        const existingSession = persistenceService.getSession(sessionId);
-        if (!existingSession) {
-          // Create a new persisted session record
-          persistenceService.saveSession({
-            id: sessionId,
-            traceId,
-            traceName: traceId, // Can be enhanced later
-            question: query,
-            messages: [],
-            createdAt: session.createdAt,
-            updatedAt: Date.now(),
-          });
-        }
-
-	        // Save the full session context (includes EntityStore)
-	        const saved = persistenceService.saveSessionContext(sessionId, sessionContext);
-	        if (saved) {
-	          const storeStats = sessionContext.getEntityStore().getStats();
-	          logger.info('AgentDrivenAnalysis', 'Session context persisted to DB', {
-	            sessionId,
-	            entityStoreStats: storeStats,
-	          });
-	        }
-
-	        // Persist FocusStore so focus-aware incremental planning can survive restarts
-	        const focusSaved = persistenceService.saveFocusStore(sessionId, session.orchestrator.getFocusStore());
-	        if (focusSaved) {
-	          logger.info('AgentDrivenAnalysis', 'FocusStore persisted to DB', {
-	            sessionId,
-	            focusStats: session.orchestrator.getFocusStore().getStats(),
-	          });
-	        }
-
-	        // Persist TraceAgentState (goal-driven agent scaffold) for cross-restart continuity.
-	        const traceAgentState = sessionContext.getTraceAgentState();
-	        if (traceAgentState) {
-	          const stateSaved = persistenceService.saveTraceAgentState(sessionId, traceAgentState);
-	          if (stateSaved) {
-	            logger.info('AgentDrivenAnalysis', 'TraceAgentState persisted to DB', {
-	              sessionId,
-	              version: traceAgentState.version,
-	              updatedAt: traceAgentState.updatedAt,
-	            });
-	          }
-	        }
-	      }
-	    } catch (persistError: any) {
-	      // Don't fail the analysis if persistence fails - just log the error
-	      logger.warn('AgentDrivenAnalysis', 'Failed to persist session context', {
-	        error: persistError.message,
-      });
-    }
+    persistSessionStateForRecovery({
+      sessionId,
+      traceId,
+      query,
+      session,
+      outcome: result.success ? 'completed' : 'failed',
+    });
 
     // Send final result
     const clientCount = session.sseClients.length;
@@ -3110,6 +3174,14 @@ async function runAgentDrivenAnalysis(
     session.status = 'failed';
     session.error = error.message;
     logger.error('AgentDrivenAnalysis', 'Agent-driven analysis failed', error);
+
+    persistSessionStateForRecovery({
+      sessionId,
+      traceId,
+      query,
+      session,
+      outcome: 'failed',
+    });
 
     broadcastToAgentDrivenClients(sessionId, {
       type: 'error',

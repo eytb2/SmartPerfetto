@@ -15,6 +15,10 @@ import {
 } from '../controllers/advancedAIController';
 import { authenticate } from '../middleware/auth';
 
+/**
+ * @deprecated Legacy route surface for `/api/ai`.
+ * Prefer `/api/agent/*` endpoints and keep this router disabled by default.
+ */
 const router = Router();
 
 // Apply authentication to all routes

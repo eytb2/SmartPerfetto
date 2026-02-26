@@ -2,6 +2,10 @@ import { Router } from 'express';
 import AutoAnalysisController from '../controllers/autoAnalysisController';
 import { body } from 'express-validator';
 
+/**
+ * @deprecated Legacy route surface for `/api/auto-analysis`.
+ * Prefer `/api/agent/analyze` and keep this router disabled by default.
+ */
 const router = Router();
 const controller = new AutoAnalysisController();
 

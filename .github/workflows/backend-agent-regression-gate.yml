@@ -48,5 +48,8 @@ jobs:
 
           echo "TRACE_PROCESSOR_PATH=$TP_BIN" >> "$GITHUB_ENV"
 
+      - name: Check legacy route usage guard
+        run: npm run check:legacy-routes
+
       - name: Run agent regression gate
         run: npm run test:gate

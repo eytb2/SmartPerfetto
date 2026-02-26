@@ -18,6 +18,7 @@
     "test:scene-trace-regression": "TP_PORT_MIN=9800 TP_PORT_MAX=9899 tsx tests/skill-eval/scene_trace_regression.ts",
     "test:integration": "jest --testPathPatterns=tests/integration --runInBand --forceExit",
     "test:agent-eval": "tsx tests/agent-eval/evaluationRunner.ts",
+    "check:legacy-routes": "tsx scripts/check-legacy-route-usage.ts",
     "test:gate": "npm run test:core && npm run test:agentv2 && npm run test:skill-eval:real-traces && npm run test:scene-trace-regression",
     "test:full": "jest --runInBand --forceExit",
     "test:all": "npm run test:gate",

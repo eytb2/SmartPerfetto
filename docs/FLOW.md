@@ -1,756 +1,235 @@
-# SmartPerfetto 完整流程图
+# SmartPerfetto 完整流程图（AgentRuntime 主链）
 
-> 本文档详细描述从用户输入到最终呈现的完整数据流程
-> 
-> ⚠️ 说明：当前仅保留 AgentRuntime 主链路，历史内容若涉及 Master/PerfettoAnalysisOrchestrator 已不再适用。
-
-## 0. 重要架构说明
-
-当前已统一为单一主链路：
-
-- 路由: /api/agent/*
-- Orchestrator: AgentRuntime
-- 会话管理: 内存 sessions Map + SSE 流
+> 更新日期：2026-02-26
+> 适用范围：`backend/src/routes/agentRoutes.ts` + `backend/src/agentv2/runtime/agentRuntime.ts` + `perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/*`
 
 ---
 
+## 0. 核心结论
 
-## 1. 总体流程概览 (当前系统 A)
+当前系统是单主链“带 UI 的智能助手”架构：
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          用户分析请求完整流程                                 │
-│                                                                              │
-│  用户输入                                                                    │
-│     │                                                                        │
-│     ▼                                                                        │
-│  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌───────────┐ │
-│  │ 1. Frontend │────►│ 2. API      │────►│ 3. 分析循环 │────►│ 4. Skills │ │
-│  │    输入处理  │     │    路由     │     │    执行     │     │    执行   │ │
-│  └─────────────┘     └─────────────┘     └─────────────┘     └───────────┘ │
-│                                                                    │        │
-│                                                                    ▼        │
-│  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌───────────┐ │
-│  │ 8. 结果渲染 │◄────│ 7. SSE 流   │◄────│ 6. 答案生成 │◄────│ 5. SQL    │ │
-│  │    显示     │     │    传输     │     │    综合     │     │    查询   │ │
-│  └─────────────┘     └─────────────┘     └─────────────┘     └───────────┘ │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+- 统一入口：`/api/agent/*`
+- 统一编排：`AgentRuntime`
+- 统一输出：SSE 事件流 + 结构化 DataEnvelope
+- 兼容层隔离：`/api/ai/*`、`/api/auto-analysis/*` 默认返回 `410 LEGACY_ROUTE_DEPRECATED`
 
-## 2. 详细流程分解
+---
 
-### Phase 1: 用户输入处理 (Frontend)
+## 1. 端到端主流程
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     Phase 1: 用户输入处理                                    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 1.1: 用户在 AI Panel 输入                                      │    │
-│  │                                                                      │    │
-│  │  用户输入: "分析这个 trace 的滑动性能问题"                            │    │
-│  │                                                                      │    │
-│  │  触发: <textarea> oninput → this.state.input = value                │    │
-│  │  位置: ai_panel.ts:787-788                                          │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                              │                                               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 1.2: 发送消息                                                  │    │
-│  │                                                                      │    │
-│  │  触发: Enter 键 或 点击发送按钮                                       │    │
-│  │  调用: sendMessage()                                                │    │
-│  │  位置: ai_panel.ts:1249-1275                                        │    │
-│  │                                                                      │    │
-│  │  处理流程:                                                           │    │
-│  │  1. const input = this.state.input.trim()                           │    │
-│  │  2. 验证输入非空                                                     │    │
-│  │  3. 添加用户消息到 messages[]                                        │    │
-│  │  4. 清空输入框                                                       │    │
-│  │  5. 判断消息类型                                                     │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                              │                                               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 1.3: 消息类型路由                                              │    │
-│  │                                                                      │    │
-│  │  if (input.startsWith('/')) {                                       │    │
-│  │      // 命令处理 (本地)                                              │    │
-│  │      await this.handleCommand(input)                                │    │
-│  │      // /sql, /jank, /anr, /slow, /memory, /clear 等                │    │
-│  │  } else {                                                           │    │
-│  │      // 自然语言处理 (发送到后端)                                     │    │
-│  │      await this.handleChatMessage(input)                            │    │
-│  │  }                                                                  │    │
-│  │                                                                      │    │
-│  │  位置: ai_panel.ts:1290-1345                                        │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                              │                                               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 1.4: 调用后端 API                                              │    │
-│  │                                                                      │    │
-│  │  前置检查:                                                           │    │
-│  │  - backendTraceId 必须存在 (trace 已上传到后端)                      │    │
-│  │                                                                      │    │
-│  │  API 调用:                                                          │    │
-│  │  POST ${backendUrl}/api/agent/analyze                      │    │
-│  │  {                                                                  │    │
-│  │    traceId: "trace-abc123",                                         │    │
-│  │    question: "分析这个 trace 的滑动性能问题",                         │    │
-│  │    maxIterations: 10                                                │    │
-│  │  }                                                                  │    │
-│  │                                                                      │    │
-│  │  响应:                                                              │    │
-│  │  { analysisId: "session_1234567890_xyz", success: true }            │    │
-│  │                                                                      │    │
-│  │  位置: ai_panel.ts:2006-2083                                        │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                              │                                               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 1.5: 建立 SSE 连接                                             │    │
-│  │                                                                      │    │
-│  │  await this.listenToSSE(analysisId)                                 │    │
-│  │                                                                      │    │
-│  │  GET ${backendUrl}/api/agent/${analysisId}/stream          │    │
-│  │                                                                      │    │
-│  │  开始监听服务器推送的事件...                                          │    │
-│  │                                                                      │    │
-│  │  位置: ai_panel.ts:2085-2150                                        │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+```mermaid
+flowchart TD
+    A[用户在 AI 面板输入问题] --> B[前端检查 trace 是否已上传]
+    B --> C[POST /api/agent/analyze]
+    C --> D{是否携带 sessionId}
 
-### Phase 2: API 路由处理 (Backend - traceAnalysisRoutes)
+    D -->|否| E[创建新会话]
+    D -->|是| F{内存中会话可复用?}
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      Phase 2: API 路由处理                                   │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 2.1: 接收分析请求                                              │    │
-│  │                                                                      │    │
-│  │  POST /api/agent/analyze                                   │    │
-│  │                                                                      │    │
-│  │  router.post('/analyze', async (req, res) => {                      │    │
-│  │    const { traceId, question, maxIterations = 10 } = req.body       │    │
-│  │    ...                                                              │    │
-│  │  })                                                                 │    │
-│  │                                                                      │    │
-│  │  位置: traceAnalysisRoutes.ts:445-530                               │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                              │                                               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 2.2: 验证和初始化                                              │    │
-│  │                                                                      │    │
-│  │  1. 验证 traceId 和 question 非空                                    │    │
-│  │  2. 获取服务实例 (懒加载)                                            │    │
-│  │     const { traceProcessorService, sessionService, orchestrator }   │    │
-│  │       = getServices()                                               │    │
-│  │  3. 验证 trace 存在                                                  │    │
-│  │     const trace = traceProcessorService.getTrace(traceId)           │    │
-│  │                                                                      │    │
-│  │  位置: traceAnalysisRoutes.ts:27-48                                 │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                              │                                               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 2.3: 创建分析会话                                              │    │
-│  │                                                                      │    │
-│  │  sessionService.createSession({                                     │    │
-│  │    traceId,                                                         │    │
-│  │    question,                                                        │    │
-│  │    userId: undefined,                                               │    │
-│  │    maxIterations,                                                   │    │
-│  │  })                                                                 │    │
-│  │                                                                      │    │
-│  │  会话存储在 AnalysisSessionService 的 sessions Map 中                │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                              │                                               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 2.4: 启动后台分析                                              │    │
-│  │                                                                      │    │
-│  │  // 非阻塞启动                                                       │    │
-│  │  orchestrator.startAnalysis(sessionId).catch(...)                   │    │
-│  │                                                                      │    │
-│  │  // 立即返回 analysisId                                              │    │
-│  │  res.json({ success: true, analysisId: sessionId })                 │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                              │                                               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 2.5: SSE 流连接处理                                            │    │
-│  │                                                                      │    │
-│  │  GET /api/agent/:sessionId/stream                          │    │
-│  │                                                                      │    │
-│  │  router.get('/:sessionId/stream', (req, res) => {                   │    │
-│  │    // 设置 SSE headers                                              │    │
-│  │    res.setHeader('Content-Type', 'text/event-stream')               │    │
-│  │    res.setHeader('Cache-Control', 'no-cache')                       │    │
-│  │    res.setHeader('Connection', 'keep-alive')                        │    │
-│  │                                                                      │    │
-│  │    // 注册 SSE 监听器到 sessionService                               │    │
-│  │    sessionService.registerSSEClient(sessionId, res)                 │    │
-│  │  })                                                                 │    │
-│  │                                                                      │    │
-│  │  位置: traceAnalysisRoutes.ts:224-300                               │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+    F -->|可复用| G[复用会话继续多轮]
+    F -->|不可复用| H[尝试从持久化恢复]
 
-### Phase 3: 分析循环执行 (PerfettoAnalysisOrchestrator)
+    H -->|恢复成功| G
+    H -->|恢复失败| I[返回明确错误码]
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      Phase 3: 分析循环执行                                   │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 3.1: 启动分析                                                  │    │
-│  │                                                                      │    │
-│  │  startAnalysis(sessionId)                                           │    │
-│  │  位置: perfettoAnalysisOrchestrator.ts:165-204                      │    │
-│  │                                                                      │    │
-│  │  1. 获取会话信息                                                     │    │
-│  │     const session = sessionService.getSession(sessionId)            │    │
-│  │  2. 验证 trace 存在                                                  │    │
-│  │     const trace = traceProcessor.getTrace(session.traceId)          │    │
-│  │  3. 更新状态: GENERATING_SQL                                        │    │
-│  │  4. 调用 runAnalysisLoop(sessionId)                                 │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                              │                                               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 3.2: 主分析循环                                                │    │
-│  │                                                                      │    │
-│  │  runAnalysisLoop(sessionId)                                         │    │
-│  │  位置: perfettoAnalysisOrchestrator.ts:209-572                      │    │
-│  │                                                                      │    │
-│  │  while (iteration < maxIterations) {                                │    │
-│  │    iteration++                                                      │    │
-│  │                                                                      │    │
-│  │    // Step 1: 生成 SQL                                              │    │
-│  │    emit: { type: 'progress', step: 'generating_sql' }               │    │
-│  │    const sqlResult = await generateSQL(sessionId, question)         │    │
-│  │                                                                      │    │
-│  │    // 如果是 Skill Engine 结果，直接处理并返回                        │    │
-│  │    if (sqlResult.skillEngineResult) {                               │    │
-│  │      → 处理分层结果 (L1/L2/L4)                                       │    │
-│  │      → 发送 skill_layered_result 事件                                │    │
-│  │      → 生成最终答案并返回                                            │    │
-│  │    }                                                                │    │
-│  │                                                                      │    │
-│  │    // Step 2: 执行 SQL                                              │    │
-│  │    emit: { type: 'progress', step: 'executing_sql' }                │    │
-│  │    const queryResult = await executeSQL(sessionId, sql)             │    │
-│  │                                                                      │    │
-│  │    // Step 3: 检查错误 → 重试                                        │    │
-│  │    if (queryResult.error) {                                         │    │
-│  │      question = buildFixPrompt(sql, error)                          │    │
-│  │      continue                                                       │    │
-│  │    }                                                                │    │
-│  │                                                                      │    │
-│  │    // Step 4: 检查空结果 → 诊断并调整                                 │    │
-│  │    if (queryResult.rowCount === 0) {                                │    │
-│  │      question = buildAdjustPromptWithDiagnosis(...)                 │    │
-│  │      continue                                                       │    │
-│  │    }                                                                │    │
-│  │                                                                      │    │
-│  │    // Step 5: 收集成功结果                                           │    │
-│  │    sessionService.addCollectedResult(sessionId, result)             │    │
-│  │                                                                      │    │
-│  │    // Step 6: 评估完整性                                             │    │
-│  │    const evaluation = await evaluateResultCompleteness(...)         │    │
-│  │    if (evaluation.completeness === COMPLETE) break                  │    │
-│  │  }                                                                  │    │
-│  │                                                                      │    │
-│  │  // 生成最终答案                                                     │    │
-│  │  const finalAnswer = await generateFinalAnswer(sessionId)           │    │
-│  │  sessionService.completeSession(sessionId, finalAnswer)             │    │
-│  │  emitCompleted(sessionId, finalAnswer, startTime)                   │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+    E --> J[异步启动 orchestrator.analyze]
+    G --> J
 
-### Phase 4: SQL 生成策略
+    J --> K[返回 sessionId/isNewSession]
+    K --> L[前端连接 SSE: /api/agent/:sessionId/stream]
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     Phase 4: SQL 生成策略                                    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 4.1: 多层次尝试                                                │    │
-│  │                                                                      │    │
-│  │  generateSQL(sessionId, question)                                   │    │
-│  │  位置: perfettoAnalysisOrchestrator.ts:582-770                      │    │
-│  │                                                                      │    │
-│  │  ┌─────────────────────────────────────────────────────────┐        │    │
-│  │  │ 策略 1: Skill Engine (YAML Skills) - 仅首次迭代          │        │    │
-│  │  │                                                          │        │    │
-│  │  │ if (isFirstIteration) {                                  │        │    │
-│  │  │   const skillId = skillAdapter.detectIntent(question)    │        │    │
-│  │  │   if (skillId) {                                         │        │    │
-│  │  │     const result = await skillAdapter.analyze({          │        │    │
-│  │  │       traceId, skillId, question, packageName            │        │    │
-│  │  │     })                                                   │        │    │
-│  │  │     return { skillEngineResult: result }                 │        │    │
-│  │  │   }                                                      │        │    │
-│  │  │ }                                                        │        │    │
-│  │  └─────────────────────────────────────────────────────────┘        │    │
-│  │                              │                                       │    │
-│  │                              ▼ (未匹配到 Skill)                      │    │
-│  │  ┌─────────────────────────────────────────────────────────┐        │    │
-│  │  │ 策略 2: Legacy Perfetto SQL Skill                        │        │    │
-│  │  │                                                          │        │    │
-│  │  │ const perfettoResult = await perfettoSqlSkill.analyze({  │        │    │
-│  │  │   traceId, question                                      │        │    │
-│  │  │ })                                                       │        │    │
-│  │  │ if (perfettoResult.sql) return { sql, explanation }      │        │    │
-│  │  └─────────────────────────────────────────────────────────┘        │    │
-│  │                              │                                       │    │
-│  │                              ▼ (Legacy Skill 未命中)                 │    │
-│  │  ┌─────────────────────────────────────────────────────────┐        │    │
-│  │  │ 策略 3: AI 生成 (DeepSeek/OpenAI)                        │        │    │
-│  │  │                                                          │        │    │
-│  │  │ const messages = buildSQLGenerationMessages(question)    │        │    │
-│  │  │ const completion = await openai.chat.completions.create({│        │    │
-│  │  │   model: getModelForQuestion(question),                  │        │    │
-│  │  │   messages                                               │        │    │
-│  │  │ })                                                       │        │    │
-│  │  │ return parseSQLResponse(completion)                      │        │    │
-│  │  └─────────────────────────────────────────────────────────┘        │    │
-│  │                              │                                       │    │
-│  │                              ▼ (AI 不可用)                           │    │
-│  │  ┌─────────────────────────────────────────────────────────┐        │    │
-│  │  │ 策略 4: Mock SQL (关键词匹配)                            │        │    │
-│  │  │                                                          │        │    │
-│  │  │ return generateMockSQL(question)                         │        │    │
-│  │  │ // jank → frame duration query                           │        │    │
-│  │  │ // anr → long slice query                                │        │    │
-│  │  │ // startup → start event query                           │        │    │
-│  │  └─────────────────────────────────────────────────────────┘        │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Phase 5: Skills 执行 (SkillAnalysisAdapter)
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      Phase 5: Skills 执行                                    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 5.1: 意图检测                                                  │    │
-│  │                                                                      │    │
-│  │  skillAdapter.detectIntent(question)                                │    │
-│  │  位置: skillEngine/skillAnalysisAdapter.ts                          │    │
-│  │                                                                      │    │
-│  │  问题: "分析滑动性能"                                                │    │
-│  │  匹配: scrolling_analysis                                           │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                              │                                               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 5.2: 加载 Skill 定义                                           │    │
-│  │                                                                      │    │
-│  │  从 skills/composite/scrolling_analysis.skill.yaml 加载              │    │
-│  │                                                                      │    │
-│  │  Skill 结构:                                                         │    │
-│  │  {                                                                   │    │
-│  │    name: "scrolling_analysis",                                       │    │
-│  │    type: "composite",                                                │    │
-│  │    steps: [                                                          │    │
-│  │      { id: "vsync_config", sql: "...", display: { level: "summary" }}│    │
-│  │      { id: "performance_summary", sql: "...", display: { level: "summary" }}│
-│  │      { id: "scroll_sessions", sql: "...", display: { level: "list" }}│    │
-│  │      ...                                                             │    │
-│  │    ],                                                                │    │
-│  │    diagnostics: [...]                                                │    │
-│  │  }                                                                   │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                              │                                               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 5.3: 执行 Skill Steps                                          │    │
-│  │                                                                      │    │
-│  │  for (const step of skill.steps) {                                  │    │
-│  │    // 替换变量                                                       │    │
-│  │    const sql = substituteVariables(step.sql, context)               │    │
-│  │                                                                      │    │
-│  │    // 执行查询                                                       │    │
-│  │    const result = await traceProcessor.query(traceId, sql)          │    │
-│  │                                                                      │    │
-│  │    // 按 level 组织结果                                              │    │
-│  │    if (step.display.level === 'summary') {                          │    │
-│  │      layers.L1[step.id] = result                                    │    │
-│  │    } else if (step.display.level === 'list') {                      │    │
-│  │      layers.L2[step.id] = result                                    │    │
-│  │    } else if (step.display.level === 'deep') {                      │    │
-│  │      layers.L4[step.id] = result                                    │    │
-│  │    }                                                                │    │
-│  │  }                                                                  │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                              │                                               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 5.4: 执行诊断规则                                              │    │
-│  │                                                                      │    │
-│  │  for (const diagnostic of skill.diagnostics) {                      │    │
-│  │    const matched = evaluateCondition(diagnostic.condition, layers)  │    │
-│  │    // e.g., "jank_rate > 0.1" → true                                │    │
-│  │                                                                      │    │
-│  │    if (matched) {                                                   │    │
-│  │      diagnostics.push({                                             │    │
-│  │        id: diagnostic.id,                                           │    │
-│  │        severity: diagnostic.severity,  // 'critical'                │    │
-│  │        message: diagnostic.message,                                 │    │
-│  │        suggestions: diagnostic.suggestions                          │    │
-│  │      })                                                             │    │
-│  │    }                                                                │    │
-│  │  }                                                                  │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                              │                                               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 5.5: 返回分层结果                                              │    │
-│  │                                                                      │    │
-│  │  return {                                                           │    │
-│  │    skillId: "scrolling_analysis",                                   │    │
-│  │    skillName: "滑动分析",                                            │    │
-│  │    layeredResult: {                                                 │    │
-│  │      layers: {                                                      │    │
-│  │        L1: { vsync_config: {...}, performance_summary: {...} },     │    │
-│  │        L2: { scroll_sessions: [...] },                              │    │
-│  │        L4: { scroll_frames: [...] }                                 │    │
-│  │      },                                                             │    │
-│  │      defaultExpanded: ['L1', 'L2'],                                 │    │
-│  │      metadata: { skillName, version, executedAt }                   │    │
-│  │    },                                                               │    │
-│  │    diagnostics: [...],                                              │    │
-│  │    executionTimeMs: 1500                                            │    │
-│  │  }                                                                  │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Phase 6: SSE 事件流传输
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      Phase 6: SSE 事件流传输                                 │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  事件发射流程                                                        │    │
-│  │                                                                      │    │
-│  │  PerfettoAnalysisOrchestrator                                       │    │
-│  │       │                                                             │    │
-│  │       │ emitProgress / emitSkillLayeredResult / emitCompleted       │    │
-│  │       ▼                                                             │    │
-│  │  AnalysisSessionService.emitSSE(sessionId, event)                   │    │
-│  │       │                                                             │    │
-│  │       │ 遍历 sseClients                                             │    │
-│  │       ▼                                                             │    │
-│  │  res.write(`event: ${event.type}\n`)                                │    │
-│  │  res.write(`data: ${JSON.stringify(event)}\n\n`)                    │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  SSE 事件时序示例                                                    │    │
-│  │                                                                      │    │
-│  │  Time    Event Type             Content                              │    │
-│  │  ─────────────────────────────────────────────────────────────       │    │
-│  │  T+0ms   progress               { step: 'generating_sql' }           │    │
-│  │  T+500ms skill_layered_result   { layers: {L1, L2, L4}, ... }        │    │
-│  │  T+600ms skill_diagnostics      { diagnostics: [...] }               │    │
-│  │  T+1s    progress               { step: 'generating_answer' }        │    │
-│  │  T+3s    analysis_completed     { answer, metrics, reportUrl }       │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  主要事件类型                                                        │    │
-│  │                                                                      │    │
-│  │  | 事件类型            | 数据结构                    | 用途          │    │
-│  │  |---------------------|----------------------------|---------------|    │
-│  │  | progress            | {step, message}            | 进度更新      │    │
-│  │  | sql_generated       | {stepNumber, sql}          | SQL 生成完成  │    │
-│  │  | sql_executed        | {stepNumber, sql, result}  | SQL 执行完成  │    │
-│  │  | skill_layered_result| {layers, metadata}         | Skill 分层结果│    │
-│  │  | skill_diagnostics   | {diagnostics[]}            | 诊断结果      │    │
-│  │  | skill_section       | {sectionId, columns, rows} | 单个数据段    │    │
-│  │  | analysis_completed  | {answer, metrics, reportUrl}| 分析完成     │    │
-│  │  | error               | {error, recoverable}       | 错误信息      │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Phase 7: 前端结果渲染
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     Phase 7: 前端结果渲染                                    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 7.1: SSE 事件解析                                              │    │
-│  │                                                                      │    │
-│  │  listenToSSE(analysisId)                                            │    │
-│  │  位置: ai_panel.ts:2085-2150                                        │    │
-│  │                                                                      │    │
-│  │  const reader = response.body.getReader()                           │    │
-│  │  while (!done) {                                                    │    │
-│  │    const { value, done: streamDone } = await reader.read()          │    │
-│  │    const chunk = decoder.decode(value)                              │    │
-│  │    // 解析 SSE 格式                                                  │    │
-│  │    await handleSSEEvent(eventType, data)                            │    │
-│  │  }                                                                  │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                              │                                               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 7.2: 事件处理路由                                              │    │
-│  │                                                                      │    │
-│  │  handleSSEEvent(type, data)                                         │    │
-│  │                                                                      │    │
-│  │  switch (type) {                                                    │    │
-│  │    case 'progress':                                                 │    │
-│  │      this.updateProgressMessage(`⏳ ${data.message}`)               │    │
-│  │      break                                                          │    │
-│  │                                                                      │    │
-│  │    case 'skill_layered_result':                                     │    │
-│  │      this.handleSkillLayeredResult(data)                            │    │
-│  │      // → 渲染 L1/L2/L4 层级组件                                    │    │
-│  │      break                                                          │    │
-│  │                                                                      │    │
-│  │    case 'skill_diagnostics':                                        │    │
-│  │      this.handleDiagnostics(data.diagnostics)                       │    │
-│  │      break                                                          │    │
-│  │                                                                      │    │
-│  │    case 'analysis_completed':                                       │    │
-│  │      this.handleAnalysisComplete(data)                              │    │
-│  │      this.state.isLoading = false                                   │    │
-│  │      break                                                          │    │
-│  │                                                                      │    │
-│  │    case 'error':                                                    │    │
-│  │      this.addMessage({                                              │    │
-│  │        role: 'assistant',                                           │    │
-│  │        content: `❌ 错误: ${data.message}`                          │    │
-│  │      })                                                             │    │
-│  │      break                                                          │    │
-│  │  }                                                                  │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                              │                                               │
-│                              ▼                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Step 7.3: 分层结果渲染                                              │    │
-│  │                                                                      │    │
-│  │  skill_layered_result 事件触发渲染:                                  │    │
-│  │                                                                      │    │
-│  │  ┌─────────────────────────────────────────────────────────┐        │    │
-│  │  │  L1 概览层 (默认展开)                                    │        │    │
-│  │  │  ┌─────────────────────────────────────────────┐        │        │    │
-│  │  │  │ VSync 配置: 120Hz, 8.33ms                   │        │        │    │
-│  │  │  └─────────────────────────────────────────────┘        │        │    │
-│  │  │  ┌─────────────────────────────────────────────┐        │        │    │
-│  │  │  │ 性能概览: 1000 帧, 卡顿率 15%, FPS 98       │        │        │    │
-│  │  │  └─────────────────────────────────────────────┘        │        │    │
-│  │  └─────────────────────────────────────────────────────────┘        │    │
-│  │                                                                      │    │
-│  │  ┌─────────────────────────────────────────────────────────┐        │    │
-│  │  │  L2 列表层 (点击展开)                                    │        │    │
-│  │  │  ▶ 滑动会话列表 (5 个会话)                               │        │    │
-│  │  │    └─ Session 1: 10:00-10:05, 200 帧, 卡顿 12%          │        │    │
-│  │  │    └─ Session 2: 10:10-10:12, 150 帧, 卡顿 5%           │        │    │
-│  │  └─────────────────────────────────────────────────────────┘        │    │
-│  │                                                                      │    │
-│  │  ┌─────────────────────────────────────────────────────────┐        │    │
-│  │  │  L4 深度层 (按需加载)                                    │        │    │
-│  │  │  ▶ 卡顿帧详情                                           │        │    │
-│  │  │    └─ Frame 42: 25ms, App 主线程阻塞                    │        │    │
-│  │  │    └─ Frame 108: 32ms, GPU 渲染超时                     │        │    │
-│  │  └─────────────────────────────────────────────────────────┘        │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+    J --> M[执行器路由: follow-up or strategy or hypothesis]
+    M --> N[skills 或动态 SQL]
+    N --> O[SSE 持续推送 progress/data/finding/intervention]
+    O --> P[analysis_completed]
+    P --> Q[会话状态持久化]
 ```
 
 ---
 
-### 2.x 实现补充（2026-02-11）
+## 2. Frontend 交互阶段
 
-`skill_layered_result` 的前端处理链路已补齐以下契约：
+### 2.1 发送分析请求
 
-- 统一从 `display.columns` / `columnDefinitions` 归一化列定义，按列定义顺序渲染。
-- 对 `clickAction: navigate_range` 的列，若依赖 `durationColumn`，则对应时长列即使隐藏也保留原始值。
-- 展示时长统一按 `ms` 格式化；时间跳转依赖的原始区间仍按 `ns` 传递。
+前端主入口（`ai_panel.ts`）发送：
 
-相关实现：
-- `backend/src/services/skillEngine/skillAnalysisAdapter.ts`
-- `perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/sse_event_handlers.ts`
-
-## 3. 待整合的 MasterOrchestrator 功能
-
-以下功能已在 MasterOrchestrator 中实现，但尚未集成到前端调用路径：
-
-### 3.1 Hooks 系统
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Hooks 系统                                          │
-│                                                                              │
-│  位置: backend/src/agent/hooks/                                             │
-│                                                                              │
-│  事件类型:                                                                   │
-│  - tool:use        工具调用前后                                             │
-│  - subagent:start  SubAgent 开始执行                                        │
-│  - subagent:complete  SubAgent 执行完成                                     │
-│  - session:start   会话开始                                                 │
-│  - session:end     会话结束                                                 │
-│                                                                              │
-│  用途:                                                                       │
-│  - 性能监控                                                                  │
-│  - 审计日志                                                                  │
-│  - 请求拦截和修改                                                            │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 3.2 Context 隔离
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       Context 隔离                                          │
-│                                                                              │
-│  位置: backend/src/agent/context/                                           │
-│                                                                              │
-│  策略:                                                                       │
-│  - PlannerPolicy: 只看 sessionId, traceId, intent                           │
-│  - EvaluatorPolicy: 看 intent, plan, previousResults (摘要)                  │
-│  - WorkerPolicy: 看 plan, traceProcessor, 相关依赖                          │
-│                                                                              │
-│  目的:                                                                       │
-│  - 减少 token 浪费                                                          │
-│  - 避免信息泄露                                                              │
-│  - 提高 Agent 专注度                                                         │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 3.3 Context 压缩
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       Context 压缩                                          │
-│                                                                              │
-│  位置: backend/src/agent/compaction/                                        │
-│                                                                              │
-│  配置:                                                                       │
-│  - maxContextTokens: 8000                                                   │
-│  - compactionThreshold: 6000 (80%)                                          │
-│  - preserveRecentCount: 3                                                   │
-│  - strategy: 'sliding_window'                                               │
-│                                                                              │
-│  流程:                                                                       │
-│  - 估算 token 数量                                                          │
-│  - 超过阈值时压缩旧结果                                                      │
-│  - 保留最近 N 个结果和 Critical Findings                                     │
-│  - 生成历史摘要                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 3.4 Session Fork
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       Session Fork                                          │
-│                                                                              │
-│  位置: backend/src/agent/fork/                                              │
-│                                                                              │
-│  功能:                                                                       │
-│  - forkFromCheckpoint: 从检查点分叉会话                                      │
-│  - compareForks: 比较两个分叉的结果                                          │
-│  - mergeFork: 合并分叉到父会话                                               │
-│  - listForks: 列出会话树                                                     │
-│                                                                              │
-│  合并策略:                                                                   │
-│  - replace: 完全替换父会话结果                                               │
-│  - append: 追加到父会话结果                                                  │
-│  - merge_findings: 只合并 Findings                                          │
-│  - cherry_pick: 选择性合并                                                  │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 4. 整合计划
-
-### 目标
-
-将 MasterOrchestrator 的增强功能集成到前端实际使用的 `/api/agent/analyze` 路径。
-
-### 方案
-
-**方案 A: 路由转发 (推荐)**
-
-修改 `traceAnalysisRoutes.ts`，让 `/api/agent/analyze` 内部调用 `MasterOrchestrator`：
-
-```typescript
-// traceAnalysisRoutes.ts
-router.post('/analyze', async (req, res) => {
-  // 使用 MasterOrchestrator 而不是 PerfettoAnalysisOrchestrator
-  const orchestrator = new MasterOrchestrator({...});
-  const result = await orchestrator.handleQuery(question, traceId, options);
-  // 转换结果格式以兼容现有前端
-  broadcastResult(sessionId, convertToLegacyFormat(result));
-});
-```
-
-**方案 B: 替换 Orchestrator**
-
-直接将 `PerfettoAnalysisOrchestrator` 替换为 `MasterOrchestrator`，需要确保所有功能兼容。
-
----
-
-## 附录: 关键数据结构
-
-### 分析会话 (AnalysisSession)
-
-```typescript
-interface AnalysisSession {
-  id: string;
-  traceId: string;
-  question: string;
-  status: AnalysisState;
-  currentIteration: number;
-  maxIterations: number;
-  collectedResults: CollectedResult[];
-  messages: Message[];
-  createdAt: Date;
-  completedAt?: Date;
-  answer?: string;
+```json
+{
+  "query": "分析滑动卡顿",
+  "traceId": "trace-uuid",
+  "sessionId": "agent-...",
+  "options": {
+    "maxRounds": 3,
+    "confidenceThreshold": 0.5,
+    "maxNoProgressRounds": 2,
+    "maxFailureRounds": 2
+  }
 }
 ```
 
-### Skill 分层结果
+说明：
+- `sessionId` 可选；用于续聊同一 trace。
+- 请求成功后返回 `sessionId`，前端再连接 SSE。
 
-```typescript
-interface LayeredResult {
-  layers: {
-    L1?: Record<string, StepResult>;  // 概览层
-    L2?: Record<string, StepResult>;  // 列表层
-    L3?: Record<string, Record<string, StepResult>>;  // 会话层
-    L4?: Record<string, Record<string, StepResult>>;  // 深度层
-  };
-  defaultExpanded: string[];
-  metadata: {
-    skillName: string;
-    version: string;
-    executedAt: string;
-  };
+### 2.2 会话连续性检查
+
+前端会在多轮前尝试 `POST /api/agent/resume`（若已有 sessionId）。
+
+- 若会话不可恢复，会清理本地旧 sessionId 并走新会话。
+- 若恢复成功，后续请求复用同一个 `sessionId`。
+
+---
+
+## 3. Backend 请求受理阶段
+
+### 3.1 `POST /api/agent/analyze`
+
+路由层行为：
+
+1. 校验 `traceId`、`query`
+2. 校验 trace 是否已上传
+3. 处理 `sessionId` 续聊/恢复语义
+4. 启动异步分析 promise
+5. 立即返回 `sessionId` 与 `isNewSession`
+
+典型成功响应：
+
+```json
+{
+  "success": true,
+  "sessionId": "agent-1772...",
+  "message": "Analysis started",
+  "isNewSession": true,
+  "architecture": "agent-driven"
 }
 ```
+
+### 3.2 指定 `sessionId` 时的严格语义
+
+不再 silent fallback 新会话，改为显式成功或显式失败：
+
+- `409 SESSION_BUSY`：会话仍在运行
+- `400 TRACE_ID_MISMATCH`：请求 trace 与会话 trace 不一致
+- `404 SESSION_NOT_FOUND`：会话不存在
+- `409 SESSION_CONTEXT_MISSING`：会话元数据存在但上下文快照缺失
+- `503 SESSION_PERSISTENCE_UNAVAILABLE`：持久化层不可用
+
+仅当请求未带 `sessionId` 时才创建新会话。
+
+---
+
+## 4. 编排执行阶段（AgentRuntime）
+
+### 4.1 执行器选择优先级
+
+1. follow-up 执行器
+   - `clarify`
+   - `compare`
+   - `extend`
+   - `drill_down`
+2. strategy 命中时走 `StrategyExecutor`（可按 manifest 策略偏好回退 hypothesis）
+3. 未命中策略时走 `HypothesisExecutor`
+
+### 4.2 执行中事件流
+
+SSE 常见事件：
+
+- `connected`
+- `progress`
+- `data`
+- `finding`
+- `focus_updated`
+- `intervention_required`
+- `intervention_resolved`
+- `degraded`
+- `analysis_completed`
+- `error`
+- `end`
+
+---
+
+## 5. 会话恢复与持久化
+
+### 5.1 写入时机
+
+分析完成后，无论成功或失败，都会尝试持久化：
+
+- session metadata
+- `EnhancedSessionContext`
+- `FocusStore`
+- `TraceAgentState`
+
+### 5.2 恢复结果构建
+
+恢复时使用最后一个完成 turn 构造 `recoveredResult`：
+
+- `rounds` = 完成轮次
+- `totalDurationMs` = 已完成 turns 执行时长累加
+
+这保证恢复后的统计信息与历史执行一致。
+
+### 5.3 会话发现与恢复 API
+
+- `GET /api/agent/sessions`：返回 active + recoverable sessions
+- `POST /api/agent/resume`：把 recoverable session 重新激活到内存
+
+---
+
+## 6. 场景还原子流程（独立）
+
+场景还原走专用接口，不和 analyze 混用：
+
+- `POST /api/agent/scene-reconstruct`
+- `GET /api/agent/scene-reconstruct/:analysisId/stream`
+
+另外，`/api/agent/analyze` 会拒绝“纯场景还原”关键词请求并返回指引，避免路径混淆。
+
+---
+
+## 7. Legacy 兼容层策略
+
+### 7.1 默认行为
+
+- `/api/ai/*` -> `410 LEGACY_ROUTE_DEPRECATED`
+- `/api/auto-analysis/*` -> `410 LEGACY_ROUTE_DEPRECATED`
+
+响应中会给出替代入口：`POST /api/agent/analyze`。
+
+### 7.2 可选启用（仅灰度/迁移）
+
+- `FEATURE_ENABLE_LEGACY_AI_ROUTES=true`
+- `FEATURE_ENABLE_LEGACY_AUTO_ANALYSIS_ROUTES=true`
+
+默认关闭，且 legacy router 仅在开启时运行时加载。
+
+### 7.3 防回流门禁
+
+CI 会执行：
+
+- `npm run check:legacy-routes`
+
+用于阻止新代码继续引入 `/api/ai`、`/api/auto-analysis` 调用。
+
+---
+
+## 8. 最小调用序列（客户端）
+
+```text
+1) 上传 trace -> 拿到 traceId
+2) POST /api/agent/analyze (query + traceId + 可选 sessionId)
+3) 从响应拿 sessionId
+4) GET /api/agent/{sessionId}/stream 监听实时事件
+5) 如需续聊：下一轮继续带同一 sessionId
+6) 如进程重启后续聊：先 POST /api/agent/resume，再继续 analyze
+```
+
+---
+
+## 9. 快速排障
+
+- 收到 `TRACE_NOT_UPLOADED`：先重新上传 trace。
+- 收到 `SESSION_NOT_FOUND`：使用 `/api/agent/sessions` 选择可恢复会话，或不带 `sessionId` 新开。
+- 收到 `SESSION_CONTEXT_MISSING`：该 session 不可恢复，需新开。
+- 收到 `SESSION_BUSY`：等待当前轮结束，或使用新会话。
+- legacy 路径返回 `410`：说明兼容层未开启，按迁移提示切到 `/api/agent/analyze`。

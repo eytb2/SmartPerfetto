@@ -7,17 +7,15 @@ import cors from 'cors';
 import path from 'path';
 
 // Import configuration
-import { serverConfig } from './config';
+import { featureFlagsConfig, serverConfig } from './config';
 
 // Import routes (now after dotenv.config())
 import sqlRoutes from './routes/sql';
 import traceRoutes from './routes/trace';
 import traceProcessorRoutes from './routes/traceProcessorRoutes';
-import advancedAIRoutes from './routes/advancedAIRoutes';
 import simpleTraceRoutes from './routes/simpleTraceRoutes';
 import perfettoLocalRoutes from './routes/perfettoLocalRoutes';
 import aiChatRoutes from './routes/aiChatRoutes';
-import autoAnalysisRoutes from './routes/autoAnalysis';
 import sessionRoutes from './routes/sessionRoutes';
 import perfettoSqlRoutes from './routes/perfettoSqlRoutes';
 import exportRoutes from './routes/exportRoutes';
@@ -26,6 +24,7 @@ import skillRoutes from './routes/skillRoutes';
 import skillAdminRoutes from './routes/skillAdminRoutes';
 import reportRoutes from './routes/reportRoutes';
 import agentRoutes from './routes/agentRoutes';
+import { createLegacyRouteDeprecationRouter } from './routes/legacyRouteDeprecation';
 import {
   assertTraceAnalysisConfiguredForStartup,
   getTraceAnalysisConfigurationStatus,
@@ -38,6 +37,12 @@ import { getPortPool, resetPortPool } from './services/portPool';
 const app = express();
 const PORT = serverConfig.port;
 const NODE_ENV = serverConfig.nodeEnv;
+
+function loadLegacyRouter(modulePath: string): express.Router {
+  const loadedModule = require(modulePath);
+  const candidate = loadedModule?.default ?? loadedModule;
+  return candidate as express.Router;
+}
 
 // Fail fast for trace-analysis-specific credentials when strict startup validation is enabled.
 assertTraceAnalysisConfiguredForStartup();
@@ -69,6 +74,10 @@ app.get('/debug', (req, res) => {
     deepSeekBaseUrl: process.env.DEEPSEEK_BASE_URL,
     deepSeekModel: process.env.DEEPSEEK_MODEL,
     aiService: process.env.AI_SERVICE,
+    legacyRoutes: {
+      apiAi: featureFlagsConfig.enableLegacyAiRoutes,
+      autoAnalysis: featureFlagsConfig.enableLegacyAutoAnalysisRoutes,
+    },
     cwd: process.cwd(),
   });
 });
@@ -78,9 +87,7 @@ app.use('/api/sql', sqlRoutes);
 app.use('/api/trace', traceRoutes);
 app.use('/api/traces', simpleTraceRoutes);
 app.use('/chat', aiChatRoutes);
-app.use('/api/ai', advancedAIRoutes);
 app.use('/api/perfetto', perfettoLocalRoutes);
-app.use('/api/auto-analysis', autoAnalysisRoutes);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/perfetto-sql', perfettoSqlRoutes);
 app.use('/api/export', exportRoutes);
@@ -89,6 +96,34 @@ app.use('/api/skills', skillRoutes);
 app.use('/api/admin', skillAdminRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/agent', agentRoutes);
+
+if (featureFlagsConfig.enableLegacyAiRoutes) {
+  app.use('/api/ai', loadLegacyRouter('./routes/advancedAIRoutes'));
+} else {
+  app.use(
+    '/api/ai',
+    createLegacyRouteDeprecationRouter({
+      legacyBasePath: '/api/ai',
+      replacementMethod: 'POST',
+      replacementPath: '/api/agent/analyze',
+      migrationHint: 'Legacy AI routes are disabled by default. Use POST /api/agent/analyze with traceId and query.',
+    })
+  );
+}
+
+if (featureFlagsConfig.enableLegacyAutoAnalysisRoutes) {
+  app.use('/api/auto-analysis', loadLegacyRouter('./routes/autoAnalysis'));
+} else {
+  app.use(
+    '/api/auto-analysis',
+    createLegacyRouteDeprecationRouter({
+      legacyBasePath: '/api/auto-analysis',
+      replacementMethod: 'POST',
+      replacementPath: '/api/agent/analyze',
+      migrationHint: 'Legacy auto-analysis routes are disabled by default. Use POST /api/agent/analyze with traceId and query.',
+    })
+  );
+}
 
 // Serve uploaded files in development
 if (NODE_ENV === 'development') {

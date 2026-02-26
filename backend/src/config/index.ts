@@ -305,6 +305,18 @@ export const featureFlagsConfig = {
 
   /** Toggle debug log endpoints */
   enableAgentLogsApi: parseBoolEnv('FEATURE_AGENT_LOGS_API', true),
+
+  /**
+   * Keep legacy /api/ai endpoints available.
+   * Disabled by default to converge traffic on /api/agent/analyze.
+   */
+  enableLegacyAiRoutes: parseBoolEnv('FEATURE_ENABLE_LEGACY_AI_ROUTES', false),
+
+  /**
+   * Keep legacy /api/auto-analysis endpoints available.
+   * Disabled by default to avoid parallel analysis stacks.
+   */
+  enableLegacyAutoAnalysisRoutes: parseBoolEnv('FEATURE_ENABLE_LEGACY_AUTO_ANALYSIS_ROUTES', false),
 } as const;
 
 // =============================================================================

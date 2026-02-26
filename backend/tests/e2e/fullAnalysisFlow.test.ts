@@ -546,15 +546,10 @@ describe('E2E: Multi-Turn Conversation', () => {
     expect(turn2Response.status).toBe(200);
     expect(turn2Response.body.success).toBe(true);
 
-    // Check if session was reused (isNewSession should be false)
-    if (turn2Response.body.isNewSession === false) {
-      // Session reused - same sessionId
-      expect(turn2Response.body.sessionId).toBe(turn1.sessionId);
-      console.log(`[E2E] Turn 2 reused session: ${turn2Response.body.sessionId}`);
-    } else {
-      // New session created (acceptable)
-      console.log(`[E2E] Turn 2 created new session: ${turn2Response.body.sessionId}`);
-    }
+    // Session must be reused for follow-up turns when client provides sessionId.
+    expect(turn2Response.body.isNewSession).toBe(false);
+    expect(turn2Response.body.sessionId).toBe(turn1.sessionId);
+    console.log(`[E2E] Turn 2 reused session: ${turn2Response.body.sessionId}`);
 
     // Collect events for turn 2
     const turn2SessionId = turn2Response.body.sessionId;

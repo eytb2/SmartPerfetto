@@ -138,6 +138,20 @@ SmartPerfetto/
 | POST | `/api/agent/:id/respond` | Respond to circuit breaker |
 | POST | `/api/agent/scene-reconstruct` | Scene reconstruction |
 
+### Legacy (Deprecated)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| ANY | `/api/ai/*` | Disabled by default (returns `410 LEGACY_ROUTE_DEPRECATED`) |
+| ANY | `/api/auto-analysis/*` | Disabled by default (returns `410 LEGACY_ROUTE_DEPRECATED`) |
+
+To temporarily re-enable these routes during migration:
+
+```bash
+FEATURE_ENABLE_LEGACY_AI_ROUTES=true
+FEATURE_ENABLE_LEGACY_AUTO_ANALYSIS_ROUTES=true
+```
+
 ### Logging
 
 | Method | Path | Description |

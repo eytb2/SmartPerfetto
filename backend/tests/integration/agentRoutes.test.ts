@@ -320,6 +320,31 @@ describe('Agent Routes - Session Lifecycle', () => {
     }
   });
 
+  it('should reject requested sessionId when session does not exist', async () => {
+    if (!traceId) {
+      console.warn('Skipping test: no trace loaded');
+      return;
+    }
+
+    const response = await request(app)
+      .post('/api/agent/analyze')
+      .send({
+        traceId,
+        query: '继续分析',
+        sessionId: 'agent-missing-session-id',
+      });
+
+    // In environments where better-sqlite3 native binding is unavailable,
+    // persistence lookup can fail with 503 before session-not-found handling.
+    expect([404, 503]).toContain(response.status);
+    expect(response.body.success).toBe(false);
+    if (response.status === 404) {
+      expect(response.body.code).toBe('SESSION_NOT_FOUND');
+    } else {
+      expect(response.body.code).toBe('SESSION_PERSISTENCE_UNAVAILABLE');
+    }
+  });
+
   it('should create, query status, and delete session', async () => {
     if (!traceId) {
       console.warn('Skipping test: no trace loaded');

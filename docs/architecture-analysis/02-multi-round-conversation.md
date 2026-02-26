@@ -1,6 +1,6 @@
 # 多轮对话设计深度解析（同一 trace 的连续推理）
 
-> 对齐版本：2026-02-06
+> 对齐版本：2026-02-26
 > 目标：让用户感觉在和"懂 Android + 懂当前 trace"的专家对话，而不是每轮重新跑一遍 pipeline。
 
 ---
@@ -42,15 +42,25 @@
 
 ### 1.3 路由层的 sessionId 复用
 
-`POST /api/agent/analyze` 接受可选的 `sessionId` 参数。若提供且匹配现有会话的 `traceId`，则复用 `AgentRuntime` 实例和 `SessionLogger`，实现多轮对话。否则创建新会话。
+`POST /api/agent/analyze` 接受可选的 `sessionId` 参数。当前行为是“显式恢复或显式失败”，不会在用户指定 `sessionId` 时 silently 新建会话。
 
 ```
 if (requestedSessionId && existingSession.traceId === traceId) {
   // 复用 orchestrator + logger，继续多轮对话
 } else {
-  // 创建新 orchestrator
+  // 尝试从持久化恢复；失败时返回明确错误码
 }
 ```
+
+实际语义：
+- 内存会话存在且 trace 匹配：复用会话
+- 内存会话忙：`409 SESSION_BUSY`
+- 持久化不可用：`503 SESSION_PERSISTENCE_UNAVAILABLE`
+- 持久化会话不存在：`404 SESSION_NOT_FOUND`
+- 元数据存在但缺 context snapshot：`409 SESSION_CONTEXT_MISSING`
+- trace 不匹配：`400 TRACE_ID_MISMATCH`
+
+只有在请求中不带 `sessionId` 时，才会创建新会话。
 
 ---
 
@@ -420,6 +430,8 @@ mergeCapturedEntities(...captures)       → CapturedEntities (去重合并)
 - 保留期默认 7 天，最大活动会话 100 个
 - 查询接口：按 traceId / phase / 可恢复状态查找
 
+> 注：当前 HTTP 主链路的跨重启恢复主要由 `backend/src/services/sessionPersistenceService.ts` 提供（SQLite 持久化），`POST /api/agent/resume` 与 `POST /api/agent/analyze(sessionId=...)` 都依赖该服务恢复上下文。
+
 ### 9.2 CheckpointManager（检查点管理器）
 
 位置：`backend/src/agent/state/checkpointManager.ts`
@@ -439,6 +451,18 @@ mergeCapturedEntities(...captures)       → CapturedEntities (去重合并)
 - `getOrCreate(sessionId, traceId)` — 切换 trace 时自动清理旧上下文
 - `set(sessionId, traceId, ctx)` — 持久化恢复注入
 - 全局 singleton `sessionContextManager`
+
+### 9.4 路由恢复链路（当前主路径）
+
+`backend/src/routes/agentRoutes.ts` 在分析完成和失败两条路径都会调用同一持久化入口：
+
+- `persistSessionStateForRecovery(...)`
+  - 保存 session metadata
+  - 保存 `EnhancedSessionContext`
+  - 保存 `FocusStore`
+  - 保存 `TraceAgentState`
+
+恢复时会构造 `recoveredResult`，并从已完成 turns 推导 `rounds` 与 `totalDurationMs`，确保恢复态指标与历史执行一致。
 
 ---
 

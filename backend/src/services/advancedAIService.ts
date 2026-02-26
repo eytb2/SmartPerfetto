@@ -152,8 +152,14 @@ export class AdvancedAIService extends EventEmitter {
 
     const response = completion.choices[0]?.message?.content || '';
 
-    // Extract insights from the response
-    const insights = await this.extractInsights(response, session);
+    // Extract insights from the response as a best-effort enhancement.
+    // Do not fail the main answer if insight extraction model call fails.
+    let insights: AIInsight[] = [];
+    try {
+      insights = await this.extractInsights(response, session);
+    } catch (error) {
+      console.error('[AdvancedAIService] Insight extraction failed, returning response without insights:', error);
+    }
 
     // Update session
     await this.addMessage(session, 'user', query);

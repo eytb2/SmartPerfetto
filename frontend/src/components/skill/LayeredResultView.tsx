@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Collapse, Button } from 'antd';
 import L1OverviewCard from './L1OverviewCard';
 import L2SessionList from './L2SessionList';
@@ -33,6 +33,12 @@ const LayeredResultView: React.FC<Props> = ({ result }) => {
 
   const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set());
   const [expandedFrames, setExpandedFrames] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    setExpandedLayers(new Set(result.defaultExpanded));
+    setExpandedSessions(new Set());
+    setExpandedFrames(new Set());
+  }, [result]);
 
   const toggleLayer = useCallback((layer: string) => {
     setExpandedLayers(prev => {

@@ -2,7 +2,7 @@
 
 本文档描述 SmartPerfetto 在当前代码中的真实架构（以 `backend/src/agent/` 为主），目标是让系统从“pipeline + LLM 胶水”升级为“目标驱动的 Agent”：围绕用户目标形成 **假设空间 → 实验 → 证据 → 结论 → 下一步** 的闭环，并且多轮对话下不会遗忘已做过的事。
 
-> 更新日期：2026-02-11（与 `backend/src/agent/` 与 `backend/src/services/skillEngine/` 当前实现对齐）
+> 更新日期：2026-02-26（与 `backend/src/agent/`、`backend/src/routes/agentRoutes.ts`、`backend/src/index.ts` 当前实现对齐）
 > 重要约束：所有 memory/状态必须 **严格 trace-scoped**（同一 `(sessionId, traceId)`），禁止跨 trace 泄漏。
 
 ---
@@ -56,6 +56,29 @@
 │  └──────────────────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+### 1.0 API 入口收敛（Single Main Chain）
+
+当前后端入口策略已经明确分层：
+
+- 主链路（默认）：`/api/agent/*`
+- 兼容层（默认关闭）：`/api/ai/*`、`/api/auto-analysis/*`
+  - 默认返回 `410 LEGACY_ROUTE_DEPRECATED`
+  - 返回体包含替代入口：`POST /api/agent/analyze`
+- 灰度开关：
+  - `FEATURE_ENABLE_LEGACY_AI_ROUTES`（默认 `false`）
+  - `FEATURE_ENABLE_LEGACY_AUTO_ANALYSIS_ROUTES`（默认 `false`）
+
+实现要点：
+- legacy 路由仅在开关开启时才运行时加载（lazy load），避免默认启动时引入并行分析栈依赖。
+- CI 有专门守卫 `npm run check:legacy-routes`，防止新代码再次引入 legacy 路径调用。
+
+这让 SmartPerfetto 的系统边界更接近“带 UI 的智能助手”：
+- UI 入口统一；
+- 编排器唯一；
+- 兼容行为显式隔离而非隐式并存。
 
 ---
 
@@ -243,6 +266,37 @@ flowchart LR
 - 已做过的实验与得到的证据摘要
 - 已确认的 findings 与可引用实体（frame_id/session_id）
 
+### 3.4 `sessionId` 续聊语义（路由层最新行为）
+
+`POST /api/agent/analyze` 支持可选 `sessionId`，但当前行为是“显式恢复或显式失败”，不再“悄悄新建会话”：
+
+- 若 `sessionId` 在内存中且 `traceId` 匹配：
+  - 复用当前 `AgentRuntime`，继续多轮对话
+  - 若会话正在运行，返回 `409 SESSION_BUSY`
+- 若内存中不存在：
+  - 尝试从持久化恢复
+  - 持久化不可用：`503 SESSION_PERSISTENCE_UNAVAILABLE`
+  - 会话不存在：`404 SESSION_NOT_FOUND`
+  - 元数据存在但无上下文快照：`409 SESSION_CONTEXT_MISSING`
+  - `traceId` 不匹配：`400 TRACE_ID_MISMATCH`
+
+这条语义保证了“同一会话连续性”是可验证的，不会因 silent fallback 破坏用户心智模型。
+
+### 3.5 持久化恢复一致性（成功/失败都落盘）
+
+分析执行结束后（无论成功或失败）都会尝试持久化：
+
+- session metadata
+- `EnhancedSessionContext`
+- `FocusStore`
+- `TraceAgentState`
+
+恢复时，`buildRecoveredResultFromContext(...)` 会从已完成 turns 计算：
+- `rounds`（完成轮次）
+- `totalDurationMs`（累计执行时长）
+
+避免了“恢复结果固定 rounds=1、duration=0”这类失真。
+
 ---
 
 ## 4. Skills（在新架构下需要怎样的“工具化”）
@@ -348,6 +402,8 @@ flowchart LR
 
 - `FEATURE_AGENT_SCENE_RECONSTRUCT`：控制 `/api/agent/scene-reconstruct*`
 - `FEATURE_AGENT_LOGS_API`：控制 `/api/agent/logs*`
+- `FEATURE_ENABLE_LEGACY_AI_ROUTES`：是否启用 `/api/ai/*`（默认关闭）
+- `FEATURE_ENABLE_LEGACY_AUTO_ANALYSIS_ROUTES`：是否启用 `/api/auto-analysis/*`（默认关闭）
 - `SMARTPERFETTO_ALLOW_AGENT_ADB_FULL_MODE`：控制 agent 是否可进入 ADB full 模式（仍需请求上下文显式批准）
 
 ---
@@ -368,17 +424,19 @@ flowchart LR
 
 ## 9. 回归与真实 Trace 自验证（当前默认流程）
 
-为避免“仅单测通过但真实 trace 流程退化”，默认门禁已整合为一条命令：
+为避免“仅单测通过但真实 trace 流程退化”，当前推荐本地与 CI 都执行两段门禁：
 
-- 命令：`cd backend && npm run test:gate`
-- 其中包含：
-  - `npm run test:core`
-  - `npm run test:skill-eval:real-traces`
-  - `npm run test:scene-trace-regression`
+- `cd backend && npm run check:legacy-routes`
+- `cd backend && npm run test:gate`
+  - `test:gate` 内包含：
+    - `npm run test:core`
+    - `npm run test:agentv2`
+    - `npm run test:skill-eval:real-traces`
+    - `npm run test:scene-trace-regression`
 - 启动 trace：`test-traces/app_start_heavy.pftrace`
 - 滑动 trace：`test-traces/app_aosp_scrolling_heavy_jank.pftrace`
 
 对应实现：
-- `backend/package.json`（`test:gate` 统一门禁）
+- `backend/package.json`（`check:legacy-routes` + `test:gate`）
 - `.github/workflows/backend-agent-regression-gate.yml`（CI 自动执行）
 - `backend/tests/skill-eval/runner.ts`（递归注册 skill/iterator/parallel/conditional 依赖）
