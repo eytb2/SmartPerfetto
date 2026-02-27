@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs/promises';
 import { ErrorResponse } from '../types';
+import { toSingleString } from '../utils/httpValue';
 
 class TraceController {
   private uploadDir: string;
@@ -87,7 +88,7 @@ class TraceController {
 
   getTraceInfo = async (req: Request, res: Response) => {
     try {
-      const { fileId } = req.params;
+      const fileId = toSingleString(req.params.fileId);
 
       if (!fileId) {
         const error: ErrorResponse = {
@@ -127,7 +128,7 @@ class TraceController {
 
   deleteTrace = async (req: Request, res: Response) => {
     try {
-      const { fileId } = req.params;
+      const fileId = toSingleString(req.params.fileId);
 
       if (!fileId) {
         const error: ErrorResponse = {
@@ -164,7 +165,7 @@ class TraceController {
 
   downloadTrace = async (req: Request, res: Response) => {
     try {
-      const { fileId } = req.params;
+      const fileId = toSingleString(req.params.fileId);
 
       if (!fileId) {
         const error: ErrorResponse = {

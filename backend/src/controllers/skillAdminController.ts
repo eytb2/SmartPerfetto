@@ -11,6 +11,7 @@ import yaml from 'js-yaml';
 import { skillRegistry, ensureSkillRegistryInitialized, getSkillsDir } from '../services/skillEngine/skillLoader';
 import { SkillDefinition, VendorType } from '../services/skillEngine/types';
 import { ErrorResponse } from '../types';
+import { toSingleString } from '../utils/httpValue';
 
 const SKILLS_DIR = getSkillsDir();
 const COMPOSITE_DIR = path.join(SKILLS_DIR, 'composite');
@@ -67,8 +68,15 @@ class SkillAdminController {
    */
   getSkill = async (req: Request, res: Response) => {
     try {
-      const { skillId } = req.params;
+      const skillId = toSingleString(req.params.skillId);
       await this.ensureInitialized();
+
+      if (!skillId) {
+        return res.status(400).json({
+          error: 'Missing skill ID',
+          details: 'skillId is required',
+        });
+      }
 
       const skill = skillRegistry.getSkill(skillId);
       if (!skill) {
@@ -192,8 +200,15 @@ class SkillAdminController {
    */
   updateSkill = async (req: Request, res: Response) => {
     try {
-      const { skillId } = req.params;
+      const skillId = toSingleString(req.params.skillId);
       const { yaml: yamlContent, definition } = req.body;
+
+      if (!skillId) {
+        return res.status(400).json({
+          error: 'Missing skill ID',
+          details: 'skillId is required',
+        });
+      }
 
       await this.ensureInitialized();
 
@@ -255,7 +270,14 @@ class SkillAdminController {
    */
   deleteSkill = async (req: Request, res: Response) => {
     try {
-      const { skillId } = req.params;
+      const skillId = toSingleString(req.params.skillId);
+
+      if (!skillId) {
+        return res.status(400).json({
+          error: 'Missing skill ID',
+          details: 'skillId is required',
+        });
+      }
 
       await this.ensureInitialized();
 
@@ -428,7 +450,13 @@ class SkillAdminController {
    */
   getVendorOverrides = async (req: Request, res: Response) => {
     try {
-      const { vendor } = req.params;
+      const vendor = toSingleString(req.params.vendor);
+      if (!vendor) {
+        return res.status(400).json({
+          error: 'Missing vendor',
+          details: 'vendor is required',
+        });
+      }
       const vendorPath = path.join(VENDORS_DIR, vendor);
 
       if (!fs.existsSync(vendorPath)) {

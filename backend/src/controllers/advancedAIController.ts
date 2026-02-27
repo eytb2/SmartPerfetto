@@ -3,6 +3,7 @@ import { AdvancedAIService } from '../services/advancedAIService';
 import { SQLLearningSystem } from '../services/sqlLearningSystem';
 import SQLValidator from '../services/sqlValidator';
 import { v4 as uuidv4 } from 'uuid';
+import { toSingleString } from '../utils/httpValue';
 
 // 初始化SQL学习系统
 const sqlLearningSystem = new SQLLearningSystem('./logs/sql_learning');
@@ -29,7 +30,7 @@ sessionCleanupInterval.unref?.();
 export async function startSession(req: Request, res: Response): Promise<void> {
   try {
     const { traceId, message } = req.body;
-    const sessionId = req.headers['x-session-id'] as string || uuidv4();
+    const sessionId = toSingleString(req.headers['x-session-id']) || uuidv4();
 
     const session = await getAIService().startAnalysis(sessionId, traceId, message);
 
@@ -72,7 +73,7 @@ export async function analyzeWithAI(req: Request, res: Response): Promise<void> 
 // Get proactive insights
 export async function getProactiveInsights(req: Request, res: Response): Promise<void> {
   try {
-    const { traceId } = req.params;
+    const traceId = toSingleString(req.params.traceId);
 
     if (!traceId) {
       res.status(400).json({ error: 'Trace ID is required' });
@@ -91,7 +92,7 @@ export async function getProactiveInsights(req: Request, res: Response): Promise
 // Predict potential issues
 export async function predictIssues(req: Request, res: Response): Promise<void> {
   try {
-    const { traceId } = req.params;
+    const traceId = toSingleString(req.params.traceId);
 
     if (!traceId) {
       res.status(400).json({ error: 'Trace ID is required' });
@@ -110,7 +111,7 @@ export async function predictIssues(req: Request, res: Response): Promise<void> 
 // Get session history
 export async function getSession(req: Request, res: Response): Promise<void> {
   try {
-    const { sessionId } = req.params;
+    const sessionId = toSingleString(req.params.sessionId);
 
     if (!sessionId) {
       res.status(400).json({ error: 'Session ID is required' });
@@ -141,7 +142,7 @@ export async function getSession(req: Request, res: Response): Promise<void> {
 // Update user preferences
 export async function updatePreferences(req: Request, res: Response): Promise<void> {
   try {
-    const { sessionId } = req.params;
+    const sessionId = toSingleString(req.params.sessionId);
     const preferences = req.body;
 
     if (!sessionId) {
@@ -166,7 +167,7 @@ export async function updatePreferences(req: Request, res: Response): Promise<vo
 // Delete session
 export async function deleteSession(req: Request, res: Response): Promise<void> {
   try {
-    const { sessionId } = req.params;
+    const sessionId = toSingleString(req.params.sessionId);
 
     if (!sessionId) {
       res.status(400).json({ error: 'Session ID is required' });
@@ -256,7 +257,7 @@ export async function executeQuery(req: Request, res: Response): Promise<void> {
 // Get smart analysis summary
 export async function getSmartSummary(req: Request, res: Response): Promise<void> {
   try {
-    const { traceId } = req.params;
+    const traceId = toSingleString(req.params.traceId);
 
     if (!traceId) {
       res.status(400).json({ error: 'Trace ID is required' });

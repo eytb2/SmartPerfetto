@@ -12,6 +12,7 @@ import {
   createSkillAnalysisAdapter,
 } from '../services/skillEngine/skillAnalysisAdapter';
 import { ErrorResponse } from '../types';
+import { toSingleString } from '../utils/httpValue';
 
 class SkillController {
   private adapter: SkillAnalysisAdapter | null = null;
@@ -56,7 +57,7 @@ class SkillController {
    */
   getSkillDetail = async (req: Request, res: Response) => {
     try {
-      const { skillId } = req.params;
+      const skillId = toSingleString(req.params.skillId);
 
       if (!skillId) {
         return res.status(400).json({
@@ -110,7 +111,7 @@ class SkillController {
    */
   executeSkill = async (req: Request, res: Response) => {
     try {
-      const { skillId } = req.params;
+      const skillId = toSingleString(req.params.skillId);
       const { traceId, packageName, params } = req.body;
 
       if (!skillId) {
@@ -132,7 +133,7 @@ class SkillController {
       const request: SkillAnalysisRequest = {
         traceId,
         skillId,
-        packageName,
+        packageName: typeof packageName === 'string' ? packageName : undefined,
         params,  // Pass custom skill parameters
       };
 

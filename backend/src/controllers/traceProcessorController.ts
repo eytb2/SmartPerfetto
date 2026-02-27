@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import multer from 'multer';
 import path from 'path';
+import { toSingleString } from '../utils/httpValue';
 
 // Get the shared TraceProcessorService singleton
 const traceService = getTraceProcessorService();
@@ -82,8 +83,13 @@ export async function handleUpload(req: Request, res: Response): Promise<void> {
 // Upload chunk for large files
 export async function uploadChunk(req: Request, res: Response): Promise<void> {
   try {
-    const { traceId } = req.params;
-    const { offset } = req.headers;
+    const traceId = toSingleString(req.params.traceId);
+    const offsetHeader = toSingleString(req.headers.offset);
+
+    if (!traceId) {
+      res.status(400).json({ error: 'traceId is required' });
+      return;
+    }
 
     if (!req.body || !Buffer.isBuffer(req.body)) {
       res.status(400).json({ error: 'Invalid chunk data' });
@@ -93,7 +99,7 @@ export async function uploadChunk(req: Request, res: Response): Promise<void> {
     await traceService.uploadChunk(
       traceId,
       req.body,
-      offset ? parseInt(offset as string) : 0
+      offsetHeader ? parseInt(offsetHeader, 10) : 0
     );
 
     res.json({ received: true });
@@ -106,7 +112,11 @@ export async function uploadChunk(req: Request, res: Response): Promise<void> {
 // Complete upload
 export async function completeUpload(req: Request, res: Response): Promise<void> {
   try {
-    const { traceId } = req.params;
+    const traceId = toSingleString(req.params.traceId);
+    if (!traceId) {
+      res.status(400).json({ error: 'traceId is required' });
+      return;
+    }
     await traceService.completeUpload(traceId);
 
     const trace = traceService.getTrace(traceId);
@@ -123,7 +133,11 @@ export async function completeUpload(req: Request, res: Response): Promise<void>
 // Get trace status
 export async function getTraceStatus(req: Request, res: Response): Promise<void> {
   try {
-    const { traceId } = req.params;
+    const traceId = toSingleString(req.params.traceId);
+    if (!traceId) {
+      res.status(400).json({ error: 'traceId is required' });
+      return;
+    }
     const trace = traceService.getTrace(traceId);
 
     if (!trace) {
@@ -152,7 +166,11 @@ export async function listTraces(req: Request, res: Response): Promise<void> {
 // Delete a trace
 export async function deleteTrace(req: Request, res: Response): Promise<void> {
   try {
-    const { traceId } = req.params;
+    const traceId = toSingleString(req.params.traceId);
+    if (!traceId) {
+      res.status(400).json({ error: 'traceId is required' });
+      return;
+    }
     await traceService.deleteTrace(traceId);
 
     res.json({ message: 'Trace deleted successfully' });
@@ -165,15 +183,20 @@ export async function deleteTrace(req: Request, res: Response): Promise<void> {
 // Query a trace
 export async function queryTrace(req: Request, res: Response): Promise<void> {
   try {
-    const { traceId } = req.params;
-    const { q: query } = req.query;
+    const traceId = toSingleString(req.params.traceId);
+    const query = toSingleString(req.query.q);
+
+    if (!traceId) {
+      res.status(400).json({ error: 'traceId is required' });
+      return;
+    }
 
     if (!query) {
       res.status(400).json({ error: 'Query parameter is required' });
       return;
     }
 
-    const result = await traceService.query(traceId, query as string);
+    const result = await traceService.query(traceId, query);
     res.json(result);
   } catch (error: any) {
     console.error('Failed to query trace:', error);
@@ -184,7 +207,11 @@ export async function queryTrace(req: Request, res: Response): Promise<void> {
 // Get trace metadata
 export async function getTraceMetadata(req: Request, res: Response): Promise<void> {
   try {
-    const { traceId } = req.params;
+    const traceId = toSingleString(req.params.traceId);
+    if (!traceId) {
+      res.status(400).json({ error: 'traceId is required' });
+      return;
+    }
     const trace = traceService.getTrace(traceId);
 
     if (!trace) {
