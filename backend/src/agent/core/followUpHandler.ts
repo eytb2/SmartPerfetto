@@ -14,6 +14,12 @@
 import { Intent, ReferencedEntity, Finding } from '../types';
 import { EnhancedSessionContext } from '../context/enhancedSessionContext';
 import { FocusInterval } from '../strategies/types';
+import {
+  buildEntityLabel,
+  getEntityDrillDownStrategy,
+  getEntityIdFieldKeys,
+  getEntityParamKey,
+} from './entityRegistry';
 
 export interface FollowUpResolution {
   isFollowUp: boolean;
@@ -28,22 +34,6 @@ interface ResolvedEntityResult {
   params: Record<string, any>;
   finding: Finding | null;
 }
-
-const ENTITY_PARAM_KEYS: Record<string, string> = {
-  frame: 'frame_id',
-  session: 'session_id',
-  startup: 'startup_id',
-  process: 'process_name',
-  binder_call: 'binder_txn_id',
-  time_range: 'time_range',
-};
-
-const ENTITY_LABELS: Record<string, string> = {
-  frame: '帧',
-  session: '滑动会话',
-  startup: '启动事件',
-  process: '进程',
-};
 
 // =============================================================================
 // ID Normalization Utilities
@@ -224,7 +214,7 @@ function resolveEntityFromFindings(
   }
 
   // No finding match - return just the entity id as param
-  const paramKey = ENTITY_PARAM_KEYS[entity.type] || `${entity.type}_id`;
+  const paramKey = getEntityParamKey(entity.type);
   return { params: { [paramKey]: entityId }, finding: null };
 }
 
@@ -303,9 +293,7 @@ function buildFocusInterval(
   if (!startTs || !endTs) return null;
 
   const entityId = entity.value !== undefined ? entity.value : entity.id;
-  const label = ENTITY_LABELS[entity.type]
-    ? `${ENTITY_LABELS[entity.type]} ${entityId}`
-    : `${entity.type} ${entityId}`;
+  const label = buildEntityLabel(entity.type, entityId);
 
   return {
     id: typeof entityId === 'number' ? entityId : index,
@@ -353,9 +341,7 @@ function buildFallbackInterval(
   if (!startTs || !endTs) return null;
 
   const entityId = entity.value !== undefined ? entity.value : entity.id;
-  const label = ENTITY_LABELS[entity.type]
-    ? `${ENTITY_LABELS[entity.type]} ${entityId}`
-    : `${entity.type} ${entityId}`;
+  const label = buildEntityLabel(entity.type, entityId);
 
   return {
     id: typeof entityId === 'number' ? entityId : index,
@@ -394,9 +380,7 @@ function buildMinimalIntervalFromParams(
   // If we have timestamps, use them
   if (startTs && endTs) {
     const entityType = frameId ? 'frame' : (sessionId ? 'session' : 'startup');
-    const label = ENTITY_LABELS[entityType]
-      ? `${ENTITY_LABELS[entityType]} ${entityId}`
-      : `${entityType} ${entityId}`;
+    const label = buildEntityLabel(entityType, entityId);
 
     return {
       id: typeof entityId === 'number' ? entityId : 0,
@@ -418,9 +402,7 @@ function buildMinimalIntervalFromParams(
   // The DirectDrillDownExecutor will need to handle this case
   const entityType = frameId ? 'frame' : (sessionId ? 'session' : 'startup');
   const entity = entities.find(e => e.type === entityType);
-  const label = ENTITY_LABELS[entityType]
-    ? `${ENTITY_LABELS[entityType]} ${entityId}`
-    : `${entityType} ${entityId}`;
+  const label = buildEntityLabel(entityType, entityId);
 
   return {
     id: typeof entityId === 'number' ? entityId : 0,
@@ -447,9 +429,9 @@ function getSuggestedStrategy(
   params: Record<string, any>
 ): string | undefined {
   if (followUpType === 'drill_down') {
-    if (getField(params, 'frame_id', 'frameId')) return 'frame_drill_down';
-    if (getField(params, 'session_id', 'sessionId')) return 'session_drill_down';
-    if (getField(params, 'startup_id', 'startupId')) return 'startup_drill_down';
+    if (getField(params, 'frame_id', 'frameId')) return getEntityDrillDownStrategy('frame');
+    if (getField(params, 'session_id', 'sessionId')) return getEntityDrillDownStrategy('session');
+    if (getField(params, 'startup_id', 'startupId')) return getEntityDrillDownStrategy('startup');
   }
   if (followUpType === 'compare') return 'comparison';
   return undefined;
@@ -494,11 +476,7 @@ export function findEntityInFindings(
   id: number | string,
   sessionContext: EnhancedSessionContext
 ): Record<string, any> | null {
-  const keys = type === 'frame'
-    ? ['frame_id', 'frameId']
-    : type === 'session'
-      ? ['session_id', 'sessionId']
-      : ['startup_id', 'startupId'];
+  const keys = getEntityIdFieldKeys(type);
 
   for (const finding of sessionContext.getAllFindings()) {
     const d = finding.details;

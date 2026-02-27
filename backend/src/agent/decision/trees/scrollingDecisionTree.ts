@@ -10,7 +10,15 @@
  * 基于 INTELLIGENT_AGENT_DESIGN.md 中的专家决策树
  */
 
+import { getScrollingDecisionThresholds } from '../../config/decisionThresholdManifest';
 import { DecisionTree, DecisionContext } from '../types';
+
+const SCROLLING_THRESHOLDS = getScrollingDecisionThresholds();
+
+function ratioToPercentage(ratio: number): string {
+  const percent = ratio * 100;
+  return Number.isInteger(percent) ? `${percent}%` : `${percent.toFixed(1)}%`;
+}
 
 /**
  * 滑动分析决策树
@@ -45,13 +53,16 @@ export const scrollingDecisionTree: DecisionTree = {
       type: 'CHECK',
       name: '检查是否有卡顿问题',
       check: {
-        description: 'FPS >= 55 且卡顿率 < 5%？',
+        description: `FPS >= ${SCROLLING_THRESHOLDS.noProblem.minAvgFps} 且卡顿率 < ${ratioToPercentage(
+          SCROLLING_THRESHOLDS.noProblem.maxJankRate
+        )}？`,
         useResultFrom: 'fps_data',
         evaluate: (data, _context) => {
           const avgFps = extractAvgFps(data);
           const jankRate = extractJankRate(data);
-          // 如果 FPS >= 55 且卡顿率 < 5%，认为流畅
-          return avgFps >= 55 && jankRate < 0.05;
+          // 如果 FPS 达标且卡顿率低，认为流畅
+          return avgFps >= SCROLLING_THRESHOLDS.noProblem.minAvgFps
+            && jankRate < SCROLLING_THRESHOLDS.noProblem.maxJankRate;
         },
       },
       next: {
@@ -89,7 +100,8 @@ export const scrollingDecisionTree: DecisionTree = {
           // 如果差距小但整体偏低，说明持续慢
           const variance = avgFps - minFps;
           // 持续偏低：方差小，但整体低
-          return variance < 15 && avgFps < 50;
+          return variance < SCROLLING_THRESHOLDS.continuousLowPattern.maxFpsVariance
+            && avgFps < SCROLLING_THRESHOLDS.continuousLowPattern.maxAvgFps;
         },
       },
       next: {
@@ -119,11 +131,11 @@ export const scrollingDecisionTree: DecisionTree = {
       type: 'CHECK',
       name: '检查 SF 是否正常',
       check: {
-        description: 'SF 合成耗时 < 4ms？',
+        description: `SF 合成耗时 < ${SCROLLING_THRESHOLDS.surfaceFlinger.maxAvgCompositionMs}ms？`,
         useResultFrom: 'sf_data',
         evaluate: (data, _context) => {
           const sfAvgDuration = extractSfAvgDuration(data);
-          return sfAvgDuration < 4;
+          return sfAvgDuration < SCROLLING_THRESHOLDS.surfaceFlinger.maxAvgCompositionMs;
         },
       },
       next: {
@@ -170,11 +182,11 @@ export const scrollingDecisionTree: DecisionTree = {
       type: 'CHECK',
       name: '检查 RenderThread 耗时',
       check: {
-        description: 'RenderThread 平均耗时 > 16ms？',
+        description: `RenderThread 平均耗时 > ${SCROLLING_THRESHOLDS.renderThread.minAvgRenderMs}ms？`,
         useResultFrom: 'render_data',
         evaluate: (data, _context) => {
           const avgRenderTime = extractAvgRenderTime(data);
-          return avgRenderTime > 16;
+          return avgRenderTime > SCROLLING_THRESHOLDS.renderThread.minAvgRenderMs;
         },
       },
       next: {
@@ -190,7 +202,7 @@ export const scrollingDecisionTree: DecisionTree = {
       conclusion: {
         category: 'APP',
         component: 'RENDER_THREAD',
-        summaryTemplate: 'App 的 RenderThread 耗时过长（> 16ms），可能是绘制复杂度高或 GPU 负载过重',
+        summaryTemplate: `App 的 RenderThread 耗时过长（> ${SCROLLING_THRESHOLDS.renderThread.minAvgRenderMs}ms），可能是绘制复杂度高或 GPU 负载过重`,
         confidence: 0.85,
         suggestedNextSteps: [
           '检查 DrawFrame 内部的耗时分布',
@@ -209,7 +221,7 @@ export const scrollingDecisionTree: DecisionTree = {
         useResultFrom: 'render_data',
         evaluate: (data, _context) => {
           const avgDoFrameTime = extractAvgDoFrameTime(data);
-          return avgDoFrameTime > 12;
+          return avgDoFrameTime > SCROLLING_THRESHOLDS.mainThread.minAvgDoFrameMs;
         },
       },
       next: {
@@ -256,11 +268,11 @@ export const scrollingDecisionTree: DecisionTree = {
       type: 'CHECK',
       name: '检查调度延迟',
       check: {
-        description: 'Runnable 时间 > 5ms？',
+        description: `Runnable 时间 > ${SCROLLING_THRESHOLDS.cpuScheduling.minAvgRunnableMs}ms？`,
         useResultFrom: 'cpu_data',
         evaluate: (data, _context) => {
           const avgRunnable = extractAvgRunnableTime(data);
-          return avgRunnable > 5;
+          return avgRunnable > SCROLLING_THRESHOLDS.cpuScheduling.minAvgRunnableMs;
         },
       },
       next: {
@@ -330,7 +342,7 @@ export const scrollingDecisionTree: DecisionTree = {
             useResultFrom: 'jank_frames',
             evaluate: (data, _context) => {
               const appMissedRatio = extractAppDeadlineMissedRatio(data);
-              return appMissedRatio > 0.6;
+              return appMissedRatio > SCROLLING_THRESHOLDS.jankClassification.appDeadlineMissedMinRatio;
             },
           },
           next: 'conclude_app_deadline_missed',
@@ -341,7 +353,7 @@ export const scrollingDecisionTree: DecisionTree = {
             useResultFrom: 'jank_frames',
             evaluate: (data, _context) => {
               const sfStuffingRatio = extractSfStuffingRatio(data);
-              return sfStuffingRatio > 0.6;
+              return sfStuffingRatio > SCROLLING_THRESHOLDS.jankClassification.sfStuffingMinRatio;
             },
           },
           next: 'conclude_sf_stuffing',
@@ -658,13 +670,18 @@ function checkBinderBlock(data: any): boolean {
     return true;
   }
   const binderRows = getDeepRows(data, ['binder_blocking', 'binder_blocking_data', 'binder_calls', 'binder_data']);
-  if (binderRows.some((r: any) => toNumber(r.max_block_ms) > 5 || toNumber(r.total_block_ms) > 5 || toNumber(r.dur_ms) > 5)) {
+  const binderMinMs = SCROLLING_THRESHOLDS.jankClassification.binderBlockMinMs;
+  if (binderRows.some((r: any) => (
+    toNumber(r.max_block_ms) > binderMinMs
+    || toNumber(r.total_block_ms) > binderMinMs
+    || toNumber(r.dur_ms) > binderMinMs
+  ))) {
     return true;
   }
   // 检查是否有任何帧的 Binder 耗时超过阈值
   if (data.layers?.deep?.per_frame_data?.data) {
     const frames = data.layers.deep.per_frame_data.data;
-    return frames.some((f: any) => (f.binder_duration_ms || 0) > 5);
+    return frames.some((f: any) => (f.binder_duration_ms || 0) > binderMinMs);
   }
   const diagnostics = Array.isArray(data.diagnostics) ? data.diagnostics : [];
   const diagnosisText = diagnostics.map((d: any) => String(d?.message || d?.diagnosis || '')).join(' ').toLowerCase();

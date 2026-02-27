@@ -3359,3 +3359,94 @@ describe('SkillExecutor - 集成测试', () => {
     expect(result.diagnostics[0].suggestions?.length).toBeGreaterThan(0);
   });
 });
+
+describe('SkillExecutor - Pipeline Step', () => {
+  let executor: SkillExecutor;
+  let mockTraceProcessor: any;
+
+  beforeEach(() => {
+    mockTraceProcessor = createMockTraceProcessorService();
+    executor = createSkillExecutor(mockTraceProcessor);
+  });
+
+  it('应该将 pipeline 检测结果聚合为教学包', async () => {
+    mockTraceProcessor.query
+      .mockResolvedValueOnce({
+        columns: [
+          'primary_pipeline_id',
+          'primary_confidence',
+          'candidates_list',
+          'features_list',
+          'doc_path',
+        ],
+        rows: [[
+          'ANDROID_VIEW_STANDARD_BLAST',
+          0.91,
+          'ANDROID_VIEW_STANDARD_BLAST:0.91,ANDROID_VIEW_STANDARD_LEGACY:0.42',
+          'SURFACE_CONTROL_API:0.8',
+          'rendering_pipelines/android_view_standard.md',
+        ]],
+      })
+      .mockResolvedValueOnce({
+        columns: ['upid', 'process_name', 'frame_count', 'render_thread_tid'],
+        rows: [[1001, 'com.demo.app', 128, 3123]],
+      })
+      .mockResolvedValueOnce({
+        columns: ['hint_gfx', 'hint_input'],
+        rows: [['gfx missing', null]],
+      });
+
+    const skill: SkillDefinition = {
+      name: 'pipeline_step_test',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Pipeline Step Test'),
+      steps: [
+        {
+          id: 'determine_pipeline',
+          type: 'atomic',
+          sql: 'SELECT 1',
+          save_as: 'pipeline_result',
+        },
+        {
+          id: 'active_rendering_processes',
+          type: 'atomic',
+          sql: 'SELECT 2',
+          save_as: 'active_rendering_processes',
+        },
+        {
+          id: 'trace_requirements',
+          type: 'atomic',
+          sql: 'SELECT 3',
+          save_as: 'trace_requirements',
+        },
+        {
+          id: 'pipeline_bundle',
+          type: 'pipeline',
+          pipeline_source: 'pipeline_result',
+          active_processes_source: 'active_rendering_processes',
+          trace_requirements_source: 'trace_requirements',
+          save_as: 'pipeline_bundle',
+        },
+      ],
+    };
+
+    executor.registerSkill(skill);
+    const result = await executor.execute('pipeline_step_test', 'trace-1');
+
+    expect(result.success).toBe(true);
+    expect(result.rawResults?.pipeline_bundle?.success).toBe(true);
+
+    const bundle = result.rawResults?.pipeline_bundle?.data as any;
+    expect(bundle).toBeDefined();
+    expect(bundle.detection.primaryPipelineId).toBe('ANDROID_VIEW_STANDARD_BLAST');
+    expect(bundle.detection.primaryConfidence).toBeGreaterThan(0.8);
+    expect(bundle.detection.traceRequirementsMissing).toEqual(
+      expect.arrayContaining(['gfx missing'])
+    );
+    expect(Array.isArray(bundle.pinInstructions)).toBe(true);
+    expect(bundle.pinInstructions.length).toBeGreaterThan(0);
+    expect(Array.isArray(bundle.activeRenderingProcesses)).toBe(true);
+    expect(bundle.activeRenderingProcesses[0]?.processName).toBe('com.demo.app');
+  });
+});

@@ -15,7 +15,16 @@ import type { ColumnDefinition } from '../../types/dataContract';
 // 基础类型
 // =============================================================================
 
-export type SkillType = 'atomic' | 'composite' | 'iterator' | 'diagnostic' | 'ai_decision' | 'ai_summary' | 'conditional' | 'pipeline_definition';
+export type SkillType =
+  | 'atomic'
+  | 'composite'
+  | 'iterator'
+  | 'diagnostic'
+  | 'ai_decision'
+  | 'ai_summary'
+  | 'conditional'
+  | 'pipeline'
+  | 'pipeline_definition';
 
 export type DisplayLevel = 'none' | 'debug' | 'detail' | 'summary' | 'key';
 
@@ -261,6 +270,30 @@ export interface ConditionalStep {
   synthesize?: boolean | SynthesizeConfig;
 }
 
+/**
+ * Pipeline 步骤 - 聚合渲染管线教学内容与 Pin 指令
+ *
+ * 设计目标：
+ * - 将 pipeline 教学链路从路由层收敛到 SkillEngine 步骤执行
+ * - 输入来源可配置（默认读取渲染管线检测技能的 save_as 结果）
+ */
+export interface PipelineStep {
+  id: string;
+  type: 'pipeline';
+  name?: string;
+  /** 可选：显式指定 pipeline id（支持 ${...} 模板） */
+  pipeline_id?: string;
+  /** 检测结果来源（默认: pipeline_result） */
+  pipeline_source?: string;
+  /** 活跃渲染进程来源（默认: active_rendering_processes） */
+  active_processes_source?: string;
+  /** Trace 采集缺失项来源（默认: trace_requirements） */
+  trace_requirements_source?: string;
+  display?: DisplayConfig | boolean;
+  save_as?: string;
+  synthesize?: boolean | SynthesizeConfig;
+}
+
 // 所有步骤类型的联合
 export type SkillStep =
   | AtomicStep
@@ -270,7 +303,8 @@ export type SkillStep =
   | DiagnosticStep
   | AIDecisionStep
   | AISummaryStep
-  | ConditionalStep;
+  | ConditionalStep
+  | PipelineStep;
 
 // =============================================================================
 // Skill 定义

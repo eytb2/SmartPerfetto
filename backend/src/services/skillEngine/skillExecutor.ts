@@ -20,6 +20,7 @@ import {
   AIDecisionStep,
   AISummaryStep,
   ConditionalStep,
+  PipelineStep,
   SkillExecutionContext,
   SkillExecutionResult,
   StepResult,
@@ -33,6 +34,25 @@ import {
 import logger from '../../utils/logger';
 import { parseLlmJson } from '../../utils/llmJson';
 import { redactObjectForLLM, redactTextForLLM } from '../../utils/llmPrivacy';
+import { getPipelineDocService } from '../pipelineDocService';
+import {
+  ensurePipelineSkillsInitialized,
+  pipelineSkillLoader,
+  PinInstruction,
+} from '../pipelineSkillLoader';
+import { TEACHING_DEFAULTS, TEACHING_LIMITS } from '../../config/teaching.config';
+import {
+  parseCandidates,
+  parseFeatures,
+  transformPinInstruction,
+  transformTeachingContent,
+  validateActiveProcesses,
+  validateConfidence,
+  type PinInstructionResponse,
+  type RawPinInstruction,
+  type SkillStepResult,
+  type TeachingContentResponse,
+} from '../../types/teaching.types';
 import {
   DataEnvelope,
   ColumnDefinition,
@@ -1200,6 +1220,7 @@ export class SkillExecutor {
         case 'diagnostic':
         case 'ai_decision':
         case 'ai_summary':
+        case 'pipeline':
           {
             if (!skill.steps || skill.steps.length === 0) {
               return {
@@ -1216,6 +1237,17 @@ export class SkillExecutor {
             aiSummary = stepExec.aiSummary;
           }
           break;
+
+        case 'pipeline_definition':
+          return {
+            skillId,
+            skillName: skill.meta.display_name,
+            success: false,
+            displayResults: [],
+            diagnostics: [],
+            executionTimeMs: Date.now() - startTime,
+            error: `Skill type 'pipeline_definition' is metadata-only and not executable: ${skillId}`,
+          };
       }
 
       // If skills provide data-driven synthesize configs, generate a deterministic
@@ -1683,6 +1715,10 @@ export class SkillExecutor {
 
         case 'conditional':
           result = await this.executeConditionalStep(step, context, parentSkillId);
+          break;
+
+        case 'pipeline':
+          result = await this.executePipelineStep(step, context);
           break;
 
         default:
@@ -2404,6 +2440,171 @@ export class SkillExecutor {
       data: null,
       executionTimeMs: Date.now() - startTime,
     };
+  }
+
+  /**
+   * 执行 pipeline 步骤
+   *
+   * 将渲染管线检测结果聚合为教学内容 + Pin 指令，作为 SkillEngine 一等步骤类型输出。
+   */
+  private async executePipelineStep(
+    step: PipelineStep,
+    context: SkillExecutionContext
+  ): Promise<StepResult> {
+    const startTime = Date.now();
+
+    try {
+      await ensurePipelineSkillsInitialized();
+
+      const pipelineSource = step.pipeline_source || 'pipeline_result';
+      const activeProcessesSource = step.active_processes_source || 'active_rendering_processes';
+      const traceRequirementsSource = step.trace_requirements_source || 'trace_requirements';
+
+      const pipelineRow = this.resolveFirstObjectRowFromSource(pipelineSource, context);
+      const explicitPipelineIdRaw = typeof step.pipeline_id === 'string' && step.pipeline_id.trim().length > 0
+        ? ExpressionEvaluator.evaluate(step.pipeline_id, context)
+        : undefined;
+      const explicitPipelineId =
+        explicitPipelineIdRaw !== undefined && explicitPipelineIdRaw !== null
+          ? String(explicitPipelineIdRaw).trim()
+          : '';
+      const primaryPipelineId = (
+        explicitPipelineId ||
+        String(pipelineRow?.primary_pipeline_id ?? '').trim() ||
+        TEACHING_DEFAULTS.pipelineId
+      );
+      const primaryConfidence = validateConfidence(
+        pipelineRow?.primary_confidence,
+        TEACHING_DEFAULTS.confidence
+      );
+      const candidatesList = pipelineRow?.candidates_list || '';
+      const featuresList = pipelineRow?.features_list || '';
+      const docPath = String(pipelineRow?.doc_path || TEACHING_DEFAULTS.docPath);
+
+      const candidates = candidatesList
+        ? parseCandidates(candidatesList, TEACHING_LIMITS.maxCandidates)
+        : [{ id: primaryPipelineId, confidence: primaryConfidence }];
+      const features = parseFeatures(featuresList);
+
+      const traceRequirementsMissing = this.extractTraceRequirementHints(
+        this.resolveFirstObjectRowFromSource(traceRequirementsSource, context)
+      );
+
+      const activeRenderingProcesses = validateActiveProcesses(
+        this.resolveStepResultFromSource(activeProcessesSource, context)
+      );
+
+      const yamlTeaching = pipelineSkillLoader.getTeachingContent(primaryPipelineId);
+      const mdTeaching = getPipelineDocService().getTeachingContent(primaryPipelineId);
+      const teachingContent: TeachingContentResponse | null = yamlTeaching
+        ? transformTeachingContent(
+            yamlTeaching,
+            pipelineSkillLoader.getPipelineMeta(primaryPipelineId)?.doc_path || docPath
+          )
+        : mdTeaching
+          ? {
+              title: mdTeaching.title,
+              summary: mdTeaching.summary,
+              mermaidBlocks: mdTeaching.mermaidBlocks,
+              threadRoles: mdTeaching.threadRoles,
+              keySlices: mdTeaching.keySlices,
+              docPath: mdTeaching.docPath,
+            }
+          : null;
+
+      const basePinInstructions = pipelineSkillLoader
+        .getAutoPinInstructions(primaryPipelineId)
+        .slice(0, TEACHING_LIMITS.maxPinInstructions);
+      const smartFilterConfigs = pipelineSkillLoader.getSmartFilterConfigs(primaryPipelineId);
+
+      const pinInstructions: PinInstructionResponse[] = basePinInstructions.map((inst: PinInstruction) => {
+        const hasSmartFilter = inst.smart_filter?.enabled ?? smartFilterConfigs.has(inst.pattern);
+        const rawInstruction: RawPinInstruction = {
+          pattern: inst.pattern,
+          match_by: inst.match_by,
+          priority: inst.priority,
+          reason: inst.reason,
+          expand: inst.expand,
+          main_thread_only: inst.main_thread_only,
+          smart_filter: hasSmartFilter
+            ? (inst.smart_filter || { enabled: true })
+            : undefined,
+        };
+
+        const transformed = transformPinInstruction(rawInstruction, activeRenderingProcesses);
+        if (transformed.smartPin && !transformed.skipPin) {
+          transformed.reason = `${inst.reason} (${activeRenderingProcesses.length} 活跃进程)`;
+        }
+        return transformed;
+      });
+
+      return {
+        stepId: step.id,
+        stepType: 'pipeline',
+        success: true,
+        data: {
+          detection: {
+            detected: !!pipelineRow || !!explicitPipelineId,
+            primaryPipelineId,
+            primaryConfidence,
+            candidates,
+            features,
+            traceRequirementsMissing,
+          },
+          teachingContent,
+          pinInstructions,
+          activeRenderingProcesses,
+          docPath,
+        },
+        executionTimeMs: Date.now() - startTime,
+      };
+    } catch (error: any) {
+      return {
+        stepId: step.id,
+        stepType: 'pipeline',
+        success: false,
+        error: error?.message || 'Pipeline step execution failed',
+        executionTimeMs: Date.now() - startTime,
+      };
+    }
+  }
+
+  private resolveStepResultFromSource(
+    source: string,
+    context: SkillExecutionContext
+  ): SkillStepResult | undefined {
+    if (context.results[source]) return context.results[source];
+    if (context.variables[source] !== undefined) {
+      return { data: context.variables[source] as any };
+    }
+    return undefined;
+  }
+
+  private resolveFirstObjectRowFromSource(
+    source: string,
+    context: SkillExecutionContext
+  ): Record<string, any> | null {
+    const sourceResult = this.resolveStepResultFromSource(source, context);
+    const sourceData = sourceResult?.data;
+    if (Array.isArray(sourceData)) {
+      const row = sourceData.find((item) => item && typeof item === 'object' && !Array.isArray(item));
+      return row ? (row as Record<string, any>) : null;
+    }
+    if (sourceData && typeof sourceData === 'object' && !Array.isArray(sourceData)) {
+      return sourceData as Record<string, any>;
+    }
+    return null;
+  }
+
+  private extractTraceRequirementHints(row: Record<string, any> | null): string[] {
+    if (!row) return [];
+    const hints: string[] = [];
+    for (const value of Object.values(row)) {
+      if (typeof value !== 'string') continue;
+      const trimmed = value.trim();
+      if (trimmed.length > 0) hints.push(trimmed);
+    }
+    return hints;
   }
 
   /**

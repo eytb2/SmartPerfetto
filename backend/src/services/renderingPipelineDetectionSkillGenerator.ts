@@ -752,7 +752,7 @@ export async function generateRenderingPipelineDetectionSkill(): Promise<SkillDe
 
   return {
     name: 'rendering_pipeline_detection',
-    version: '3.1',
+    version: '3.2',
     type: 'composite',
     category: 'rendering',
     meta: {
@@ -818,6 +818,20 @@ export async function generateRenderingPipelineDetectionSkill(): Promise<SkillDe
         sql: activeProcessesSql,
         save_as: 'active_rendering_processes',
       },
+      {
+        id: 'pipeline_bundle',
+        type: 'pipeline',
+        name: '聚合渲染管线教学结果',
+        pipeline_source: 'pipeline_result',
+        active_processes_source: 'active_rendering_processes',
+        trace_requirements_source: 'trace_requirements',
+        display: {
+          level: 'summary',
+          title: '渲染管线教学聚合结果',
+          format: 'summary',
+        },
+        save_as: 'pipeline_bundle',
+      },
     ],
     output: {
       fields: [
@@ -825,6 +839,7 @@ export async function generateRenderingPipelineDetectionSkill(): Promise<SkillDe
         { name: 'subvariants', label: '子变体信息' },
         { name: 'trace_requirements', label: '采集完整性检查' },
         { name: 'active_rendering_processes', label: '活跃渲染进程列表 (用于智能 Pin)' },
+        { name: 'pipeline_bundle', label: '渲染管线教学聚合结果' },
       ],
     },
   };

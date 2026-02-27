@@ -32,5 +32,11 @@ describe('rendering_pipeline_detection generator', () => {
     expect(activeStep.sql).toContain('DrawFrame');
     expect(activeStep.sql).toContain('eglSwapBuffers');
     expect(activeStep.sql).toContain('vkQueuePresentKHR');
+
+    const pipelineBundleStep = skill.steps?.find((s) => s.id === 'pipeline_bundle') as any;
+    expect(pipelineBundleStep).toBeTruthy();
+    expect(pipelineBundleStep.type).toBe('pipeline');
+    expect(pipelineBundleStep.pipeline_source).toBe('pipeline_result');
+    expect(pipelineBundleStep.active_processes_source).toBe('active_rendering_processes');
   });
 });

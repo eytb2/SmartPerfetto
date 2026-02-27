@@ -8,7 +8,10 @@
  * 4. 给出根因结论
  */
 
+import { getLaunchDecisionThresholds } from '../../config/decisionThresholdManifest';
 import { DecisionTree, DecisionContext } from '../types';
+
+const LAUNCH_THRESHOLDS = getLaunchDecisionThresholds();
 
 /**
  * 启动分析决策树
@@ -75,11 +78,11 @@ export const launchDecisionTree: DecisionTree = {
       type: 'CHECK',
       name: '检查冷启动总耗时',
       check: {
-        description: 'TTID < 1000ms？',
+        description: `TTID < ${LAUNCH_THRESHOLDS.coldLaunch.maxTtidMs}ms？`,
         useResultFrom: 'launch_data',
         evaluate: (data, context) => {
           const ttid = extractTTID(data, context);
-          return ttid < 1000;
+          return ttid < LAUNCH_THRESHOLDS.coldLaunch.maxTtidMs;
         },
       },
       next: {
@@ -159,11 +162,11 @@ export const launchDecisionTree: DecisionTree = {
       type: 'CHECK',
       name: '检查进程启动细节',
       check: {
-        description: 'Zygote fork 耗时 > 100ms？',
+        description: `Zygote fork 耗时 > ${LAUNCH_THRESHOLDS.processStart.minZygoteForkMs}ms？`,
         useResultFrom: 'launch_data',
         evaluate: (data, context) => {
           const forkTime = extractZygoteForkTime(data, context);
-          return forkTime > 100;
+          return forkTime > LAUNCH_THRESHOLDS.processStart.minZygoteForkMs;
         },
       },
       next: {
@@ -230,11 +233,11 @@ export const launchDecisionTree: DecisionTree = {
       type: 'CHECK',
       name: '检查 Activity 创建细节',
       check: {
-        description: '布局加载耗时 > 200ms？',
+        description: `布局加载耗时 > ${LAUNCH_THRESHOLDS.activityCreate.minLayoutInflateMs}ms？`,
         useResultFrom: 'launch_data',
         evaluate: (data, context) => {
           const inflateTime = extractLayoutInflateTime(data, context);
-          return inflateTime > 200;
+          return inflateTime > LAUNCH_THRESHOLDS.activityCreate.minLayoutInflateMs;
         },
       },
       next: {
@@ -318,11 +321,11 @@ export const launchDecisionTree: DecisionTree = {
       type: 'CHECK',
       name: '检查温启动耗时',
       check: {
-        description: '温启动 < 500ms？',
+        description: `温启动 < ${LAUNCH_THRESHOLDS.warmLaunch.maxDurationMs}ms？`,
         useResultFrom: 'launch_data',
         evaluate: (data, context) => {
           const warmTime = extractWarmLaunchTime(data, context);
-          return warmTime < 500;
+          return warmTime < LAUNCH_THRESHOLDS.warmLaunch.maxDurationMs;
         },
       },
       next: {
@@ -353,11 +356,11 @@ export const launchDecisionTree: DecisionTree = {
       type: 'CHECK',
       name: '检查热启动耗时',
       check: {
-        description: '热启动 < 200ms？',
+        description: `热启动 < ${LAUNCH_THRESHOLDS.hotLaunch.maxDurationMs}ms？`,
         useResultFrom: 'launch_data',
         evaluate: (data, context) => {
           const hotTime = extractHotLaunchTime(data, context);
-          return hotTime < 200;
+          return hotTime < LAUNCH_THRESHOLDS.hotLaunch.maxDurationMs;
         },
       },
       next: {

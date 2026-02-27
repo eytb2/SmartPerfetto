@@ -10,6 +10,7 @@
  */
 
 import { EventEmitter } from 'events';
+import { getDecisionTreePostProcessingThresholds } from '../config/decisionThresholdManifest';
 import { StageExecutor } from '../core/pipelineExecutor';
 import { PipelineStage, SubAgentContext, SubAgentResult, Finding } from '../types';
 import {
@@ -21,6 +22,8 @@ import {
 import { DecisionTreeExecutor } from './decisionTreeExecutor';
 import { SkillExecutorAdapter } from './skillExecutorAdapter';
 import { getDecisionTree } from './index';
+
+const DECISION_POST_THRESHOLDS = getDecisionTreePostProcessingThresholds();
 
 /**
  * Stage executor that runs a decision tree
@@ -282,11 +285,11 @@ export class DecisionTreeStageExecutor extends EventEmitter implements StageExec
       // Scrolling-related findings
       if (key === 'scrolling_analysis' || key.includes('fps')) {
         const fps = value.transformed?.avg_fps || value.avg_fps;
-        if (fps && fps < 55) {
+        if (fps && fps < DECISION_POST_THRESHOLDS.findings.lowFps.threshold) {
           findings.push({
             id: `finding_low_fps_${Date.now()}`,
             type: 'performance',
-            severity: fps < 30 ? 'high' : 'medium',
+            severity: fps < DECISION_POST_THRESHOLDS.findings.lowFps.highSeverityThreshold ? 'high' : 'medium',
             title: 'FPS 低于目标值',
             description: `平均 FPS 为 ${fps.toFixed(1)}，低于 60 FPS 的目标`,
             source: 'decision_tree',
@@ -298,13 +301,13 @@ export class DecisionTreeStageExecutor extends EventEmitter implements StageExec
       // Startup-related findings
       if (key === 'launch_data' || key === 'startup_analysis') {
         const ttid = value.transformed?.ttid || value.ttid || value.time_to_initial_display;
-        if (ttid && ttid > 1000) {
+        if (ttid && ttid > DECISION_POST_THRESHOLDS.findings.slowStartup.thresholdMs) {
           findings.push({
             id: `finding_slow_startup_${Date.now()}`,
             type: 'performance',
-            severity: ttid > 2000 ? 'high' : 'medium',
+            severity: ttid > DECISION_POST_THRESHOLDS.findings.slowStartup.highSeverityThresholdMs ? 'high' : 'medium',
             title: '启动时间过长',
-            description: `TTID 为 ${ttid.toFixed(0)}ms，超过 1000ms 的目标`,
+            description: `TTID 为 ${ttid.toFixed(0)}ms，超过 ${DECISION_POST_THRESHOLDS.findings.slowStartup.thresholdMs}ms 的目标`,
             source: 'decision_tree',
             confidence: 0.85,
           });

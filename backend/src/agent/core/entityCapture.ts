@@ -27,6 +27,7 @@ import type {
   EntityId,
 } from '../context/entityStore';
 import type { FocusInterval } from '../strategies/types';
+import { EntityCaptureKind, resolveCaptureEntityKindByStepId } from './entityRegistry';
 
 // =============================================================================
 // Types
@@ -45,16 +46,6 @@ export interface CapturedEntities {
   candidateFrameIds: EntityId[];
   candidateSessionIds: EntityId[];
 }
-
-// Known step IDs that contain entities
-const FRAME_STEP_IDS = ['get_app_jank_frames', 'jank_frames', 'frame_list', 'frames'];
-const SESSION_STEP_IDS = ['scroll_sessions', 'sessions', 'session_list'];
-
-// Phase 3: New entity type step IDs
-const CPU_SLICE_STEP_IDS = ['cpu_slices', 'sched_slices', 'thread_slices', 'scheduling', 'cpu_timeline'];
-const BINDER_STEP_IDS = ['binder_transactions', 'binder_calls', 'ipc_transactions', 'binder_blocking'];
-const GC_STEP_IDS = ['gc_events', 'garbage_collection', 'gc_analysis', 'gc_pauses'];
-const MEMORY_STEP_IDS = ['memory_events', 'allocations', 'oom_events', 'lmk_events', 'memory_stats'];
 
 // =============================================================================
 // Main Capture Function
@@ -215,52 +206,16 @@ export function mergeCapturedEntities(...captures: CapturedEntities[]): Captured
 function captureFromToolResult(toolResult: AgentToolResult, result: CapturedEntities): void {
   if (!toolResult.data) return;
 
-  const data = toolResult.data;
-
-  // Check for known step IDs in the data structure
-  for (const stepId of FRAME_STEP_IDS) {
-    if (data[stepId]) {
-      const frames = parseFrames(data[stepId]);
-      result.frames.push(...frames);
-      result.candidateFrameIds.push(...frames.map(f => f.frame_id));
-    }
+  if (typeof toolResult.data !== 'object' || Array.isArray(toolResult.data)) {
+    return;
   }
+  const data = toolResult.data as Record<string, any>;
 
-  for (const stepId of SESSION_STEP_IDS) {
-    if (data[stepId]) {
-      const sessions = parseSessions(data[stepId]);
-      result.sessions.push(...sessions);
-      result.candidateSessionIds.push(...sessions.map(s => s.session_id));
-    }
-  }
-
-  // Phase 3: Check for new entity types
-  for (const stepId of CPU_SLICE_STEP_IDS) {
-    if (data[stepId]) {
-      const slices = parseCpuSlices(data[stepId]);
-      result.cpuSlices.push(...slices);
-    }
-  }
-
-  for (const stepId of BINDER_STEP_IDS) {
-    if (data[stepId]) {
-      const binders = parseBinders(data[stepId]);
-      result.binders.push(...binders);
-    }
-  }
-
-  for (const stepId of GC_STEP_IDS) {
-    if (data[stepId]) {
-      const gcs = parseGcs(data[stepId]);
-      result.gcs.push(...gcs);
-    }
-  }
-
-  for (const stepId of MEMORY_STEP_IDS) {
-    if (data[stepId]) {
-      const memories = parseMemories(data[stepId]);
-      result.memories.push(...memories);
-    }
+  // Exact step id matching for direct tool result payloads
+  for (const [stepId, payload] of Object.entries(data)) {
+    const kind = resolveCaptureEntityKindByStepId(stepId, 'exact');
+    if (!kind) continue;
+    applyCaptureByKind(kind, payload, result);
   }
 
   // Also check dataEnvelopes if present
@@ -268,39 +223,46 @@ function captureFromToolResult(toolResult: AgentToolResult, result: CapturedEnti
     for (const envelope of toolResult.dataEnvelopes) {
       const stepId = envelope.meta?.stepId || '';
       const envelopeData = envelope.data;
+      const kind = resolveCaptureEntityKindByStepId(stepId, 'contains');
+      if (!kind) continue;
+      applyCaptureByKind(kind, envelopeData, result);
+    }
+  }
+}
 
-      if (FRAME_STEP_IDS.some(id => stepId.includes(id))) {
-        const frames = parseFrames(envelopeData);
-        result.frames.push(...frames);
-        result.candidateFrameIds.push(...frames.map(f => f.frame_id));
-      }
-
-      if (SESSION_STEP_IDS.some(id => stepId.includes(id))) {
-        const sessions = parseSessions(envelopeData);
-        result.sessions.push(...sessions);
-        result.candidateSessionIds.push(...sessions.map(s => s.session_id));
-      }
-
-      // Phase 3: New entity types in envelopes
-      if (CPU_SLICE_STEP_IDS.some(id => stepId.includes(id))) {
-        const slices = parseCpuSlices(envelopeData);
-        result.cpuSlices.push(...slices);
-      }
-
-      if (BINDER_STEP_IDS.some(id => stepId.includes(id))) {
-        const binders = parseBinders(envelopeData);
-        result.binders.push(...binders);
-      }
-
-      if (GC_STEP_IDS.some(id => stepId.includes(id))) {
-        const gcs = parseGcs(envelopeData);
-        result.gcs.push(...gcs);
-      }
-
-      if (MEMORY_STEP_IDS.some(id => stepId.includes(id))) {
-        const memories = parseMemories(envelopeData);
-        result.memories.push(...memories);
-      }
+function applyCaptureByKind(kind: EntityCaptureKind, payload: any, result: CapturedEntities): void {
+  switch (kind) {
+    case 'frame': {
+      const frames = parseFrames(payload);
+      result.frames.push(...frames);
+      result.candidateFrameIds.push(...frames.map(f => f.frame_id));
+      break;
+    }
+    case 'session': {
+      const sessions = parseSessions(payload);
+      result.sessions.push(...sessions);
+      result.candidateSessionIds.push(...sessions.map(s => s.session_id));
+      break;
+    }
+    case 'cpu_slice': {
+      const slices = parseCpuSlices(payload);
+      result.cpuSlices.push(...slices);
+      break;
+    }
+    case 'binder': {
+      const binders = parseBinders(payload);
+      result.binders.push(...binders);
+      break;
+    }
+    case 'gc': {
+      const gcs = parseGcs(payload);
+      result.gcs.push(...gcs);
+      break;
+    }
+    case 'memory': {
+      const memories = parseMemories(payload);
+      result.memories.push(...memories);
+      break;
     }
   }
 }
