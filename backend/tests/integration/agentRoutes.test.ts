@@ -173,9 +173,7 @@ describe('Agent Routes - Input Validation', () => {
         .post('/api/agent/resume')
         .send({ sessionId: 'non-existent-session' });
 
-      // In environments where better-sqlite3 native binding is unavailable,
-      // persistence lookup can fail with 500 before "not found" handling.
-      expect([404, 500]).toContain(response.status);
+      expect(response.status).toBe(404);
       expect(response.body.success).toBe(false);
     });
   });
@@ -244,12 +242,9 @@ describe('Agent Routes - Session Logs', () => {
       const response = await request(app)
         .get('/api/agent/logs/test-session-xyz');
 
-      // May return 200 with empty array or 500 if file operations fail
-      expect([200, 500]).toContain(response.status);
-      if (response.status === 200) {
-        expect(response.body.success).toBe(true);
-        expect(Array.isArray(response.body.logs)).toBe(true);
-      }
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      expect(Array.isArray(response.body.logs)).toBe(true);
     });
   });
 
@@ -258,13 +253,10 @@ describe('Agent Routes - Session Logs', () => {
       const response = await request(app)
         .get('/api/agent/logs/test-session-xyz/errors');
 
-      // May return 200 with empty arrays or 500 if file operations fail
-      expect([200, 500]).toContain(response.status);
-      if (response.status === 200) {
-        expect(response.body.success).toBe(true);
-        expect(typeof response.body.errorCount).toBe('number');
-        expect(typeof response.body.warnCount).toBe('number');
-      }
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      expect(typeof response.body.errorCount).toBe('number');
+      expect(typeof response.body.warnCount).toBe('number');
     });
   });
 
@@ -297,35 +289,22 @@ describe('Agent Routes - Session Logs', () => {
 
 describe('Agent Routes - Session Lifecycle', () => {
   let app: ReturnType<typeof createTestApp>;
-  let traceId: string | null = null;
+  let traceId: string;
 
   // Use a smaller trace for faster tests
   const TEST_TRACE = 'app_aosp_scrolling_light.pftrace';
 
   beforeAll(async () => {
     app = createTestApp();
-
-    // Load test trace
-    try {
-      traceId = await loadTestTrace(TEST_TRACE);
-      console.log(`[Test] Loaded trace: ${traceId}`);
-    } catch (error) {
-      console.warn(`[Test] Could not load trace: ${error}`);
-    }
+    traceId = await loadTestTrace(TEST_TRACE);
+    console.log(`[Test] Loaded trace: ${traceId}`);
   }, 120000);
 
   afterAll(async () => {
-    if (traceId) {
-      await cleanupTrace(traceId);
-    }
+    await cleanupTrace(traceId);
   });
 
   it('should reject requested sessionId when session does not exist', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
     const response = await request(app)
       .post('/api/agent/analyze')
       .send({
@@ -334,23 +313,12 @@ describe('Agent Routes - Session Lifecycle', () => {
         sessionId: 'agent-missing-session-id',
       });
 
-    // In environments where better-sqlite3 native binding is unavailable,
-    // persistence lookup can fail with 503 before session-not-found handling.
-    expect([404, 503]).toContain(response.status);
+    expect(response.status).toBe(404);
     expect(response.body.success).toBe(false);
-    if (response.status === 404) {
-      expect(response.body.code).toBe('SESSION_NOT_FOUND');
-    } else {
-      expect(response.body.code).toBe('SESSION_PERSISTENCE_UNAVAILABLE');
-    }
+    expect(response.body.code).toBe('SESSION_NOT_FOUND');
   });
 
   it('should create, query status, and delete session', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
     // 1. Create session
     const createResponse = await request(app)
       .post('/api/agent/analyze')
@@ -403,11 +371,6 @@ describe('Agent Routes - Session Lifecycle', () => {
   }, 60000);
 
   it('should handle respond endpoint correctly for running session', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
     // Create session
     const createResponse = await request(app)
       .post('/api/agent/analyze')
@@ -417,7 +380,10 @@ describe('Agent Routes - Session Lifecycle', () => {
         options: { maxIterations: 1 },
       });
 
+    expect(createResponse.status).toBe(200);
+    expect(createResponse.body.success).toBe(true);
     const sessionId = createResponse.body.sessionId;
+    expect(typeof sessionId).toBe('string');
 
     // Try to respond with invalid action
     const invalidResponse = await request(app)
@@ -428,14 +394,13 @@ describe('Agent Routes - Session Lifecycle', () => {
     // Session state check happens before action validation
     expect(invalidResponse.body.error).toBeDefined();
 
-    // Try to respond when not awaiting user (should fail)
-    await wait(200);
+    // Try to respond while the session is still running/pending (should fail)
     const respondResponse = await request(app)
       .post(`/api/agent/${sessionId}/respond`)
       .send({ action: 'continue' });
 
-    // Either succeeds or fails with "not awaiting user"
-    expect([200, 400]).toContain(respondResponse.status);
+    expect(respondResponse.status).toBe(400);
+    expect(String(respondResponse.body.error || '')).toContain('not awaiting user input');
 
     // Cleanup
     await request(app).delete(`/api/agent/${sessionId}`);

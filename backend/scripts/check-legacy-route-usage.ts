@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 
-type LegacyEndpoint = '/api/ai' | '/api/auto-analysis';
+type LegacyEndpoint = '/api/ai' | '/api/auto-analysis' | '/chat';
 
 interface EndpointPattern {
   endpoint: LegacyEndpoint;
@@ -21,6 +21,7 @@ const repoRoot = path.resolve(__dirname, '../..');
 const endpointPatterns: EndpointPattern[] = [
   { endpoint: '/api/ai', regex: /\/api\/ai(?:\/|\b)/ },
   { endpoint: '/api/auto-analysis', regex: /\/api\/auto-analysis(?:\/|\b)/ },
+  { endpoint: '/chat', regex: /['"`]\/chat(?:\/|\b)/ },
 ];
 
 const allowlist: Record<LegacyEndpoint, Set<string>> = {
@@ -39,10 +40,33 @@ const allowlist: Record<LegacyEndpoint, Set<string>> = {
     'backend/src/index.ts',
     'backend/src/routes/autoAnalysis.ts',
   ]),
+  '/chat': new Set([
+    'README.md',
+    'backend/scripts/check-legacy-route-usage.ts',
+    'backend/src/config/index.ts',
+    'backend/src/index.ts',
+    'backend/src/routes/aiChatRoutes.ts',
+  ]),
 };
 
 function toRepoRelativePath(absolutePath: string): string {
   return path.relative(repoRoot, absolutePath).split(path.sep).join('/');
+}
+
+function shouldScanPath(relativePath: string): boolean {
+  if (relativePath.startsWith('backend/src/')) {
+    return /\.(ts|tsx|js|jsx)$/.test(relativePath);
+  }
+
+  if (relativePath.startsWith('backend/scripts/')) {
+    return /\.(ts|tsx|js)$/.test(relativePath);
+  }
+
+  if (relativePath === 'README.md') {
+    return true;
+  }
+
+  return false;
 }
 
 function collectCandidateFiles(): string[] {
@@ -83,6 +107,11 @@ function collectCandidateFiles(): string[] {
 }
 
 function scanFile(absolutePath: string): Violation[] {
+  const relativePath = toRepoRelativePath(absolutePath);
+  if (!shouldScanPath(relativePath)) {
+    return [];
+  }
+
   let content: string;
   try {
     content = fs.readFileSync(absolutePath, 'utf-8');
@@ -94,7 +123,6 @@ function scanFile(absolutePath: string): Violation[] {
     return [];
   }
 
-  const relativePath = toRepoRelativePath(absolutePath);
   const lines = content.split(/\r?\n/);
   const violations: Violation[] = [];
 

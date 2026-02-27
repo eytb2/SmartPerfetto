@@ -94,6 +94,7 @@ export class SkillAnalysisAdapter {
   private initialized = false;
   private eventHandler?: (event: SkillEvent) => void;
   private currentEventCollector?: SkillEventCollector;
+  private aiService: any;
 
   constructor(
     traceProcessor: TraceProcessorService,
@@ -114,7 +115,7 @@ export class SkillAnalysisAdapter {
    * 设置 AI 服务（用于 ai_decision 和 ai_summary 步骤）
    */
   setAIService(aiService: any): void {
-    // SkillExecutor 需要支持 setAIService 方法
+    this.aiService = aiService;
     (this.executor as any).aiService = aiService;
   }
 
@@ -123,7 +124,6 @@ export class SkillAnalysisAdapter {
    */
   setEventHandler(handler: (event: SkillEvent) => void): void {
     this.eventHandler = handler;
-    (this.executor as any).eventEmitter = handler;
   }
 
   /**
@@ -299,15 +299,16 @@ export class SkillAnalysisAdapter {
     const eventCollector = createEventCollector();
     const totalSteps = skill.steps?.length || 1;
     eventCollector.start(targetSkillId, totalSteps);
+    const externalEventHandler = this.eventHandler;
 
     // 设置事件处理器（同时转发到外部处理器和收集器）
     const combinedHandler = (event: SkillEvent) => {
       eventCollector.addEvent(event);
-      if (this.eventHandler) {
-        this.eventHandler(event);
+      if (externalEventHandler) {
+        externalEventHandler(event);
       }
     };
-    (this.executor as any).eventEmitter = combinedHandler;
+    const requestExecutor = this.createRequestScopedExecutor(combinedHandler);
 
     // 检测是否使用分层输出
     const useLayeredOutput = this.hasLayeredOutput(skill);
@@ -320,10 +321,15 @@ export class SkillAnalysisAdapter {
       // 使用分层输出模式（executeCompositeSkill）
       console.log('[SkillAnalysisAdapter] Using layered output mode for skill', targetSkillId);
       try {
-        layeredResult = await (this.executor as any).executeCompositeSkill(
+        layeredResult = await (requestExecutor as any).executeCompositeSkill(
           skill,
           params,
-          { traceId, vendor: vendorResult.vendor }
+          {
+            traceId,
+            inherited: {
+              vendor: vendorResult.vendor,
+            },
+          }
         );
         console.log('[SkillAnalysisAdapter] executeCompositeSkill completed. layeredResult:', JSON.stringify({
           hasLayers: !!layeredResult?.layers,
@@ -368,7 +374,7 @@ export class SkillAnalysisAdapter {
     } else {
       // 使用传统输出模式（execute）
       console.log('[SkillAnalysisAdapter] Using traditional output mode for skill', targetSkillId);
-      result = await this.executor.execute(
+      result = await requestExecutor.execute(
         targetSkillId,
         traceId,
         params,
@@ -871,6 +877,18 @@ export class SkillAnalysisAdapter {
       defaultExpanded: result.defaultExpanded,
       metadata: result.metadata
     };
+  }
+
+  private createRequestScopedExecutor(
+    eventHandler?: (event: SkillEvent) => void
+  ): SkillExecutor {
+    const requestExecutor = createSkillExecutor(
+      this.traceProcessor,
+      this.aiService,
+      eventHandler
+    );
+    requestExecutor.registerSkills(skillRegistry.getAllSkills());
+    return requestExecutor;
   }
 }
 

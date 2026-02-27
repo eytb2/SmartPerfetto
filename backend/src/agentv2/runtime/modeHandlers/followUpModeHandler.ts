@@ -76,6 +76,26 @@ export class FollowUpModeHandler implements RuntimeModeHandler {
     this.resultFinalizer.handleExecutorIntervention(sessionId, executorResult);
     this.resultFinalizer.applyEntityWriteback(runtimeContext.sessionContext, executorResult);
 
+    if (executorResult.pausedForIntervention) {
+      emitter.emitUpdate('progress', {
+        phase: 'paused_for_intervention',
+        message: '分析已暂停，等待用户决策后继续',
+      });
+
+      return {
+        sessionId,
+        success: true,
+        findings: executorResult.findings,
+        hypotheses: Array.from(sharedContext.hypotheses.values()),
+        conclusion: '分析已暂停，等待用户决策后继续。',
+        confidence: executorResult.confidence,
+        rounds: executorResult.rounds,
+        totalDurationMs: Date.now() - startTime,
+        pausedForIntervention: true,
+        interventionRequest: executorResult.interventionRequest,
+      };
+    }
+
     const previousFindings = runtimeContext.sessionContext.getAllFindings();
     const mergedFindings = runtimeContext.decisionContext.mode === 'extend'
       ? this.incrementalAnalyzer.mergeFindings(previousFindings, executorResult.findings)

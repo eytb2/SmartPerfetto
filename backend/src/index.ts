@@ -86,7 +86,6 @@ app.get('/debug', (req, res) => {
 app.use('/api/sql', sqlRoutes);
 app.use('/api/trace', traceRoutes);
 app.use('/api/traces', simpleTraceRoutes);
-app.use('/chat', aiChatRoutes);
 app.use('/api/perfetto', perfettoLocalRoutes);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/perfetto-sql', perfettoSqlRoutes);
@@ -96,6 +95,20 @@ app.use('/api/skills', skillRoutes);
 app.use('/api/admin', skillAdminRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/agent', agentRoutes);
+
+if (featureFlagsConfig.enableLegacyChatProxyRoutes) {
+  app.use('/chat', aiChatRoutes);
+} else {
+  app.use(
+    '/chat',
+    createLegacyRouteDeprecationRouter({
+      legacyBasePath: '/chat',
+      replacementMethod: 'POST',
+      replacementPath: '/api/agent/analyze',
+      migrationHint: 'Legacy chat proxy routes are disabled by default. Use POST /api/agent/analyze.',
+    })
+  );
+}
 
 if (featureFlagsConfig.enableLegacyAiRoutes) {
   app.use('/api/ai', loadLegacyRouter('./routes/advancedAIRoutes'));

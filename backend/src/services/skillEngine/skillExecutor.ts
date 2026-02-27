@@ -41,6 +41,7 @@ import {
   displayResultToEnvelope,
   layeredResultToEnvelopes,
 } from '../../types/dataContract';
+import vm from 'node:vm';
 
 // =============================================================================
 // Layered Result Types
@@ -121,6 +122,9 @@ export function normalizeLayer(layer: string | undefined): DisplayLayer | undefi
 
 class ExpressionEvaluator {
   private static warnedConditionMessages = new Set<string>();
+  private static readonly EVAL_TIMEOUT_MS = 30;
+  private static readonly UNSAFE_EXPRESSION_PATTERN =
+    /\b(?:process|require|globalThis|global|module|exports|Function|eval|constructor|import)\b/;
 
   private static warnConditionOnce(reason: string, condition: string, extra?: string): void {
     const key = `${reason}::${condition}`;
@@ -130,6 +134,59 @@ class ExpressionEvaluator {
       'ExpressionEvaluator',
       `${reason}: ${condition}${extra ? ` (${extra})` : ''}`
     );
+  }
+
+  private static evaluateInSandbox(
+    expression: string,
+    scope: Record<string, any>,
+    options?: { suppressErrorLog?: boolean }
+  ): any {
+    const expr = String(expression || '').trim();
+    if (!expr) {
+      return undefined;
+    }
+
+    if (this.UNSAFE_EXPRESSION_PATTERN.test(expr)) {
+      if (!options?.suppressErrorLog) {
+        logger.warn('ExpressionEvaluator', `Blocked unsafe expression: ${expr}`);
+      }
+      return undefined;
+    }
+
+    try {
+      const sandbox = Object.assign(Object.create(null), scope, {
+        Math,
+        JSON,
+        Number,
+        String,
+        Boolean,
+        Array,
+        Object,
+      });
+      const vmContext = vm.createContext(sandbox, {
+        codeGeneration: {
+          strings: false,
+          wasm: false,
+        },
+      });
+      const script = new vm.Script(expr);
+      return script.runInContext(vmContext, {
+        timeout: this.EVAL_TIMEOUT_MS,
+      });
+    } catch (e: any) {
+      if (!options?.suppressErrorLog) {
+        logger.debug('ExpressionEvaluator', `Sandbox evaluation failed: ${expr} (${e.message})`);
+      }
+      return undefined;
+    }
+  }
+
+  static evaluateInScope(
+    expression: string,
+    scope: Record<string, any>,
+    options?: { suppressErrorLog?: boolean }
+  ): any {
+    return this.evaluateInSandbox(expression, scope, options);
   }
 
   /**
@@ -212,8 +269,8 @@ class ExpressionEvaluator {
     // 如果是简单的比较表达式，尝试求值
     if (/^[\d\.\s\+\-\*\/\>\<\=\!\&\|]+$/.test(result)) {
       try {
-        // 安全地执行简单数学/比较表达式
-        return new Function(`return ${result}`)();
+        const evaluated = this.evaluateInSandbox(`(${result})`, {}, { suppressErrorLog: true });
+        return evaluated === undefined ? result : evaluated;
       } catch {
         return result;
       }
@@ -268,18 +325,7 @@ class ExpressionEvaluator {
       // Debug log removed for cleaner output
 
       // 构建并执行函数
-      const varNames = Object.keys(scope);
-      const varValues = Object.values(scope);
-
-      if (varNames.length === 0) {
-        // 没有变量，直接求值（纯表达式如 true, false, 数字比较）
-        return new Function(`return ${expr}`)();
-      }
-
-      const fn = new Function(...varNames, `return ${expr}`);
-      const result = fn(...varValues);
-
-      return result;
+      return this.evaluateInSandbox(`(${expr})`, scope, options);
     } catch (e: any) {
       if (!options?.suppressErrorLog) {
         logger.debug('ExpressionEvaluator', `JS expression failed: ${expr} (${e.message})`);
@@ -1436,11 +1482,10 @@ export class SkillExecutor {
           aiSummary = stepResult.data.summary;
         }
       } else {
-        context.results[step.id] = stepResult;
-        const isOptional = Boolean((step as any).optional);
-        if (!isOptional && !blockingError) {
-          blockingError = `${step.id}: ${stepResult.error || 'Step failed'}`;
-        }
+        logger.warn(
+          'SkillExecutor',
+          `Skipping failed step ${step.id} in skill ${skillId}: ${stepResult.error || 'Step failed'}`
+        );
       }
     }
 
@@ -1708,19 +1753,18 @@ export class SkillExecutor {
       const conditionStr = (step as any).condition;
       const conditionResult = ExpressionEvaluator.evaluateCondition(conditionStr, context);
       if (!conditionResult) {
-        const isOptional = Boolean((step as any).optional);
         this.emit({
           type: 'step_completed',
           skillId: parentSkillId,
           stepId: step.id,
-          data: { skipped: true, reason: 'condition_not_met', optional: isOptional },
+          data: { skipped: true, reason: 'condition_not_met', optional: Boolean((step as any).optional) },
         });
         return {
           stepId: step.id,
           stepType: step.type,
-          success: isOptional,
-          data: isOptional ? [] : undefined,
-          error: isOptional ? undefined : 'Condition not met',
+          success: true,
+          data: [],
+          error: 'Condition not met',
           executionTimeMs: Date.now() - startTime,
         };
       }
@@ -2185,15 +2229,19 @@ export class SkillExecutor {
 
     // 如果没有匹配的规则且配置了 AI 辅助，调用 AI
     if (diagnostics.length === 0 && step.ai_assist && step.fallback && this.aiService) {
-      const aiResult = await this.callAI(step.fallback.prompt, context);
-      if (aiResult) {
-        diagnostics.push({
-          id: `${step.id}_ai`,
-          diagnosis: aiResult,
-          confidence: 0.6,
-          severity: 'info',
-          source: 'ai',
-        });
+      try {
+        const aiResult = await this.callAI(step.fallback.prompt, context);
+        if (aiResult) {
+          diagnostics.push({
+            id: `${step.id}_ai`,
+            diagnosis: aiResult,
+            confidence: 0.6,
+            severity: 'info',
+            source: 'ai',
+          });
+        }
+      } catch (error: any) {
+        logger.warn('SkillExecutor', `AI diagnostic fallback failed for step ${step.id}: ${error?.message || error}`);
       }
     }
 
@@ -2373,14 +2421,36 @@ export class SkillExecutor {
       data: { prompt },
     });
 
-    const response = await this.callAI(prompt, context, 'evaluation');
-    const normalizedDecision = this.extractStructuredAIField(response, 'decision');
+    let normalizedDecision = '';
+    let rawResponse = '';
+    try {
+      rawResponse = await this.callAI(prompt, context, 'evaluation');
+      normalizedDecision = this.extractStructuredAIField(rawResponse, 'decision');
+    } catch (error: any) {
+      return {
+        stepId: step.id,
+        stepType: 'ai_decision',
+        success: false,
+        error: error?.message || 'AI decision step failed',
+        executionTimeMs: Date.now() - startTime,
+      };
+    }
+
+    if (!normalizedDecision || !normalizedDecision.trim()) {
+      return {
+        stepId: step.id,
+        stepType: 'ai_decision',
+        success: false,
+        error: 'AI decision returned empty response',
+        executionTimeMs: Date.now() - startTime,
+      };
+    }
 
     this.emit({
       type: 'ai_response',
       skillId: '',
       stepId: step.id,
-      data: { response: normalizedDecision, rawResponse: response },
+      data: { response: normalizedDecision, rawResponse },
     });
 
     return {
@@ -2424,14 +2494,36 @@ export class SkillExecutor {
       data: { prompt },
     });
 
-    const response = await this.callAI(prompt, context, 'synthesis');
-    const normalizedSummary = this.extractStructuredAIField(response, 'summary');
+    let normalizedSummary = '';
+    let rawResponse = '';
+    try {
+      rawResponse = await this.callAI(prompt, context, 'synthesis');
+      normalizedSummary = this.extractStructuredAIField(rawResponse, 'summary');
+    } catch (error: any) {
+      return {
+        stepId: step.id,
+        stepType: 'ai_summary',
+        success: false,
+        error: error?.message || 'AI summary step failed',
+        executionTimeMs: Date.now() - startTime,
+      };
+    }
+
+    if (!normalizedSummary || !normalizedSummary.trim()) {
+      return {
+        stepId: step.id,
+        stepType: 'ai_summary',
+        success: false,
+        error: 'AI summary returned empty response',
+        executionTimeMs: Date.now() - startTime,
+      };
+    }
 
     this.emit({
       type: 'ai_response',
       skillId: '',
       stepId: step.id,
-      data: { response: normalizedSummary, rawResponse: response },
+      data: { response: normalizedSummary, rawResponse },
     });
 
     return {
@@ -2495,22 +2587,30 @@ export class SkillExecutor {
    */
   private async callAI(prompt: string, _context: SkillExecutionContext, taskType: any = 'general'): Promise<string> {
     if (!this.aiService) {
-      return '';
+      throw new Error('AI service not available');
     }
 
     const safePrompt = redactTextForLLM(prompt).text;
     try {
       if (typeof this.aiService.chat === 'function') {
-        return await this.aiService.chat(safePrompt);
+        const response = await this.aiService.chat(safePrompt);
+        if (!response || !String(response).trim()) {
+          throw new Error('AI returned empty response');
+        }
+        return response;
       }
       if (typeof this.aiService.callWithFallback === 'function') {
         const result = await this.aiService.callWithFallback(safePrompt, taskType, { temperature: 0 });
-        return result?.response || result?.content || '';
+        const response = result?.response || result?.content || '';
+        if (!response || !String(response).trim()) {
+          throw new Error('AI returned empty response');
+        }
+        return response;
       }
       throw new Error('AI service does not implement chat');
     } catch (error: any) {
       console.error('[SkillExecutor] AI call failed:', error.message);
-      return '';
+      throw error;
     }
   }
 
@@ -2800,9 +2900,14 @@ export class SkillExecutor {
       const expr = String(condition || '').trim();
       if (!expr) return true;
       try {
-        // YAML-defined expressions are trusted (skill author controlled).
-        const fn = new Function('ctx', `with (ctx) { return (${expr}); }`);
-        return Boolean(fn(rowCtx));
+        const scope = {
+          ...rowCtx,
+          ctx: rowCtx,
+        };
+        const evaluated = ExpressionEvaluator.evaluateInScope(`(${expr})`, scope, {
+          suppressErrorLog: true,
+        });
+        return Boolean(evaluated);
       } catch {
         return false;
       }

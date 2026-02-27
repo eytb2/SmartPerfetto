@@ -158,6 +158,15 @@ export interface AnalysisResult {
   confidence: number;
   rounds: number;
   totalDurationMs: number;
+  /**
+   * Analysis was intentionally paused waiting for user intervention.
+   * When true, the caller should keep the session in awaiting_user state.
+   */
+  pausedForIntervention?: boolean;
+  /**
+   * Intervention details to surface to the caller/UI.
+   */
+  interventionRequest?: InterventionRequest;
 }
 
 // =============================================================================

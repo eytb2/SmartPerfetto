@@ -12,7 +12,7 @@
 - 统一入口：`/api/agent/*`
 - 统一编排：`AgentRuntime`
 - 统一输出：SSE 事件流 + 结构化 DataEnvelope
-- 兼容层隔离：`/api/ai/*`、`/api/auto-analysis/*` 默认返回 `410 LEGACY_ROUTE_DEPRECATED`
+- 兼容层隔离：`/api/ai/*`、`/api/auto-analysis/*`、`/chat/*` 默认返回 `410 LEGACY_ROUTE_DEPRECATED`
 
 ---
 
@@ -193,6 +193,7 @@ SSE 常见事件：
 
 - `/api/ai/*` -> `410 LEGACY_ROUTE_DEPRECATED`
 - `/api/auto-analysis/*` -> `410 LEGACY_ROUTE_DEPRECATED`
+- `/chat/*` -> `410 LEGACY_ROUTE_DEPRECATED`
 
 响应中会给出替代入口：`POST /api/agent/analyze`。
 
@@ -200,6 +201,7 @@ SSE 常见事件：
 
 - `FEATURE_ENABLE_LEGACY_AI_ROUTES=true`
 - `FEATURE_ENABLE_LEGACY_AUTO_ANALYSIS_ROUTES=true`
+- `FEATURE_ENABLE_LEGACY_CHAT_PROXY_ROUTES=true`
 
 默认关闭，且 legacy router 仅在开启时运行时加载。
 
@@ -209,7 +211,7 @@ CI 会执行：
 
 - `npm run check:legacy-routes`
 
-用于阻止新代码继续引入 `/api/ai`、`/api/auto-analysis` 调用。
+用于阻止新代码继续引入 `/api/ai`、`/api/auto-analysis`、`/chat` 调用。
 
 ---
 

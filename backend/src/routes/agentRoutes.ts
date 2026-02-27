@@ -128,6 +128,7 @@ interface AnalysisSession {
     sourceEventType?: string;
   }>;
   activeRunPromise?: Promise<void>;
+  lastRunOptions?: Record<string, any>;
 }
 const sessions = new Map<string, AnalysisSession>();
 
@@ -353,7 +354,7 @@ function persistSessionStateForRecovery(params: {
   traceId: string;
   query: string;
   session: AnalysisSession;
-  outcome: 'completed' | 'failed';
+  outcome: 'completed' | 'failed' | 'awaiting_user';
 }): void {
   const { sessionId, traceId, query, session, outcome } = params;
   const { logger } = session;
@@ -828,40 +829,24 @@ router.post('/analyze', async (req, res) => {
       });
     }
 
-    if (sessionForRun.activeRunPromise) {
-      return res.status(409).json({
-        success: false,
-        error: `Session is busy (status: ${sessionForRun.status})`,
-        code: 'SESSION_BUSY',
-        status: sessionForRun.status,
-      });
-    }
-
-    const analysisPromise = runAgentDrivenAnalysis(sessionId, query, traceId, {
+    const runRequest = startAgentDrivenAnalysisRun({
+      sessionId,
+      query,
+      traceId,
+      options: {
       ...options,
       blockedStrategyIds,
       traceProcessorService,
+      },
     });
-    sessionForRun.activeRunPromise = analysisPromise;
-
-    analysisPromise.catch((error) => {
-      const session = sessions.get(sessionId);
-      if (session) {
-        session.logger.error('AgentRoutes', 'Agent-driven analysis failed', error);
-        session.status = 'failed';
-        session.error = error.message;
-        broadcastToAgentDrivenClients(sessionId, {
-          type: 'error',
-          content: { message: error.message },
-          timestamp: Date.now(),
-        });
-      }
-    }).finally(() => {
-      const session = sessions.get(sessionId);
-      if (session && session.activeRunPromise === analysisPromise) {
-        session.activeRunPromise = undefined;
-      }
-    });
+    if (!runRequest.ok) {
+      return res.status(runRequest.code === 'SESSION_BUSY' ? 409 : 500).json({
+        success: false,
+        error: runRequest.error,
+        code: runRequest.code,
+        status: runRequest.status,
+      });
+    }
 
     res.json({
       success: true,
@@ -1239,11 +1224,36 @@ router.post('/:sessionId/respond', async (req, res) => {
   if (directive.action === 'abort') {
     session.status = 'failed';
     session.error = 'Aborted by user';
-  } else {
-    session.status = 'running';
-    session.error = undefined;
+    return res.json({ success: true, sessionId, status: session.status, directive });
   }
 
+  const traceProcessorService = getTraceProcessorService();
+  const resumeOptions = {
+    ...(session.lastRunOptions || {}),
+    traceProcessorService,
+    interventionDirective: directive,
+  };
+  const resumeQuery = buildResumeQueryFromDirective(session.query, directive);
+  const runRequest = startAgentDrivenAnalysisRun({
+    sessionId,
+    query: resumeQuery,
+    traceId: session.traceId,
+    options: resumeOptions,
+  });
+
+  if (!runRequest.ok) {
+    session.status = 'awaiting_user';
+    return res.status(runRequest.code === 'SESSION_BUSY' ? 409 : 500).json({
+      success: false,
+      error: runRequest.error,
+      code: runRequest.code,
+      directive,
+      status: runRequest.status,
+    });
+  }
+
+  session.status = 'running';
+  session.error = undefined;
   return res.json({ success: true, sessionId, status: session.status, directive });
 });
 
@@ -1346,9 +1356,38 @@ router.post('/:sessionId/intervene', async (req, res) => {
     if (directive.action === 'abort') {
       session.status = 'failed';
       session.error = 'Aborted by user intervention';
-    } else if (session.status === 'awaiting_user') {
-      session.status = 'running';
+      return res.json({
+        success: true,
+        sessionId,
+        directive,
+      });
     }
+
+    const traceProcessorService = getTraceProcessorService();
+    const resumeOptions = {
+      ...(session.lastRunOptions || {}),
+      traceProcessorService,
+      interventionDirective: directive,
+    };
+    const resumeQuery = buildResumeQueryFromDirective(session.query, directive);
+    const runRequest = startAgentDrivenAnalysisRun({
+      sessionId,
+      query: resumeQuery,
+      traceId: session.traceId,
+      options: resumeOptions,
+    });
+    if (!runRequest.ok) {
+      session.status = 'awaiting_user';
+      return res.status(runRequest.code === 'SESSION_BUSY' ? 409 : 500).json({
+        success: false,
+        error: runRequest.error,
+        code: runRequest.code,
+        status: runRequest.status,
+        directive,
+      });
+    }
+    session.status = 'running';
+    session.error = undefined;
 
     return res.json({
       success: true,
@@ -3011,6 +3050,84 @@ router.get('/:sessionId/report', (req, res) => {
 // Agent-Driven Analysis Helper Functions (Phase 2-4)
 // ============================================================================
 
+function buildResumeQueryFromDirective(baseQuery: string, directive: AnalysisDirective): string {
+  const trimmedBase = String(baseQuery || '').trim();
+  if (directive.action !== 'focus') {
+    return trimmedBase;
+  }
+
+  const focusDirections = (directive.focusDirections || [])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+  const customInput = String(directive.params?.customInput || '').trim();
+
+  if (focusDirections.length === 0 && !customInput) {
+    return trimmedBase;
+  }
+
+  const hintParts: string[] = [];
+  if (focusDirections.length > 0) {
+    hintParts.push(`重点方向: ${focusDirections.join(', ')}`);
+  }
+  if (customInput) {
+    hintParts.push(`用户补充: ${customInput}`);
+  }
+
+  return `${trimmedBase}\n\n[用户干预] ${hintParts.join('；')}`;
+}
+
+function startAgentDrivenAnalysisRun(params: {
+  sessionId: string;
+  query: string;
+  traceId: string;
+  options?: Record<string, any>;
+}): { ok: true } | { ok: false; error: string; code: string; status?: AnalysisSession['status'] } {
+  const { sessionId, query, traceId, options = {} } = params;
+  const session = sessions.get(sessionId);
+  if (!session) {
+    return { ok: false, code: 'SESSION_NOT_FOUND', error: 'Session not found' };
+  }
+
+  if (session.activeRunPromise || session.status === 'running') {
+    return {
+      ok: false,
+      code: 'SESSION_BUSY',
+      error: `Session is busy (status: ${session.status})`,
+      status: session.status,
+    };
+  }
+
+  session.query = query;
+  session.result = undefined;
+  session.error = undefined;
+  session.lastActivityAt = Date.now();
+  session.lastRunOptions = { ...options };
+
+  const analysisPromise = runAgentDrivenAnalysis(sessionId, query, traceId, options);
+  session.activeRunPromise = analysisPromise;
+
+  analysisPromise.catch((error) => {
+    const activeSession = sessions.get(sessionId);
+    if (activeSession) {
+      activeSession.logger.error('AgentRoutes', 'Agent-driven analysis failed', error);
+      activeSession.status = 'failed';
+      activeSession.error = error.message;
+      broadcastToAgentDrivenClients(sessionId, {
+        type: 'error',
+        content: { message: error.message },
+        timestamp: Date.now(),
+      });
+    }
+  }).finally(() => {
+    const activeSession = sessions.get(sessionId);
+    if (activeSession && activeSession.activeRunPromise === analysisPromise) {
+      activeSession.activeRunPromise = undefined;
+    }
+  });
+
+  return { ok: true };
+}
+
 async function runAgentDrivenAnalysis(
   sessionId: string,
   query: string,
@@ -3132,6 +3249,26 @@ async function runAgentDrivenAnalysis(
 
     session.result = result;
     session.hypotheses = result.hypotheses;
+
+    if (result.pausedForIntervention) {
+      session.status = 'awaiting_user';
+
+      logger.info('AgentDrivenAnalysis', 'Analysis paused for user intervention', {
+        confidence: result.confidence,
+        rounds: result.rounds,
+        findingsCount: result.findings.length,
+        interventionType: result.interventionRequest?.type,
+      });
+      persistSessionStateForRecovery({
+        sessionId,
+        traceId,
+        query,
+        session,
+        outcome: 'awaiting_user',
+      });
+      return;
+    }
+
     session.status = result.success ? 'completed' : 'failed';
 
     // Ensure trackEvents/scenes are computed for completed sessions (even without SSE clients)

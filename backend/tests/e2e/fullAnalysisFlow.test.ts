@@ -36,6 +36,9 @@ import { createTestApp, loadTestTrace, cleanupTrace, wait } from '../integration
 // Longer timeout for E2E tests (analysis can take 30-120 seconds)
 const E2E_TIMEOUT = 180000; // 3 minutes
 const SSE_TIMEOUT = 120000; // 2 minutes for SSE collection
+const MAX_AUTO_CONTINUE_ATTEMPTS = 3;
+const TERMINAL_SSE_EVENTS = new Set(['end', 'analysis_completed', 'error', 'intervention_required']);
+const NON_TERMINAL_STATUSES = new Set(['pending', 'running']);
 
 // Test traces
 const SCROLLING_TRACE = 'app_aosp_scrolling_heavy_jank.pftrace';
@@ -81,8 +84,9 @@ async function collectSSEFromUrl(
 ): Promise<SSEEvent[]> {
   const events: SSEEvent[] = [];
   let resolved = false;
+  let requestStream: any;
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const safeResolve = (result: SSEEvent[]) => {
       if (!resolved) {
         resolved = true;
@@ -90,16 +94,26 @@ async function collectSSEFromUrl(
       }
     };
 
+    const safeReject = (error: Error) => {
+      if (!resolved) {
+        resolved = true;
+        reject(error);
+      }
+    };
+
     const timeout = setTimeout(() => {
-      console.log(`[E2E] SSE timeout reached after ${timeoutMs}ms, collected ${events.length} events`);
-      safeResolve(events);
+      console.error(`[E2E] SSE timeout after ${timeoutMs}ms for session ${sessionId}; events=${events.length}`);
+      if (requestStream && typeof (requestStream as any).abort === 'function') {
+        (requestStream as any).abort();
+      }
+      safeReject(new Error(`SSE timeout for session ${sessionId} after ${timeoutMs}ms`));
     }, timeoutMs);
 
-    const req = request(app)
+    requestStream = request(app)
       .get(`/api/agent/${sessionId}/stream`)
       .set('Accept', 'text/event-stream')
       .buffer(false)
-      .parse((res, callback) => {
+      .parse((res: any) => {
         let buffer = '';
         let currentEvent = '';
         let currentData = '';
@@ -124,7 +138,7 @@ async function collectSSEFromUrl(
                 console.log(`[E2E] SSE Event: ${currentEvent}`);
 
                 // Check for terminal events
-                if (currentEvent === 'end' || currentEvent === 'analysis_completed' || currentEvent === 'error') {
+                if (TERMINAL_SSE_EVENTS.has(currentEvent)) {
                   clearTimeout(timeout);
                   setTimeout(() => safeResolve(events), 500); // Give a moment for any final events
                 }
@@ -145,11 +159,16 @@ async function collectSSEFromUrl(
 
         res.on('error', () => {
           clearTimeout(timeout);
-          safeResolve(events);
+          safeReject(new Error(`SSE stream error for session ${sessionId}`));
         });
       });
 
-    req.end();
+    requestStream.end((err: any) => {
+      if (err && !resolved) {
+        clearTimeout(timeout);
+        safeReject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
   });
 }
 
@@ -184,18 +203,44 @@ async function runAnalysisToCompletion(
   activeSessions.add(newSessionId); // Track for cleanup
   console.log(`[E2E] Analysis started, sessionId: ${newSessionId}`);
 
-  // Collect SSE events
-  const events = await collectSSEFromUrl(app, newSessionId, maxWaitMs);
+  const allEvents: SSEEvent[] = [];
 
-  // Get final status
-  const statusResponse = await request(app)
-    .get(`/api/agent/${newSessionId}/status`);
+  for (let attempt = 0; attempt < MAX_AUTO_CONTINUE_ATTEMPTS; attempt++) {
+    const events = await collectSSEFromUrl(app, newSessionId, maxWaitMs);
+    allEvents.push(...events);
 
-  return {
-    sessionId: newSessionId,
-    result: statusResponse.body,
-    events,
-  };
+    const statusResponse = await request(app)
+      .get(`/api/agent/${newSessionId}/status`);
+
+    expect(statusResponse.status).toBe(200);
+    expect(statusResponse.body.success).toBe(true);
+
+    const status = statusResponse.body.status;
+    if (status === 'completed' || status === 'failed') {
+      return {
+        sessionId: newSessionId,
+        result: statusResponse.body,
+        events: allEvents,
+      };
+    }
+
+    if (status === 'awaiting_user') {
+      const resumeResponse = await request(app)
+        .post(`/api/agent/${newSessionId}/respond`)
+        .send({ action: 'continue' });
+      expect(resumeResponse.status).toBe(200);
+      expect(resumeResponse.body.success).toBe(true);
+      continue;
+    }
+
+    if (NON_TERMINAL_STATUSES.has(status)) {
+      throw new Error(`Session ${newSessionId} still in non-terminal status ${status} after SSE collection`);
+    }
+
+    throw new Error(`Session ${newSessionId} ended with unexpected status ${status}`);
+  }
+
+  throw new Error(`Session ${newSessionId} exceeded max auto-continue attempts (${MAX_AUTO_CONTINUE_ATTEMPTS})`);
 }
 
 /**
@@ -328,24 +373,17 @@ function readNumericMetric(
 
 describe('E2E: Full Scrolling Analysis Flow', () => {
   let app: ReturnType<typeof createTestApp>;
-  let traceId: string | null = null;
+  let traceId: string;
 
   beforeAll(async () => {
     app = createTestApp();
-
-    try {
-      traceId = await loadTestTrace(SCROLLING_TRACE);
-      console.log(`[E2E] Loaded test trace: ${traceId}`);
-    } catch (error) {
-      console.warn(`[E2E] Could not load trace: ${error}`);
-    }
+    traceId = await loadTestTrace(SCROLLING_TRACE);
+    console.log(`[E2E] Loaded test trace: ${traceId}`);
   }, E2E_TIMEOUT);
 
   afterAll(async () => {
     await cleanupAllSessions(app);
-    if (traceId) {
-      await cleanupTrace(traceId);
-    }
+    await cleanupTrace(traceId);
   });
 
   afterEach(async () => {
@@ -354,19 +392,13 @@ describe('E2E: Full Scrolling Analysis Flow', () => {
   });
 
   it('should complete a full scrolling analysis with proper SSE events', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
     const { sessionId, result, events } = await runAnalysisToCompletion(
       app,
       traceId,
       '分析滑动性能'
     );
 
-    // Verify analysis started or completed
-    expect(['completed', 'running', 'pending']).toContain(result.status);
+    expect(['completed', 'failed']).toContain(result.status);
     expect(result.sessionId).toBe(sessionId);
     expect(result.traceId).toBe(traceId);
 
@@ -381,6 +413,9 @@ describe('E2E: Full Scrolling Analysis Flow', () => {
 
     // Verify progress events
     expect(hasEvent(events, 'progress')).toBe(true);
+    if (result.status === 'failed') {
+      expect(hasEvent(events, 'error') || hasEvent(events, 'degraded')).toBe(true);
+    }
 
     console.log(`[E2E] Analysis completed with ${events.length} events`);
 
@@ -389,12 +424,7 @@ describe('E2E: Full Scrolling Analysis Flow', () => {
   }, E2E_TIMEOUT);
 
   it('should generate proper DataEnvelopes during analysis', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
-    const { sessionId, events } = await runAnalysisToCompletion(
+    const { sessionId, result, events } = await runAnalysisToCompletion(
       app,
       traceId,
       '分析滑动卡顿'
@@ -402,35 +432,38 @@ describe('E2E: Full Scrolling Analysis Flow', () => {
 
     // Look for data events
     const dataEvents = findEvents(events, 'data');
+    if (result.status === 'failed') {
+      expect(hasEvent(events, 'error') || hasEvent(events, 'degraded')).toBe(true);
+      await cleanupSession(app, sessionId);
+      return;
+    }
+    expect(dataEvents.length).toBeGreaterThan(0);
 
-    // If we have data events, validate their structure
-    if (dataEvents.length > 0) {
-      for (const dataEvent of dataEvents) {
-        // Each data event should have envelope(s)
-        if (dataEvent.data.envelope) {
-          const envelopes = Array.isArray(dataEvent.data.envelope)
-            ? dataEvent.data.envelope
-            : [dataEvent.data.envelope];
+    for (const dataEvent of dataEvents) {
+      // Each data event should have envelope(s)
+      if (dataEvent.data.envelope) {
+        const envelopes = Array.isArray(dataEvent.data.envelope)
+          ? dataEvent.data.envelope
+          : [dataEvent.data.envelope];
 
-          for (const envelope of envelopes) {
-            // Validate DataEnvelope structure
-            expect(envelope.meta).toBeDefined();
-            expect(envelope.meta.type).toBeDefined();
-            expect(envelope.meta.version).toBeDefined();
-            expect(envelope.meta.source).toBeDefined();
+        for (const envelope of envelopes) {
+          // Validate DataEnvelope structure
+          expect(envelope.meta).toBeDefined();
+          expect(envelope.meta.type).toBeDefined();
+          expect(envelope.meta.version).toBeDefined();
+          expect(envelope.meta.source).toBeDefined();
 
-            expect(envelope.display).toBeDefined();
-            expect(envelope.display.layer).toBeDefined();
-            expect(envelope.display.format).toBeDefined();
-            expect(envelope.display.title).toBeDefined();
+          expect(envelope.display).toBeDefined();
+          expect(envelope.display.layer).toBeDefined();
+          expect(envelope.display.format).toBeDefined();
+          expect(envelope.display.title).toBeDefined();
 
-            // Data should be present
-            expect(envelope.data).toBeDefined();
-          }
+          // Data should be present
+          expect(envelope.data).toBeDefined();
         }
       }
-      console.log(`[E2E] Validated ${dataEvents.length} data events with DataEnvelopes`);
     }
+    console.log(`[E2E] Validated ${dataEvents.length} data events with DataEnvelopes`);
 
     // Cleanup
     await cleanupSession(app, sessionId);
@@ -443,44 +476,35 @@ describe('E2E: Full Scrolling Analysis Flow', () => {
 
 describe('E2E: Full Startup Analysis Flow', () => {
   let app: ReturnType<typeof createTestApp>;
-  let traceId: string | null = null;
+  let traceId: string;
 
   beforeAll(async () => {
     app = createTestApp();
-
-    try {
-      traceId = await loadTestTrace(STARTUP_TRACE);
-      console.log(`[E2E] Loaded startup test trace: ${traceId}`);
-    } catch (error) {
-      console.warn(`[E2E] Could not load startup trace: ${error}`);
-    }
+    traceId = await loadTestTrace(STARTUP_TRACE);
+    console.log(`[E2E] Loaded startup test trace: ${traceId}`);
   }, E2E_TIMEOUT);
 
   afterAll(async () => {
     await cleanupAllSessions(app);
-    if (traceId) {
-      await cleanupTrace(traceId);
-    }
+    await cleanupTrace(traceId);
   });
 
   it('should complete a full startup analysis and emit data events', async () => {
-    if (!traceId) {
-      console.warn('Skipping startup test: no trace loaded');
-      return;
-    }
-
     const { sessionId, result, events } = await runAnalysisToCompletion(
       app,
       traceId,
       '分析启动性能'
     );
 
-    expect(['completed', 'running', 'pending']).toContain(result.status);
+    expect(['completed', 'failed']).toContain(result.status);
     expect(result.sessionId).toBe(sessionId);
     expect(result.traceId).toBe(traceId);
     expect(events.length).toBeGreaterThan(0);
     expect(hasEvent(events, 'connected')).toBe(true);
     expect(hasEvent(events, 'progress')).toBe(true);
+    if (result.status === 'failed') {
+      expect(hasEvent(events, 'error') || hasEvent(events, 'degraded')).toBe(true);
+    }
 
     await cleanupSession(app, sessionId);
   }, E2E_TIMEOUT);
@@ -492,32 +516,20 @@ describe('E2E: Full Startup Analysis Flow', () => {
 
 describe('E2E: Multi-Turn Conversation', () => {
   let app: ReturnType<typeof createTestApp>;
-  let traceId: string | null = null;
+  let traceId: string;
 
   beforeAll(async () => {
     app = createTestApp();
-
-    try {
-      traceId = await loadTestTrace(SCROLLING_TRACE);
-      console.log(`[E2E] Loaded test trace for multi-turn: ${traceId}`);
-    } catch (error) {
-      console.warn(`[E2E] Could not load trace: ${error}`);
-    }
+    traceId = await loadTestTrace(SCROLLING_TRACE);
+    console.log(`[E2E] Loaded test trace for multi-turn: ${traceId}`);
   }, E2E_TIMEOUT);
 
   afterAll(async () => {
     await cleanupAllSessions(app);
-    if (traceId) {
-      await cleanupTrace(traceId);
-    }
+    await cleanupTrace(traceId);
   });
 
   it('should handle multi-turn conversation with context preservation', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
     // First turn: Initial analysis
     const turn1 = await runAnalysisToCompletion(
       app,
@@ -553,9 +565,50 @@ describe('E2E: Multi-Turn Conversation', () => {
 
     // Collect events for turn 2
     const turn2SessionId = turn2Response.body.sessionId;
-    const turn2Events = await collectSSEFromUrl(app, turn2SessionId, 60000);
+    const turn2Events: SSEEvent[] = [];
+    let turn2Status: 'completed' | 'failed' | null = null;
+
+    for (let attempt = 0; attempt < MAX_AUTO_CONTINUE_ATTEMPTS; attempt++) {
+      const streamEvents = await collectSSEFromUrl(app, turn2SessionId, 60000);
+      turn2Events.push(...streamEvents);
+
+      const turn2StatusResponse = await request(app)
+        .get(`/api/agent/${turn2SessionId}/status`);
+      expect(turn2StatusResponse.status).toBe(200);
+      expect(turn2StatusResponse.body.success).toBe(true);
+
+      const currentTurn2Status = turn2StatusResponse.body.status;
+      if (currentTurn2Status === 'completed' || currentTurn2Status === 'failed') {
+        turn2Status = currentTurn2Status;
+        break;
+      }
+      if (currentTurn2Status === 'awaiting_user') {
+        const continueResponse = await request(app)
+          .post(`/api/agent/${turn2SessionId}/respond`)
+          .send({ action: 'continue' });
+        expect(continueResponse.status).toBe(200);
+        expect(continueResponse.body.success).toBe(true);
+        continue;
+      }
+
+      if (NON_TERMINAL_STATUSES.has(currentTurn2Status)) {
+        throw new Error(`Turn 2 stayed non-terminal: ${currentTurn2Status}`);
+      }
+      throw new Error(`Turn 2 ended with unexpected status: ${currentTurn2Status}`);
+    }
+
+    expect(turn2Status).not.toBeNull();
 
     expect(turn2Events.length).toBeGreaterThan(0);
+    if (turn2Status === 'failed') {
+      expect(hasEvent(turn2Events, 'error') || hasEvent(turn2Events, 'degraded')).toBe(true);
+      await cleanupSession(app, turn1.sessionId);
+      if (turn2SessionId !== turn1.sessionId) {
+        await cleanupSession(app, turn2SessionId);
+      }
+      return;
+    }
+
     const hasCompleted = hasEvent(turn2Events, 'analysis_completed');
     const hasEnd = hasEvent(turn2Events, 'end');
     expect(hasCompleted || hasEnd).toBe(true);
@@ -594,11 +647,6 @@ describe('E2E: Multi-Turn Conversation', () => {
   }, E2E_TIMEOUT);
 
   it('should handle drill-down queries', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
     // First: run analysis
     const { sessionId, events } = await runAnalysisToCompletion(
       app,
@@ -653,32 +701,20 @@ describe('E2E: Multi-Turn Conversation', () => {
 
 describe('E2E: SSE Event Sequence Validation', () => {
   let app: ReturnType<typeof createTestApp>;
-  let traceId: string | null = null;
+  let traceId: string;
 
   beforeAll(async () => {
     app = createTestApp();
-
-    try {
-      traceId = await loadTestTrace(SCROLLING_TRACE);
-      console.log(`[E2E] Loaded test trace for SSE validation: ${traceId}`);
-    } catch (error) {
-      console.warn(`[E2E] Could not load trace: ${error}`);
-    }
+    traceId = await loadTestTrace(SCROLLING_TRACE);
+    console.log(`[E2E] Loaded test trace for SSE validation: ${traceId}`);
   }, E2E_TIMEOUT);
 
   afterAll(async () => {
     await cleanupAllSessions(app);
-    if (traceId) {
-      await cleanupTrace(traceId);
-    }
+    await cleanupTrace(traceId);
   });
 
   it('should emit events in expected sequence', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
     const { sessionId, events } = await runAnalysisToCompletion(
       app,
       traceId,
@@ -729,11 +765,6 @@ describe('E2E: SSE Event Sequence Validation', () => {
   }, E2E_TIMEOUT);
 
   it('should include required fields in progress events', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
     const { sessionId, events } = await runAnalysisToCompletion(
       app,
       traceId,
@@ -757,11 +788,6 @@ describe('E2E: SSE Event Sequence Validation', () => {
   }, E2E_TIMEOUT);
 
   it('should handle agent dialogue events correctly', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
     const { sessionId, events } = await runAnalysisToCompletion(
       app,
       traceId,
@@ -799,32 +825,20 @@ describe('E2E: SSE Event Sequence Validation', () => {
 
 describe('E2E: Data Integrity Validation', () => {
   let app: ReturnType<typeof createTestApp>;
-  let traceId: string | null = null;
+  let traceId: string;
 
   beforeAll(async () => {
     app = createTestApp();
-
-    try {
-      traceId = await loadTestTrace(SCROLLING_TRACE);
-      console.log(`[E2E] Loaded test trace for data integrity: ${traceId}`);
-    } catch (error) {
-      console.warn(`[E2E] Could not load trace: ${error}`);
-    }
+    traceId = await loadTestTrace(SCROLLING_TRACE);
+    console.log(`[E2E] Loaded test trace for data integrity: ${traceId}`);
   }, E2E_TIMEOUT);
 
   afterAll(async () => {
     await cleanupAllSessions(app);
-    if (traceId) {
-      await cleanupTrace(traceId);
-    }
+    await cleanupTrace(traceId);
   });
 
   it('should generate findings with correct structure', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
     const { sessionId, result, events } = await runAnalysisToCompletion(
       app,
       traceId,
@@ -862,11 +876,6 @@ describe('E2E: Data Integrity Validation', () => {
   }, E2E_TIMEOUT);
 
   it('should validate DataEnvelope data payload', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
     const { sessionId, events } = await runAnalysisToCompletion(
       app,
       traceId,
@@ -908,11 +917,6 @@ describe('E2E: Data Integrity Validation', () => {
   }, E2E_TIMEOUT);
 
   it('should generate conclusion when analysis completes', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
     const { sessionId, events } = await runAnalysisToCompletion(
       app,
       traceId,
@@ -951,12 +955,7 @@ describe('E2E: Data Integrity Validation', () => {
   }, E2E_TIMEOUT);
 
   it('should match golden key metrics and conclusion for heavy jank trace', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
-    const { sessionId, events } = await runAnalysisToCompletion(
+    const { sessionId, result, events } = await runAnalysisToCompletion(
       app,
       traceId,
       '分析滑动卡顿并给出根因',
@@ -965,6 +964,12 @@ describe('E2E: Data Integrity Validation', () => {
     );
 
     const completedEvents = findEvents(events, 'analysis_completed');
+    if (result.status === 'failed') {
+      expect(hasEvent(events, 'error') || hasEvent(events, 'degraded')).toBe(true);
+      await cleanupSession(app, sessionId);
+      return;
+    }
+
     expect(completedEvents.length).toBeGreaterThan(0);
     const completed = completedEvents[0].data?.data || {};
     expect(typeof completed.conclusion).toBe('string');
@@ -1156,31 +1161,19 @@ describe('E2E: Error Handling', () => {
 
 describe('E2E: Performance Validation', () => {
   let app: ReturnType<typeof createTestApp>;
-  let traceId: string | null = null;
+  let traceId: string;
 
   beforeAll(async () => {
     app = createTestApp();
-
-    try {
-      traceId = await loadTestTrace(SCROLLING_TRACE);
-    } catch (error) {
-      console.warn(`[E2E] Could not load trace: ${error}`);
-    }
+    traceId = await loadTestTrace(SCROLLING_TRACE);
   }, E2E_TIMEOUT);
 
   afterAll(async () => {
     await cleanupAllSessions(app);
-    if (traceId) {
-      await cleanupTrace(traceId);
-    }
+    await cleanupTrace(traceId);
   });
 
   it('should complete analysis within reasonable time', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
     const startTime = Date.now();
 
     const { sessionId, result } = await runAnalysisToCompletion(
@@ -1203,11 +1196,6 @@ describe('E2E: Performance Validation', () => {
   }, E2E_TIMEOUT);
 
   it('should handle concurrent sessions', async () => {
-    if (!traceId) {
-      console.warn('Skipping test: no trace loaded');
-      return;
-    }
-
     // Start multiple analyses concurrently
     const analysisPromises = [
       runAnalysisToCompletion(app, traceId, '分析滑动性能', undefined, 90000),

@@ -18,6 +18,7 @@ const IS_TEST_ENV = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_I
 // Path: backend/src/services/ -> ../../../ -> perfetto/out/ui/
 const TRACE_PROCESSOR_PATH = process.env.TRACE_PROCESSOR_PATH ||
   path.resolve(__dirname, '../../../perfetto/out/ui/trace_processor_shell');
+const TRACE_PROCESSOR_REGISTRY_DIR = path.resolve(process.cwd(), '.trace-processor-registry');
 
 // Small subset used by core Android analysis paths that query stdlib views directly.
 const CRITICAL_STDLIB_MODULES = [
@@ -26,6 +27,43 @@ const CRITICAL_STDLIB_MODULES = [
   'android.startup.startups',
   'android.input',
 ];
+
+interface ManagedTraceProcessorRecord {
+  pid: number;
+  traceId: string;
+  binaryPath: string;
+  createdAt: number;
+}
+
+function ensureRegistryDirExists(): void {
+  if (!fs.existsSync(TRACE_PROCESSOR_REGISTRY_DIR)) {
+    fs.mkdirSync(TRACE_PROCESSOR_REGISTRY_DIR, { recursive: true });
+  }
+}
+
+function getRegistryFilePath(pid: number): string {
+  return path.join(TRACE_PROCESSOR_REGISTRY_DIR, `${pid}.json`);
+}
+
+function writeManagedProcessorRecord(record: ManagedTraceProcessorRecord): void {
+  try {
+    ensureRegistryDirExists();
+    fs.writeFileSync(getRegistryFilePath(record.pid), JSON.stringify(record), 'utf8');
+  } catch (error: any) {
+    console.warn('[TraceProcessor] Failed to write managed processor record:', error?.message || error);
+  }
+}
+
+function deleteManagedProcessorRecord(pid: number): void {
+  try {
+    const registryPath = getRegistryFilePath(pid);
+    if (fs.existsSync(registryPath)) {
+      fs.unlinkSync(registryPath);
+    }
+  } catch {
+    // best effort cleanup
+  }
+}
 
 /**
  * Kill all orphan trace_processor_shell processes.
@@ -37,32 +75,51 @@ export function killOrphanProcessors(): number {
   }
 
   try {
-    // Find all trace_processor_shell processes
-    const result = execSync('pgrep -f trace_processor_shell 2>/dev/null || true', { encoding: 'utf-8' });
-    const pids = result.trim().split('\n').filter(pid => pid.length > 0);
+    ensureRegistryDirExists();
+    const registryFiles = fs
+      .readdirSync(TRACE_PROCESSOR_REGISTRY_DIR)
+      .filter((name) => name.endsWith('.json'));
 
-    if (pids.length === 0) {
+    if (registryFiles.length === 0) {
       if (!IS_TEST_ENV) {
-        console.log('[TraceProcessor] No orphan processes found');
+        console.log('[TraceProcessor] No managed orphan processes found');
       }
       return 0;
     }
 
-    if (!IS_TEST_ENV) {
-      console.log(`[TraceProcessor] Found ${pids.length} orphan process(es): ${pids.join(', ')}`);
-    }
-
-    // Kill each process
     let killed = 0;
-    for (const pid of pids) {
+    for (const fileName of registryFiles) {
+      const recordPath = path.join(TRACE_PROCESSOR_REGISTRY_DIR, fileName);
+      const recordRaw = fs.readFileSync(recordPath, 'utf8');
+      const record = JSON.parse(recordRaw) as Partial<ManagedTraceProcessorRecord>;
+      const pid = Number(record.pid);
+      if (!Number.isFinite(pid) || pid <= 0) {
+        fs.unlinkSync(recordPath);
+        continue;
+      }
+
       try {
+        const commandLine = execSync(`ps -p ${pid} -o command=`, { encoding: 'utf-8' }).trim();
+        const binaryName = path.basename(TRACE_PROCESSOR_PATH);
+        if (!commandLine.includes(binaryName)) {
+          // PID got reused by an unrelated process. Keep safety first.
+          fs.unlinkSync(recordPath);
+          continue;
+        }
+
         execSync(`kill ${pid} 2>/dev/null || true`);
         killed++;
         if (!IS_TEST_ENV) {
           console.log(`[TraceProcessor] Killed orphan process ${pid}`);
         }
       } catch (e) {
-        // Process may already be dead
+        // Process may already be dead or inaccessible; treat as stale record.
+      } finally {
+        try {
+          fs.unlinkSync(recordPath);
+        } catch {
+          // ignore
+        }
       }
     }
 
@@ -110,6 +167,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
   private process: ChildProcess | null = null;
   private tracePath: string;
   private _httpPort: number;
+  private managedPid: number | null = null;
 
   /** Get the HTTP port this processor is listening on */
   public get httpPort(): number {
@@ -126,6 +184,27 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
 
     // Allocate port from pool
     this._httpPort = getPortPool().allocate(traceId);
+  }
+
+  private registerManagedPid(pid?: number): void {
+    if (!pid || !Number.isFinite(pid)) {
+      return;
+    }
+    this.managedPid = pid;
+    writeManagedProcessorRecord({
+      pid,
+      traceId: this.traceId,
+      binaryPath: TRACE_PROCESSOR_PATH,
+      createdAt: Date.now(),
+    });
+  }
+
+  private unregisterManagedPid(): void {
+    if (!this.managedPid) {
+      return;
+    }
+    deleteManagedProcessorRecord(this.managedPid);
+    this.managedPid = null;
   }
 
   async initialize(): Promise<void> {
@@ -202,6 +281,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: false,
       });
+      this.registerManagedPid(this.process.pid);
 
       let stdout = '';
       let stderr = '';
@@ -284,6 +364,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
         if (!IS_TEST_ENV) {
           console.log(`[TraceProcessor] Process exited with code ${code}`);
         }
+        this.unregisterManagedPid();
         this.serverReady = false;
         if (!this.isDestroyed) {
           this.status = 'error';
@@ -486,6 +567,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
       console.log(`[TraceProcessor] Destroying processor ${this.id} for trace ${this.traceId}`);
     }
     this.isDestroyed = true;
+    this.unregisterManagedPid();
     this.serverReady = false;
     this.status = 'error';
 
@@ -546,13 +628,96 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
  */
 export class TraceProcessorFactory {
   private static processors: Map<string, WorkingTraceProcessor> = new Map();
+  private static processorMetrics: Map<
+    string,
+    { createdAt: number; lastUsedAt: number; activeQueries: number }
+  > = new Map();
   private static maxProcessors = 5;
+
+  private static markTraceUsed(traceId: string): void {
+    const metrics = this.processorMetrics.get(traceId);
+    if (metrics) {
+      metrics.lastUsedAt = Date.now();
+    }
+  }
+
+  private static trackProcessor(traceId: string, processor: TraceProcessor): void {
+    this.processors.set(traceId, processor as WorkingTraceProcessor);
+    this.processorMetrics.set(traceId, {
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      activeQueries: 0,
+    });
+    this.wrapQueryWithMetrics(traceId, processor);
+  }
+
+  private static untrackProcessor(traceId: string): void {
+    this.processors.delete(traceId);
+    this.processorMetrics.delete(traceId);
+  }
+
+  private static wrapQueryWithMetrics(traceId: string, processor: TraceProcessor): void {
+    const wrappedFlag = '__smartPerfettoQueryWrapped';
+    const candidate = processor as any;
+    if (candidate[wrappedFlag]) {
+      return;
+    }
+
+    const originalQuery = processor.query.bind(processor);
+    processor.query = (async (sql: string) => {
+      const metrics = this.processorMetrics.get(traceId);
+      if (metrics) {
+        metrics.activeQueries += 1;
+        metrics.lastUsedAt = Date.now();
+      }
+
+      try {
+        return await originalQuery(sql);
+      } finally {
+        const latest = this.processorMetrics.get(traceId);
+        if (latest) {
+          latest.activeQueries = Math.max(0, latest.activeQueries - 1);
+          latest.lastUsedAt = Date.now();
+        }
+      }
+    }) as TraceProcessor['query'];
+    candidate[wrappedFlag] = true;
+  }
+
+  private static evictOneProcessorIfNeeded(): void {
+    while (this.processors.size >= this.maxProcessors) {
+      const candidates = Array.from(this.processors.entries())
+        .map(([traceId, processor]) => ({
+          traceId,
+          processor,
+          metrics: this.processorMetrics.get(traceId),
+        }))
+        .filter(({ processor, metrics }) =>
+          (metrics?.activeQueries || 0) === 0 && processor.status !== 'busy'
+        )
+        .sort((a, b) => {
+          const aLast = a.metrics?.lastUsedAt ?? a.metrics?.createdAt ?? 0;
+          const bLast = b.metrics?.lastUsedAt ?? b.metrics?.createdAt ?? 0;
+          return aLast - bLast;
+        });
+
+      const selected = candidates[0];
+      if (!selected) {
+        throw new Error('TRACE_PROCESSOR_POOL_EXHAUSTED_ACTIVE');
+      }
+
+      console.log(`[TraceProcessorFactory] Evicting idle processor: ${selected.traceId}`);
+      selected.processor.destroy();
+      this.untrackProcessor(selected.traceId);
+    }
+  }
 
   static async create(traceId: string, tracePath: string): Promise<WorkingTraceProcessor> {
     // Check if processor already exists and is ready
     const existing = this.processors.get(traceId);
     if (existing && existing.status === 'ready') {
       console.log(`[TraceProcessorFactory] Reusing existing processor for trace ${traceId}`);
+      this.markTraceUsed(traceId);
       return existing;
     }
 
@@ -560,18 +725,10 @@ export class TraceProcessorFactory {
     if (existing && existing.status !== 'ready') {
       console.log(`[TraceProcessorFactory] Cleaning up failed processor for trace ${traceId}`);
       existing.destroy();
-      this.processors.delete(traceId);
+      this.untrackProcessor(traceId);
     }
 
-    // Clean up oldest processors if too many
-    while (this.processors.size >= this.maxProcessors) {
-      const oldest = Array.from(this.processors.entries())[0];
-      if (oldest) {
-        console.log(`[TraceProcessorFactory] Cleaning up oldest processor: ${oldest[0]}`);
-        oldest[1].destroy();
-        this.processors.delete(oldest[0]);
-      }
-    }
+    this.evictOneProcessorIfNeeded();
 
     const maxAttempts = 8;
     let lastError: any;
@@ -582,10 +739,10 @@ export class TraceProcessorFactory {
       const processor = new WorkingTraceProcessor(traceId, tracePath);
 
       processor.on('error', () => {
-        this.processors.delete(traceId);
+        this.untrackProcessor(traceId);
       });
 
-      this.processors.set(traceId, processor);
+      this.trackProcessor(traceId, processor);
 
       try {
         await processor.initialize();
@@ -599,7 +756,7 @@ export class TraceProcessorFactory {
         } catch {
           // ignore
         }
-        this.processors.delete(traceId);
+        this.untrackProcessor(traceId);
 
         // Retry with a different port if the chosen port is already in use by another process.
         const msg = String(error?.message || '');
@@ -623,7 +780,11 @@ export class TraceProcessorFactory {
   }
 
   static get(traceId: string): WorkingTraceProcessor | undefined {
-    return this.processors.get(traceId);
+    const processor = this.processors.get(traceId);
+    if (processor) {
+      this.markTraceUsed(traceId);
+    }
+    return processor;
   }
 
   static remove(traceId: string): boolean {
@@ -631,7 +792,7 @@ export class TraceProcessorFactory {
     if (processor) {
       console.log(`[TraceProcessorFactory] Removing processor for trace ${traceId}`);
       processor.destroy();
-      this.processors.delete(traceId);
+      this.untrackProcessor(traceId);
       return true;
     }
     return false;
@@ -643,12 +804,18 @@ export class TraceProcessorFactory {
       processor.destroy();
     }
     this.processors.clear();
+    this.processorMetrics.clear();
   }
 
-  static getStats(): { count: number; traceIds: string[] } {
+  static getStats(): { count: number; traceIds: string[]; activeQueries: Record<string, number> } {
+    const activeQueries: Record<string, number> = {};
+    for (const [traceId, metrics] of this.processorMetrics.entries()) {
+      activeQueries[traceId] = metrics.activeQueries;
+    }
     return {
       count: this.processors.size,
       traceIds: Array.from(this.processors.keys()),
+      activeQueries,
     };
   }
 
@@ -671,7 +838,7 @@ export class TraceProcessorFactory {
       throw new Error(`Cannot connect to external trace_processor on port ${port}`);
     }
 
-    this.processors.set(traceId, processor as any);
+    this.trackProcessor(traceId, processor as any);
     return processor;
   }
 }
@@ -706,7 +873,7 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
       // Use protobuf encoding for the query
       const requestBody = encodeQueryArgs(sql);
 
-      return new Promise((resolve, reject) => {
+      return await new Promise((resolve, reject) => {
         const req = http.request({
           hostname: '127.0.0.1',
           port: this._httpPort,

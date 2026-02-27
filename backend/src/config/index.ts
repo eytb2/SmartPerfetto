@@ -317,6 +317,12 @@ export const featureFlagsConfig = {
    * Disabled by default to avoid parallel analysis stacks.
    */
   enableLegacyAutoAnalysisRoutes: parseBoolEnv('FEATURE_ENABLE_LEGACY_AUTO_ANALYSIS_ROUTES', false),
+
+  /**
+   * Keep legacy /chat proxy endpoints available.
+   * Disabled by default to keep assistant traffic on /api/agent/*.
+   */
+  enableLegacyChatProxyRoutes: parseBoolEnv('FEATURE_ENABLE_LEGACY_CHAT_PROXY_ROUTES', false),
 } as const;
 
 // =============================================================================

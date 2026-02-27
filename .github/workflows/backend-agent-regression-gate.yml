@@ -13,6 +13,9 @@ on:
       - "backend/**"
       - "test-traces/**"
       - ".github/workflows/backend-agent-regression-gate.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
 
 jobs:
   gate:
@@ -51,5 +54,10 @@ jobs:
       - name: Check legacy route usage guard
         run: npm run check:legacy-routes
 
-      - name: Run agent regression gate
-        run: npm run test:gate
+      - name: Run fast regression gate
+        if: ${{ github.event_name == 'pull_request' }}
+        run: npm run test:gate:fast
+
+      - name: Run nightly regression gate
+        if: ${{ github.event_name != 'pull_request' }}
+        run: npm run test:gate:nightly

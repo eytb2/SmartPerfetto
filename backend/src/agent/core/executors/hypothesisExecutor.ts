@@ -319,8 +319,8 @@ export class HypothesisExecutor implements AnalysisExecutor {
           reason: interventionRequest.reason,
           message: `需要用户干预: ${interventionRequest.reason}`,
         });
-        // Don't break - we'll check in the orchestrator whether to pause
-        // For now, continue to strategy decision which may also conclude
+        stopReason = interventionRequest.reason || 'Paused for user intervention';
+        break;
       }
 
       // 5. Decide next strategy with focus context (v2.0)

@@ -39,6 +39,7 @@ export interface TraceProcessor {
 interface UploadState {
   filePath: string;
   pendingWrite: Promise<void>;
+  receivedRanges: Array<{ start: number; end: number }>;
 }
 
 /**
@@ -111,12 +112,19 @@ export class TraceProcessorService extends EventEmitter {
     if (!Number.isFinite(offset) || offset < 0) {
       throw new Error(`Invalid chunk offset: ${offset}`);
     }
+    if (!chunk || chunk.length === 0) {
+      throw new Error('Chunk payload is empty');
+    }
+    if (trace.size > 0 && offset + chunk.length > trace.size) {
+      throw new Error(`Chunk exceeds expected file size (${offset + chunk.length} > ${trace.size})`);
+    }
 
     // Create upload state if not exists
     if (!this.uploads.has(traceId)) {
       this.uploads.set(traceId, {
         filePath,
         pendingWrite: Promise.resolve(),
+        receivedRanges: [],
       });
     }
 
@@ -132,6 +140,11 @@ export class TraceProcessorService extends EventEmitter {
       } finally {
         await fileHandle.close();
       }
+
+      uploadState.receivedRanges = this.mergeUploadedRange(uploadState.receivedRanges, {
+        start: offset,
+        end: offset + chunk.length,
+      });
     });
 
     return uploadState.pendingWrite;
@@ -150,8 +163,31 @@ export class TraceProcessorService extends EventEmitter {
     const uploadState = this.uploads.get(traceId);
     if (uploadState) {
       await uploadState.pendingWrite;
-      this.uploads.delete(traceId);
     }
+
+    try {
+      const filePath = this.getTraceFilePath(traceId);
+      const stats = await fs.promises.stat(filePath);
+
+      if (trace.size > 0 && stats.size !== trace.size) {
+        throw new Error(`Upload size mismatch: expected ${trace.size}, got ${stats.size}`);
+      }
+
+      if (uploadState && trace.size > 0 && !this.hasFullCoverage(uploadState.receivedRanges, trace.size)) {
+        throw new Error('Upload incomplete: not all byte ranges were received');
+      }
+
+      if (trace.size === 0 && stats.size <= 0) {
+        throw new Error('Uploaded trace file is empty');
+      }
+    } catch (error: any) {
+      trace.status = 'error';
+      trace.error = error?.message || 'Upload validation failed';
+      this.emit('trace-status-changed', trace);
+      this.uploads.delete(traceId);
+      throw error;
+    }
+    this.uploads.delete(traceId);
 
     // Update status
     trace.status = 'processing';
@@ -476,6 +512,42 @@ export class TraceProcessorService extends EventEmitter {
     await this.processTrace(traceId);
 
     return traceId;
+  }
+
+  private mergeUploadedRange(
+    ranges: Array<{ start: number; end: number }>,
+    next: { start: number; end: number }
+  ): Array<{ start: number; end: number }> {
+    const normalized = [...ranges, next]
+      .filter((range) => Number.isFinite(range.start) && Number.isFinite(range.end) && range.end > range.start)
+      .sort((a, b) => a.start - b.start);
+    if (normalized.length === 0) {
+      return [];
+    }
+
+    const merged: Array<{ start: number; end: number }> = [];
+    for (const range of normalized) {
+      const last = merged[merged.length - 1];
+      if (!last || range.start > last.end) {
+        merged.push({ ...range });
+        continue;
+      }
+      last.end = Math.max(last.end, range.end);
+    }
+    return merged;
+  }
+
+  private hasFullCoverage(
+    ranges: Array<{ start: number; end: number }>,
+    expectedSize: number
+  ): boolean {
+    if (!Number.isFinite(expectedSize) || expectedSize <= 0) {
+      return false;
+    }
+    if (!Array.isArray(ranges) || ranges.length === 0) {
+      return false;
+    }
+    return ranges.length === 1 && ranges[0].start === 0 && ranges[0].end >= expectedSize;
   }
 
   /**

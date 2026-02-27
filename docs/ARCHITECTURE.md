@@ -64,12 +64,13 @@
 当前后端入口策略已经明确分层：
 
 - 主链路（默认）：`/api/agent/*`
-- 兼容层（默认关闭）：`/api/ai/*`、`/api/auto-analysis/*`
+- 兼容层（默认关闭）：`/api/ai/*`、`/api/auto-analysis/*`、`/chat/*`
   - 默认返回 `410 LEGACY_ROUTE_DEPRECATED`
   - 返回体包含替代入口：`POST /api/agent/analyze`
 - 灰度开关：
   - `FEATURE_ENABLE_LEGACY_AI_ROUTES`（默认 `false`）
   - `FEATURE_ENABLE_LEGACY_AUTO_ANALYSIS_ROUTES`（默认 `false`）
+  - `FEATURE_ENABLE_LEGACY_CHAT_PROXY_ROUTES`（默认 `false`）
 
 实现要点：
 - legacy 路由仅在开关开启时才运行时加载（lazy load），避免默认启动时引入并行分析栈依赖。
@@ -404,6 +405,7 @@ flowchart LR
 - `FEATURE_AGENT_LOGS_API`：控制 `/api/agent/logs*`
 - `FEATURE_ENABLE_LEGACY_AI_ROUTES`：是否启用 `/api/ai/*`（默认关闭）
 - `FEATURE_ENABLE_LEGACY_AUTO_ANALYSIS_ROUTES`：是否启用 `/api/auto-analysis/*`（默认关闭）
+- `FEATURE_ENABLE_LEGACY_CHAT_PROXY_ROUTES`：是否启用 `/chat/*`（默认关闭）
 - `SMARTPERFETTO_ALLOW_AGENT_ADB_FULL_MODE`：控制 agent 是否可进入 ADB full 模式（仍需请求上下文显式批准）
 
 ---
@@ -424,19 +426,23 @@ flowchart LR
 
 ## 9. 回归与真实 Trace 自验证（当前默认流程）
 
-为避免“仅单测通过但真实 trace 流程退化”，当前推荐本地与 CI 都执行两段门禁：
+为避免“仅单测通过但真实 trace 流程退化”，当前推荐本地与 CI 执行分层门禁：
 
 - `cd backend && npm run check:legacy-routes`
-- `cd backend && npm run test:gate`
-  - `test:gate` 内包含：
+- `cd backend && npm run test:gate:fast`
+  - `test:gate:fast` 内包含：
     - `npm run test:core`
     - `npm run test:agentv2`
+    - `npm run test:integration:agent-routes`
+- `cd backend && npm run test:gate:nightly`
+  - `test:gate:nightly` 在 fast 基础上增加：
+    - `npm run test:e2e:full-analysis`
     - `npm run test:skill-eval:real-traces`
     - `npm run test:scene-trace-regression`
 - 启动 trace：`test-traces/app_start_heavy.pftrace`
 - 滑动 trace：`test-traces/app_aosp_scrolling_heavy_jank.pftrace`
 
 对应实现：
-- `backend/package.json`（`check:legacy-routes` + `test:gate`）
-- `.github/workflows/backend-agent-regression-gate.yml`（CI 自动执行）
+- `backend/package.json`（`check:legacy-routes` + `test:gate:fast/test:gate:nightly`）
+- `.github/workflows/backend-agent-regression-gate.yml`（PR 跑 fast，main/schedule 跑 nightly）
 - `backend/tests/skill-eval/runner.ts`（递归注册 skill/iterator/parallel/conditional 依赖）

@@ -64,7 +64,7 @@ flowchart TD
 ### 最新对齐点（2026-02-26）
 
 - Orchestrator 路由已是“多执行器优先级链”：`clarify/compare/extend/drill_down` 优先于策略匹配。
-- HTTP 入口已收敛为单主链：`/api/agent/*`；`/api/ai/*` 与 `/api/auto-analysis/*` 默认返回 `410 LEGACY_ROUTE_DEPRECATED`，仅在 feature flag 打开时启用。
+- HTTP 入口已收敛为单主链：`/api/agent/*`；`/api/ai/*`、`/api/auto-analysis/*` 与 `/chat/*` 默认返回 `410 LEGACY_ROUTE_DEPRECATED`，仅在 feature flag 打开时启用。
 - 策略命中后仍会按 `DomainManifest.strategyExecutionPolicies` 决定是否偏好 hypothesis loop。
 - `scene_reconstruction` 的 Stage2 task 已由 `DomainManifest.sceneReconstructionRoutes` 动态构建，不再写死二分逻辑。
 - Data 输出统一走 `DataEnvelope` + `emitDataEnvelopes()`，并由 `EmittedEnvelopeRegistry` 做 session 级去重。
@@ -74,7 +74,8 @@ flowchart TD
 - 会话状态持久化改为“成功和失败都落盘”，恢复结果中的 `rounds` 与 `totalDurationMs` 基于已完成 turns 计算。
 - 启动与滑动展示层时长统一 `ms`，时间跳转链路保持 `ns` 精度（双轨时间契约）。
 - 真实 trace 回归纳入默认流程：`npm run test:skill-eval:real-traces` 覆盖 `test-traces/app_start_heavy.pftrace` 与 `test-traces/app_aosp_scrolling_heavy_jank.pftrace`。
-- 新增 CI 守卫 `check:legacy-routes`，防止新增 `/api/ai`、`/api/auto-analysis` 路径引用。
+- 新增 CI 守卫 `check:legacy-routes`，防止新增 `/api/ai`、`/api/auto-analysis`、`/chat` 路径引用。
+- 回归门禁拆分为 `test:gate:fast`（core/agentv2/integration）与 `test:gate:nightly`（在 fast 基础上追加 e2e + real trace 回归）；CI 中 PR 跑 fast，main/schedule 跑 nightly。
 
 关键约束：
 - **仅同一 trace**：所有记忆/状态以 `(sessionId, traceId)` 为 key，且有迁移时的 trace guard。
