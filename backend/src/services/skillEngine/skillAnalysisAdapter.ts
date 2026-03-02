@@ -108,6 +108,11 @@ export class SkillAnalysisAdapter {
       undefined,  // AI service 稍后注入
       eventHandler
     );
+
+    // Wire fragment cache from the skill registry (if loaded)
+    if (skillRegistry.isInitialized()) {
+      this.executor.setFragmentRegistry(skillRegistry.getFragmentCache());
+    }
   }
 
   /**

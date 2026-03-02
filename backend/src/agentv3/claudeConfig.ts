@@ -7,6 +7,7 @@ export interface ClaudeAgentConfig {
 }
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
+// Scrolling pipeline needs: 1 time-range query + 1 scrolling_analysis + 5 jank_frame_detail + conclusion = ~8-10 turns
 const DEFAULT_MAX_TURNS = 15;
 const DEFAULT_EFFORT = 'high';
 

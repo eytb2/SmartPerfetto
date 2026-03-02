@@ -56,6 +56,7 @@ export async function detectTraceConfig(
     // Create skill executor
     const skillExecutor = createSkillExecutor(traceProcessorService, aiService);
     skillExecutor.registerSkills(skillRegistry.getAllSkills());
+    skillExecutor.setFragmentRegistry(skillRegistry.getFragmentCache());
 
     // Execute vsync_config skill
     emitter.log('[TraceConfig] Detecting VSync configuration...');

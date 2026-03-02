@@ -1,5 +1,6 @@
 import type { ArchitectureInfo } from '../agent/detectors/types';
 import type { Finding } from '../agent/types';
+import type { DetectedFocusApp } from './focusAppDetector';
 
 export interface McpToolResult {
   success: boolean;
@@ -46,7 +47,10 @@ export interface ClaudeAnalysisContext {
   query: string;
   architecture?: ArchitectureInfo;
   packageName?: string;
+  focusApps?: DetectedFocusApp[];
   previousFindings?: Finding[];
   conversationSummary?: string;
   skillCatalog?: Array<{ id: string; displayName: string; description: string; type: string }>;
+  /** Perfetto SQL knowledge context matched to the user query (from ExtendedSqlKnowledgeBase) */
+  knowledgeBaseContext?: string;
 }

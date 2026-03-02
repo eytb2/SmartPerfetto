@@ -90,7 +90,7 @@ export interface SynthesizeConfig {
 
 export interface SkillInput {
   name: string;
-  type: 'string' | 'number' | 'timestamp' | 'duration' | 'array' | 'object';
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'timestamp' | 'duration' | 'array' | 'object';
   required: boolean;
   default?: any;
   description?: string;
@@ -98,8 +98,24 @@ export interface SkillInput {
 
 export interface SkillOutput {
   name: string;
-  type: 'string' | 'number' | 'timestamp' | 'duration' | 'array' | 'object';
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'timestamp' | 'duration' | 'array' | 'object';
   description?: string;
+}
+
+// =============================================================================
+// Input Validation Types
+// =============================================================================
+
+export interface SkillInputValidationError {
+  paramName: string;
+  message: string;
+  severity: 'error' | 'warning';
+}
+
+export interface ValidatedParams {
+  params: Record<string, any>;
+  errors: SkillInputValidationError[];
+  warnings: SkillInputValidationError[];
 }
 
 // =============================================================================
@@ -157,6 +173,8 @@ export interface AtomicStep {
   name?: string;
   description?: string;
   sql: string;
+  /** SQL fragment paths relative to skills/ (e.g., ['fragments/target_threads.sql']) */
+  sql_fragments?: string[];
   display?: DisplayConfig | boolean;
   save_as?: string;
   optional?: boolean;

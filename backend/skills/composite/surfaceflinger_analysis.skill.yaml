@@ -162,7 +162,7 @@ steps:
           CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER) as vsync_period_ns,
           'sf_vsync_counter' as source
         FROM sf_vsync_intervals
-        WHERE interval_ns > 4000000 AND interval_ns < 20000000
+        WHERE interval_ns > 4000000 AND interval_ns < 50000000
       ),
       raw_period AS (
         SELECT

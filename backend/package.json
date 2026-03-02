@@ -21,6 +21,7 @@
     "test:full": "jest --runInBand --forceExit",
     "test:all": "npm run test:gate",
     "skill:validate": "tsx src/cli/index.ts validate",
+    "validate:skills": "tsx src/cli/index.ts validate --contracts --all",
     "skill:test": "tsx src/cli/index.ts test",
     "skill:smoke": "tsx src/cli/index.ts smoke",
     "skill:list": "tsx src/cli/index.ts list",

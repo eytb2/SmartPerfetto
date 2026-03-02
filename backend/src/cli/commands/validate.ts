@@ -8,7 +8,8 @@ import { Command } from 'commander';
 import fs from 'fs';
 import path from 'path';
 import yaml from 'js-yaml';
-import { SkillDefinition, SkillStep } from '../../services/skillEngine/types';
+import { SkillDefinition } from '../../services/skillEngine/types';
+import { validateSkillConditions } from '../../services/skillEngine/skillValidator';
 
 // ANSI color codes (fallback for chalk ESM issues)
 const colors = {
@@ -313,6 +314,39 @@ function validateSql(sql: string): { errors: string[]; warnings: string[] } {
 }
 
 /**
+ * Contract validation: input declarations, condition references, iterator sources
+ */
+function validateContracts(skill: SkillDefinition): { errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  // 1. Input declarations completeness
+  if (Array.isArray(skill.inputs)) {
+    const validTypes = new Set(['string', 'number', 'integer', 'boolean', 'timestamp', 'duration', 'array', 'object']);
+    for (const input of skill.inputs) {
+      if (!input.name) {
+        errors.push(`inputs: Input missing name`);
+        continue;
+      }
+      if (input.type && !validTypes.has(input.type)) {
+        warnings.push(`inputs.${input.name}: Unknown type '${input.type}' (valid: ${[...validTypes].join(', ')})`);
+      }
+      if (input.required && !input.description) {
+        warnings.push(`inputs.${input.name}: Required input missing description`);
+      }
+    }
+  }
+
+  // 2. Condition variable reference checks
+  const condWarnings = validateSkillConditions(skill);
+  for (const w of condWarnings) {
+    warnings.push(`${w.stepId}: ${w.message}`);
+  }
+
+  return { errors, warnings };
+}
+
+/**
  * Extract variable references from SQL
  */
 function extractVariableReferences(sql: string): string[] {
@@ -387,8 +421,9 @@ export const validateCommand = new Command('validate')
   .description('Validate skill YAML files')
   .argument('[skillId]', 'Specific skill ID to validate (optional)')
   .option('-a, --all', 'Validate all skills including vendor overrides')
+  .option('-c, --contracts', 'Run contract checks (input types, condition refs, iterator sources)')
   .option('-v, --verbose', 'Show detailed validation output')
-  .action((skillId: string | undefined, options: { all?: boolean; verbose?: boolean }) => {
+  .action((skillId: string | undefined, options: { all?: boolean; contracts?: boolean; verbose?: boolean }) => {
     console.log(colors.bold('\nSmartPerfetto Skill Validator\n'));
 
     let files: string[] = [];
@@ -432,6 +467,23 @@ export const validateCommand = new Command('validate')
 
     for (const file of files) {
       const result = validateFile(file);
+
+      // Run contract validation when --contracts is specified
+      if (options.contracts) {
+        try {
+          const content = fs.readFileSync(file, 'utf-8');
+          const skill = yaml.load(content) as SkillDefinition;
+          if (skill) {
+            const contracts = validateContracts(skill);
+            result.errors.push(...contracts.errors);
+            result.warnings.push(...contracts.warnings);
+            if (contracts.errors.length > 0) {
+              result.valid = false;
+            }
+          }
+        } catch { /* parse error already captured */ }
+      }
+
       const relativePath = path.relative(SKILLS_DIR, file);
 
       if (result.valid) {

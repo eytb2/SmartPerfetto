@@ -194,6 +194,8 @@ steps:
     type: atomic
     name: "四象限分析"
     optional: true
+    sql_fragments:
+      - fragments/target_threads.sql
     display:
       level: key
       layer: deep
@@ -215,28 +217,6 @@ steps:
           format: percentage
     sql: |
       WITH
-      target_threads AS (
-        SELECT t.utid, t.tid, t.name as thread_name, p.pid, p.name as process_name,
-          CASE
-            WHEN t.tid = p.pid THEN 'MainThread'
-            WHEN t.name = 'RenderThread' THEN 'RenderThread'
-            ELSE 'Other'
-          END as thread_type,
-          CASE
-            WHEN t.tid = p.pid THEN COALESCE(${main_start_ts}, ${start_ts})
-            WHEN t.name = 'RenderThread' THEN COALESCE(${render_start_ts}, ${start_ts})
-            ELSE ${start_ts}
-          END as thread_start_ts,
-          CASE
-            WHEN t.tid = p.pid THEN COALESCE(${main_end_ts}, ${end_ts})
-            WHEN t.name = 'RenderThread' THEN COALESCE(${render_end_ts}, ${end_ts})
-            ELSE ${end_ts}
-          END as thread_end_ts
-        FROM thread t
-        JOIN process p ON t.upid = p.upid
-        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
-          AND (t.tid = p.pid OR t.name = 'RenderThread')
-      ),
       thread_states AS (
         SELECT
           tt.thread_type,
@@ -882,6 +862,10 @@ steps:
   - id: root_cause_summary
     type: atomic
     name: "根因分析"
+    sql_fragments:
+      - fragments/vsync_config.sql
+      - fragments/target_threads.sql
+      - fragments/thread_states_quadrant.sql
     display:
       level: key
       layer: deep
@@ -929,60 +913,8 @@ steps:
           type: string
     sql: |
       -- 根因分析: 综合四象限、CPU频率、耗时操作等数据，输出明确的根因结论
+      -- CTEs vsync_ticks, vsync_config, target_threads, thread_states injected via sql_fragments
       WITH
-      -- 0. 估算当前帧窗口的 VSync 周期（缺失时回退 8.33ms）
-      vsync_ticks AS (
-        SELECT
-          c.ts,
-          c.ts - LAG(c.ts) OVER (ORDER BY c.ts) as interval_ns
-        FROM counter c
-        JOIN counter_track t ON c.track_id = t.id
-        WHERE t.name = 'VSYNC-sf'
-          AND c.ts >= ${start_ts} - 100000000
-          AND c.ts < ${end_ts} + 100000000
-      ),
-      vsync_config AS (
-        SELECT
-          CAST(COALESCE(
-            (
-              SELECT PERCENTILE(interval_ns, 0.5)
-              FROM vsync_ticks
-              WHERE interval_ns > 4000000 AND interval_ns < 50000000
-            ),
-            8333333
-          ) AS INTEGER) as vsync_period_ns
-      ),
-      -- 1. 获取目标线程
-      target_threads AS (
-        SELECT t.utid, t.tid, t.name as thread_name, p.pid, p.name as process_name,
-          CASE
-            WHEN t.tid = p.pid THEN 'MainThread'
-            WHEN t.name = 'RenderThread' THEN 'RenderThread'
-            ELSE 'Other'
-          END as thread_type
-        FROM thread t
-        JOIN process p ON t.upid = p.upid
-        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
-          AND (t.tid = p.pid OR t.name = 'RenderThread')
-      ),
-      -- 2. 线程状态分析 (四象限)
-      thread_states AS (
-        SELECT
-          tt.thread_type,
-          CASE
-            WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('prime', 'big') THEN 'Q1'
-            WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('medium', 'little') THEN 'Q2'
-            WHEN ts.state = 'R' THEN 'Q3'
-            WHEN ts.state IN ('S', 'D', 'I') THEN 'Q4'
-            ELSE 'Other'
-          END as quadrant,
-          SUM(ts.dur) as dur_ns
-        FROM thread_state ts
-        JOIN target_threads tt ON ts.utid = tt.utid
-        LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
-        WHERE ts.ts >= ${start_ts} AND ts.ts < ${end_ts}
-        GROUP BY tt.thread_type, quadrant
-      ),
       -- 3. 计算各线程四象限百分比
       quadrant_pct AS (
         SELECT
@@ -1194,15 +1126,11 @@ steps:
           AND s.ts >= ${start_ts} AND s.ts < ${end_ts}
           AND (s.name GLOB '*Fence*' OR s.name GLOB '*fence*')
       ),
-      -- 9. CPU 簇负载检测
-      cluster_load AS (
+      -- 9. CPU 簇负载检测（动态核心计数，适配所有 SoC 拓扑）
+      cluster_core_counts AS (
         SELECT
-          ROUND(100.0 * SUM(CASE WHEN COALESCE(ct.core_type, 'little') IN ('prime', 'big') THEN
-            MIN(ts.ts + ts.dur, ${end_ts}) - MAX(ts.ts, ${start_ts})
-          ELSE 0 END) / NULLIF((${end_ts} - ${start_ts}) * 4, 0), 1) as big_load_pct,
-          ROUND(100.0 * SUM(CASE WHEN COALESCE(ct.core_type, 'little') IN ('medium', 'little') THEN
-            MIN(ts.ts + ts.dur, ${end_ts}) - MAX(ts.ts, ${start_ts})
-          ELSE 0 END) / NULLIF((${end_ts} - ${start_ts}) * 4, 0), 1) as little_load_pct
+          COUNT(DISTINCT CASE WHEN COALESCE(ct.core_type, 'little') IN ('prime', 'big') THEN ts.cpu END) as big_cores,
+          COUNT(DISTINCT CASE WHEN COALESCE(ct.core_type, 'little') IN ('medium', 'little') THEN ts.cpu END) as little_cores
         FROM thread_state ts
         LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
         WHERE ts.ts < ${end_ts}
@@ -1210,7 +1138,40 @@ steps:
           AND ts.state = 'Running'
           AND ts.cpu IS NOT NULL
       ),
-      -- 10. 主线程同步 Binder 与关键 slice 重叠分析
+      cluster_load AS (
+        SELECT
+          ROUND(100.0 * SUM(CASE WHEN COALESCE(ct.core_type, 'little') IN ('prime', 'big') THEN
+            MIN(ts.ts + ts.dur, ${end_ts}) - MAX(ts.ts, ${start_ts})
+          ELSE 0 END) / NULLIF((${end_ts} - ${start_ts}) * MAX((SELECT big_cores FROM cluster_core_counts), 1), 0), 1) as big_load_pct,
+          ROUND(100.0 * SUM(CASE WHEN COALESCE(ct.core_type, 'little') IN ('medium', 'little') THEN
+            MIN(ts.ts + ts.dur, ${end_ts}) - MAX(ts.ts, ${start_ts})
+          ELSE 0 END) / NULLIF((${end_ts} - ${start_ts}) * MAX((SELECT little_cores FROM cluster_core_counts), 1), 0), 1) as little_load_pct
+        FROM thread_state ts
+        LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
+        WHERE ts.ts < ${end_ts}
+          AND ts.ts + ts.dur > ${start_ts}
+          AND ts.state = 'Running'
+          AND ts.cpu IS NOT NULL
+      ),
+      -- 10. GC 事件与帧窗口重叠检测
+      -- android_garbage_collection_events view 由 prerequisites 中的
+      -- INCLUDE PERFETTO MODULE android.garbage_collection 保证存在（可能为空）
+      gc_frame_overlap AS (
+        SELECT
+          COALESCE(ROUND(SUM(
+            CASE WHEN MIN(gc.gc_ts + gc.gc_dur, ${end_ts}) > MAX(gc.gc_ts, ${start_ts})
+              THEN MIN(gc.gc_ts + gc.gc_dur, ${end_ts}) - MAX(gc.gc_ts, ${start_ts})
+              ELSE 0 END
+          ) / 1e6, 2), 0) as gc_overlap_ms,
+          COUNT(*) as gc_count
+        FROM android_garbage_collection_events gc
+        JOIN thread t ON gc.tid = t.tid
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND gc.gc_ts < ${end_ts}
+          AND gc.gc_ts + gc.gc_dur > ${start_ts}
+      ),
+      -- 11. 主线程同步 Binder 与关键 slice 重叠分析
       binder_sync_main AS (
         SELECT
           bt.client_ts,
@@ -1335,6 +1296,8 @@ steps:
           (SELECT max_sched_ms FROM sched_latency) as max_sched_ms,
           (SELECT total_sched_ms FROM sched_latency) as total_sched_ms,
           (SELECT fence_ms FROM gpu_fence) as fence_ms,
+          (SELECT gc_overlap_ms FROM gc_frame_overlap) as gc_overlap_ms,
+          (SELECT gc_count FROM gc_frame_overlap) as gc_count,
           (SELECT big_load_pct FROM cluster_load) as big_load_pct,
           (SELECT little_load_pct FROM cluster_load) as little_load_pct,
           ROUND((SELECT vsync_period_ns FROM vsync_config) / 1e6, 2) as frame_budget_ms,
@@ -1352,41 +1315,55 @@ steps:
         SELECT
           *,
           CASE
+            -- P1: Binder 同步阻塞（特定可操作，阻塞可能占据 slice 大部分时间）
             WHEN slice_dur > slice_critical_ms
               AND binder_overlap_ms >= binder_overlap_critical_ms
               THEN 'binder_sync_blocking'
+            -- P2: 小核调度（可能导致 3-4x 性能损失，可操作）
             WHEN slice_dur > slice_critical_ms
               AND COALESCE(top_slice_little_pct, 0) >= 45
               THEN 'small_core_placement'
+            -- P3: 关键操作中的调度延迟
             WHEN slice_dur > slice_critical_ms
               AND COALESCE(top_slice_runnable_pct, 0) >= 15
               THEN 'sched_delay_in_slice'
+            -- P4: 重度业务负载（>2x 帧预算）— 即使在满频下也会超时
+            -- 频率/调度等供给侧因素只是放大因素，不是根因
+            WHEN slice_dur > frame_budget_ms * 2.0
+              THEN 'workload_heavy'
+            -- P5: 大核低频（仅适用于边际情况：slice 在 1x-2x 帧预算区间）
             WHEN slice_dur > slice_critical_ms
               AND COALESCE(top_slice_big_pct, 0) >= 40
               AND COALESCE(top_big_avg_freq_mhz, 0) > 0
               AND COALESCE(top_big_max_freq_mhz, 0) > 0
               AND top_big_avg_freq_mhz < top_big_max_freq_mhz * 0.55
               THEN 'big_core_low_freq'
+            -- P6: 频率爬升慢（仅适用于边际情况：slice 在 1x-2x 帧预算区间）
             WHEN slice_dur > slice_critical_ms
               AND COALESCE(ramp_to_high_ms, 0) > freq_ramp_critical_ms
               AND COALESCE(top_slice_offset_ms, 0) <= ramp_to_high_ms
               THEN 'freq_ramp_slow'
+            -- P7: 工作负载超时兜底（1x-2x 帧预算，无特定供给侧因素）
             WHEN slice_dur > slice_critical_ms
               THEN 'workload_heavy'
+            -- P8: GC 导致帧卡顿（GC pause 与帧窗口重叠 > 1ms）
+            WHEN gc_overlap_ms > 1.0
+              THEN 'gc_jank'
             WHEN max_sched_ms > sched_max_critical_ms
               OR total_sched_ms > total_sched_critical_ms
               OR main_q3 > 20
               THEN 'scheduling_delay'
             WHEN main_q2 > 50
               THEN 'small_core_placement'
+            -- GPU Fence 等待（渲染管线瓶颈，比 CPU 负载更具可操作性）
+            WHEN fence_ms > gpu_fence_warning_ms
+              THEN 'gpu_wait'
             WHEN big_freq > 0 AND big_freq_peak > 0 AND big_freq < big_freq_peak * 0.45
               THEN 'big_core_low_freq'
             WHEN big_load_pct > 90 OR (big_load_pct > 70 AND little_load_pct > 70)
               THEN 'cpu_load_high'
             WHEN io_block_ms > io_block_critical_ms OR main_q4 > 30
               THEN 'blocking_wait'
-            WHEN fence_ms > gpu_fence_warning_ms
-              THEN 'gpu_wait'
             ELSE 'unknown'
           END as reason_code
         FROM analysis
@@ -1463,8 +1440,10 @@ steps:
             WHEN reason_code = 'workload_heavy' THEN
               CASE
                 WHEN slice_name GLOB '*RV*Prefetch*' OR slice_name GLOB '*OnBind*' OR slice_name GLOB '*Adapter*bind*' OR slice_name GLOB '*bind*'
-                  THEN '业务负载重：列表预取/绑定逻辑在主线程串行执行 ' || slice_dur || 'ms'
-                ELSE '业务负载重：主线程业务逻辑本身执行 ' || slice_dur || 'ms'
+                  THEN '业务负载重：列表预取/绑定逻辑在主线程串行执行 ' || slice_dur || 'ms（超帧预算 ' || ROUND(slice_dur / NULLIF(frame_budget_ms, 0), 1) || '倍）'
+                WHEN COALESCE(ramp_to_high_ms, 0) > freq_ramp_critical_ms
+                  THEN '业务负载重：操作耗时 ' || slice_dur || 'ms（超帧预算 ' || ROUND(slice_dur / NULLIF(frame_budget_ms, 0), 1) || '倍），频率爬升 ' || ramp_to_high_ms || 'ms 为次要加剧因素'
+                ELSE '业务负载重：主线程操作耗时 ' || slice_dur || 'ms（超帧预算 ' || ROUND(slice_dur / NULLIF(frame_budget_ms, 0), 1) || '倍）'
               END
             WHEN reason_code = 'scheduling_delay' THEN
               '调度延迟：主线程 Runnable 累计 ' || COALESCE(total_sched_ms, 0) ||
@@ -1476,6 +1455,8 @@ steps:
               '阻塞等待：主线程阻塞/IO 等待 ' || COALESCE(io_block_ms, 0) || 'ms，Q4 占比 ' || COALESCE(main_q4, 0) || '%'
             WHEN reason_code = 'gpu_wait' THEN
               'GPU 等待：RenderThread/GPU Fence 累计等待 ' || COALESCE(fence_ms, 0) || 'ms'
+            WHEN reason_code = 'gc_jank' THEN
+              'GC 暂停：帧窗口内 GC 重叠 ' || COALESCE(gc_overlap_ms, 0) || 'ms（' || COALESCE(gc_count, 0) || ' 次 GC）'
             ELSE NULL
           END as deep_reason,
           CASE
@@ -1493,6 +1474,7 @@ steps:
             WHEN reason_code = 'cpu_load_high' THEN '优化方向：降低 CPU 总负载并限制后台并发，优先保障 UI 与 RenderThread 预算'
             WHEN reason_code = 'blocking_wait' THEN '优化方向：减少主线程同步等待（Binder/锁/IO），缩短临界区和同步链路'
             WHEN reason_code = 'gpu_wait' THEN '优化方向：降低 draw 复杂度/overdraw，减少 GPU Fence 等待'
+            WHEN reason_code = 'gc_jank' THEN '优化方向：减少帧渲染路径上的对象分配，使用对象池化/预分配，避免 GC 暂停重叠关键帧'
             ELSE '优化方向：扩大同窗样本做聚类，确认该慢原因是否稳定复现'
           END as optimization_hint,
           reason_code,
@@ -1502,7 +1484,9 @@ steps:
             WHEN reason_code = 'sched_delay_in_slice' THEN '关键操作 Runnable 占比 ' || COALESCE(top_slice_runnable_pct, 0) || '%'
             WHEN reason_code = 'big_core_low_freq' THEN '关键操作大核频率 ' || COALESCE(top_big_avg_freq_mhz, big_freq) || 'MHz'
             WHEN reason_code = 'freq_ramp_slow' THEN '高频拉升耗时 ' || COALESCE(ramp_to_high_ms, 0) || 'ms'
-            WHEN reason_code = 'workload_heavy' THEN '关键业务操作 ' || COALESCE(slice_name, 'unknown') || ' 执行 ' || COALESCE(slice_dur, 0) || 'ms'
+            WHEN reason_code = 'workload_heavy' THEN '操作 "' || COALESCE(slice_name, 'unknown') || '" 耗时 ' || COALESCE(slice_dur, 0) || 'ms（超帧预算 ' || ROUND(COALESCE(slice_dur, 0) / NULLIF(frame_budget_ms, 0), 1) || 'x）' ||
+              CASE WHEN COALESCE(ramp_to_high_ms, 0) > freq_ramp_critical_ms THEN '，频率爬升 ' || ramp_to_high_ms || 'ms 加剧' ELSE '' END
+            WHEN reason_code = 'gc_jank' THEN 'GC 重叠 ' || COALESCE(gc_overlap_ms, 0) || 'ms（' || COALESCE(gc_count, 0) || ' 次）'
             WHEN fence_ms > gpu_fence_warning_ms THEN 'GPU Fence 等待 ' || ROUND(fence_ms, 1) || 'ms'
             WHEN total_sched_ms > (total_sched_critical_ms * 0.5) THEN '调度等待累计 ' || ROUND(total_sched_ms, 1) || 'ms'
             WHEN big_load_pct > 70 THEN '大核负载 ' || ROUND(big_load_pct, 0) || '%'
@@ -1512,6 +1496,7 @@ steps:
           END as secondary_info,
           CASE
             WHEN slice_dur > slice_critical_ms THEN '高'
+            WHEN gc_overlap_ms > 1.0 THEN '高'
             WHEN fence_ms > gpu_fence_critical_ms THEN '高'
             WHEN max_sched_ms > sched_max_critical_ms THEN '高'
             WHEN main_q3 > 20 THEN '高'
@@ -1533,6 +1518,7 @@ steps:
             WHEN total_sched_ms > total_sched_critical_ms THEN 'sched_latency'
             WHEN main_q4 > 30 THEN 'blocking'
             WHEN render_q4 > 50 THEN 'render_wait'
+            WHEN gc_overlap_ms > 1.0 THEN 'gc_pause'
             WHEN main_q2 > 50 THEN 'small_core'
             WHEN big_freq < 1200 AND big_freq > 0 THEN 'freq_limit'
             WHEN big_load_pct > 90 THEN 'cpu_overload'
@@ -1594,10 +1580,12 @@ steps:
           WHEN cause_type IN ('slice', 'blocking', 'io_blocking') THEN 'trigger'
           WHEN cause_type IN ('sched_latency', 'cpu_contention', 'small_core', 'freq_limit', 'cpu_overload') THEN 'supply'
           WHEN cause_type IN ('gpu_fence', 'render_wait') THEN 'amplification'
+          WHEN cause_type = 'gc_pause' THEN 'trigger'
           ELSE 'unknown'
         END as mechanism_group,
         CASE
           WHEN reason_code IN ('binder_sync_blocking', 'blocking_wait') THEN 'blocking_wait'
+          WHEN reason_code = 'gc_jank' THEN 'gc_pause'
           WHEN reason_code = 'small_core_placement' THEN 'core_placement'
           WHEN reason_code IN ('big_core_low_freq', 'freq_ramp_slow') THEN 'frequency_insufficient'
           WHEN reason_code IN ('sched_delay_in_slice', 'scheduling_delay') THEN 'scheduling_delay'
@@ -1616,7 +1604,7 @@ steps:
           ELSE 'none'
         END as supply_constraint,
         CASE
-          WHEN cause_type IN ('slice', 'blocking', 'io_blocking', 'sched_latency', 'cpu_contention', 'small_core', 'freq_limit', 'cpu_overload') THEN 'app_producer'
+          WHEN cause_type IN ('slice', 'blocking', 'io_blocking', 'sched_latency', 'cpu_contention', 'small_core', 'freq_limit', 'cpu_overload', 'gc_pause') THEN 'app_producer'
           WHEN cause_type IN ('gpu_fence', 'render_wait') THEN 'sf_consumer'
           ELSE 'unknown'
         END as trigger_layer,

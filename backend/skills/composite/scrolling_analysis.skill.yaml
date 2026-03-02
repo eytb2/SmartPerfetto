@@ -294,7 +294,7 @@ steps:
           COALESCE(
             (SELECT CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER)
              FROM vsync_intervals
-             WHERE interval_ns > 5000000 AND interval_ns < 15000000),
+             WHERE interval_ns > 4000000 AND interval_ns < 50000000),
             8333333  -- 默认 120Hz
           ) as raw_vsync_period_ns
       ),
@@ -736,7 +736,7 @@ steps:
           COALESCE(
             (SELECT CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER)
              FROM vsync_intervals
-             WHERE interval_ns > 5000000 AND interval_ns < 15000000),
+             WHERE interval_ns > 4000000 AND interval_ns < 50000000),
             8333333
           ) as vsync_period_ns
       ),
@@ -871,7 +871,7 @@ steps:
         SELECT COALESCE(
           (SELECT CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER)
            FROM vsync_intervals
-           WHERE interval_ns > 5000000 AND interval_ns < 15000000),
+           WHERE interval_ns > 4000000 AND interval_ns < 50000000),
           8333333
         ) as vsync_period_ns
       ),
@@ -978,7 +978,7 @@ steps:
         SELECT COALESCE(
           (SELECT CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER)
            FROM vsync_intervals_for_session
-           WHERE interval_ns > 5000000 AND interval_ns < 15000000),
+           WHERE interval_ns > 4000000 AND interval_ns < 50000000),
           8333333
         ) as vsync_period_ns
       ),
@@ -1253,7 +1253,7 @@ steps:
       vsync_config AS (
         SELECT COALESCE(
           (SELECT CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER)
-           FROM vsync_intervals WHERE interval_ns > 5000000 AND interval_ns < 15000000),
+           FROM vsync_intervals WHERE interval_ns > 4000000 AND interval_ns < 50000000),
           8333333
         ) as raw_vsync_period_ns
       ),
@@ -1541,7 +1541,7 @@ steps:
       END
       ORDER BY session_id, actual_start
     save_as: app_jank_frames
-    condition: "frame_timeline.data[0]?.has_frame_timeline === 1 && typeof environment !== 'undefined' && environment.data[0]?.has_data === 1 && perf_summary.data[0]?.janky_frames > 0 && start_ts != null"
+    condition: "frame_timeline.data[0]?.has_frame_timeline === 1 && typeof environment !== 'undefined' && environment.data[0]?.has_data === 1 && perf_summary.data[0]?.janky_frames > 0"
 
   # ==========================================================================
   # L3: 逐帧诊断 (所有掉帧帧 → jank_frame_detail)
@@ -1687,7 +1687,7 @@ steps:
           COALESCE(
             (SELECT CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER)
              FROM vsync_intervals
-             WHERE interval_ns > 5000000 AND interval_ns < 15000000),
+             WHERE interval_ns > 4000000 AND interval_ns < 50000000),
             8333333
           ) as vsync_period_ns
       ),

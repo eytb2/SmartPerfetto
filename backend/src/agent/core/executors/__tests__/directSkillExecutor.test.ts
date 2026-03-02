@@ -25,6 +25,7 @@ const mockEnsureSkillRegistryInitialized = jest.fn().mockResolvedValue(undefined
 jest.mock('../../../../services/skillEngine/skillLoader', () => ({
   skillRegistry: {
     getAllSkills: () => mockGetAllSkills(),
+    getFragmentCache: () => new Map(),
   },
   ensureSkillRegistryInitialized: () => mockEnsureSkillRegistryInitialized(),
 }));
@@ -37,6 +38,7 @@ jest.mock('../../../../services/skillEngine/skillExecutor', () => ({
   createSkillExecutor: jest.fn(() => ({
     execute: mockExecute,
     registerSkills: mockRegisterSkills,
+    setFragmentRegistry: jest.fn(),
   })),
   SkillExecutor: class {
     execute = mockExecute;

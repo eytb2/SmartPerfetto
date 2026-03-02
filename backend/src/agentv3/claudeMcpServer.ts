@@ -8,11 +8,22 @@ import type { SkillExecutor } from '../services/skillEngine/skillExecutor';
 import { getSkillAnalysisAdapter } from '../services/skillEngine/skillAnalysisAdapter';
 import { createArchitectureDetector } from '../agent/detectors/architectureDetector';
 import { displayResultToEnvelope } from '../types/dataContract';
+import { SQLLearningSystem } from '../services/sqlLearningSystem';
 import type { DisplayResult as SkillDisplayResult } from '../services/skillEngine/types';
 import type { StreamingUpdate } from '../agent/types';
 import type { SqlSchemaIndex } from './types';
 
 let sqlSchemaCache: SqlSchemaIndex | null = null;
+let sqlLearningInstance: SQLLearningSystem | null = null;
+
+async function getSqlLearning(): Promise<SQLLearningSystem> {
+  if (!sqlLearningInstance) {
+    const logDir = process.env.SQL_LEARNING_LOG_DIR || './logs/sql_learning';
+    sqlLearningInstance = new SQLLearningSystem(logDir);
+  }
+  await sqlLearningInstance.init();
+  return sqlLearningInstance;
+}
 
 function loadSqlSchema(): SqlSchemaIndex {
   if (sqlSchemaCache) return sqlSchemaCache;
@@ -60,13 +71,64 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       try {
         const result = await traceProcessorService.query(traceId, sql);
         const truncated = result.rows.length > 200;
+        const rows = truncated ? result.rows.slice(0, 200) : result.rows;
+        const success = !result.error;
+
+        // SQL Learning: log errors and attempt auto-fix
+        if (result.error) {
+          try {
+            const learning = await getSqlLearning();
+            const fixResult = await learning.fixSQL(
+              sql,
+              result.error,
+              'execute_sql via Claude Agent',
+              () => ({ isValid: true, errors: [] }), // basic validator — let trace_processor validate
+              async (fixedSql) => {
+                const retryResult = await traceProcessorService.query(traceId, fixedSql);
+                return { ok: !retryResult.error, error: retryResult.error };
+              },
+            );
+            if (fixResult.success) {
+              // Auto-fix succeeded — retry with the fixed SQL
+              const retryResult = await traceProcessorService.query(traceId, fixResult.fixedSQL);
+              const retryRows = retryResult.rows.length > 200 ? retryResult.rows.slice(0, 200) : retryResult.rows;
+              if (emitUpdate && !retryResult.error && retryResult.columns.length > 0 && retryRows.length > 0) {
+                emitSqlDataEnvelope(emitUpdate, retryResult.columns, retryRows);
+              }
+              return {
+                content: [{
+                  type: 'text' as const,
+                  text: JSON.stringify({
+                    success: !retryResult.error,
+                    columns: retryResult.columns,
+                    rows: retryRows,
+                    totalRows: retryResult.rows.length,
+                    truncated: retryResult.rows.length > 200,
+                    durationMs: retryResult.durationMs,
+                    autoFixed: true,
+                    originalError: result.error,
+                    fixMethod: fixResult.method,
+                  }, null, 2),
+                }],
+              };
+            }
+          } catch {
+            // SQL learning is non-critical — fall through to original error response
+          }
+        }
+
+        // Emit DataEnvelope for interactive table rendering in frontend
+        if (emitUpdate && success && result.columns.length > 0 && rows.length > 0) {
+          emitSqlDataEnvelope(emitUpdate, result.columns, rows);
+        }
+
         return {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({
-              success: !result.error,
+              success,
               columns: result.columns,
-              rows: truncated ? result.rows.slice(0, 200) : result.rows,
+              rows,
               totalRows: result.rows.length,
               truncated,
               durationMs: result.durationMs,
@@ -101,6 +163,11 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         if (packageName && !effectiveParams.process_name) {
           effectiveParams.process_name = packageName;
         }
+        // YAML skills reference ${package} in SQL, not ${process_name}.
+        // Map process_name → package so skill SQL resolves correctly.
+        if (effectiveParams.process_name && !effectiveParams.package) {
+          effectiveParams.package = effectiveParams.process_name;
+        }
         const result = await skillExecutor.execute(skillId, traceId, effectiveParams);
 
         // Emit DataEnvelopes for interactive frontend tables
@@ -115,6 +182,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               success: result.success,
               skillId: result.skillId,
               skillName: result.skillName,
+              ...(result.error ? { error: result.error } : {}),
               displayResults: result.displayResults?.map(dr => ({
                 stepId: dr.stepId,
                 title: dr.title,
@@ -243,6 +311,33 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     name: 'smartperfetto',
     version: '1.0.0',
     tools: [executeSql, invokeSkill, listSkills, detectArchitecture, lookupSqlSchema],
+  });
+}
+
+/** Emit a DataEnvelope for SQL query results (used by execute_sql). */
+function emitSqlDataEnvelope(
+  emit: (update: StreamingUpdate) => void,
+  columns: string[],
+  rows: any[],
+): void {
+  emit({
+    type: 'data',
+    content: [{
+      meta: { type: 'sql_result', version: '2.0', source: 'execute_sql' },
+      data: { columns, rows },
+      display: {
+        layer: 'detail',
+        format: 'table',
+        title: `SQL Query (${rows.length} rows)`,
+        columns: columns.map((col: string) => ({
+          name: col,
+          type: col.includes('ts') || col.includes('timestamp') ? 'timestamp' :
+                col.includes('dur') ? 'duration' :
+                col.includes('pct') || col.includes('percent') ? 'percentage' : 'string',
+        })),
+      },
+    }],
+    timestamp: Date.now(),
   });
 }
 

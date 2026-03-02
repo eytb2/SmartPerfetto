@@ -23,53 +23,38 @@ export * from './types';
 // =============================================================================
 export * from './skillLoader';
 
-export {
-  skillRegistry,
-  ensureSkillRegistryInitialized,
-  getSkillsDir,
-} from './skillLoader';
-
 // =============================================================================
 // Skill Executor
 // =============================================================================
 export * from './skillExecutor';
-
-export {
-  SkillExecutor,
-  createSkillExecutor,
-  LayeredResult,
-  // Cross-Domain Expert System types and functions
-  ExtractedFinding,
-  ExtractedSuggestion,
-  ModuleSkillResponse,
-  extractFindings,
-  extractSuggestions,
-} from './skillExecutor';
 
 // =============================================================================
 // Skill Analysis Adapter
 // =============================================================================
 export * from './skillAnalysisAdapter';
 
+// =============================================================================
+// Skill Validator
+// =============================================================================
 export {
-  SkillAnalysisAdapter,
-  createSkillAnalysisAdapter,
-  getSkillAnalysisAdapter,
-  SkillAnalysisRequest,
-  SkillAnalysisResponse,
-  SkillListItem,
-  AdaptedResult,
-} from './skillAnalysisAdapter';
+  validateSkillInputs,
+  validateSkillConditions,
+  validateFragmentReferences,
+  type SkillValidationWarning,
+} from './skillValidator';
+
+// =============================================================================
+// Expression Utilities
+// =============================================================================
+export { extractRootVariables, JS_BUILTINS } from './expressionUtils';
 
 // =============================================================================
 // Utilities
 // =============================================================================
 
-// 智能摘要和回答生成器
 export { smartSummaryGenerator, SmartSummaryGenerator } from './smartSummaryGenerator';
 export { answerGenerator, AnswerGenerator } from './answerGenerator';
 
-// 事件收集器
 export {
   SkillEventCollector,
   createEventCollector,
@@ -111,4 +96,3 @@ export {
   isDataEvent,
   isLegacySkillEvent,
 } from '../../types/dataContract';
-

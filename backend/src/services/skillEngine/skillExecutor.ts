@@ -31,6 +31,7 @@ import {
   SkillEvent,
   SynthesizeConfig,
 } from './types';
+import { validateSkillInputs } from './skillValidator';
 import logger from '../../utils/logger';
 import { parseLlmJson } from '../../utils/llmJson';
 import { redactObjectForLLM, redactTextForLLM } from '../../utils/llmPrivacy';
@@ -995,6 +996,7 @@ export class SkillExecutor {
   private skillRegistry: Map<string, SkillDefinition>;
   private eventEmitter?: (event: SkillEvent) => void;
   private sqlLearningSystem?: SQLLearningSystem;
+  private fragmentRegistry: Map<string, string> = new Map();
 
   constructor(
     traceProcessor: any,
@@ -1008,6 +1010,14 @@ export class SkillExecutor {
   }
 
   /**
+   * Set the SQL fragment registry (loaded by SkillRegistry).
+   * Fragments are reusable CTE definitions injected into step SQL at runtime.
+   */
+  setFragmentRegistry(cache: Map<string, string>): void {
+    this.fragmentRegistry = cache;
+  }
+
+  /**
    * 获取 SQL 学习系统实例（懒初始化单例）
    */
   private async getSQLLearningSystem(): Promise<SQLLearningSystem> {
@@ -1017,6 +1027,51 @@ export class SkillExecutor {
     }
     await this.sqlLearningSystem.init();
     return this.sqlLearningSystem;
+  }
+
+  /**
+   * Inject SQL fragment CTEs into a step's SQL query.
+   *
+   * Fragment files contain bare CTE definitions (no WITH keyword), e.g.:
+   *   target_threads AS (SELECT ...)
+   *
+   * Injection rules:
+   * - If the SQL starts with WITH: insert fragments after WITH, before existing CTEs
+   * - Otherwise: wrap as WITH <fragments>\n<sql>
+   */
+  private injectSqlFragments(
+    sql: string,
+    fragmentPaths: string[],
+    context: SkillExecutionContext,
+  ): string {
+    const fragmentCteBodies: string[] = [];
+
+    for (const fragPath of fragmentPaths) {
+      const content = this.fragmentRegistry.get(fragPath);
+      if (!content) {
+        logger.warn('SkillExecutor', `Fragment not found: ${fragPath}, skipping`);
+        continue;
+      }
+      // Apply variable substitution to the fragment content
+      const substituted = substituteVariables(content, context);
+      fragmentCteBodies.push(substituted);
+    }
+
+    if (fragmentCteBodies.length === 0) return sql;
+
+    const fragmentBlock = fragmentCteBodies.join(',\n');
+    const trimmed = sql.trimStart();
+
+    // Check if SQL already starts with WITH (case-insensitive)
+    const withMatch = trimmed.match(/^WITH\s+/i);
+    if (withMatch) {
+      // Insert fragments after WITH, before existing CTEs
+      const afterWith = trimmed.slice(withMatch[0].length);
+      return `WITH\n${fragmentBlock},\n${afterWith}`;
+    }
+
+    // Wrap the entire SQL in a WITH clause
+    return `WITH\n${fragmentBlock}\n${trimmed}`;
   }
 
   /**
@@ -1142,6 +1197,25 @@ export class SkillExecutor {
       data: { skillName: skill.meta.display_name },
     });
 
+    // Validate and coerce input parameters against skill.inputs declarations
+    const validated = validateSkillInputs(skillId, skill.inputs, params);
+    for (const w of validated.warnings) {
+      logger.warn('SkillExecutor', `[${skillId}] ${w.paramName}: ${w.message}`);
+    }
+    if (validated.errors.length > 0) {
+      const msg = validated.errors.map(e => `${e.paramName}: ${e.message}`).join('; ');
+      logger.error('SkillExecutor', `[${skillId}] Input validation failed: ${msg}`);
+      return {
+        skillId,
+        skillName: skill.meta.display_name,
+        success: false,
+        displayResults: [],
+        diagnostics: [],
+        executionTimeMs: Date.now() - startTime,
+        error: `Input validation failed: ${msg}`,
+      };
+    }
+
     const prerequisiteModules = this.resolvePrerequisiteModules(skill.prerequisites?.modules);
     let moduleIncludes = prerequisiteModules;
 
@@ -1150,10 +1224,10 @@ export class SkillExecutor {
       moduleIncludes = await this.resolveAvailableModules(traceId, prerequisiteModules);
     }
 
-    // 创建执行上下文
+    // 创建执行上下文 (use validated.params with coerced types and defaults)
     const context: SkillExecutionContext = {
       traceId,
-      params,
+      params: validated.params,
       inherited,
       results: {},
       variables: {},
@@ -1779,8 +1853,15 @@ export class SkillExecutor {
     context: SkillExecutionContext
   ): Promise<StepResult> {
     const startTime = Date.now();
+    let substitutedSql = substituteVariables(step.sql, context);
+
+    // Inject SQL fragments if declared on this step
+    if (step.sql_fragments?.length) {
+      substitutedSql = this.injectSqlFragments(substitutedSql, step.sql_fragments, context);
+    }
+
     const sql = this.buildSqlWithModuleIncludes(
-      substituteVariables(step.sql, context),
+      substitutedSql,
       context
     );
 

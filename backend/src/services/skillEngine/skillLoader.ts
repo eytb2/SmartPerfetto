@@ -15,6 +15,7 @@ import yaml from 'js-yaml';
 import { SkillDefinition, ModuleLayer, DialogueCapability, SkillStep } from './types';
 import { generateRenderingPipelineDetectionSkill } from '../renderingPipelineDetectionSkillGenerator';
 import logger from '../../utils/logger';
+import { validateSkillConditions, validateFragmentReferences } from './skillValidator';
 import {
   VALID_DISPLAY_LAYERS,
   VALID_DISPLAY_LEVELS,
@@ -23,7 +24,6 @@ import {
   VALID_COLUMN_FORMATS,
   VALID_CLICK_ACTIONS,
   isValidDisplayLayer,
-  ColumnDefinition,
 } from '../../types/dataContract';
 
 // =============================================================================
@@ -524,6 +524,7 @@ function validateStepDisplay(
 class SkillRegistry {
   private skills: Map<string, SkillDefinition> = new Map();
   private moduleSkills: Map<string, SkillDefinition> = new Map();  // Skills with module metadata
+  private fragmentCache: Map<string, string> = new Map();  // SQL fragment path → content
   private initialized = false;
 
   /**
@@ -533,6 +534,9 @@ class SkillRegistry {
     if (this.initialized) return;
 
     logger.info('SkillLoader', `Loading skills from: ${skillsDir}`);
+
+    // Load SQL fragments first (before skills, so fragment references can be validated)
+    this.loadFragments(skillsDir);
 
     // 加载原子 skills
     const atomicDir = path.join(skillsDir, 'atomic');
@@ -577,6 +581,68 @@ class SkillRegistry {
   }
 
   /**
+   * Load SQL fragments from skills/fragments/ directory.
+   * Fragments are reusable CTE definitions that can be injected into step SQL.
+   */
+  private loadFragments(skillsDir: string): void {
+    const fragmentsDir = path.join(skillsDir, 'fragments');
+    if (!fs.existsSync(fragmentsDir)) return;
+
+    const files = fs.readdirSync(fragmentsDir);
+    for (const file of files) {
+      if (!file.endsWith('.sql')) continue;
+      const filePath = path.join(fragmentsDir, file);
+      try {
+        const content = fs.readFileSync(filePath, 'utf-8').trim();
+        const key = `fragments/${file}`;
+        this.fragmentCache.set(key, content);
+        logger.debug('SkillLoader', `Loaded SQL fragment: ${key}`);
+      } catch (error: any) {
+        logger.error('SkillLoader', `Failed to load fragment ${file}: ${error.message}`);
+      }
+    }
+    logger.info('SkillLoader', `Loaded ${this.fragmentCache.size} SQL fragments`);
+  }
+
+  /** Get a loaded SQL fragment by its path key (e.g., 'fragments/target_threads.sql') */
+  getFragment(fragmentPath: string): string | undefined {
+    return this.fragmentCache.get(fragmentPath);
+  }
+
+  /** Get all loaded fragment path keys */
+  getFragmentPaths(): Set<string> {
+    return new Set(this.fragmentCache.keys());
+  }
+
+  /** Get the full fragment cache (for passing to SkillExecutor) */
+  getFragmentCache(): Map<string, string> {
+    return this.fragmentCache;
+  }
+
+  /**
+   * Run all load-time validations on a skill and log warnings.
+   */
+  private validateAndLogWarnings(skill: SkillDefinition): void {
+    const displayWarnings = validateSkillDisplayConfig(skill);
+    for (const warn of displayWarnings) {
+      logger.warn(
+        'SkillLoader',
+        `Validation warning in ${skill.name}${warn.stepId ? `.${warn.stepId}` : ''}: ${warn.field} - ${warn.message} (value: ${warn.value})`
+      );
+    }
+
+    const condWarnings = validateSkillConditions(skill);
+    for (const w of condWarnings) {
+      logger.warn('SkillLoader', `[${skill.name}.${w.stepId}] ${w.message}`);
+    }
+
+    const fragWarnings = validateFragmentReferences(skill, this.getFragmentPaths());
+    for (const w of fragWarnings) {
+      logger.warn('SkillLoader', `[${skill.name}.${w.stepId}] ${w.message}`);
+    }
+  }
+
+  /**
    * 递归加载 modules 目录下的 skills
    * modules/
    *   ├── app/
@@ -593,22 +659,14 @@ class SkillRegistry {
       if (entry.isDirectory()) {
         await this.loadModuleSkillsRecursively(fullPath);
       } else if (entry.name.endsWith('.skill.yaml') || entry.name.endsWith('.skill.yml')) {
-          try {
-            const content = fs.readFileSync(fullPath, 'utf-8');
-            const loaded = yaml.load(content) as any;
-            const skill = normalizeSkillDefinition(loaded, fullPath);
+        try {
+          const content = fs.readFileSync(fullPath, 'utf-8');
+          const loaded = yaml.load(content) as any;
+          const skill = normalizeSkillDefinition(loaded, fullPath);
 
-            if (skill && skill.name) {
-              // Validate display configurations
-              const warnings = validateSkillDisplayConfig(skill);
-              for (const warn of warnings) {
-                logger.warn(
-                  'SkillLoader',
-                  `Validation warning in ${skill.name}${warn.stepId ? `.${warn.stepId}` : ''}: ${warn.field} - ${warn.message} (value: ${warn.value})`
-                );
-              }
-
-              this.skills.set(skill.name, skill);
+          if (skill && skill.name) {
+            this.validateAndLogWarnings(skill);
+            this.skills.set(skill.name, skill);
 
             // Track module skills separately for efficient lookup
             if (skill.module) {
@@ -671,15 +729,7 @@ class SkillRegistry {
         const skill = normalizeSkillDefinition(loaded, filePath);
 
         if (skill && skill.name) {
-          // Validate display configurations
-          const warnings = validateSkillDisplayConfig(skill);
-          for (const warn of warnings) {
-            logger.warn(
-              'SkillLoader',
-              `Validation warning in ${skill.name}${warn.stepId ? `.${warn.stepId}` : ''}: ${warn.field} - ${warn.message} (value: ${warn.value})`
-            );
-          }
-
+          this.validateAndLogWarnings(skill);
           this.skills.set(skill.name, skill);
           logger.debug('SkillLoader', `Loaded skill: ${skill.name} (${skill.type})`);
         }

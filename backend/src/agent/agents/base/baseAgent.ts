@@ -1246,6 +1246,7 @@ export abstract class BaseAgent extends EventEmitter {
 
     const executor = createSkillExecutor(traceProcessorService, aiService);
     executor.registerSkills(skillRegistry.getAllSkills());
+    executor.setFragmentRegistry(skillRegistry.getFragmentCache());
 
     this.skillExecutorCache = {
       traceProcessorService,

@@ -89,6 +89,7 @@ export class DirectSkillExecutor {
       this.aiService  // ModelRouter duck-types as aiService via callWithFallback()
     );
     skillExecutor.registerSkills(skillRegistry.getAllSkills());
+    skillExecutor.setFragmentRegistry(skillRegistry.getFragmentCache());
 
     emitter.log(`DirectSkillExecutor: executing ${tasks.length} tasks (concurrency: ${this.concurrency})`);
     emitter.emitUpdate('progress', {
