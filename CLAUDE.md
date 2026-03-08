@@ -6,6 +6,14 @@ AI-driven Perfetto analysis platform for Android performance data.
 
 This is primarily a TypeScript codebase. Use TypeScript idioms, strict typing, and follow existing patterns in the codebase.
 
+## Post-change Dev Workflow
+
+Both backend (`tsx watch`) and frontend (`build.js --watch`) auto-rebuild on file save. After code changes:
+- **All .ts / .yaml changes**: Tell user to refresh the browser. No restart needed.
+- **Only use `./scripts/restart-backend.sh`** for: `.env` changes, `npm install`, or tsx watch stuck.
+- **Only use `./scripts/start-dev.sh`** for: first-time setup or both services crashed.
+- **Default assumption**: User only refreshes browser after changes. If a restart is truly needed, explicitly tell the user to run the specific script and why.
+
 ## Mandatory Post-change Trace Regression
 
 After every code change, run the scene reconstruction regression suite:
@@ -35,10 +43,10 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 
 **Core Concepts:**
 - Frontend/backend share `trace_processor_shell` via HTTP RPC
-- **Dual-Layer Architecture:** agentv2 (governance + routing) wraps agent/core (execution)
-- **Dual-Executor Pattern:** Strategy-Driven (deterministic) + Hypothesis-Driven (adaptive)
-- **Governance Pipeline:** PrincipleEngine → OperationPlanner → SoulGuard → Execute
-- Domain Agents collect evidence via SQL queries
+- **Primary Runtime: agentv3** — Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`) as orchestrator
+- **Deprecated Fallback: agentv2** — governance pipeline + agent/core executors (activated by `AI_SERVICE=deepseek`)
+- Claude orchestrates via MCP tools: execute_sql, invoke_skill, detect_architecture, etc.
+- Scene Classifier routes queries to scene-specific system prompts (scrolling/startup/anr/general)
 - Analysis logic in YAML Skills (`backend/skills/`)
 - Results layered: L1 (overview) → L2 (list) → L3 (diagnosis) → L4 (deep)
 - SSE for real-time streaming
@@ -47,193 +55,104 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 
 ## Backend Structure
 
-### Runtime Layer (Primary Path): `backend/src/agentv2/`
+### Runtime Layer (Primary Path): `backend/src/agentv3/`
 
-The real execution path goes through `agentv2/runtime/`, which wraps the older `agent/core/` executors with a governance layer.
+The primary execution path uses Claude Agent SDK as the orchestrator. Claude receives a system prompt with scene-specific analysis strategies and accesses trace data through MCP tools.
+
+**Routing:** `agentAnalyzeSessionService.ts` calls `isClaudeCodeEnabled()` → `ClaudeRuntime` (default) or legacy `AgentRuntime` (fallback).
+
+| Component | Purpose |
+|-----------|---------|
+| claudeRuntime.ts | 主编排器 — implements `IOrchestrator`, wraps `sdkQuery()` |
+| claudeMcpServer.ts | 8 MCP tools for Claude to access trace data |
+| claudeSystemPrompt.ts | 动态 system prompt — 按 SceneType 注入分析策略 |
+| claudeSseBridge.ts | SDK stream → SSE events 桥接 (text buffering, tool tracking) |
+| claudeConfig.ts | 配置 + `isClaudeCodeEnabled()` 路由判断 |
+| sceneClassifier.ts | 关键词场景分类 (scrolling/startup/anr/general, <1ms) |
+| focusAppDetector.ts | 焦点应用检测 (battery_stats/oom_adj/frame_timeline) |
+| claudeAgentDefinitions.ts | Sub-agent 定义 (feature-flagged: `CLAUDE_ENABLE_SUB_AGENTS=true`) |
+| claudeVerifier.ts | 结论验证 (heuristic + plan adherence + LLM) + 修正提示生成. 默认开启 |
+| artifactStore.ts | Skill 结果引用存储 — 3 级获取 (summary/rows/full) |
+| sqlSummarizer.ts | SQL 结果摘要 — `summary=true` 时返回列统计+采样行，节省 ~85% tokens |
+| claudeFindingExtractor.ts | 从 SDK 响应和 Skill 结果中提取 Findings |
+| analysisPatternMemory.ts | 跨会话分析模式记忆 — 持久化 trace 特征→insights (200 条, 60 天 TTL) |
+| types.ts | ClaudeAnalysisContext, AnalysisNote, AnalysisPlanV3, VerificationResult |
+| index.ts | 导出 + `createClaudeRuntime()` 工厂 |
+
+**MCP Tools (10):**
+
+| Tool | Purpose |
+|------|---------|
+| execute_sql | 执行 Perfetto SQL 查询 (支持 summary 模式) |
+| invoke_skill | 调用 YAML Skill (参数传递, 结果存入 ArtifactStore) |
+| list_skills | 列出可用 Skills (按类型过滤) |
+| detect_architecture | 检测渲染架构 (Standard/Flutter/Compose/WebView) |
+| lookup_sql_schema | 查询 Perfetto SQL 表/视图/函数 schema |
+| write_analysis_note | 写入结构化分析笔记 (跨轮次持久化, 20 条上限) |
+| fetch_artifact | 分页获取 Skill 结果详情 (summary/rows/full) |
+| query_perfetto_source | 搜索 Perfetto 源码 (异步 fs) |
+| submit_plan | 提交结构化分析计划 (必须首先调用) |
+| update_plan_phase | 更新计划阶段状态 (in_progress/completed/skipped) |
+
+**Sub-Agents (Optional, feature-flagged):**
+
+| Agent | Model | Scene | Purpose |
+|-------|-------|-------|---------|
+| frame-expert | sonnet | scrolling | 帧渲染 + 卡顿分析 |
+| system-expert | sonnet | all | CPU/内存/Binder 系统级分析 |
+| startup-expert | sonnet | startup | 启动性能分析 |
+
+### Agent Core (Shared): `backend/src/agent/`
+
+Both agentv3 and agentv2 share these components:
+
+**Detectors:** `agent/detectors/`
+- architectureDetector.ts - 架构检测 (总控)
+- standardDetector.ts / composeDetector.ts / flutterDetector.ts / webviewDetector.ts
+
+**Context & Entity Tracking:** `agent/context/`
+- enhancedSessionContext.ts - 多轮对话上下文
+- entityStore.ts - 跨轮次实体追踪 (进程/线程/帧/区间)
+- contextBuilder.ts / contextTypes.ts
+
+**Core Utilities:** `agent/core/`
+- entityCapture.ts - 从分析结果中提取实体
+- conclusionGenerator.ts - 结论综合与格式化
+- orchestratorTypes.ts - `IOrchestrator` 接口
+
+### Legacy Runtime (Deprecated Fallback): `backend/src/agentv2/`
+
+Activated only when `AI_SERVICE=deepseek`. Uses a governance pipeline wrapping agent/core executors.
+
+<details>
+<summary>展开 agentv2 详细结构</summary>
 
 **Runtime:** `agentv2/runtime/`
-| Component | Purpose |
-|-----------|---------|
-| agentRuntime.ts | 主 entry point (API → 意图理解 → 治理流水线 → 模式路由) |
-| runtimeGovernancePipeline.ts | 治理流水线 (PrincipleEngine → Planner → SoulGuard → Execute) |
-| runtimeModeExecutor.ts | 根据 mode 路由到对应 handler |
-| runtimeModeContracts.ts | RuntimeModeHandler 接口定义 |
-| runtimeContextBuilder.ts | 构建 DecisionContext |
-| runtimeExecutionFactory.ts | 创建 AnalysisServices (含 knowledgeBase) |
-| runtimeResultFinalizer.ts | 结果后处理与结论生成 |
-| runtimeUpdateBridge.ts | SSE 事件转发 |
-| runtimeInitialExecutorSelector.ts | 选择 StrategyExecutor 或 HypothesisExecutor |
+- agentRuntime.ts — 主 entry point
+- runtimeGovernancePipeline.ts — PrincipleEngine → Planner → SoulGuard → Execute
+- runtimeModeExecutor.ts — mode 路由 (initial/clarify/extend/compare/drill_down)
 
-**Mode Handlers:** `agentv2/runtime/modeHandlers/`
-| Handler | Modes | Description |
-|---------|-------|-------------|
-| initialModeHandler.ts | initial | 首次分析 (Strategy 匹配 → 执行器选择 → 回退机制) |
-| followUpModeHandler.ts | extend, compare, drill_down | 后续查询 (扩展/对比/深钻) |
-| clarifyModeHandler.ts | clarify | 澄清问题 (定向证据收集) |
+**Executors:** `agent/core/executors/`
+- strategyExecutor.ts — 确定性多阶段流水线 (Strategy matched)
+- hypothesisExecutor.ts — 假设驱动多轮分析 (No strategy match)
+- directSkillExecutor.ts — 直接执行 Skill (零 LLM 开销)
+- clarifyExecutor.ts / comparisonExecutor.ts / extendExecutor.ts
 
-**Principles & Governance:** `agentv2/principles/`
-| Component | Purpose |
-|-----------|---------|
-| principleEngine.ts | 策略决策 (allow/deny/require_more_evidence/require_approval) |
-| principleRegistry.ts | 活跃原则管理 |
-| principleSchema.ts | 原则定义 schema |
-| policyCompiler.ts | 上下文 → 策略编译 |
+**Strategies:** `agent/strategies/`
+- scrollingStrategy.ts — 滑动分析 3 阶段流水线
+- registry.ts — trigger 匹配策略选择
 
-**Soul Guard:** `agentv2/soul/`
-| Component | Purpose |
-|-----------|---------|
-| soulGuard.ts | 操作计划完整性校验 (域边界/证据先行/可追溯/置信度诚实) |
-| soulProfile.ts | Android 域边界约束定义 |
+**Decision Trees:** `agent/decision/`
+- trees/scrollingDecisionTree.ts, launchDecisionTree.ts
 
-**Operations:** `agentv2/operations/`
-| Component | Purpose |
-|-----------|---------|
-| operationPlanner.ts | 分解分析为步骤序列 (collect → test → resolve → conclude) |
-| operationExecutor.ts | 执行计划，委托到 agent/core |
-| evidenceSynthesizer.ts | LLM 综合发现 |
-| approvalController.ts | 用户审批门控 |
+**Core:** `agent/core/`
+- modelRouter.ts — 多模型路由 (DeepSeek/OpenAI/Anthropic)
+- stateMachine.ts, circuitBreaker.ts, pipelineExecutor.ts, etc.
 
-**Contracts:** `agentv2/contracts/`
-| Contract | Key Types |
-|----------|-----------|
-| runtime.ts | OperationMode, OperationPlan, OperationStep |
-| policy.ts | DecisionContext, PrincipleDecision, SoulViolation |
-| learning.ts | Learning contracts |
+**Domain Agents:** `agent/agents/domain/`
+- frameAgent.ts, cpuAgent.ts, memoryAgent.ts, binderAgent.ts, additionalAgents.ts
 
-### Agent Core (Delegated): `backend/src/agent/core/`
-
-The agent/core layer provides the actual analysis executors, delegated to by agentv2 mode handlers.
-
-**Core:** `backend/src/agent/core/`
-| Component | Purpose |
-|-----------|---------|
-| agentRuntime.ts | Legacy 协调器 (被 agentv2 包装) |
-| circuitBreaker.ts | 熔断器，触发用户介入 |
-| modelRouter.ts | 多模型路由 (DeepSeek/OpenAI/Anthropic/GLM) |
-| stateMachine.ts | 状态机 (IDLE→PLANNING→HYPOTHESIS→ROUNDS→CONCLUSION) |
-| pipelineExecutor.ts | 任务执行流水线 |
-| taskGraphPlanner.ts | 任务图生成 |
-| taskGraphExecutor.ts | 依赖有序执行 |
-| hypothesisGenerator.ts | 初始假设生成 |
-| intentUnderstanding.ts | 意图理解 |
-| conclusionGenerator.ts | 结论综合 |
-| feedbackSynthesizer.ts | LLM 综合发现 |
-| followUpHandler.ts | 后续问题处理与上下文延续 |
-
-**Executors:** `backend/src/agent/core/executors/`
-| Executor | Mode | Trigger | Description |
-|----------|------|---------|-------------|
-| strategyExecutor.ts | Deterministic | Strategy matched | 确定性多阶段流水线 |
-| hypothesisExecutor.ts | Adaptive LLM | No strategy match | 假设驱动多轮分析 |
-| directSkillExecutor.ts | Direct bypass | Stage template | 直接执行 Skill (零 LLM 开销) |
-| clarifyExecutor.ts | Conversation | User clarification | 处理用户澄清请求 |
-| comparisonExecutor.ts | Conversation | Compare request | 对比多次分析结果 |
-| extendExecutor.ts | Conversation | Extend request | 扩展上一轮分析 |
-| directDrillDownExecutor.ts | Drill-down | Time/range navigation | 直接跳转时间戳或区间 |
-| analysisExecutor.ts | Interface | - | 执行器基类接口 |
-
-**Conversation Support:** `backend/src/agent/core/`
-| Component | Purpose |
-|-----------|---------|
-| drillDownResolver.ts | 解析 drill-down 导航 (时间戳/区间跳转) |
-| entityCapture.ts | 从分析结果中提取实体 (进程/线程/帧) |
-
-**Strategies:** `backend/src/agent/strategies/`
-| Component | Purpose |
-|-----------|---------|
-| types.ts | StagedAnalysisStrategy, FocusInterval, StageDefinition, StageTaskTemplate |
-| registry.ts | StrategyRegistry - trigger 匹配策略选择 |
-| scrollingStrategy.ts | 滑动分析策略 (3 阶段流水线) |
-| helpers.ts | 区间提取和格式化工具函数 |
-
-**Decision Trees:** `backend/src/agent/decision/`
-| Component | Purpose |
-|-----------|---------|
-| decisionTreeExecutor.ts | 决策树执行引擎 |
-| decisionTreeStageExecutor.ts | 决策树与 Pipeline 集成 |
-| skillExecutorAdapter.ts | Skill 调用适配器 |
-| types.ts | 决策节点/分支/树类型 (CHECK/ACTION/BRANCH/CONCLUDE) |
-| trees/scrollingDecisionTree.ts | 滑动场景决策树 |
-| trees/launchDecisionTree.ts | 启动场景决策树 |
-
-**Domain Agents:** `backend/src/agent/agents/domain/`
-| Agent | Purpose |
-|-------|---------|
-| frameAgent.ts | 帧渲染分析 (jank_frame_detail, scrolling_analysis, consumer_jank_detection) |
-| cpuAgent.ts | CPU 调度与负载 |
-| memoryAgent.ts | 内存分配与 GC |
-| binderAgent.ts | IPC/Binder 事务 |
-| additionalAgents.ts | Startup、Interaction、ANR、System |
-
-**Planning & Evaluation:** `backend/src/agent/agents/`
-- plannerAgent.ts - 意图理解、任务分解
-- evaluatorAgent.ts - 结果质量评估
-- iterationStrategyPlanner.ts - 迭代策略决策（置信度评估，是否继续下一轮）
-- sceneReconstructionAgent.ts - 场景重建
-- scrollingExpertAgent.ts - 滑动专家 (legacy)
-
-**Agent Bases:** `backend/src/agent/agents/base/`
-- baseAgent.ts - Agent 基类
-- baseSubAgent.ts - SubAgent 基类
-
-**Communication:** `backend/src/agent/communication/`
-- agentMessageBus.ts - Agent 间消息总线
-
-**Context & State:**
-- `context/enhancedSessionContext.ts` - 多轮对话上下文
-- `context/contextBuilder.ts` - 按角色过滤上下文
-- `context/contextTypes.ts` - 上下文类型定义
-- `context/entityStore.ts` - 跨轮次实体追踪 (进程/线程/帧/区间)
-- `context/policies/` - Planner/Evaluator/Worker Policy
-- `compaction/contextCompactor.ts` - Token 溢出防护
-- `compaction/tokenEstimator.ts` - Token 用量估算
-- `compaction/strategies/slidingWindowStrategy.ts` - 滑动窗口压缩
-- `state/checkpointManager.ts` - 暂停/恢复
-- `state/sessionStore.ts` - 会话持久化
-- `fork/forkManager.ts` - 会话分叉
-- `fork/mergeStrategies.ts` - 分叉合并策略
-- `fork/sessionTree.ts` - 会话树结构
-
-**Hooks (Middleware):** `backend/src/agent/hooks/`
-| Component | Purpose |
-|-----------|---------|
-| hookTypes.ts | Hook 生命周期和注册类型 |
-| hookRegistry.ts | Hook 注册管理 |
-| hookContext.ts | Hook 执行上下文 |
-| middleware/loggingMiddleware.ts | 日志中间件 |
-| middleware/timingMiddleware.ts | 计时中间件 |
-
-**Experts:** `backend/src/agent/experts/`
-- launchExpert.ts, interactionExpert.ts, systemExpert.ts
-- `base/baseExpert.ts` - Expert 基类
-- `crossDomain/` - 跨域分析
-  - baseCrossDomainExpert.ts - 跨域基类
-  - hypothesisManager.ts - 假设生命周期管理
-  - dialogueProtocol.ts - Agent 通信协议
-  - moduleCatalog.ts - 模块目录 (framework/vendor capabilities)
-  - moduleExpertInvoker.ts - 模块专家调用
-  - experts/performanceExpert.ts - 性能综合分析
-
-**Tools:** `backend/src/agent/tools/`
-- sqlExecutor.ts - SQL 查询执行
-- frameAnalyzer.ts - 帧分析
-- skillInvoker.ts - Skill 调用 (参数映射)
-- dataStats.ts - 数据统计
-
-**Detectors:** `backend/src/agent/detectors/`
-- architectureDetector.ts - 架构检测 (总控)
-- baseDetector.ts - Detector 基类
-- standardDetector.ts - 标准 Android
-- composeDetector.ts - Jetpack Compose
-- flutterDetector.ts - Flutter
-- webviewDetector.ts - WebView
-
-**Other:**
-- `types/agentProtocol.ts` - Agent 通信协议类型
-- `llmAdapter.ts` - LLM 适配器
-- `toolRegistry.ts` - 工具注册表
-- `traceRecorder.ts` - Trace 录制
-- `evalSystem.ts` - 评估系统
+</details>
 
 ### Key Services
 
@@ -249,7 +168,6 @@ The agent/core layer provides the actual analysis executors, delegated to by age
 | EventCollector | services/skillEngine/eventCollector.ts | 事件收集 |
 | HTMLReportGenerator | services/htmlReportGenerator.ts | HTML 报告生成 |
 | SessionLogger | services/sessionLogger.ts | JSONL 会话日志 |
-| AutoAnalysisService | services/autoAnalysisService.ts | 自动分析服务 |
 | SessionPersistenceService | services/sessionPersistenceService.ts | 会话持久化 |
 | ResultExportService | services/resultExportService.ts | 结果导出 |
 
@@ -257,138 +175,64 @@ The agent/core layer provides the actual analysis executors, delegated to by age
 
 ## Data Flow
 
+### agentv3 (Primary — Claude Agent SDK)
+
+```
+User Query → POST /api/agent/v1/analyze → AgentAnalyzeSessionService
+    │
+    ├─ isClaudeCodeEnabled() → true (default)
+    │
+    ├─ Phase 1: Context Preparation (prepareAnalysisContext)
+    │   ├─ classifyScene(query) → SceneType (scrolling/startup/anr/general)
+    │   ├─ detectFocusApps() → 焦点应用 + 包名
+    │   ├─ detectArchitecture() → 渲染架构 (缓存 per traceId)
+    │   ├─ loadLearnedSqlFixPairs() → 跨会话 SQL 纠错上下文
+    │   └─ buildSystemPrompt(context, sceneType) → 场景化 system prompt
+    │
+    ├─ Phase 2: SDK Orchestration
+    │   ├─ sdkQuery({ prompt, systemPrompt, mcpServers, model, effort })
+    │   ├─ Claude 通过 MCP tools 自主决策:
+    │   │   ├─ execute_sql → 查询 trace 数据
+    │   │   ├─ invoke_skill → 调用 YAML 分析技能
+    │   │   ├─ detect_architecture → 检测渲染管线
+    │   │   ├─ write_analysis_note → 记录分析笔记
+    │   │   └─ fetch_artifact → 分页获取大型结果
+    │   └─ claudeSseBridge → SDK messages → SSE events → 前端实时展示
+    │
+    ├─ Phase 3: Result Extraction
+    │   ├─ extractFindingsFromText() + extractFindingsFromSkillResult()
+    │   ├─ captureEntitiesFromResponses() → entityStore (跨轮次追踪)
+    │   └─ verifyConclusion() (optional, feature-flagged)
+    │
+    └─ Phase 4: conclusion → analysis_completed → SSE
+```
+
+### Multi-Turn Conversation
+
+```
+Round N+1 → sdkQuery({ resume: existingSdkSessionId })
+    │
+    ├─ SDK 自动恢复对话上下文 (无需手动传 previousFindings)
+    ├─ entityStore 提供实体解析 ("第3帧" → frameId)
+    └─ analysisNotes 跨轮次传递结构化笔记
+```
+
+### agentv2 (Deprecated Fallback)
+
+<details>
+<summary>展开 agentv2 数据流</summary>
+
 ```
 User Query → POST /api/agent/v1/analyze → agentv2/AgentRuntime
-    │
-    ├─ Phase 1: Intent Understanding
-    │   └─ ModelRouter → LLM 意图分类 + 上下文解析
-    │
-    ├─ Phase 2: Governance Pipeline (runtimeGovernancePipeline)
-    │   ├─ PrincipleEngine.decide(context) → 策略决策 (allow/deny/require_more)
-    │   ├─ OperationPlanner.buildPlan() → 步骤序列 (collect → test → conclude)
-    │   ├─ SoulGuard.evaluate() → 完整性校验 (域边界/证据先行/可追溯)
-    │   └─ OperationExecutor → 委托到 Mode Handler
-    │
-    ├─ Phase 3: Mode-Based Execution (runtimeModeExecutor)
-    │   │
-    │   ├─ [initial] InitialModeHandler:
-    │   │   ├─ selectInitialExecutor → Strategy 匹配 / HypothesisExecutor 回退
-    │   │   │
-    │   │   ├─ [Strategy Match] StrategyExecutor (确定性流水线):
-    │   │   │   ├─ Stage 0: scroll_session_analysis → 识别卡顿会话
-    │   │   │   ├─ extractIntervals() → FocusInterval[]
-    │   │   │   ├─ Stage 1: scrolling_analysis → 每会话统计
-    │   │   │   └─ Stage 2: jank_frame_detail → 逐帧分析
-    │   │   │
-    │   │   └─ [No Strategy] HypothesisExecutor (自适应多轮):
-    │   │       ├─ 分派任务 → Domain Agents → SQL 证据收集
-    │   │       ├─ 综合 Findings → 评估置信度
-    │   │       └─ 多轮迭代直到置信度达标
-    │   │
-    │   ├─ [clarify] ClarifyModeHandler → entityStore 解析 → 定向分析
-    │   ├─ [extend/compare/drill_down] FollowUpModeHandler → 复用上下文
-    │   └─ Circuit Breaker: 置信度过低时触发用户介入
-    │
-    └─ Phase 4: EvidenceSynthesizer → 结论生成 → analysis_completed
+    ├─ Intent Understanding → ModelRouter → LLM 意图分类
+    ├─ Governance Pipeline → PrincipleEngine → OperationPlanner → SoulGuard
+    ├─ Mode Execution:
+    │   ├─ [Strategy Match] StrategyExecutor → 确定性多阶段流水线
+    │   └─ [No Strategy] HypothesisExecutor → 多轮迭代
+    └─ EvidenceSynthesizer → 结论生成
 ```
 
-### Multi-Round Conversation Flow
-
-```
-Round N+1 (Follow-up Query) → Intent Classification:
-    │
-    ├─ [Clarify] "刚才说的第3帧是什么情况?"
-    │   └─ ClarifyExecutor → entityStore.resolve("第3帧") → 定向分析
-    │
-    ├─ [Extend] "继续分析 CPU 调度"
-    │   └─ ExtendExecutor → 复用上轮 FocusInterval → 扩展 skill
-    │
-    ├─ [Compare] "对比这两次滑动"
-    │   └─ ComparisonExecutor → 多区间并行分析 → 差异报告
-    │
-    └─ [DrillDown] 点击表格中的时间戳
-        └─ DrillDownResolver → navigate_timeline / navigate_range
-```
-
-**Entity Tracking:** `entityStore` 跨轮次追踪实体引用
-- 进程: "com.example.app" → processName
-- 线程: "RenderThread" → threadName
-- 帧: "第3帧" → frameId + timestamp
-- 区间: "卡顿会话" → FocusInterval
-
----
-
-## Dual-Executor Pattern
-
-**Purpose:** 根据场景选择最优执行路径，平衡确定性与灵活性。
-
-### StrategyExecutor (Deterministic)
-
-```
-Query → Strategy.trigger() match → Multi-stage pipeline → Fixed output
-```
-
-**特点:**
-- 预定义分析流水线
-- 确定性阶段转换
-- 保证输出格式
-- 支持 `direct_skill` 模式 (零 LLM 开销)
-- 适用: 滑动、启动、导航等常见场景
-
-### HypothesisExecutor (Adaptive)
-
-```
-Query → LLM 假设生成 → Multi-round refinement → Variable output
-```
-
-**特点:**
-- LLM 驱动假设生成
-- 多轮迭代优化
-- 输出随发现变化
-- Circuit Breaker 用户介入
-- 适用: 通用分析、边缘场景
-
-### Execution Modes
-
-| Mode | LLM Overhead | Use Case |
-|------|--------------|----------|
-| `agent` | Full reasoning | 需要 LLM 决策的任务 |
-| `direct_skill` | Zero | 确定性 SQL 查询 (`*_in_range` skills) |
-
----
-
-## Strategy System
-
-**Purpose:** 将常见分析场景编码为确定性多阶段流水线，避免 LLM 不确定性。
-
-### Scrolling Strategy (3 Stages)
-
-```
-Stage 0 (overview):
-  - Skill: scroll_session_analysis
-  - Scope: global
-  - Output: scroll_sessions, session_jank data
-  - extractIntervals() → FocusInterval[] (janky sessions)
-
-Stage 1 (session_overview):
-  - Skill: scrolling_analysis
-  - Scope: global (with session context)
-  - Output: FPS, frame drop stats per session
-
-Stage 2 (per_interval):
-  - Skill: jank_frame_detail
-  - Scope: per_interval
-  - For each FocusInterval:
-    - Run with start_ts/end_ts parameters
-    - Collect CPU/Binder/Rendering metrics per frame
-```
-
-**Key Concepts:**
-- `StagedAnalysisStrategy` — 策略定义 (trigger + stages)
-- `StageDefinition` — 阶段定义 (tasks + extractIntervals + shouldStop)
-- `StageTaskTemplate` — 任务模板 (agentId + scope + executionMode + skillParams)
-- `FocusInterval` — 焦点区间 (startTs/endTs/processName/priority)
-- `skillParams` — 泛型参数传递，Strategy → Agent → Skill
+</details>
 
 ---
 
@@ -433,60 +277,14 @@ steps:
 ```
 
 **Location:** `backend/skills/`
-- `atomic/` - 单步检测 (32 skills)
-- `composite/` - 组合分析 (27 skills)
+- `atomic/` - 单步检测 (57 skills)
+- `composite/` - 组合分析 (28 skills)
 - `deep/` - 深度分析 (2 skills)
+- `pipelines/` - 渲染管线检测+教学 (26 skills)
 - `modules/` - 模块配置 (app/framework/hardware/kernel)
 - `vendors/` - 厂商适配 (pixel/samsung/xiaomi/honor/oppo/vivo/qualcomm/mtk)
 
-### Atomic Skills (32)
-
-**Frame Analysis:**
-- app_frame_production, consumer_jank_detection, render_thread_slices
-- rendering_arch_detection, present_fence_timing, vrr_detection, vsync_config
-
-**CPU Analysis:**
-- cpu_freq_timeline, cpu_load_in_range, cpu_slice_analysis
-- cpu_topology_detection, scheduling_analysis, lock_contention_in_range
-
-**Range-Based Skills (12 - direct_skill 模式):**
-- binder_blocking_in_range, cpu_cluster_load_in_range, cpu_throttling_in_range
-- gpu_freq_in_range, gpu_render_in_range, page_fault_in_range
-- render_pipeline_latency, sched_latency_in_range, sf_composition_in_range
-- system_load_in_range, task_migration_in_range, vsync_alignment_in_range
-
-**Other:**
-- binder_in_range, gpu_metrics, game_fps_analysis, sf_frame_consumption
-
-### Composite Skills (27)
-
-**Scrolling/Jank:**
-- scroll_session_analysis, scrolling_analysis, jank_frame_detail
-
-**Startup:**
-- startup_analysis, startup_detail
-
-**ANR:**
-- anr_analysis, anr_detail
-
-**Interaction:**
-- click_response_analysis, click_response_detail, navigation_analysis
-
-**System Analysis:**
-- cpu_analysis, memory_analysis, gc_analysis, lmk_analysis
-- binder_analysis, binder_detail, gpu_analysis, surfaceflinger_analysis
-
-**Issues:**
-- lock_contention_analysis, render_pipeline_latency
-- block_io_analysis, io_pressure, dmabuf_analysis
-- suspend_wakeup_analysis, thermal_throttling, irq_analysis, network_analysis
-
-**Meta:**
-- scene_reconstruction
-
-### Pipeline Skills (25)
-
-**Location:** `backend/skills/pipelines/`
+### Pipeline Skills (26)
 
 渲染管线检测和教学内容，每个 Pipeline Skill 包含:
 - `detection` - SQL 检测逻辑
@@ -598,10 +396,10 @@ interface ColumnDefinition {
 ## API Endpoints
 
 **Agent (唯一主链路):**
-- `POST /api/agent/v1/analyze` - 启动分析 (Strategy 匹配 → Executor 路由)
+- `POST /api/agent/v1/analyze` - 启动分析 (agentv3 ClaudeRuntime 或 agentv2 fallback)
 - `GET /api/agent/v1/:sessionId/stream` - SSE 实时流
 - `GET /api/agent/v1/:sessionId/status` - 轮询状态
-- `POST /api/agent/v1/:sessionId/respond` - 响应断路器
+- `POST /api/agent/v1/:sessionId/respond` - 响应断路器 (agentv2 only)
 - `POST /api/agent/v1/scene-reconstruct` - 场景重建（独立功能）
 
 **Logs:**
@@ -622,30 +420,36 @@ interface ColumnDefinition {
 
 ---
 
-## SSE Events (Agent-Driven)
+## SSE Events
 
-| Event | Phase Mapping | Description |
-|-------|---------------|-------------|
-| progress | starting, understanding, concluding | 阶段进度 |
-| hypothesis_generated | hypotheses_generated | 假设生成 |
-| round_start | round_start | 新一轮开始 |
-| stage_start | stage_start | 策略阶段开始 |
-| agent_task_dispatched | tasks_dispatched | 任务批量分派 |
-| agent_dialogue | task_dispatched | 单任务分派 |
-| agent_response | task_completed | Agent 完成任务 |
-| synthesis_complete | synthesis_complete | 综合结果 |
-| strategy_decision | strategy_decision | 迭代策略决定 |
-| analysis_completed | - | 分析完成 |
-| error | - | 错误 |
+### agentv3 (claudeSseBridge)
+
+| Event | Source | Description |
+|-------|--------|-------------|
+| progress | phase transitions | 阶段进度 (starting/analyzing/concluding) |
+| agent_response | MCP tool results | 工具调用结果 (SQL/Skill) |
+| answer_token | final text stream | 结论文本流式输出 |
+| thought | intermediate reasoning | 中间推理 (工具调用前的文本) |
+| analysis_completed | result message | 分析完成 |
+| error | exceptions | 错误 |
+
+### agentv2 (legacy)
+
+| Event | Description |
+|-------|-------------|
+| hypothesis_generated, round_start, stage_start | 假设/轮次/阶段 |
+| agent_task_dispatched, agent_dialogue, agent_response | 任务分派与完成 |
+| synthesis_complete, strategy_decision | 综合与迭代决策 |
 
 ---
 
 ## Session Management
 
 - 路由层内存 `Map<sessionId, AnalysisSession>` 管理会话
+- agentv3: SDK session ID 持久化到 `logs/claude_session_map.json` (debounced, 24h TTL)
 - 每 30 分钟清理过期会话
-- 支持多轮对话（复用 sessionId）
-- AnalysisSession 包含: orchestrator, sseClients, result, hypotheses, agentDialogue
+- 支持多轮对话（复用 sessionId, agentv3 通过 `resume: sdkSessionId` 恢复 SDK 上下文）
+- 并发保护: `activeAnalyses` Set 防止同一 session 并行 analyze()
 
 ---
 
@@ -681,8 +485,15 @@ When fixing localization (L10n) or code generation issues, always identify and m
 ```bash
 # backend/.env
 PORT=3000
-AI_SERVICE=deepseek
-DEEPSEEK_API_KEY=sk-xxx
+# Default: claude-code (Claude Agent SDK). Set AI_SERVICE=deepseek for legacy agentv2 (deprecated).
+# AI_SERVICE=claude-code
+CLAUDE_MODEL=claude-sonnet-4-6          # Optional, default
+# CLAUDE_MAX_TURNS=15                   # Optional
+# CLAUDE_ENABLE_SUB_AGENTS=true         # Optional feature flag
+# CLAUDE_ENABLE_VERIFICATION=false       # Default: true (set false to disable)
+
+# Legacy (deprecated, only for AI_SERVICE=deepseek)
+# DEEPSEEK_API_KEY=sk-xxx
 ```
 
 ---
@@ -691,7 +502,9 @@ DEEPSEEK_API_KEY=sk-xxx
 
 | Category | Count |
 |----------|-------|
-| Agent System | ~129 source files |
+| agentv3 (Primary) | 15 source files |
+| agent (Shared) | ~50 source files |
+| agentv2 (Deprecated) | ~37 source files |
 | Services | ~31 service files |
-| Skills | 86 definitions (32 atomic + 27 composite + 25 pipelines + 2 deep) |
+| Skills | 113 definitions (57 atomic + 28 composite + 26 pipelines + 2 deep) |
 | Routes | 16 API handlers |

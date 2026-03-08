@@ -214,6 +214,8 @@ steps:
           s.dur,
           s.ts
         FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
         WHERE (s.name GLOB '*GPU*'
                OR s.name GLOB '*gpu*'
                OR s.name GLOB '*Render*Pass*'
@@ -222,6 +224,13 @@ steps:
                OR s.name GLOB '*fence*signal*'
                OR s.name GLOB '*vkQueue*'
                OR s.name GLOB '*gl*Draw*')
+          -- Exclude CPU-side rendering slices (RenderThread, DrawFrame on main thread)
+          AND t.name NOT IN ('RenderThread', 'GPU completion', 'hwc_retire')
+          AND s.name NOT GLOB 'DrawFrame*'
+          AND s.name NOT GLOB 'RenderThread*'
+          -- Exclude jank classification markers (CPU-side, not actual GPU work)
+          AND s.name NOT GLOB '*DEADLINE*'
+          AND s.name NOT GLOB '*MISSED*'
           AND s.ts >= (SELECT start_ts FROM time_bounds)
           AND s.ts <= (SELECT end_ts FROM time_bounds)
           AND s.dur > 0
@@ -291,15 +300,19 @@ steps:
           COALESCE(${end_ts}, MAX(ts)) as end_ts
         FROM slice
       ),
-      -- 动态检测 VSync 周期（限定在分析区间内）
+      -- 动态检测 VSync 周期（IQR 过滤，VRR 场景鲁棒）
       vsync_config AS (
         SELECT COALESCE(
-          (SELECT CAST(AVG(dur) AS INTEGER)
-           FROM expected_frame_timeline_slice
-           WHERE dur > 5000000 AND dur < 35000000
-             AND ts >= (SELECT start_ts FROM time_bounds)
-             AND ts <= (SELECT end_ts FROM time_bounds)),
-          8333333
+          (SELECT CAST(AVG(i.dur_val) AS INTEGER)
+           FROM (
+             SELECT dur AS dur_val, PERCENT_RANK() OVER (ORDER BY dur) AS pct
+             FROM expected_frame_timeline_slice
+             WHERE dur > 5000000 AND dur < 50000000
+               AND ts >= (SELECT start_ts FROM time_bounds)
+               AND ts <= (SELECT end_ts FROM time_bounds)
+           ) i
+           WHERE i.pct BETWEEN 0.25 AND 0.75),
+          16666667
         ) as vsync_period_ns
       ),
       fence_slices AS (
@@ -310,8 +323,9 @@ steps:
         WHERE (s.name GLOB '*fence*'
                OR s.name GLOB '*Fence*'
                OR s.name GLOB '*GPU completion*'
-               OR s.name GLOB '*Waiting for GPU*'
-               OR s.name GLOB '*eglSwapBuffers*')
+               OR s.name GLOB '*Waiting for GPU*')
+          -- Note: eglSwapBuffers excluded — it measures buffer queue fullness
+          -- (buffer stuffing), not GPU fence completion time
           AND s.ts >= (SELECT start_ts FROM time_bounds)
           AND s.ts <= (SELECT end_ts FROM time_bounds)
           AND s.dur > 0
@@ -360,7 +374,7 @@ steps:
         SELECT
           (SELECT COUNT(*) FROM gpu_counter_track WHERE name GLOB '*freq*') as has_freq,
           (SELECT COUNT(*) FROM gpu_counter_track WHERE name GLOB '*util*') as has_util,
-          (SELECT COUNT(*) FROM slice WHERE name GLOB '*GPU*' OR name GLOB '*fence*') as has_slices
+          (SELECT COUNT(*) FROM slice WHERE (name GLOB '*GPU*' AND name NOT GLOB '*DEADLINE*' AND name NOT GLOB '*MISSED*') OR name GLOB '*fence*') as has_slices
       )
       SELECT
         CASE WHEN has_freq > 0 THEN '可用' ELSE '不可用' END as freq_data,

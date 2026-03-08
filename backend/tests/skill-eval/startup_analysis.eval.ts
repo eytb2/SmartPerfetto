@@ -51,6 +51,27 @@ describe('startup_analysis skill', () => {
         }
       }, 30000);
 
+      it('should include type validation fields (original_type, type_reclassified)', async () => {
+        const result = await evaluator.executeStep('get_startups', { package: '' });
+
+        expect(result.success).toBe(true);
+        if (result.data.length > 0) {
+          const s = result.data[0];
+          // New fields from type validation
+          expect(s.original_type).toBeDefined();
+          expect(['cold', 'warm', 'hot']).toContain(s.original_type);
+          expect(s.type_reclassified).toBeDefined();
+          expect([0, 1]).toContain(s.type_reclassified);
+          // startup_type should always be one of cold/warm/hot
+          expect(['cold', 'warm', 'hot']).toContain(s.startup_type);
+          // If reclassified, startup_type must be 'cold' and original_type must differ
+          if (s.type_reclassified === 1) {
+            expect(s.startup_type).toBe('cold');
+            expect(s.original_type).not.toBe('cold');
+          }
+        }
+      }, 30000);
+
       it('should handle non-matching package gracefully', async () => {
         const result = await evaluator.executeStep('get_startups', { package: 'com.nonexistent.package' });
 

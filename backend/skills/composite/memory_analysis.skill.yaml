@@ -112,6 +112,9 @@ steps:
     on_empty: "未找到目标进程"
 
   # ========== 初始化 GC 事件视图（供后续步骤 JOIN）==========
+  # Uses DROP+CREATE to ensure VIEW reflects current package filter.
+  # VIEW is used instead of CTE to avoid duplicating the 20-line definition
+  # across 7 consuming steps. Safe for sequential skill execution.
   - id: init_gc_view
     type: atomic
     name: "初始化 GC 事件视图"
@@ -119,7 +122,8 @@ steps:
       level: hidden
     optional: true
     sql: |
-      CREATE VIEW IF NOT EXISTS _gc_events AS
+      DROP VIEW IF EXISTS _gc_events;
+      CREATE VIEW _gc_events AS
       SELECT
         s.ts,
         s.dur,
@@ -128,6 +132,7 @@ steps:
         t.tid,
         p.pid,
         p.name as process_name,
+        p.upid,
         CASE WHEN t.tid = p.pid THEN 1 ELSE 0 END as is_main_thread,
         CASE
           WHEN s.name GLOB '*ConcurrentCopying*' THEN 'ConcurrentCopying'
@@ -143,7 +148,7 @@ steps:
       JOIN thread_track tt ON s.track_id = tt.id
       JOIN thread t ON tt.utid = t.utid
       JOIN process p ON t.upid = p.upid
-      WHERE p.name GLOB '${package}*'
+      WHERE (p.name GLOB '${package}*' OR '${package}' = '')
         AND (s.name GLOB '*GC*' OR s.name GLOB '*gc*' OR s.name GLOB '*ConcurrentCopying*')
         AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
         AND (${end_ts} IS NULL OR s.ts < ${end_ts})
@@ -380,7 +385,7 @@ steps:
         af.dur / 1e6 as frame_dur_ms,
         CASE
           WHEN af.jank_type != 'None' THEN 'GC导致掉帧'
-          WHEN af.dur > ${vsync_info.data[0].vsync_period_ns|8333333} THEN '帧超时'
+          WHEN af.dur > ${vsync_info.data[0].vsync_period_ns|16666667} THEN '帧超时'
           ELSE '正常'
         END as impact
       FROM _gc_events gc
@@ -443,7 +448,7 @@ steps:
           ELSE 'normal'
         END as severity,
         -- 掉帧数估算（使用动态 VSync 周期）
-        CAST(dur / ${vsync_info.data[0].vsync_period_ns|8333333} AS INTEGER) as dropped_frames
+        CAST(dur / ${vsync_info.data[0].vsync_period_ns|16666667} AS INTEGER) as dropped_frames
       FROM _gc_events
       WHERE is_main_thread = 1
         AND dur > 1000000  -- > 1ms

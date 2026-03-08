@@ -1,0 +1,111 @@
+# =============================================================================
+# 启动热点 Slice 线程状态分布（原子 Skill）
+# =============================================================================
+
+name: startup_hot_slice_states
+version: "1.0"
+type: atomic
+category: app_lifecycle
+
+meta:
+  display_name: "热点 Slice 线程状态分布"
+  description: "分析启动区间内 Top N 热点 Slice 各自的线程状态分布（Running/S/D/R）及 blocked_functions"
+  icon: "timeline"
+  tags: [startup, main_thread, state, slice, per_slice, atomic]
+
+prerequisites:
+  modules:
+    - sched
+
+inputs:
+  - name: package
+    type: string
+    required: true
+  - name: start_ts
+    type: timestamp
+    required: true
+  - name: end_ts
+    type: timestamp
+    required: true
+  - name: top_n
+    type: number
+    required: false
+
+display:
+  level: detail
+  layer: deep
+  title: "热点 Slice 线程状态分布"
+  columns:
+    - name: slice_name
+      label: "切片名"
+      type: string
+    - name: slice_dur_ms
+      label: "切片耗时"
+      type: duration
+      format: duration_ms
+      unit: ms
+    - name: slice_ts
+      label: "开始时间"
+      type: timestamp
+    - name: state
+      label: "线程状态"
+      type: string
+    - name: state_dur_ms
+      label: "状态耗时"
+      type: duration
+      format: duration_ms
+      unit: ms
+    - name: state_pct
+      label: "状态占比"
+      type: percentage
+      format: percentage
+    - name: blocked_functions
+      label: "阻塞函数"
+      type: string
+      format: truncate
+
+sql: |
+  WITH main_thread AS (
+    SELECT t.utid, p.pid
+    FROM thread t
+    JOIN process p ON t.upid = p.upid
+    WHERE p.name GLOB '${package}*'
+      AND t.tid = p.pid
+  ),
+  hot_slices AS (
+    SELECT
+      s.name as slice_name,
+      s.ts as slice_ts,
+      s.ts + s.dur as slice_end,
+      s.dur / 1e6 as slice_dur_ms
+    FROM slice s
+    JOIN thread_track tt ON s.track_id = tt.id
+    JOIN main_thread mt ON tt.utid = mt.utid
+    WHERE s.ts >= ${start_ts}
+      AND s.ts + s.dur <= ${end_ts}
+      AND s.dur >= 5000000
+    ORDER BY s.dur DESC
+    LIMIT ${top_n|10}
+  )
+  SELECT
+    hs.slice_name,
+    ROUND(hs.slice_dur_ms, 1) as slice_dur_ms,
+    printf('%d', hs.slice_ts) as slice_ts,
+    tstate.state,
+    ROUND(SUM(
+      MIN(tstate.ts + tstate.dur, hs.slice_end) - MAX(tstate.ts, hs.slice_ts)
+    ) / 1e6, 2) as state_dur_ms,
+    ROUND(100.0 * SUM(
+      MIN(tstate.ts + tstate.dur, hs.slice_end) - MAX(tstate.ts, hs.slice_ts)
+    ) / (hs.slice_dur_ms * 1e6), 1) as state_pct,
+    GROUP_CONCAT(DISTINCT tstate.blocked_function) as blocked_functions
+  FROM hot_slices hs
+  JOIN main_thread mt
+  JOIN thread_state tstate ON tstate.utid = mt.utid
+    AND tstate.ts < hs.slice_end
+    AND tstate.ts + tstate.dur > hs.slice_ts
+  GROUP BY hs.slice_name, hs.slice_ts, tstate.state
+  ORDER BY hs.slice_dur_ms DESC, state_dur_ms DESC
+
+output:
+  format: structured

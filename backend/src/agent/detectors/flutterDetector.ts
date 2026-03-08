@@ -100,8 +100,8 @@ export class FlutterDetector extends BaseDetector {
           'Impeller rendering engine detected'
         )
       );
-      // Impeller 默认从 Flutter 3.27 开始在 Android 上启用
-      versionHint = '>=3.27';
+      // Impeller 默认从 Flutter 3.16 开始在 Android 上启用 (January 2024)
+      versionHint = '>=3.16';
     }
 
     // 6. 检测 Skia 渲染引擎 (如果没有 Impeller)
@@ -117,7 +117,7 @@ export class FlutterDetector extends BaseDetector {
             'Skia rendering engine detected'
           )
         );
-        versionHint = '<3.27 or Skia fallback';
+        versionHint = '<3.16 or Skia fallback';
       }
     }
 

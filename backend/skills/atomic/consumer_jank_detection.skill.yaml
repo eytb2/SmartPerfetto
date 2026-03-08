@@ -51,23 +51,47 @@ steps:
     type: atomic
     name: "VSync 配置"
     sql: |
+      WITH
+      sf_vsync_intervals AS (
+        SELECT
+          c.ts - LAG(c.ts) OVER (ORDER BY c.ts) as interval_ns
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE t.name = 'VSYNC-sf'
+          AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
+      ),
+      raw_period AS (
+        SELECT COALESCE(
+          (SELECT CAST((SELECT AVG(i.interval_ns) FROM (SELECT interval_ns, PERCENT_RANK() OVER (ORDER BY interval_ns) AS pct FROM sf_vsync_intervals WHERE interval_ns > 4000000 AND interval_ns < 50000000) i WHERE i.pct BETWEEN 0.25 AND 0.75) AS INTEGER)
+           FROM sf_vsync_intervals
+           WHERE interval_ns > 4000000 AND interval_ns < 50000000),
+          (SELECT CAST(PERCENTILE(dur, 0.5) AS INTEGER)
+           FROM expected_frame_timeline_slice
+           WHERE dur > 5000000 AND dur < 50000000
+             AND (${start_ts} IS NULL OR ts >= ${start_ts})
+             AND (${end_ts} IS NULL OR ts < ${end_ts})),
+          16666667
+        ) as period_ns
+      ),
+      snapped AS (
+        SELECT
+          CASE
+            WHEN period_ns < 4880000 THEN 240
+            WHEN period_ns < 6300000 THEN 175
+            WHEN period_ns < 7610000 THEN 144
+            WHEN period_ns < 9620000 THEN 120
+            WHEN period_ns < 13610000 THEN 90
+            WHEN period_ns < 23570000 THEN 60
+            WHEN period_ns < 37270000 THEN 30
+            ELSE 24
+          END as refresh_rate_hz
+        FROM raw_period
+      )
       SELECT
-        COALESCE(
-          (SELECT CAST(AVG(dur) AS INTEGER)
-           FROM expected_frame_timeline_slice
-           WHERE dur > 5000000 AND dur < 35000000
-             AND (${start_ts} IS NULL OR ts >= ${start_ts})
-             AND (${end_ts} IS NULL OR ts < ${end_ts})),
-          8333333
-        ) as vsync_period_ns,
-        ROUND(1e9 / COALESCE(
-          (SELECT AVG(dur)
-           FROM expected_frame_timeline_slice
-           WHERE dur > 5000000 AND dur < 35000000
-             AND (${start_ts} IS NULL OR ts >= ${start_ts})
-             AND (${end_ts} IS NULL OR ts < ${end_ts})),
-          8333333
-        ), 0) as refresh_rate_hz
+        CAST(ROUND(1e9 / refresh_rate_hz, 0) AS INTEGER) as vsync_period_ns,
+        refresh_rate_hz
+      FROM snapped
     save_as: vsync_config
 
   # Step 2: 检测真正的掉帧（基于实际呈现间隔）
@@ -114,6 +138,10 @@ steps:
         - name: jank_severity
           label: "严重程度"
           type: string
+        - name: delay_source
+          label: "延迟来源"
+          type: string
+          description: "app_late=应用渲染超时, sf_late=SF/显示延迟, buffer_stuffing=缓冲区满"
     sql: |
       WITH
       vsync_ticks AS (
@@ -122,20 +150,20 @@ steps:
         FROM counter c
         JOIN counter_track t ON c.track_id = t.id
         WHERE t.name = 'VSYNC-sf'
-          AND ('${start_ts}' = '' OR c.ts >= CAST('${start_ts}' AS INTEGER))
-          AND ('${end_ts}' = '' OR c.ts < CAST('${end_ts}' AS INTEGER))
+          AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
       ),
       vsync_period AS (
         SELECT COALESCE(
-          (SELECT CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER)
+          (SELECT CAST((SELECT AVG(i.interval_ns) FROM (SELECT interval_ns, PERCENT_RANK() OVER (ORDER BY interval_ns) AS pct FROM vsync_ticks WHERE interval_ns > 4000000 AND interval_ns < 50000000) i WHERE i.pct BETWEEN 0.25 AND 0.75) AS INTEGER)
            FROM vsync_ticks
            WHERE interval_ns > 4000000 AND interval_ns < 50000000),
-          (SELECT CAST(AVG(dur) AS INTEGER)
+          (SELECT CAST(PERCENTILE(dur, 0.5) AS INTEGER)
            FROM expected_frame_timeline_slice
-           WHERE dur > 5000000 AND dur < 35000000
-             AND ('${start_ts}' = '' OR ts >= CAST('${start_ts}' AS INTEGER))
-             AND ('${end_ts}' = '' OR ts < CAST('${end_ts}' AS INTEGER))),
-          8333333
+           WHERE dur > 5000000 AND dur < 50000000
+             AND (${start_ts} IS NULL OR ts >= ${start_ts})
+             AND (${end_ts} IS NULL OR ts < ${end_ts})),
+          16666667
         ) as vsync_period_ns
       ),
       raw_frames AS (
@@ -228,7 +256,19 @@ steps:
         app_jank_type,
         present_type,
         jank_severity,
-        is_consumer_jank
+        is_consumer_jank,
+        -- P0-3: Decompose delay source using framework jank classification (ground truth)
+        -- Note: dur from actual_frame_timeline_slice spans app→display, includes SF time,
+        -- so we rely on app_jank_type from the framework instead of dur comparison.
+        -- app_late = framework detected app missed its deadline
+        -- sf_late = app was on time (None) or SF was the bottleneck
+        -- buffer_stuffing = buffer queue full (triple-buffering backpressure)
+        CASE
+          WHEN app_jank_type = 'None' THEN 'sf_late'
+          WHEN app_jank_type GLOB '*SurfaceFlinger*' THEN 'sf_late'
+          WHEN app_jank_type GLOB '*Buffer*' THEN 'buffer_stuffing'
+          ELSE 'app_late'
+        END as delay_source
       FROM interval_analysis
       WHERE is_session_break = 0
         AND is_consumer_jank = 1
@@ -273,20 +313,20 @@ steps:
         FROM counter c
         JOIN counter_track t ON c.track_id = t.id
         WHERE t.name = 'VSYNC-sf'
-          AND ('${start_ts}' = '' OR c.ts >= CAST('${start_ts}' AS INTEGER))
-          AND ('${end_ts}' = '' OR c.ts < CAST('${end_ts}' AS INTEGER))
+          AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
       ),
       vsync_period AS (
         SELECT COALESCE(
-          (SELECT CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER)
+          (SELECT CAST((SELECT AVG(i.interval_ns) FROM (SELECT interval_ns, PERCENT_RANK() OVER (ORDER BY interval_ns) AS pct FROM vsync_ticks WHERE interval_ns > 4000000 AND interval_ns < 50000000) i WHERE i.pct BETWEEN 0.25 AND 0.75) AS INTEGER)
            FROM vsync_ticks
            WHERE interval_ns > 4000000 AND interval_ns < 50000000),
-          (SELECT CAST(AVG(dur) AS INTEGER)
+          (SELECT CAST(PERCENTILE(dur, 0.5) AS INTEGER)
            FROM expected_frame_timeline_slice
-           WHERE dur > 5000000 AND dur < 35000000
-             AND ('${start_ts}' = '' OR ts >= CAST('${start_ts}' AS INTEGER))
-             AND ('${end_ts}' = '' OR ts < CAST('${end_ts}' AS INTEGER))),
-          8333333
+           WHERE dur > 5000000 AND dur < 50000000
+             AND (${start_ts} IS NULL OR ts >= ${start_ts})
+             AND (${end_ts} IS NULL OR ts < ${end_ts})),
+          16666667
         ) as vsync_period_ns
       ),
       vsync_events AS (
@@ -296,8 +336,8 @@ steps:
         FROM counter c
         JOIN counter_track t ON c.track_id = t.id
         WHERE t.name = 'VSYNC-sf'
-          AND ('${start_ts}' = '' OR c.ts >= CAST('${start_ts}' AS INTEGER))
-          AND ('${end_ts}' = '' OR c.ts < CAST('${end_ts}' AS INTEGER))
+          AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
       ),
       buffer_events AS (
         SELECT c.ts, c.value as buffer_count
@@ -344,6 +384,7 @@ steps:
       ),
       app_stats AS (
         SELECT
+          COUNT(*) as app_total_frames,
           SUM(CASE WHEN COALESCE(a.jank_type, 'None') != 'None' THEN 1 ELSE 0 END) as app_reported_jank
         FROM actual_frame_timeline_slice a
         LEFT JOIN process p ON a.upid = p.upid
@@ -357,12 +398,13 @@ steps:
           AND ('${end_ts}' = '' OR a.ts <= CAST('${end_ts}' AS INTEGER))
       )
       SELECT
-        (SELECT total_frames FROM vsync_stats) as total_frames,
+        (SELECT total_frames FROM vsync_stats) as vsync_total_frames,
+        COALESCE((SELECT app_total_frames FROM app_stats), 0) as app_total_frames,
         (SELECT consumer_jank_frames FROM vsync_stats) as consumer_jank_frames,
         (SELECT total_frames FROM vsync_stats) - (SELECT consumer_jank_frames FROM vsync_stats) as smooth_frames,
         ROUND(100.0 * (SELECT consumer_jank_frames FROM vsync_stats) / NULLIF((SELECT total_frames FROM vsync_stats), 0), 2) as consumer_jank_rate,
         COALESCE((SELECT app_reported_jank FROM app_stats), 0) as old_logic_jank_count,
-        ROUND(100.0 * COALESCE((SELECT app_reported_jank FROM app_stats), 0) / NULLIF((SELECT total_frames FROM vsync_stats), 0), 2) as old_logic_jank_rate,
+        ROUND(100.0 * COALESCE((SELECT app_reported_jank FROM app_stats), 0) / NULLIF(COALESCE((SELECT app_total_frames FROM app_stats), 0), 0), 2) as old_logic_jank_rate,
         MAX(COALESCE((SELECT app_reported_jank FROM app_stats), 0) - (SELECT consumer_jank_frames FROM vsync_stats), 0) as false_positives,
         MAX((SELECT consumer_jank_frames FROM vsync_stats) - COALESCE((SELECT app_reported_jank FROM app_stats), 0), 0) as false_negatives,
         (SELECT max_vsync_missed FROM vsync_stats) as max_vsync_missed,
@@ -403,20 +445,20 @@ steps:
         FROM counter c
         JOIN counter_track t ON c.track_id = t.id
         WHERE t.name = 'VSYNC-sf'
-          AND ('${start_ts}' = '' OR c.ts >= CAST('${start_ts}' AS INTEGER))
-          AND ('${end_ts}' = '' OR c.ts < CAST('${end_ts}' AS INTEGER))
+          AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
       ),
       vsync_period AS (
         SELECT COALESCE(
-          (SELECT CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER)
+          (SELECT CAST((SELECT AVG(i.interval_ns) FROM (SELECT interval_ns, PERCENT_RANK() OVER (ORDER BY interval_ns) AS pct FROM vsync_ticks WHERE interval_ns > 4000000 AND interval_ns < 50000000) i WHERE i.pct BETWEEN 0.25 AND 0.75) AS INTEGER)
            FROM vsync_ticks
            WHERE interval_ns > 4000000 AND interval_ns < 50000000),
-          (SELECT CAST(AVG(dur) AS INTEGER)
+          (SELECT CAST(PERCENTILE(dur, 0.5) AS INTEGER)
            FROM expected_frame_timeline_slice
-           WHERE dur > 5000000 AND dur < 35000000
-             AND ('${start_ts}' = '' OR ts >= CAST('${start_ts}' AS INTEGER))
-             AND ('${end_ts}' = '' OR ts < CAST('${end_ts}' AS INTEGER))),
-          8333333
+           WHERE dur > 5000000 AND dur < 50000000
+             AND (${start_ts} IS NULL OR ts >= ${start_ts})
+             AND (${end_ts} IS NULL OR ts < ${end_ts})),
+          16666667
         ) as vsync_period_ns
       ),
       vsync_events AS (
@@ -426,8 +468,8 @@ steps:
         FROM counter c
         JOIN counter_track t ON c.track_id = t.id
         WHERE t.name = 'VSYNC-sf'
-          AND ('${start_ts}' = '' OR c.ts >= CAST('${start_ts}' AS INTEGER))
-          AND ('${end_ts}' = '' OR c.ts < CAST('${end_ts}' AS INTEGER))
+          AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
       ),
       buffer_events AS (
         SELECT

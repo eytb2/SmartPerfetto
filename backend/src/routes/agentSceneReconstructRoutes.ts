@@ -1,9 +1,9 @@
 import express from 'express';
 import {
-  type AgentRuntime,
   type AgentRuntimeAnalysisResult,
   createAgentRuntime,
   type Hypothesis,
+  type IOrchestrator,
   type ModelRouter,
   type StreamingUpdate,
 } from '../agent';
@@ -28,7 +28,7 @@ export interface SceneReconstructConversationStep {
 }
 
 export interface SceneReconstructSession extends ManagedAssistantSession {
-  orchestrator: AgentRuntime;
+  orchestrator: IOrchestrator;
   orchestratorUpdateHandler?: (update: StreamingUpdate) => void;
   traceId: string;
   query: string;
@@ -116,8 +116,8 @@ export function registerSceneReconstructRoutes<TSession extends SceneReconstruct
       const query = deepAnalysis ? '场景还原' : '场景还原 仅检测';
       const analysisId = `scene-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 
-      const orchestrator = isClaudeCodeEnabled()
-        ? createClaudeRuntime(getTraceProcessorService()) as unknown as AgentRuntime
+      const orchestrator: IOrchestrator = isClaudeCodeEnabled()
+        ? createClaudeRuntime(getTraceProcessorService())
         : createAgentRuntime(deps.getModelRouter(), {
             maxRounds: options.maxRounds ?? options.maxIterations ?? 5,
             maxConcurrentTasks: options.maxConcurrentTasks || 3,

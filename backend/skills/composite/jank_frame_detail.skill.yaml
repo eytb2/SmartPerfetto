@@ -155,7 +155,7 @@ steps:
             SELECT 1 FROM slice s
             JOIN thread_track tt ON s.track_id = tt.id
             JOIN thread t ON tt.utid = t.utid
-            WHERE t.name = 'RenderThread'
+            WHERE (t.name = 'RenderThread' OR t.name GLOB '[0-9]*.raster')
               AND (s.name GLOB '*Draw*' OR s.name GLOB '*eglSwap*' OR s.name GLOB '*Fence*')
             LIMIT 1
           ) THEN 1
@@ -227,7 +227,8 @@ steps:
             WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('prime', 'big') THEN 'Q1_大核运行'
             WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('medium', 'little') THEN 'Q2_小核运行'
             WHEN ts.state = 'R' THEN 'Q3_等待调度'
-            WHEN ts.state IN ('S', 'D', 'I') THEN 'Q4_休眠阻塞'
+            WHEN ts.state IN ('D', 'DK') THEN 'Q4a_IO阻塞'
+            WHEN ts.state IN ('S', 'I') THEN 'Q4b_休眠等待'
             ELSE 'Other'
           END as quadrant_name
         FROM thread_state ts
@@ -411,7 +412,7 @@ steps:
         FROM thread t
         JOIN process p ON t.upid = p.upid
         WHERE (p.name GLOB '${package}*' OR '${package}' = '')
-          AND t.tid = p.pid
+          AND (t.tid = p.pid OR t.name GLOB '[0-9]*.ui')
       )
       SELECT
         s.name,
@@ -479,7 +480,7 @@ steps:
         FROM thread t
         JOIN process p ON t.upid = p.upid
         WHERE (p.name GLOB '${package}*' OR '${package}' = '')
-          AND t.name = 'RenderThread'
+          AND (t.name = 'RenderThread' OR t.name GLOB '[0-9]*.raster')
       )
       SELECT
         s.name,
@@ -715,7 +716,7 @@ steps:
         FROM thread t
         JOIN process p ON t.upid = p.upid
         WHERE (p.name GLOB '${package}*' OR '${package}' = '')
-          AND (t.tid = p.pid OR t.name = 'RenderThread')
+          AND (t.tid = p.pid OR t.name = 'RenderThread' OR t.name GLOB '[0-9]*.raster' OR t.name GLOB '[0-9]*.ui')
       ),
       io_states AS (
         SELECT
@@ -930,7 +931,8 @@ steps:
           COALESCE(SUM(CASE WHEN quadrant = 'Q1' THEN pct ELSE 0 END), 0) as q1,
           COALESCE(SUM(CASE WHEN quadrant = 'Q2' THEN pct ELSE 0 END), 0) as q2,
           COALESCE(SUM(CASE WHEN quadrant = 'Q3' THEN pct ELSE 0 END), 0) as q3,
-          COALESCE(SUM(CASE WHEN quadrant = 'Q4' THEN pct ELSE 0 END), 0) as q4
+          COALESCE(SUM(CASE WHEN quadrant = 'Q4a' THEN pct ELSE 0 END), 0) as q4a,
+          COALESCE(SUM(CASE WHEN quadrant = 'Q4b' THEN pct ELSE 0 END), 0) as q4b
         FROM quadrant_pct WHERE thread_type = 'MainThread'
       ),
       render_summary AS (
@@ -938,19 +940,20 @@ steps:
           COALESCE(SUM(CASE WHEN quadrant = 'Q1' THEN pct ELSE 0 END), 0) as q1,
           COALESCE(SUM(CASE WHEN quadrant = 'Q2' THEN pct ELSE 0 END), 0) as q2,
           COALESCE(SUM(CASE WHEN quadrant = 'Q3' THEN pct ELSE 0 END), 0) as q3,
-          COALESCE(SUM(CASE WHEN quadrant = 'Q4' THEN pct ELSE 0 END), 0) as q4
+          COALESCE(SUM(CASE WHEN quadrant = 'Q4a' THEN pct ELSE 0 END), 0) as q4a,
+          COALESCE(SUM(CASE WHEN quadrant = 'Q4b' THEN pct ELSE 0 END), 0) as q4b
         FROM quadrant_pct WHERE thread_type = 'RenderThread'
       ),
       -- 4. 获取最耗时的主线程操作
       main_thread_utid AS (
         SELECT t.utid
         FROM thread t JOIN process p ON t.upid = p.upid
-        WHERE (p.name GLOB '${package}*' OR '${package}' = '') AND t.tid = p.pid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '') AND (t.tid = p.pid OR t.name GLOB '[0-9]*.ui')
       ),
       main_thread_tid AS (
         SELECT t.tid
         FROM thread t JOIN process p ON t.upid = p.upid
-        WHERE (p.name GLOB '${package}*' OR '${package}' = '') AND t.tid = p.pid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '') AND (t.tid = p.pid OR t.name GLOB '[0-9]*.ui')
       ),
       top_slice AS (
         SELECT
@@ -1114,7 +1117,8 @@ steps:
           AND ts3.ts >= ${start_ts} AND ts3.ts < ${end_ts}
           AND ts3.state = 'R'
       ),
-      -- 8. GPU Fence 检测
+      -- 8. GPU Fence / GPU 同步检测
+      -- 包含 GPU fence 等待、eglSwapBuffers（GPU backpressure）、dequeueBuffer（BufferQueue 阻塞）
       gpu_fence AS (
         SELECT COALESCE(ROUND(SUM(s.dur) / 1e6, 2), 0) as fence_ms
         FROM slice s
@@ -1122,9 +1126,29 @@ steps:
         JOIN thread t ON tt.utid = t.utid
         JOIN process p ON t.upid = p.upid
         WHERE (p.name GLOB '${package}*' OR '${package}' = '')
-          AND t.name = 'RenderThread'
+          AND (t.name = 'RenderThread' OR t.name GLOB '[0-9]*.raster')
           AND s.ts >= ${start_ts} AND s.ts < ${end_ts}
-          AND (s.name GLOB '*Fence*' OR s.name GLOB '*fence*')
+          AND (s.name GLOB '*Fence*' OR s.name GLOB '*fence*'
+               OR s.name GLOB '*eglSwapBuffers*'
+               OR s.name GLOB '*dequeueBuffer*')
+      ),
+      -- 8b. Shader 编译检测（RenderThread 上的着色器编译/管线创建 slice）
+      shader_compile AS (
+        SELECT
+          COALESCE(ROUND(SUM(s.dur) / 1e6, 2), 0) as shader_ms,
+          COUNT(*) as shader_count
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND (t.name = 'RenderThread' OR t.name GLOB '[0-9]*.raster')
+          AND s.ts >= ${start_ts} AND s.ts < ${end_ts}
+          AND (s.name GLOB '*shader*' OR s.name GLOB '*Shader*'
+               OR s.name GLOB '*Compile*' OR s.name GLOB '*compile*'
+               OR s.name GLOB 'GrGLGpu*'
+               OR s.name GLOB '*Pipeline*Create*'
+               OR s.name GLOB '*programCache*')
       ),
       -- 9. CPU 簇负载检测（动态核心计数，适配所有 SoC 拓扑）
       cluster_core_counts AS (
@@ -1256,7 +1280,7 @@ steps:
         FROM binder_sync_main b
         JOIN top_slice_bounds tsb
       ),
-      -- 10. 综合根因判断
+      -- 12. 综合根因判断
       analysis AS (
         SELECT
           (SELECT dur_ms FROM top_slice) as slice_dur,
@@ -1265,11 +1289,13 @@ steps:
           (SELECT q1 FROM main_summary) as main_q1,
           (SELECT q2 FROM main_summary) as main_q2,
           (SELECT q3 FROM main_summary) as main_q3,
-          (SELECT q4 FROM main_summary) as main_q4,
+          (SELECT q4a FROM main_summary) as main_q4a,
+          (SELECT q4b FROM main_summary) as main_q4b,
           (SELECT q1 FROM render_summary) as render_q1,
           (SELECT q2 FROM render_summary) as render_q2,
           (SELECT q3 FROM render_summary) as render_q3,
-          (SELECT q4 FROM render_summary) as render_q4,
+          (SELECT q4a FROM render_summary) as render_q4a,
+          (SELECT q4b FROM render_summary) as render_q4b,
           (SELECT big_avg_freq FROM freq_info) as big_freq,
           (SELECT big_max_freq FROM freq_info) as big_freq_peak,
           (SELECT big_min_freq FROM freq_info) as big_freq_min,
@@ -1296,6 +1322,8 @@ steps:
           (SELECT max_sched_ms FROM sched_latency) as max_sched_ms,
           (SELECT total_sched_ms FROM sched_latency) as total_sched_ms,
           (SELECT fence_ms FROM gpu_fence) as fence_ms,
+          (SELECT shader_ms FROM shader_compile) as shader_ms,
+          (SELECT shader_count FROM shader_compile) as shader_count,
           (SELECT gc_overlap_ms FROM gc_frame_overlap) as gc_overlap_ms,
           (SELECT gc_count FROM gc_frame_overlap) as gc_count,
           (SELECT big_load_pct FROM cluster_load) as big_load_pct,
@@ -1355,6 +1383,9 @@ steps:
               THEN 'scheduling_delay'
             WHEN main_q2 > 50
               THEN 'small_core_placement'
+            -- Shader 编译（首次渲染特定图形效果时的编译开销）
+            WHEN COALESCE(shader_ms, 0) > gpu_fence_warning_ms
+              THEN 'shader_compile'
             -- GPU Fence 等待（渲染管线瓶颈，比 CPU 负载更具可操作性）
             WHEN fence_ms > gpu_fence_warning_ms
               THEN 'gpu_wait'
@@ -1362,8 +1393,10 @@ steps:
               THEN 'big_core_low_freq'
             WHEN big_load_pct > 90 OR (big_load_pct > 70 AND little_load_pct > 70)
               THEN 'cpu_load_high'
-            WHEN io_block_ms > io_block_critical_ms OR main_q4 > 30
-              THEN 'blocking_wait'
+            WHEN io_block_ms > io_block_critical_ms OR main_q4a > 20
+              THEN 'blocking_io'
+            WHEN main_q4b > 30
+              THEN 'lock_binder_wait'
             ELSE 'unknown'
           END as reason_code
         FROM analysis
@@ -1389,12 +1422,15 @@ steps:
             -- 优先级6: 总调度延迟（相对帧预算）
             WHEN total_sched_ms > total_sched_critical_ms THEN
               '主线程 Runnable 累计等待 ' || ROUND(total_sched_ms, 1) || 'ms'
-            -- 优先级7: 主线程被阻塞 (Q4 > 30%)
-            WHEN main_q4 > 30 THEN
-              '主线程阻塞等待 (Binder/IO/锁)，休眠占比 ' || main_q4 || '%'
+            -- 优先级7a: 主线程 IO 阻塞 (Q4a > 20%)
+            WHEN main_q4a > 20 THEN
+              '主线程 IO 阻塞 (D/DK 状态)，占比 ' || main_q4a || '%'
+            -- 优先级7b: 主线程锁/Binder等待 (Q4b > 30%)
+            WHEN main_q4b > 30 THEN
+              '主线程锁/Binder 等待 (S/I 状态)，占比 ' || main_q4b || '%'
             -- 优先级8: RenderThread 休眠 (Q4 > 50%)
-            WHEN render_q4 > 50 THEN
-              'RenderThread 长时间休眠 (' || render_q4 || '%)，等待主线程或 GPU'
+            WHEN (render_q4a + render_q4b) > 50 THEN
+              'RenderThread 长时间休眠 (' || (render_q4a + render_q4b) || '%)，等待主线程或 GPU'
             -- 优先级9: 主线程在小核运行 (Q2 > 50%)
             WHEN main_q2 > 50 THEN
               '主线程被调度到小核 (' || main_q2 || '%)，CPU 能力不足'
@@ -1451,8 +1487,12 @@ steps:
             WHEN reason_code = 'cpu_load_high' THEN
               'CPU 负载高：大核负载 ' || COALESCE(big_load_pct, 0) ||
               '%，小核负载 ' || COALESCE(little_load_pct, 0) || '%'
-            WHEN reason_code = 'blocking_wait' THEN
-              '阻塞等待：主线程阻塞/IO 等待 ' || COALESCE(io_block_ms, 0) || 'ms，Q4 占比 ' || COALESCE(main_q4, 0) || '%'
+            WHEN reason_code = 'blocking_io' THEN
+              'IO 阻塞：主线程不可中断睡眠(D/DK) ' || COALESCE(io_block_ms, 0) || 'ms，Q4a 占比 ' || COALESCE(main_q4a, 0) || '%'
+            WHEN reason_code = 'lock_binder_wait' THEN
+              '锁/Binder 等待：主线程可中断睡眠(S/I)，Q4b 占比 ' || COALESCE(main_q4b, 0) || '%'
+            WHEN reason_code = 'shader_compile' THEN
+              'Shader 编译：RenderThread 上着色器编译耗时 ' || COALESCE(shader_ms, 0) || 'ms（' || COALESCE(shader_count, 0) || ' 次），首次渲染或新视觉效果触发'
             WHEN reason_code = 'gpu_wait' THEN
               'GPU 等待：RenderThread/GPU Fence 累计等待 ' || COALESCE(fence_ms, 0) || 'ms'
             WHEN reason_code = 'gc_jank' THEN
@@ -1472,7 +1512,9 @@ steps:
                 ELSE '优化方向：把关键帧内重逻辑拆分到后台并做结果复用，缩短主线程单次执行时长'
               END
             WHEN reason_code = 'cpu_load_high' THEN '优化方向：降低 CPU 总负载并限制后台并发，优先保障 UI 与 RenderThread 预算'
-            WHEN reason_code = 'blocking_wait' THEN '优化方向：减少主线程同步等待（Binder/锁/IO），缩短临界区和同步链路'
+            WHEN reason_code = 'blocking_io' THEN '优化方向：排查主线程 IO 操作（文件读写/页缺失/磁盘同步），移至后台线程或使用异步 IO'
+            WHEN reason_code = 'lock_binder_wait' THEN '优化方向：减少主线程同步等待（Binder/锁/futex），缩短临界区和同步链路'
+            WHEN reason_code = 'shader_compile' THEN '优化方向：使用 PrecompiledShaders / Shader Warm-up 在启动时预编译着色器，避免滑动时动态编译'
             WHEN reason_code = 'gpu_wait' THEN '优化方向：降低 draw 复杂度/overdraw，减少 GPU Fence 等待'
             WHEN reason_code = 'gc_jank' THEN '优化方向：减少帧渲染路径上的对象分配，使用对象池化/预分配，避免 GC 暂停重叠关键帧'
             ELSE '优化方向：扩大同窗样本做聚类，确认该慢原因是否稳定复现'
@@ -1487,6 +1529,7 @@ steps:
             WHEN reason_code = 'workload_heavy' THEN '操作 "' || COALESCE(slice_name, 'unknown') || '" 耗时 ' || COALESCE(slice_dur, 0) || 'ms（超帧预算 ' || ROUND(COALESCE(slice_dur, 0) / NULLIF(frame_budget_ms, 0), 1) || 'x）' ||
               CASE WHEN COALESCE(ramp_to_high_ms, 0) > freq_ramp_critical_ms THEN '，频率爬升 ' || ramp_to_high_ms || 'ms 加剧' ELSE '' END
             WHEN reason_code = 'gc_jank' THEN 'GC 重叠 ' || COALESCE(gc_overlap_ms, 0) || 'ms（' || COALESCE(gc_count, 0) || ' 次）'
+            WHEN reason_code = 'shader_compile' THEN 'Shader 编译 ' || COALESCE(shader_ms, 0) || 'ms（' || COALESCE(shader_count, 0) || ' 次）'
             WHEN fence_ms > gpu_fence_warning_ms THEN 'GPU Fence 等待 ' || ROUND(fence_ms, 1) || 'ms'
             WHEN total_sched_ms > (total_sched_critical_ms * 0.5) THEN '调度等待累计 ' || ROUND(total_sched_ms, 1) || 'ms'
             WHEN big_load_pct > 70 THEN '大核负载 ' || ROUND(big_load_pct, 0) || '%'
@@ -1503,7 +1546,8 @@ steps:
             WHEN io_block_ms > io_block_critical_ms THEN '高'
             WHEN total_sched_ms > total_sched_critical_ms THEN '高'
             WHEN big_load_pct > 90 THEN '高'
-            WHEN main_q4 > 30 THEN '中'
+            WHEN COALESCE(shader_ms, 0) > gpu_fence_warning_ms THEN '高'
+            WHEN main_q4a > 20 OR main_q4b > 30 THEN '中'
             WHEN fence_ms > gpu_fence_warning_ms THEN '中'
             WHEN big_load_pct > 70 AND little_load_pct > 70 THEN '中'
             WHEN slice_dur > slice_warning_ms THEN '中'
@@ -1516,8 +1560,10 @@ steps:
             WHEN main_q3 > 20 THEN 'cpu_contention'
             WHEN io_block_ms > io_block_critical_ms THEN 'io_blocking'
             WHEN total_sched_ms > total_sched_critical_ms THEN 'sched_latency'
-            WHEN main_q4 > 30 THEN 'blocking'
+            WHEN main_q4a > 20 THEN 'io_blocking'
+            WHEN main_q4b > 30 THEN 'blocking'
             WHEN render_q4 > 50 THEN 'render_wait'
+            WHEN COALESCE(shader_ms, 0) > gpu_fence_warning_ms THEN 'shader_compile'
             WHEN gc_overlap_ms > 1.0 THEN 'gc_pause'
             WHEN main_q2 > 50 THEN 'small_core'
             WHEN big_freq < 1200 AND big_freq > 0 THEN 'freq_limit'
@@ -1536,7 +1582,8 @@ steps:
           total_sched_ms,
           main_q2,
           main_q3,
-          main_q4,
+          main_q4a,
+          main_q4b,
           big_freq,
           big_freq_peak,
           top_slice_little_pct,
@@ -1550,8 +1597,11 @@ steps:
           big_load_pct,
           little_load_pct,
           io_block_ms,
-          render_q4,
+          render_q4a,
+          render_q4b,
           fence_ms,
+          shader_ms,
+          shader_count,
           sched_max_critical_ms,
           total_sched_critical_ms,
           io_block_critical_ms
@@ -1569,8 +1619,10 @@ steps:
         slice_dur,
         frame_budget_ms,
         main_q3 as main_q3_pct,
-        main_q4 as main_q4_pct,
-        render_q4 as render_q4_pct,
+        main_q4a as main_q4a_pct,
+        main_q4b as main_q4b_pct,
+        render_q4a as render_q4a_pct,
+        render_q4b as render_q4b_pct,
         max_sched_ms as main_max_sched_ms,
         io_block_ms as main_io_block_ms,
         fence_ms as gpu_fence_ms,
@@ -1579,19 +1631,20 @@ steps:
         CASE
           WHEN cause_type IN ('slice', 'blocking', 'io_blocking') THEN 'trigger'
           WHEN cause_type IN ('sched_latency', 'cpu_contention', 'small_core', 'freq_limit', 'cpu_overload') THEN 'supply'
-          WHEN cause_type IN ('gpu_fence', 'render_wait') THEN 'amplification'
+          WHEN cause_type IN ('gpu_fence', 'render_wait', 'shader_compile') THEN 'amplification'
           WHEN cause_type = 'gc_pause' THEN 'trigger'
           ELSE 'unknown'
         END as mechanism_group,
         CASE
-          WHEN reason_code IN ('binder_sync_blocking', 'blocking_wait') THEN 'blocking_wait'
+          WHEN reason_code IN ('binder_sync_blocking', 'blocking_io', 'lock_binder_wait') THEN 'blocking_wait'
           WHEN reason_code = 'gc_jank' THEN 'gc_pause'
           WHEN reason_code = 'small_core_placement' THEN 'core_placement'
           WHEN reason_code IN ('big_core_low_freq', 'freq_ramp_slow') THEN 'frequency_insufficient'
           WHEN reason_code IN ('sched_delay_in_slice', 'scheduling_delay') THEN 'scheduling_delay'
           WHEN reason_code = 'cpu_load_high' THEN 'load_high'
+          WHEN reason_code = 'shader_compile' THEN 'none'
           WHEN reason_code = 'workload_heavy' THEN 'none'
-          WHEN io_block_ms > io_block_critical_ms OR main_q4 > 30 THEN 'blocking_wait'
+          WHEN io_block_ms > io_block_critical_ms OR main_q4a > 20 OR main_q4b > 30 THEN 'blocking_wait'
           WHEN big_freq < 1200 AND big_freq > 0 THEN 'frequency_insufficient'
           WHEN main_q2 > 50 THEN 'core_placement'
           WHEN max_sched_ms > sched_max_critical_ms OR total_sched_ms > total_sched_critical_ms OR main_q3 > 20 THEN 'scheduling_delay'
@@ -1605,11 +1658,12 @@ steps:
         END as supply_constraint,
         CASE
           WHEN cause_type IN ('slice', 'blocking', 'io_blocking', 'sched_latency', 'cpu_contention', 'small_core', 'freq_limit', 'cpu_overload', 'gc_pause') THEN 'app_producer'
-          WHEN cause_type IN ('gpu_fence', 'render_wait') THEN 'sf_consumer'
+          WHEN cause_type IN ('gpu_fence', 'render_wait', 'shader_compile') THEN 'sf_consumer'
           ELSE 'unknown'
         END as trigger_layer,
         CASE
           WHEN cause_type = 'gpu_fence' THEN 'gpu_fence_wait'
+          WHEN cause_type = 'shader_compile' THEN 'shader_compile_stall'
           WHEN cause_type = 'render_wait' THEN 'render_pipeline_wait'
           WHEN jank_responsibility = 'SF' THEN 'sf_consumer_backpressure'
           WHEN jank_responsibility = 'APP' THEN 'app_deadline_miss'

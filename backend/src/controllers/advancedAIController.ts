@@ -1,12 +1,9 @@
 import { Request, Response } from 'express';
 import { AdvancedAIService } from '../services/advancedAIService';
-import { SQLLearningSystem } from '../services/sqlLearningSystem';
 import SQLValidator from '../services/sqlValidator';
 import { v4 as uuidv4 } from 'uuid';
 import { toSingleString } from '../utils/httpValue';
 
-// 初始化SQL学习系统
-const sqlLearningSystem = new SQLLearningSystem('./logs/sql_learning');
 const sqlValidator = new SQLValidator();
 
 let aiService: AdvancedAIService;
@@ -202,66 +199,7 @@ export async function executeQuery(req: Request, res: Response): Promise<void> {
       res.json(result);
       return;
     } catch (firstError: any) {
-      console.log('[SQLLearning] 第一次执行失败，尝试通过学习系统修复...');
-
-      // 使用学习系统尝试修复SQL
-      const fixResult = await sqlLearningSystem.fixSQL(
-        query,
-        firstError.message,
-        userQuery,
-        (sql: string) => {
-          const validation = sqlValidator.validateSQL(sql);
-          return {
-            isValid: validation.isValid,
-            errors: validation.errors
-          };
-        },
-        async (sql: string) => {
-          try {
-            const verification = await traceService.query(traceId, sql);
-            const executionError =
-              verification && typeof (verification as any).error === 'string'
-                ? (verification as any).error.trim()
-                : '';
-            if (executionError) {
-              return { ok: false, error: executionError };
-            }
-            return { ok: true };
-          } catch (verificationError: any) {
-            return {
-              ok: false,
-              error: verificationError?.message || String(verificationError),
-            };
-          }
-        }
-      );
-
-      if (fixResult.success && fixResult.fixedSQL !== query) {
-        console.log(`[SQLLearning] 修复成功，应用规则: ${fixResult.appliedRules.join(', ')}`);
-
-        // 尝试执行修复后的SQL
-        try {
-          const result = await traceService.query(traceId, fixResult.fixedSQL);
-
-          // 返回结果，并告知用户SQL被修复了
-          res.json({
-            ...result,
-            _sqlFixed: true,
-            _originalSQL: query,
-            _fixedSQL: fixResult.fixedSQL,
-            _appliedRules: fixResult.appliedRules,
-            _fixMethod: fixResult.method
-          });
-          return;
-        } catch (secondError: any) {
-          console.log('[SQLLearning] 修复后的SQL仍然失败:', secondError.message);
-          // 修复后仍然失败，返回原始错误
-          throw firstError;
-        }
-      } else {
-        console.log('[SQLLearning] 无法修复SQL，返回原始错误');
-        throw firstError;
-      }
+      throw firstError;
     }
   } catch (error: any) {
     console.error('Query execution failed:', error);
@@ -318,40 +256,17 @@ export async function getSmartSummary(req: Request, res: Response): Promise<void
   }
 }
 
-// Get SQL learning statistics
-export async function getLearningStats(req: Request, res: Response): Promise<void> {
-  try {
-    const stats = await sqlLearningSystem.getStats();
-    res.json(stats);
-  } catch (error: any) {
-    console.error('Failed to get learning stats:', error);
-    res.status(500).json({ error: 'Failed to get learning stats' });
-  }
+// Deprecated: SQL learning system removed in favor of in-context learning (error-fix pairs in MCP)
+export async function getLearningStats(_req: Request, res: Response): Promise<void> {
+  res.json({ deprecated: true, message: 'SQL learning system has been replaced by in-context learning' });
 }
 
-// Generate SQL learning report
-export async function getLearningReport(req: Request, res: Response): Promise<void> {
-  try {
-    const report = await sqlLearningSystem.generateReport();
-    res.type('text/markdown').send(report);
-  } catch (error: any) {
-    console.error('Failed to generate learning report:', error);
-    res.status(500).json({ error: 'Failed to generate learning report' });
-  }
+export async function getLearningReport(_req: Request, res: Response): Promise<void> {
+  res.json({ deprecated: true, message: 'SQL learning system has been replaced by in-context learning' });
 }
 
-// Trigger learning from past successes
-export async function triggerLearning(req: Request, res: Response): Promise<void> {
-  try {
-    const newRulesCount = await sqlLearningSystem.learnNewRules();
-    res.json({
-      message: `Learning complete. ${newRulesCount} new rules generated.`,
-      newRulesCount
-    });
-  } catch (error: any) {
-    console.error('Failed to trigger learning:', error);
-    res.status(500).json({ error: 'Failed to trigger learning' });
-  }
+export async function triggerLearning(_req: Request, res: Response): Promise<void> {
+  res.json({ deprecated: true, message: 'SQL learning system has been replaced by in-context learning' });
 }
 
 function generateRecommendations(insights: any[], predictions: any[]): string[] {

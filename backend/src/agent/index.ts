@@ -54,6 +54,7 @@ export { ModelRouter } from './core/modelRouter';
 export type {
   AgentRuntimeConfig,
   AnalysisResult,
+  IOrchestrator,
 } from './core/orchestratorTypes';
 
 export {

@@ -310,6 +310,8 @@ export function createDataEnvelope<T = DataPayload>(
     metadataFields?: string[];
     highlights?: HighlightRule[];
     level?: DisplayLevel;
+    collapsible?: boolean;
+    defaultCollapsed?: boolean;
   }
 ): DataEnvelope<T> {
   return {
@@ -330,6 +332,8 @@ export function createDataEnvelope<T = DataPayload>(
       metadataFields: options.metadataFields,
       highlights: options.highlights,
       level: options.level || 'detail',
+      ...(options.collapsible !== undefined && { collapsible: options.collapsible }),
+      ...(options.defaultCollapsed !== undefined && { defaultCollapsed: options.defaultCollapsed }),
     },
   };
 }
@@ -379,7 +383,7 @@ export function buildColumnDefinitions(
  * 2. Update frontend layer handling
  * 3. Update HTML report generation
  */
-export const VALID_DISPLAY_LAYERS = ['overview', 'list', 'session', 'deep'] as const;
+export const VALID_DISPLAY_LAYERS = ['overview', 'list', 'session', 'deep', 'diagnosis'] as const;
 export type DisplayLayer = typeof VALID_DISPLAY_LAYERS[number];
 
 /**
@@ -399,7 +403,7 @@ export function isValidDisplayLayer(layer: string | undefined): layer is Display
  * - summary: Show summarized version
  * - key: Key metric, always prominent
  */
-export const VALID_DISPLAY_LEVELS = ['none', 'debug', 'detail', 'summary', 'key'] as const;
+export const VALID_DISPLAY_LEVELS = ['none', 'debug', 'detail', 'summary', 'key', 'hidden'] as const;
 export type DisplayLevel = typeof VALID_DISPLAY_LEVELS[number];
 
 /**
@@ -630,6 +634,7 @@ export interface LayeredSkillResult {
     list?: Record<string, DisplayResult>;
     session?: Record<string, DisplayResult>;
     deep?: Record<string, DisplayResult>;
+    diagnosis?: Record<string, DisplayResult>;
   };
   /** Diagnostic findings */
   diagnostics?: DiagnosticFinding[];
@@ -944,6 +949,7 @@ export function organizeIntoLayers(
     list: {},
     session: {},
     deep: {},
+    diagnosis: {},
   };
 
   for (const result of displayResults) {
@@ -1007,6 +1013,8 @@ export function displayResultToEnvelope(
     metadataFields: result.metadataConfig?.fields,
     highlights: result.highlight,
     level: result.level,
+    collapsible: (result as any).collapsible,
+    defaultCollapsed: (result as any).defaultCollapsed,
   });
 }
 

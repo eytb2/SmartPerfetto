@@ -13,7 +13,7 @@
 # Fallback chain (when capacity is unavailable):
 #   1. cpu.capacity (DRC values from kernel)
 #   2. cpufreq max frequency ranking
-#   3. CPU index position (last resort)
+#   3. 'little' (conservative default — no position-based guessing across SoC vendors)
 #
 # Usage: Call this skill as a `type: skill` step at the beginning of any
 # composite skill that needs CPU topology. Then JOIN _cpu_topology in SQL:
@@ -91,13 +91,11 @@ steps:
               WHEN cf.max_freq >= (SELECT MAX(max_freq) * 0.4 FROM cpu_max_freq) THEN 'medium'
               ELSE 'little'
             END
-          -- Last resort: position-based (upper half → big)
-          ELSE
-            CASE
-              WHEN cc.cpu_id >= (SELECT COUNT(*) * 3 / 4 FROM cpu) THEN 'prime'
-              WHEN cc.cpu_id >= (SELECT COUNT(*) / 2 FROM cpu) THEN 'big'
-              ELSE 'little'
-            END
+          -- Last resort: no capacity or cpufreq data.
+          -- Position-based guessing (cpu_id >= N → big) removed — unreliable:
+          -- Samsung Exynos: big at CPU 0-3; Qualcomm: big at 4-7; MTK varies.
+          -- Conservative default: 'little' (won't inflate big-core time).
+          ELSE 'little'
         END as core_type
       FROM cpu_capacity cc
       LEFT JOIN cpu_max_freq cf ON cc.cpu_id = cf.cpu_id

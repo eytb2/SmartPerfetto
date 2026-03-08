@@ -881,14 +881,30 @@ export class EnhancedSessionContext {
       }
     }
 
-    const result = parts.join('\n');
+    // Semantic-aware truncation: drop least-important sections (front) first,
+    // preserving recent turns/findings (back) which are most actionable.
+    const charBudget = maxTokens * 3; // ~3 chars per token (conservative for CJK/ASCII mix)
+    let result = parts.join('\n');
 
-    // Rough token estimation (4 chars ≈ 1 token for Chinese)
-    const estimatedTokens = Math.ceil(result.length / 4);
-    if (estimatedTokens > maxTokens) {
-      // Truncate if too long
-      const ratio = maxTokens / estimatedTokens;
-      return result.substring(0, Math.floor(result.length * ratio)) + '...';
+    if (result.length > charBudget) {
+      const droppableSections = ['\n## 目标', '\n## 覆盖度', '\n## 最近实验', '\n## 证据摘要', '\n## 已检测到'];
+      for (const marker of droppableSections) {
+        if (result.length <= charBudget) break;
+        const idx = result.indexOf(marker);
+        if (idx < 0) continue;
+        const nextSection = result.indexOf('\n## ', idx + marker.length);
+        if (nextSection > 0) {
+          result = result.substring(0, idx) + result.substring(nextSection);
+        }
+      }
+      if (result.length > charBudget) {
+        const lastSection = result.lastIndexOf('\n## ', charBudget);
+        if (lastSection > 0) {
+          result = result.substring(0, lastSection) + '\n...(上下文已截断)';
+        } else {
+          result = result.substring(0, charBudget) + '...';
+        }
+      }
     }
 
     return result;

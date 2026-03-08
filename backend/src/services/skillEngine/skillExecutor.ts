@@ -35,7 +35,6 @@ import { validateSkillInputs } from './skillValidator';
 import logger from '../../utils/logger';
 import { parseLlmJson } from '../../utils/llmJson';
 import { redactObjectForLLM, redactTextForLLM } from '../../utils/llmPrivacy';
-import { SQLLearningSystem } from '../sqlLearningSystem';
 import { getPipelineDocService } from '../pipelineDocService';
 import {
   ensurePipelineSkillsInitialized,
@@ -757,12 +756,13 @@ function transformDeepFrameAnalysis(displayResults: any[]): { diagnosis_summary:
           if (quadrant.includes('Q1')) mainThread.q1 = percentage;
           else if (quadrant.includes('Q2')) mainThread.q2 = percentage;
           else if (quadrant.includes('Q3')) mainThread.q3 = percentage;
-          else if (quadrant.includes('Q4')) mainThread.q4 = percentage;
+          // Q4a (IO-block) + Q4b (voluntary sleep) both contribute to Q4 total
+          else if (quadrant.includes('Q4')) mainThread.q4 = (mainThread.q4 || 0) + percentage;
         } else if (quadrant.includes('RenderThread')) {
           if (quadrant.includes('Q1')) renderThread.q1 = percentage;
           else if (quadrant.includes('Q2')) renderThread.q2 = percentage;
           else if (quadrant.includes('Q3')) renderThread.q3 = percentage;
-          else if (quadrant.includes('Q4')) renderThread.q4 = percentage;
+          else if (quadrant.includes('Q4')) renderThread.q4 = (renderThread.q4 || 0) + percentage;
         }
       }
 
@@ -995,7 +995,6 @@ export class SkillExecutor {
   private aiService: any;  // AI 服务（用于 ai_decision, ai_summary）
   private skillRegistry: Map<string, SkillDefinition>;
   private eventEmitter?: (event: SkillEvent) => void;
-  private sqlLearningSystem?: SQLLearningSystem;
   private fragmentRegistry: Map<string, string> = new Map();
 
   constructor(
@@ -1015,18 +1014,6 @@ export class SkillExecutor {
    */
   setFragmentRegistry(cache: Map<string, string>): void {
     this.fragmentRegistry = cache;
-  }
-
-  /**
-   * 获取 SQL 学习系统实例（懒初始化单例）
-   */
-  private async getSQLLearningSystem(): Promise<SQLLearningSystem> {
-    if (!this.sqlLearningSystem) {
-      const logDir = process.env.SQL_LEARNING_LOG_DIR || './logs/sql_learning';
-      this.sqlLearningSystem = new SQLLearningSystem(logDir);
-    }
-    await this.sqlLearningSystem.init();
-    return this.sqlLearningSystem;
   }
 
   /**
@@ -1062,12 +1049,15 @@ export class SkillExecutor {
     const fragmentBlock = fragmentCteBodies.join(',\n');
     const trimmed = sql.trimStart();
 
-    // Check if SQL already starts with WITH (case-insensitive)
-    const withMatch = trimmed.match(/^WITH\s+/i);
+    // Strip leading SQL single-line comments (-- ...) before WITH detection,
+    // since steps like root_cause_summary prefix SQL with comment lines.
+    const noLeadingComments = trimmed.replace(/^(--[^\n]*\n\s*)*/g, '');
+    const withMatch = noLeadingComments.match(/^WITH\s+/i);
     if (withMatch) {
-      // Insert fragments after WITH, before existing CTEs
-      const afterWith = trimmed.slice(withMatch[0].length);
-      return `WITH\n${fragmentBlock},\n${afterWith}`;
+      // Preserve original comments, insert fragments after WITH
+      const commentPrefix = trimmed.slice(0, trimmed.length - noLeadingComments.length);
+      const afterWith = noLeadingComments.slice(withMatch[0].length);
+      return `${commentPrefix}WITH\n${fragmentBlock},\n${afterWith}`;
     }
 
     // Wrap the entire SQL in a WITH clause
@@ -1476,11 +1466,14 @@ export class SkillExecutor {
 
         // 收集需要展示的结果
         if (this.shouldDisplay(step)) {
+          // Substitute template variables (e.g., ${startup_id}) in display config
+          const rawDisplay = this.getDisplayConfig(step);
+          const processedDisplay = rawDisplay ? processDisplayConfig(rawDisplay, context) : undefined;
           displayResults.push(this.createDisplayResult(
             step.id,
             ('name' in step ? step.name : step.id) || step.id,
             stepResult,
-            this.getDisplayConfig(step),
+            processedDisplay,
             ('sql' in step ? (step as AtomicStep).sql : undefined)
           ));
         }
@@ -1879,15 +1872,6 @@ export class SkillExecutor {
           };
         }
 
-        // 尝试通过 SQL 学习系统修复
-        const repairResult = await this.attemptSQLRepair(sql, result.error, step, context);
-        if (repairResult) {
-          return {
-            ...repairResult,
-            executionTimeMs: Date.now() - startTime,
-          };
-        }
-
         return {
           stepId: step.id,
           stepType: 'atomic',
@@ -1918,98 +1902,7 @@ export class SkillExecutor {
         };
       }
 
-      // 尝试通过 SQL 学习系统修复
-      const repairResult = await this.attemptSQLRepair(
-        sql, error.message, step, context
-      );
-      if (repairResult) {
-        return {
-          ...repairResult,
-          executionTimeMs: Date.now() - startTime,
-        };
-      }
-
       throw error;
-    }
-  }
-
-  /**
-   * 尝试通过 SQL 学习系统修复失败的 SQL
-   *
-   * 闭环流程: 记录错误 → 应用已知规则 → 验证 → 执行 → 更新规则置信度
-   * 成功修复后返回 StepResult，失败返回 null（回退到原有错误处理）
-   */
-  private async attemptSQLRepair(
-    failedSQL: string,
-    errorMessage: string,
-    step: AtomicStep,
-    context: SkillExecutionContext
-  ): Promise<Omit<StepResult, 'executionTimeMs'> | null> {
-    try {
-      const learning = await this.getSQLLearningSystem();
-
-      const fixResult = await learning.fixSQL(
-        failedSQL,
-        errorMessage,
-        `skill_step:${step.id}`,
-        // validator: 基本语法检查
-        (candidateSQL: string) => {
-          const errors: string[] = [];
-          const trimmed = candidateSQL.trim();
-          if (!trimmed) errors.push('Empty SQL');
-          if (trimmed === failedSQL.trim()) errors.push('Same as original');
-          // 必须以合法 SQL 关键字开头
-          const validStart = /^(SELECT|WITH|CREATE|INSERT|UPDATE|DELETE|EXPLAIN|PRAGMA|DROP|ALTER|INCLUDE)/i;
-          if (trimmed && !validStart.test(trimmed)) errors.push('Does not start with valid SQL keyword');
-          // 括号必须匹配
-          const opens = (trimmed.match(/\(/g) || []).length;
-          const closes = (trimmed.match(/\)/g) || []).length;
-          if (opens !== closes) errors.push(`Unbalanced parentheses: ${opens} open vs ${closes} close`);
-          // 不能包含未替换的模板变量（JS 条件语法残留）
-          if (/\$\{[^}]*\?/.test(trimmed)) errors.push('Contains unreplaced JS-style template conditional');
-          return { isValid: errors.length === 0, errors };
-        },
-        // executor: 实际执行修正后的 SQL 验证
-        async (candidateSQL: string) => {
-          try {
-            const result = await this.traceProcessor.query(context.traceId, candidateSQL);
-            if (result?.error) {
-              return { ok: false, error: result.error };
-            }
-            return { ok: true };
-          } catch (execError: any) {
-            return { ok: false, error: execError?.message || String(execError) };
-          }
-        }
-      );
-
-      if (!fixResult.success || !fixResult.fixedSQL || fixResult.fixedSQL.trim() === failedSQL.trim()) {
-        return null;
-      }
-
-      // 修复成功 — 用修正后的 SQL 重新查询并返回结果
-      logger.info(
-        'SkillExecutor',
-        `SQL repair succeeded for step "${step.id}" ` +
-        `(rules: ${fixResult.appliedRules.join(', ')}, method: ${fixResult.method})`
-      );
-
-      const reResult = await this.traceProcessor.query(context.traceId, fixResult.fixedSQL);
-      if (reResult.error) {
-        // 重新执行仍然失败（极少发生，因为 executor 已验证过）
-        return null;
-      }
-
-      const data = this.rowsToObjects(reResult.columns, reResult.rows);
-      return {
-        stepId: step.id,
-        stepType: 'atomic',
-        success: true,
-        data,
-      };
-    } catch {
-      // 学习系统本身出错不应阻塞主流程
-      return null;
     }
   }
 
@@ -3057,6 +2950,8 @@ export class SkillExecutor {
       metadataFields: config.metadataFields,   // 提取到元数据的字段
       hidden_columns: config.hidden_columns,   // 隐藏的列
       columnDefinitions,                       // 完整的列定义（包含 hidden 等属性）
+      collapsible: config.collapsible,         // 是否可折叠
+      defaultCollapsed: config.defaultCollapsed, // 是否默认折叠
     };
   }
 

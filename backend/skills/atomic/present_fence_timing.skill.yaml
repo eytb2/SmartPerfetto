@@ -64,16 +64,19 @@ steps:
           COALESCE(${end_ts}, MAX(ts + dur)) as end_ts
         FROM actual_frame_timeline_slice
       ),
-      -- 动态检测 VSync 周期（限定在分析区间内）
+      -- 动态检测 VSync 周期（IQR 过滤，VRR 场景鲁棒）
       vsync_config AS (
         SELECT COALESCE(
-          (SELECT CAST(AVG(dur) AS INTEGER)
-           FROM expected_frame_timeline_slice
-           WHERE dur > 5000000 AND dur < 20000000
-             AND ts >= (SELECT start_ts FROM time_bounds)
-             AND ts <= (SELECT end_ts FROM time_bounds)
-           LIMIT 1000),
-          8333333  -- 默认 120Hz (保守阈值)
+          (SELECT CAST(AVG(i.dur_val) AS INTEGER)
+           FROM (
+             SELECT dur AS dur_val, PERCENT_RANK() OVER (ORDER BY dur) AS pct
+             FROM expected_frame_timeline_slice
+             WHERE dur > 5000000 AND dur < 50000000
+               AND ts >= (SELECT start_ts FROM time_bounds)
+               AND ts <= (SELECT end_ts FROM time_bounds)
+           ) i
+           WHERE i.pct BETWEEN 0.25 AND 0.75),
+          16666667  -- 默认 60Hz
         ) as vsync_period_ns
       ),
       fence_data AS (
@@ -86,12 +89,11 @@ steps:
         JOIN thread_track tt ON s.track_id = tt.id
         JOIN thread t ON tt.utid = t.utid
         JOIN process p ON t.upid = p.upid
-        WHERE (s.name GLOB '*PresentFence*' 
+        WHERE (s.name GLOB '*PresentFence*'
                OR s.name GLOB '*present*fence*'
                OR s.name GLOB '*GPU completion*'
                OR s.name GLOB '*waiting for GPU*'
-               OR s.name GLOB '*Waiting for GPU*'
-               OR s.name GLOB '*eglSwapBuffers*')
+               OR s.name GLOB '*Waiting for GPU*')
           AND s.ts >= (SELECT start_ts FROM time_bounds)
           AND s.ts <= (SELECT end_ts FROM time_bounds)
       ),

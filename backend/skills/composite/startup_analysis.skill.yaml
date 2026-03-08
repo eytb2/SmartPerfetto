@@ -102,6 +102,8 @@ steps:
       insights:
         - condition: "dur_ms > 2000 && startup_type === 'cold'"
           template: "冷启动耗时 {{dur_ms}}ms，超过 2s 需要优化"
+        - condition: "dur_ms > 1000 && dur_ms <= 2000 && startup_type === 'cold'"
+          template: "冷启动耗时 {{dur_ms}}ms，超过 1s 建议优化"
         - condition: "dur_ms > 1000 && startup_type === 'warm'"
           template: "温启动耗时 {{dur_ms}}ms，超过 1s 建议优化"
     display:
@@ -194,6 +196,7 @@ steps:
         SELECT
           s.startup_id,
           s.startup_type,
+          s.package,
           s.ts,
           s.dur,
           s.dur / 1e6 as dur_ms,
@@ -213,16 +216,37 @@ steps:
           AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
           AND (${end_ts} IS NULL OR s.ts + s.dur <= ${end_ts})
       ),
+      -- Detect key slices to validate startup_type classification
+      startup_type_signals AS (
+        SELECT
+          f.startup_id,
+          MAX(CASE WHEN sl.name = 'bindApplication' THEN 1 ELSE 0 END) as has_bind_app,
+          MAX(CASE WHEN sl.name GLOB 'performCreate:*' THEN 1 ELSE 0 END) as has_perform_create
+        FROM filtered f
+        JOIN process p ON p.name = f.package
+        JOIN thread t ON t.upid = p.upid AND t.tid = p.pid
+        JOIN thread_track tt ON tt.utid = t.utid
+        JOIN slice sl ON sl.track_id = tt.id
+        WHERE sl.ts >= f.ts AND sl.ts < f.ts + f.dur
+          AND (sl.name = 'bindApplication' OR sl.name GLOB 'performCreate:*')
+        GROUP BY f.startup_id
+      ),
       flags AS (
         SELECT
-          startup_id,
-          CASE WHEN dur <= 0 THEN 1 ELSE 0 END as b_invalid_duration,
-          CASE WHEN dur_ms >= 200 AND ttid_ms IS NOT NULL AND ttid_ms < 10 THEN 1 ELSE 0 END as w_ttid_small,
-          CASE WHEN dur_ms >= 200 AND ttfd_ms IS NOT NULL AND ttfd_ms < 10 THEN 1 ELSE 0 END as w_ttfd_small,
-          CASE WHEN ttid_ms IS NOT NULL AND ttid_ms > dur_ms + 50 THEN 1 ELSE 0 END as w_ttid_gt_dur,
-          CASE WHEN ttfd_ms IS NOT NULL AND ttfd_ms > dur_ms + 50 THEN 1 ELSE 0 END as w_ttfd_gt_dur,
-          CASE WHEN ttid_ms IS NOT NULL AND ttfd_ms IS NOT NULL AND ttfd_ms < ttid_ms THEN 1 ELSE 0 END as w_ttfd_lt_ttid
-        FROM filtered
+          f.startup_id,
+          CASE WHEN f.dur <= 0 THEN 1 ELSE 0 END as b_invalid_duration,
+          CASE WHEN f.dur_ms >= 200 AND f.ttid_ms IS NOT NULL AND f.ttid_ms < 10 THEN 1 ELSE 0 END as w_ttid_small,
+          CASE WHEN f.dur_ms >= 200 AND f.ttfd_ms IS NOT NULL AND f.ttfd_ms < 10 THEN 1 ELSE 0 END as w_ttfd_small,
+          CASE WHEN f.ttid_ms IS NOT NULL AND f.ttid_ms > f.dur_ms + 50 THEN 1 ELSE 0 END as w_ttid_gt_dur,
+          CASE WHEN f.ttfd_ms IS NOT NULL AND f.ttfd_ms > f.dur_ms + 50 THEN 1 ELSE 0 END as w_ttfd_gt_dur,
+          CASE WHEN f.ttid_ms IS NOT NULL AND f.ttfd_ms IS NOT NULL AND f.ttfd_ms < f.ttid_ms THEN 1 ELSE 0 END as w_ttfd_lt_ttid,
+          CASE
+            WHEN COALESCE(sts.has_bind_app, 0) = 1 AND f.startup_type != 'cold' THEN 1
+            WHEN COALESCE(sts.has_perform_create, 0) = 1 AND COALESCE(sts.has_bind_app, 0) = 0 AND f.startup_type != 'warm' THEN 1
+            ELSE 0
+          END as w_type_reclassified
+        FROM filtered f
+        LEFT JOIN startup_type_signals sts USING (startup_id)
       ),
       agg AS (
         SELECT
@@ -232,13 +256,15 @@ steps:
             COALESCE(SUM(w_ttfd_small), 0) +
             COALESCE(SUM(w_ttid_gt_dur), 0) +
             COALESCE(SUM(w_ttfd_gt_dur), 0) +
-            COALESCE(SUM(w_ttfd_lt_ttid), 0) as warning_count,
+            COALESCE(SUM(w_ttfd_lt_ttid), 0) +
+            COALESCE(SUM(w_type_reclassified), 0) as warning_count,
           MAX(CASE WHEN b_invalid_duration = 1 THEN 1 ELSE 0 END) as has_invalid_duration,
           MAX(CASE WHEN w_ttid_small = 1 THEN 1 ELSE 0 END) as has_ttid_small,
           MAX(CASE WHEN w_ttfd_small = 1 THEN 1 ELSE 0 END) as has_ttfd_small,
           MAX(CASE WHEN w_ttid_gt_dur = 1 THEN 1 ELSE 0 END) as has_ttid_gt_dur,
           MAX(CASE WHEN w_ttfd_gt_dur = 1 THEN 1 ELSE 0 END) as has_ttfd_gt_dur,
-          MAX(CASE WHEN w_ttfd_lt_ttid = 1 THEN 1 ELSE 0 END) as has_ttfd_lt_ttid
+          MAX(CASE WHEN w_ttfd_lt_ttid = 1 THEN 1 ELSE 0 END) as has_ttfd_lt_ttid,
+          MAX(CASE WHEN w_type_reclassified = 1 THEN 1 ELSE 0 END) as has_type_reclassified
         FROM flags
       )
       SELECT
@@ -256,11 +282,13 @@ steps:
           (CASE WHEN has_ttfd_small = 1 THEN 'R008_TTFD_SUSPICIOUSLY_SMALL,' ELSE '' END) ||
           (CASE WHEN has_ttid_gt_dur = 1 THEN 'R008_TTID_GT_DUR,' ELSE '' END) ||
           (CASE WHEN has_ttfd_gt_dur = 1 THEN 'R008_TTFD_GT_DUR,' ELSE '' END) ||
-          (CASE WHEN has_ttfd_lt_ttid = 1 THEN 'R008_TTFD_LT_TTID,' ELSE '' END),
+          (CASE WHEN has_ttfd_lt_ttid = 1 THEN 'R008_TTFD_LT_TTID,' ELSE '' END) ||
+          (CASE WHEN has_type_reclassified = 1 THEN 'R009_TYPE_RECLASSIFIED,' ELSE '' END),
           ','
         ) as issue_codes,
         CASE
           WHEN blocker_count > 0 THEN '检测到阻断级数据问题，已停止启动深挖'
+          WHEN has_type_reclassified = 1 AND warning_count = 1 THEN '启动类型已修正（基于 bindApplication/performCreate 存在性校验，原始分类不一致），评级已按修正后类型计算'
           WHEN warning_count > 0 THEN '检测到可疑指标，结论需谨慎解读'
           ELSE '数据质量通过，允许进入深度分析'
         END as quality_summary
@@ -823,6 +851,7 @@ steps:
       dur_ms: dur_ms
       package: package
       startup_type: startup_type
+      original_type: original_type
       ttid_ms: ttid_ms
       ttfd_ms: ttfd_ms
       perfetto_start: perfetto_start
@@ -861,8 +890,19 @@ steps:
           - "检查 TTID/TTFD 字段来源和单位，确认没有误用 us/ns"
           - "修复数据口径后重新执行启动分析"
 
-      # 数据质量告警
-      - condition: "((startup_quality?.data?.[0]?.warning_count) || 0) > 0"
+      # TTID > dur 异常 — 首帧渲染延迟（独立发现，不只是数据质量注释）
+      - condition: "(startups?.data?.[0]?.ttid_ms || 0) > (startups?.data?.[0]?.dur_ms || 0) + 50"
+        severity: warning
+        diagnosis: "TTID (${startups?.data?.[0]?.ttid_ms}ms) 超出启动总时长 (${startups?.data?.[0]?.dur_ms}ms)，首帧渲染可能在 Perfetto 认定的启动结束后才完成"
+        confidence: medium
+        suggestions:
+          - "可能原因：Activity.setContentView 后仍有异步加载导致首帧延迟，或 RenderThread/SurfaceFlinger 合成排队"
+          - "检查启动区间结束后是否有较长的 Choreographer#doFrame 或 DrawFrame"
+          - "如果 TTID 代表真实首帧时间，优化方向应以 TTID 而非 dur 为目标"
+          - "建议在 Perfetto UI 中检查 startup 结束时间戳附近的帧渲染情况"
+
+      # 数据质量告警（通用，排除已由上条单独处理的 TTID_GT_DUR）
+      - condition: "((startup_quality?.data?.[0]?.warning_count) || 0) > 0 && !((startup_quality?.data?.[0]?.issue_codes || '').includes('R008_TTID_GT_DUR') && (startup_quality?.data?.[0]?.warning_count || 0) === 1)"
         severity: info
         diagnosis: "启动数据存在告警项（${startup_quality?.data?.[0]?.issue_codes || 'none'}），结论需结合原始 Trace 复核"
         confidence: medium
@@ -870,7 +910,16 @@ steps:
           - "重点复核 TTID/TTFD 与启动总时长关系是否合理"
           - "保留本次结论作为线索，不直接作为最终定论"
 
-      # 冷启动时间过长
+      # 启动类型重分类提示
+      - condition: "(startups?.data?.[0]?.type_reclassified || 0) === 1"
+        severity: info
+        diagnosis: "启动类型已从 ${startups?.data?.[0]?.original_type} 修正为 ${startups?.data?.[0]?.startup_type}。判定依据：bindApplication 存在→cold，仅 performCreate 存在→warm，均不存在→保持原始分类。评级已按修正后类型重新计算。"
+        confidence: high
+        suggestions:
+          - "Perfetto 的 startup_type 来自框架层 atrace 标记，在某些场景下可能误报"
+          - "bindApplication 是进程新建（冷启动）的可靠信号，performCreate 是 Activity 重建（温启动）的可靠信号"
+
+      # 冷启动时间过长（>2s）
       - condition: "((startups?.data?.[0]?.dur_ms) || 0) > 2000 && startups?.data?.[0]?.startup_type === 'cold'"
         severity: critical
         diagnosis: "冷启动时间过长 (${startups?.data?.[0]?.dur_ms}ms)"
@@ -879,6 +928,54 @@ steps:
           - "检查 Application.onCreate() 中的初始化逻辑"
           - "使用 App Startup 库延迟初始化"
           - "将耗时操作移到后台线程"
+
+      # 冷启动时间偏长（1-2s）
+      - condition: "((startups?.data?.[0]?.dur_ms) || 0) > 1000 && ((startups?.data?.[0]?.dur_ms) || 0) <= 2000 && startups?.data?.[0]?.startup_type === 'cold'"
+        severity: warning
+        diagnosis: "冷启动时间偏长 (${startups?.data?.[0]?.dur_ms}ms)，建议优化"
+        confidence: high
+        suggestions:
+          - "检查 Application.onCreate() 和 Activity.onCreate() 中的耗时操作"
+          - "将非关键初始化延迟到首帧之后"
+          - "使用 Baseline Profile 加速类加载和 JIT"
+
+      # 温启动时间严重（>1s）
+      - condition: "((startups?.data?.[0]?.dur_ms) || 0) > 1000 && startups?.data?.[0]?.startup_type === 'warm'"
+        severity: critical
+        diagnosis: "温启动时间严重偏长 (${startups?.data?.[0]?.dur_ms}ms)，接近甚至超过正常冷启动水平"
+        confidence: high
+        suggestions:
+          - "温启动进程已存在，不应有 Application.onCreate 开销"
+          - "检查 Activity.onCreate() 和 onStart()/onResume() 中是否重复执行初始化"
+          - "将 View 绑定、数据加载等操作移到后台线程"
+
+      # 温启动时间偏长（500ms-1s）
+      - condition: "((startups?.data?.[0]?.dur_ms) || 0) > 500 && ((startups?.data?.[0]?.dur_ms) || 0) <= 1000 && startups?.data?.[0]?.startup_type === 'warm'"
+        severity: warning
+        diagnosis: "温启动时间偏长 (${startups?.data?.[0]?.dur_ms}ms)，建议优化"
+        confidence: high
+        suggestions:
+          - "检查 Activity.onCreate()/onResume() 中的耗时操作"
+          - "使用 ViewStub 延迟加载非首屏视图"
+          - "减少 Activity 重建时的数据库/网络查询"
+
+      # 热启动时间严重（>500ms）
+      - condition: "((startups?.data?.[0]?.dur_ms) || 0) > 500 && startups?.data?.[0]?.startup_type === 'hot'"
+        severity: critical
+        diagnosis: "热启动时间严重偏长 (${startups?.data?.[0]?.dur_ms}ms)，热启动应在 200ms 内完成"
+        confidence: high
+        suggestions:
+          - "热启动只需 onResume() → 首帧，检查是否有不必要的数据重载"
+          - "排查 onResume() 中的同步 Binder 或 IO 阻塞"
+
+      # 热启动时间偏长（200-500ms）
+      - condition: "((startups?.data?.[0]?.dur_ms) || 0) > 200 && ((startups?.data?.[0]?.dur_ms) || 0) <= 500 && startups?.data?.[0]?.startup_type === 'hot'"
+        severity: warning
+        diagnosis: "热启动时间偏长 (${startups?.data?.[0]?.dur_ms}ms)，建议优化"
+        confidence: high
+        suggestions:
+          - "检查 onResume() 中是否有不必要的数据刷新或视图重建"
+          - "减少热启动路径上的同步调用"
 
       # Binder 调用占比过高（需有主线程证据佐证）
       - condition: "(startup_binder?.data?.length || 0) > 0 && ((startup_binder.data[0]?.percent_of_startup) || 0) > 20 && ((startup_binder.data[0]?.main_thread_calls || 0) > 0) && ((((main_sync_binder?.data?.[0]?.percent_of_startup) || 0) > 5) || (((main_binder_blocking?.data?.[0]?.dur_ms) || 0) > 8) || (((main_thread_states?.data?.find(s => s.state === 'D')?.percent) || 0) > 5) || (((main_thread_states?.data?.find(s => s.state === 'S')?.percent) || 0) > 20))"

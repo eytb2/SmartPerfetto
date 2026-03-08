@@ -5,6 +5,8 @@
  */
 
 import express from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import {
   createSessionLogger,
@@ -21,12 +23,12 @@ import {
 import {
   registerCoreTools,
   StreamingUpdate,
-  AgentRuntime,
   createAgentRuntime,
   AgentRuntimeAnalysisResult,
   ModelRouter,
   Hypothesis,
 } from '../agent';
+import type { IOrchestrator } from '../agent/core/orchestratorTypes';
 import {
   deriveConclusionContract,
   normalizeConclusionOutput,
@@ -185,7 +187,7 @@ router.use(authenticate);
 // ============================================================================
 
 interface AnalysisSession {
-  orchestrator: AgentRuntime;
+  orchestrator: IOrchestrator;
   orchestratorUpdateHandler?: (update: StreamingUpdate) => void;
   sessionId: string;
   sseClients: express.Response[];
@@ -1014,10 +1016,52 @@ router.delete('/:sessionId', (req, res) => {
     } catch {}
   });
 
-  session.orchestrator.reset();
+  // Clean up session-scoped state only — do NOT call reset() which clears
+  // global caches (architectureCache) shared across all active sessions.
+  if (typeof session.orchestrator.cleanupSession === 'function') {
+    session.orchestrator.cleanupSession(sessionId);
+  }
+  // Also clean up the EnhancedSessionContext (EntityStore, turns, working memory)
+  sessionContextManager.remove(sessionId);
   assistantAppService.deleteSession(sessionId);
 
   res.json({ success: true });
+});
+
+/**
+ * POST /api/agent/v1/:sessionId/feedback
+ *
+ * Submit user feedback on analysis quality (thumbs up/down + optional comment).
+ * Stored as append-only JSONL in logs/feedback/ for later pattern analysis.
+ */
+router.post('/:sessionId/feedback', async (req, res) => {
+  const { sessionId } = req.params;
+  const { rating, comment, turnIndex } = req.body;
+
+  if (!rating || !['positive', 'negative'].includes(rating)) {
+    return res.status(400).json({ success: false, error: 'rating must be "positive" or "negative"' });
+  }
+
+  try {
+    const feedbackDir = path.join(process.cwd(), 'logs', 'feedback');
+    if (!fs.existsSync(feedbackDir)) fs.mkdirSync(feedbackDir, { recursive: true });
+
+    const entry = {
+      sessionId,
+      rating,
+      comment: typeof comment === 'string' ? comment.substring(0, 500) : undefined,
+      turnIndex: typeof turnIndex === 'number' ? turnIndex : undefined,
+      timestamp: new Date().toISOString(),
+    };
+
+    const feedbackFile = path.join(feedbackDir, 'feedback.jsonl');
+    fs.appendFileSync(feedbackFile, JSON.stringify(entry) + '\n');
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[Feedback] Failed to save feedback:', (err as Error).message);
+    res.status(500).json({ success: false, error: 'Failed to save feedback' });
+  }
 });
 
 /**
@@ -1124,6 +1168,10 @@ router.post('/:sessionId/intervene', async (req, res) => {
   }
 
   try {
+    // ClaudeRuntime (agentv3) doesn't implement getInterventionController — reject gracefully.
+    if (typeof session.orchestrator.getInterventionController !== 'function') {
+      return res.status(400).json({ success: false, error: 'Intervention not supported in this runtime mode' });
+    }
     const interventionController = session.orchestrator.getInterventionController();
 
     // Check if there's a pending intervention
@@ -1243,18 +1291,17 @@ router.post('/:sessionId/interaction', async (req, res) => {
       context,
     };
 
-    // Record the interaction
-    session.orchestrator.recordUserInteraction(interaction);
+    // Record the interaction — ClaudeRuntime (agentv3) doesn't implement these methods.
+    if (typeof session.orchestrator.recordUserInteraction === 'function') {
+      session.orchestrator.recordUserInteraction(interaction);
+      const focusStore = typeof session.orchestrator.getFocusStore === 'function'
+        ? session.orchestrator.getFocusStore()
+        : null;
+      const focusCount = focusStore ? focusStore.getTopFocuses(100).length : 0;
+      return res.json({ success: true, sessionId, focusCount });
+    }
 
-    // Get current focus count
-    const focusStore = session.orchestrator.getFocusStore();
-    const focusCount = focusStore.getTopFocuses(100).length;
-
-    return res.json({
-      success: true,
-      sessionId,
-      focusCount,
-    });
+    return res.json({ success: true, sessionId, focusCount: 0 });
   } catch (error: any) {
     console.error(`[Interaction] Error recording interaction for session ${sessionId}:`, error);
     return res.status(500).json({
@@ -1293,11 +1340,16 @@ router.get('/:sessionId/focus', (req, res) => {
   }
 
   try {
+    // ClaudeRuntime (agentv3) doesn't implement getFocusStore — return empty.
+    if (typeof session.orchestrator.getFocusStore !== 'function') {
+      return res.json({ success: true, sessionId, focuses: [], context: '' });
+    }
+
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 10;
     const focusStore = session.orchestrator.getFocusStore();
 
     // Get top focuses
-    const focuses = focusStore.getTopFocuses(limit).map(f => ({
+    const focuses = focusStore.getTopFocuses(limit).map((f: any) => ({
       id: f.id,
       type: f.type,
       target: {
@@ -1834,6 +1886,12 @@ async function runAgentDrivenAnalysis(
     console.log(`[AgentRoutes.AgentDriven] Received event: ${update.type}`, update.content?.phase);
     logger.debug('Stream', `Update: ${update.type}`, update.content);
     const normalizedUpdate = normalizeAgentDrivenUpdate(update);
+
+    // Broadcast the original event so the frontend receives raw events
+    // (answer_token, thought, agent_response, conclusion, etc.) for rendering.
+    broadcastToAgentDrivenClients(sessionId, normalizedUpdate);
+
+    // Also derive a conversation_step for the timeline/observability layer.
     const conversationStep = buildConversationStepUpdate(session, normalizedUpdate);
     if (conversationStep) {
       appendConversationStep(session, conversationStep);
@@ -1879,14 +1937,19 @@ async function runAgentDrivenAnalysis(
       }
     }
 
-    // Broadcast specialized events for frontend visualization
+    // Broadcast specialized events for frontend visualization.
+    // Skip if the mapped type is the same as the original — agentv3 events
+    // (answer_token, thought, conclusion, etc.) are already broadcast above
+    // and remapping would cause duplicate delivery to the frontend.
     const eventType = mapToAgentDrivenEventType(normalizedUpdate);
-    broadcastToAgentDrivenClients(sessionId, {
-      type: eventType,
-      content: normalizedUpdate.content,
-      timestamp: normalizedUpdate.timestamp,
-      id: normalizedUpdate.id,
-    });
+    if (eventType !== normalizedUpdate.type) {
+      broadcastToAgentDrivenClients(sessionId, {
+        type: eventType,
+        content: normalizedUpdate.content,
+        timestamp: normalizedUpdate.timestamp,
+        id: normalizedUpdate.id,
+      });
+    }
   };
 
   // Listen to orchestrator events
@@ -1962,12 +2025,15 @@ async function runAgentDrivenAnalysis(
 	        }
 
 	        // Persist FocusStore so focus-aware incremental planning can survive restarts
-	        const focusSaved = persistenceService.saveFocusStore(sessionId, session.orchestrator.getFocusStore());
-	        if (focusSaved) {
-	          logger.info('AgentDrivenAnalysis', 'FocusStore persisted to DB', {
-	            sessionId,
-	            focusStats: session.orchestrator.getFocusStore().getStats(),
-	          });
+	        // ClaudeRuntime (agentv3) doesn't implement getFocusStore — skip gracefully.
+	        if (typeof session.orchestrator.getFocusStore === 'function') {
+	          const focusSaved = persistenceService.saveFocusStore(sessionId, session.orchestrator.getFocusStore());
+	          if (focusSaved) {
+	            logger.info('AgentDrivenAnalysis', 'FocusStore persisted to DB', {
+	              sessionId,
+	              focusStats: session.orchestrator.getFocusStore().getStats(),
+	            });
+	          }
 	        }
 
 	        // Persist TraceAgentState (goal-driven agent scaffold) for cross-restart continuity.
@@ -2129,6 +2195,7 @@ function buildConversationStepUpdate(
       phase = 'thinking';
       role = update.type === 'worker_thought' ? 'system' : 'agent';
       text =
+        sanitizeConversationText(contentRecord.thought) ||
         sanitizeConversationText(contentRecord.content) ||
         sanitizeConversationText(contentRecord.message);
       break;
@@ -2158,7 +2225,8 @@ function buildConversationStepUpdate(
       } else {
         text =
           sanitizeConversationText(contentRecord.summary) ||
-          sanitizeConversationText(contentRecord.message);
+          sanitizeConversationText(contentRecord.message) ||
+          (contentRecord.taskId ? `工具调用完成 (#${String(contentRecord.taskId).slice(-6)})` : '');
       }
       break;
     case 'data': {
@@ -3404,7 +3472,13 @@ const sessionCleanupInterval = setInterval(() => {
           // Ignore closed sockets during cleanup.
         }
       });
-      session.orchestrator.reset();
+      // Clean up session-scoped state only — do NOT call reset() which clears
+      // global caches (architectureCache) shared across all active sessions.
+      if (typeof session.orchestrator.cleanupSession === 'function') {
+        session.orchestrator.cleanupSession(sessionId);
+      }
+      // Also clean up the EnhancedSessionContext (EntityStore, turns, working memory)
+      sessionContextManager.remove(sessionId);
     },
   });
 }, 30 * 60 * 1000);

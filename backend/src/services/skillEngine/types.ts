@@ -134,6 +134,8 @@ export interface DisplayConfig {
   expandable?: boolean;         // 是否支持展开查看详细分析（用于 L2 列表关联 L4 deep 数据）
   metadataFields?: string[];    // 提取到元数据的字段（这些字段从列表移到标题显示）
   hidden_columns?: string[];    // 隐藏的列（保留数据但不显示）
+  collapsible?: boolean;        // 是否可折叠（点击展开/收起整个表格）
+  defaultCollapsed?: boolean;   // 是否默认折叠
 }
 
 export interface HighlightRule {
@@ -529,6 +531,10 @@ export interface DisplayResult {
   metadataFields?: string[];
   /** 隐藏的列（保留数据但不显示） */
   hidden_columns?: string[];
+  /** 是否可折叠（点击展开/收起整个表格） */
+  collapsible?: boolean;
+  /** 是否默认折叠 */
+  defaultCollapsed?: boolean;
   /** 完整的列定义（包含 type, format, hidden, clickAction 等） */
   columnDefinitions?: Array<{
     name: string;

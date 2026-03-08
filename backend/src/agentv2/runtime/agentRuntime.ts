@@ -9,6 +9,7 @@ import {
 import type { StreamingUpdate } from '../../agent/types';
 import { FocusStore, type FocusInteraction } from '../../agent/context/focusStore';
 import {
+  type IOrchestrator,
   AnalysisOptions,
   AnalysisResult,
   AgentRuntimeConfig,
@@ -45,7 +46,7 @@ export interface AgentRuntimeExtensions {
   modeHandlerRegistration?: RuntimeModeHandlerRegistrationOptions;
 }
 
-export class AgentRuntime extends EventEmitter {
+export class AgentRuntime extends EventEmitter implements IOrchestrator {
   private readonly modelRouter: ModelRouter;
   private readonly runtimeConfig: AgentRuntimeConfig;
   private readonly circuitBreaker: CircuitBreaker;

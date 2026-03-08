@@ -1,8 +1,8 @@
 import {
-  type AgentRuntime,
   type AgentRuntimeAnalysisResult,
   createAgentRuntime,
   type Hypothesis,
+  type IOrchestrator,
   type ModelRouter,
   type StreamingUpdate,
 } from '../../agent';
@@ -54,7 +54,7 @@ export interface AnalyzeSessionRunContext {
 }
 
 export interface AnalyzeManagedSession extends ManagedAssistantSession {
-  orchestrator: AgentRuntime;
+  orchestrator: IOrchestrator;
   orchestratorUpdateHandler?: (update: StreamingUpdate) => void;
   traceId: string;
   query: string;
@@ -172,14 +172,14 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
         if (restoredContext) {
           this.sessionContextManager.set(requestedSessionId, traceId, restoredContext);
 
-          const restoredOrchestrator = isClaudeCodeEnabled()
-            ? createClaudeRuntime(getTraceProcessorService()) as unknown as AgentRuntime
+          const restoredOrchestrator: IOrchestrator = isClaudeCodeEnabled()
+            ? createClaudeRuntime(getTraceProcessorService())
             : createAgentRuntime(this.getModelRouter(), {
                 enableLogging: true,
               });
 
           const focusSnapshot = this.sessionPersistenceService.loadFocusStore(requestedSessionId);
-          if (focusSnapshot) {
+          if (focusSnapshot && typeof restoredOrchestrator.getFocusStore === 'function') {
             restoredOrchestrator.getFocusStore().loadSnapshot(focusSnapshot);
             restoredOrchestrator.getFocusStore().syncWithEntityStore(restoredContext.getEntityStore());
           }
@@ -269,8 +269,8 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
     }
 
     const sessionId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    const orchestrator = isClaudeCodeEnabled()
-      ? createClaudeRuntime(getTraceProcessorService()) as unknown as AgentRuntime
+    const orchestrator: IOrchestrator = isClaudeCodeEnabled()
+      ? createClaudeRuntime(getTraceProcessorService())
       : createAgentRuntime(this.getModelRouter(), {
           maxRounds: options.maxRounds ?? options.maxIterations ?? 5,
           maxConcurrentTasks: options.maxConcurrentTasks || 3,

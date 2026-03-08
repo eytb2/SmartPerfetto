@@ -145,6 +145,36 @@ export const DEFAULT_EVIDENCE: Record<string, string[]> = {
 };
 
 // =============================================================================
+// IOrchestrator — Shared interface for AgentRuntime (agentv2) & ClaudeRuntime (agentv3)
+// =============================================================================
+
+/**
+ * Minimal orchestrator contract that both runtime implementations satisfy.
+ * Used in session management and route layers to avoid unsafe `as unknown as AgentRuntime` casts.
+ *
+ * Both AgentRuntime and ClaudeRuntime extend EventEmitter and implement this interface.
+ * getFocusStore() is only available on AgentRuntime — callers must guard with typeof check.
+ */
+export interface IOrchestrator {
+  on(event: string, listener: (...args: any[]) => void): this;
+  off(event: string, listener: (...args: any[]) => void): this;
+  emit(event: string, ...args: any[]): boolean;
+  analyze(query: string, sessionId: string, traceId: string, options?: AnalysisOptions): Promise<AnalysisResult>;
+  reset(): void;
+  /** Clean up all session-scoped state for a specific session (agentv3: artifacts, notes, session map). */
+  cleanupSession?(sessionId: string): void;
+  /** Only available on AgentRuntime (agentv2). Guard with: typeof orchestrator.getFocusStore === 'function' */
+  getFocusStore?(): any;
+  /** Only available on AgentRuntime (agentv2). */
+  recordUserInteraction?(interaction: any): void;
+  /** Only available on AgentRuntime (agentv2). */
+  getInterventionController?(): any;
+  /** Only available on ClaudeRuntime (agentv3). */
+  getSdkSessionId?(sessionId: string): string | undefined;
+  restoreSessionMapping?(sessionId: string, sdkSessionId: string): void;
+}
+
+// =============================================================================
 // Analysis Result
 // =============================================================================
 

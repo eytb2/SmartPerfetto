@@ -6,7 +6,7 @@
 # 数据来源 (按优先级):
 #   1. VSYNC-sf counter track 间隔的中位数 (直接反映显示侧消费节奏，和滑动分析口径一致)
 #   2. expected_frame_timeline_slice 的帧 duration (作为回退)
-#   3. 默认 120Hz (8.33ms)
+#   3. 默认 60Hz (16.67ms)
 #
 # 输出:
 #   - vsync_period_ns: Vsync 周期（纳秒）
@@ -51,10 +51,10 @@ steps:
       -- 当提供 start_ts/end_ts 时，只看该区间内的帧（避免 VRR 省电时段干扰）
       expected_frame_vsync AS (
         SELECT
-          CAST(AVG(dur) AS INTEGER) as vsync_period_ns,
+          CAST(PERCENTILE(dur, 0.5) AS INTEGER) as vsync_period_ns,
           'expected_frame_dur' as source
         FROM expected_frame_timeline_slice
-        WHERE dur > 5000000 AND dur < 35000000  -- 5ms-35ms 覆盖 30Hz VRR
+        WHERE dur > 5000000 AND dur < 50000000  -- 5ms-50ms 覆盖 24Hz VRR
           AND (${start_ts} IS NULL OR ts >= ${start_ts})
           AND (${end_ts} IS NULL OR ts < ${end_ts})
       ),
@@ -72,10 +72,11 @@ steps:
       ),
       sf_vsync AS (
         SELECT
-          CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER) as vsync_period_ns,
+          CAST((SELECT AVG(i.interval_ns) FROM (SELECT interval_ns, PERCENT_RANK() OVER (ORDER BY interval_ns) AS pct FROM sf_vsync_intervals WHERE interval_ns > 4000000 AND interval_ns < 50000000) i WHERE i.pct BETWEEN 0.25 AND 0.75) AS INTEGER) as vsync_period_ns,
           'sf_vsync_counter' as source
         FROM sf_vsync_intervals
-        WHERE interval_ns > 4000000 AND interval_ns < 20000000
+        WHERE interval_ns > 4000000 AND interval_ns < 50000000
+        LIMIT 1
       ),
       -- 合并结果，按优先级选择 (sf_vsync 优先，expected_frame 回退)
       combined AS (
@@ -86,8 +87,8 @@ steps:
       -- 将原始周期 snap 到最近的标准刷新率（边界为相邻标准率周期的几何均值）
       raw_period AS (
         SELECT
-          COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 8333333) as period_ns,
-          COALESCE((SELECT source FROM combined LIMIT 1), 'default_120hz') as source
+          COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 16666667) as period_ns,
+          COALESCE((SELECT source FROM combined LIMIT 1), 'default_60hz') as source
       ),
       snapped AS (
         SELECT

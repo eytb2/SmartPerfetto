@@ -8,21 +8,108 @@ import type { SkillExecutor } from '../services/skillEngine/skillExecutor';
 import { getSkillAnalysisAdapter } from '../services/skillEngine/skillAnalysisAdapter';
 import { createArchitectureDetector } from '../agent/detectors/architectureDetector';
 import { displayResultToEnvelope } from '../types/dataContract';
-import { SQLLearningSystem } from '../services/sqlLearningSystem';
 import type { DisplayResult as SkillDisplayResult } from '../services/skillEngine/types';
 import type { StreamingUpdate } from '../agent/types';
-import type { SqlSchemaIndex } from './types';
+import type { SqlSchemaIndex, AnalysisNote, AnalysisPlanV3, PlanPhase } from './types';
+import { summarizeSqlResult } from './sqlSummarizer';
+import type { ArtifactStore } from './artifactStore';
 
 let sqlSchemaCache: SqlSchemaIndex | null = null;
-let sqlLearningInstance: SQLLearningSystem | null = null;
 
-async function getSqlLearning(): Promise<SQLLearningSystem> {
-  if (!sqlLearningInstance) {
-    const logDir = process.env.SQL_LEARNING_LOG_DIR || './logs/sql_learning';
-    sqlLearningInstance = new SQLLearningSystem(logDir);
+/**
+ * SQL structural keywords to exclude when computing Jaccard similarity
+ * for error-fix pair matching. Without this filter, any two Perfetto SQL
+ * queries match at >30% simply by sharing common keywords like SELECT/FROM/WHERE.
+ */
+const SQL_STOP_WORDS = new Set([
+  // SQL structural keywords
+  'select', 'from', 'where', 'and', 'or', 'not', 'in', 'is', 'as', 'on',
+  'join', 'left', 'right', 'inner', 'outer', 'cross', 'full',
+  'group', 'by', 'order', 'limit', 'having', 'offset',
+  'with', 'case', 'when', 'then', 'else', 'end',
+  'null', 'like', 'glob', 'between',
+  'cast', 'count', 'sum', 'avg', 'max', 'min', 'round', 'coalesce',
+  'lag', 'lead', 'over', 'partition', 'row_number', 'rank',
+  'distinct', 'union', 'all', 'exists', 'into',
+  'asc', 'desc', 'true', 'false', 'integer', 'text', 'real',
+  'printf', 'substr', 'instr', 'replace', 'length', 'trim', 'upper', 'lower',
+  // Perfetto domain-structural tokens — appear in virtually all trace queries
+  // and inflate Jaccard similarity between unrelated queries
+  'upid', 'utid', 'track_id', 'layer_name', 'jank_type', 'dur', 'name',
+  'surface_frame_token', 'display_frame_token', 'frame_number',
+  'process', 'thread', 'slice', 'counter', 'counter_track',
+  'actual_frame_timeline_slice', 'expected_frame_timeline_slice',
+]);
+
+/** Extract meaningful content tokens from SQL, filtering out structural keywords. */
+function sqlContentTokens(sql: string): Set<string> {
+  return new Set(
+    sql.toLowerCase()
+      .split(/[\s,()=<>!+\-*/|;'"]+/)
+      .filter(t => t.length > 2 && !SQL_STOP_WORDS.has(t))
+  );
+}
+
+const SQL_ERROR_LOG_DIR = path.resolve(__dirname, '../../logs/sql_learning');
+
+interface SqlErrorFixPair {
+  errorSql: string;
+  errorMessage: string;
+  fixedSql?: string;
+  timestamp: number;
+}
+
+/**
+ * Load previously learned SQL error-fix pairs from disk.
+ * Returns only pairs that have a fixedSql (i.e., successfully corrected).
+ * Used to seed new sessions with cross-session learning.
+ */
+/** TTL for error-fix pairs: 30 days. Older pairs may reference outdated schemas. */
+const ERROR_FIX_PAIR_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+export function loadLearnedSqlFixPairs(maxPairs = 10): SqlErrorFixPair[] {
+  try {
+    const logFile = path.join(SQL_ERROR_LOG_DIR, 'error_fix_pairs.json');
+    if (!fs.existsSync(logFile)) return [];
+    const data = fs.readFileSync(logFile, 'utf-8');
+    const pairs: SqlErrorFixPair[] = JSON.parse(data);
+    const cutoff = Date.now() - ERROR_FIX_PAIR_TTL_MS;
+    // Only return pairs that have successful fixes and are within TTL
+    return pairs
+      .filter(p => p.fixedSql && p.timestamp >= cutoff)
+      .slice(-maxPairs);
+  } catch {
+    return [];
   }
-  await sqlLearningInstance.init();
-  return sqlLearningInstance;
+}
+
+async function logSqlErrorFixPair(pair: SqlErrorFixPair): Promise<void> {
+  try {
+    const logFile = path.join(SQL_ERROR_LOG_DIR, 'error_fix_pairs.json');
+    let pairs: SqlErrorFixPair[] = [];
+    try {
+      const data = await fs.promises.readFile(logFile, 'utf-8');
+      pairs = JSON.parse(data);
+    } catch { /* fresh start */ }
+    // Deduplicate: if an equivalent error+fix pair already exists, update timestamp instead of appending
+    const existingIdx = pairs.findIndex(p =>
+      p.errorMessage === pair.errorMessage && p.fixedSql === pair.fixedSql
+    );
+    if (existingIdx >= 0) {
+      pairs[existingIdx].timestamp = pair.timestamp;
+    } else {
+      pairs.push(pair);
+    }
+    // Keep last 200 pairs
+    if (pairs.length > 200) pairs = pairs.slice(-200);
+    await fs.promises.mkdir(SQL_ERROR_LOG_DIR, { recursive: true });
+    // Atomic write: write to tmp file, then rename
+    const tmpFile = logFile + '.tmp';
+    await fs.promises.writeFile(tmpFile, JSON.stringify(pairs));
+    await fs.promises.rename(tmpFile, logFile);
+  } catch (err) {
+    console.warn('[ClaudeMCP] Failed to log SQL error-fix pair:', (err as Error).message);
+  }
 }
 
 function loadSqlSchema(): SqlSchemaIndex {
@@ -39,6 +126,77 @@ function loadSqlSchema(): SqlSchemaIndex {
   return sqlSchemaCache;
 }
 
+/**
+ * Normalize synthesizeData entry's `data` field into { columns, rows } format.
+ * synthesizeData entries can be:
+ *   - Array of objects: [{ col1: val1, col2: val2 }, ...]
+ *   - Already columnar: { columns: [...], rows: [[...], ...] }
+ *   - Iterator results: [{ itemIndex, item, result: { ... } }]
+ *   - Single object: { key: value, ... }
+ * All are normalized to { columns: string[], rows: any[][] } for ArtifactStore.
+ */
+function normalizeSynthesizeDataForStorage(data: any): { columns: string[]; rows: any[][] } {
+  if (!data) return { columns: [], rows: [] };
+
+  // Already columnar format
+  if (data.columns && Array.isArray(data.rows)) {
+    return { columns: data.columns, rows: data.rows };
+  }
+
+  // Array of objects
+  if (Array.isArray(data) && data.length > 0) {
+    const first = data[0];
+    // Iterator format: flatten item + result
+    if (first && typeof first === 'object' && 'itemIndex' in first && 'result' in first) {
+      const allKeys = new Set<string>();
+      const flatRows = data.map((entry: any) => {
+        const flat: Record<string, any> = { itemIndex: entry.itemIndex };
+        // Merge item fields
+        if (entry.item && typeof entry.item === 'object') {
+          for (const [k, v] of Object.entries(entry.item)) {
+            flat[k] = v;
+            allKeys.add(k);
+          }
+        }
+        // Merge result fields (top-level scalars only, skip nested objects)
+        if (entry.result && typeof entry.result === 'object') {
+          for (const [k, v] of Object.entries(entry.result)) {
+            if (typeof v !== 'object' || v === null) {
+              flat[`result_${k}`] = v;
+              allKeys.add(`result_${k}`);
+            }
+          }
+        }
+        allKeys.add('itemIndex');
+        return flat;
+      });
+      const columns = ['itemIndex', ...Array.from(allKeys).filter(k => k !== 'itemIndex')];
+      const rows = flatRows.map((row: Record<string, any>) => columns.map(c => row[c] ?? null));
+      return { columns, rows };
+    }
+
+    // Plain array of objects
+    if (typeof first === 'object' && first !== null) {
+      const columns = Object.keys(first);
+      const rows = data.map((row: Record<string, any>) => columns.map(c => row[c] ?? null));
+      return { columns, rows };
+    }
+
+    // Array of primitives — single column
+    return { columns: ['value'], rows: data.map((v: any) => [v]) };
+  }
+
+  // Single object → single row
+  if (typeof data === 'object' && data !== null) {
+    const columns = Object.keys(data);
+    const rows = [columns.map(c => data[c] ?? null)];
+    return { columns, rows };
+  }
+
+  // Scalar
+  return { columns: ['value'], rows: [[data]] };
+}
+
 export interface ClaudeMcpServerOptions {
   traceId: string;
   traceProcessorService: TraceProcessorService;
@@ -46,80 +204,122 @@ export interface ClaudeMcpServerOptions {
   packageName?: string;
   /** Callback to emit StreamingUpdate events (e.g. DataEnvelopes from skill results) */
   emitUpdate?: (update: StreamingUpdate) => void;
+  /** Callback when invoke_skill returns a successful result (used for entity capture) */
+  onSkillResult?: (result: { skillId: string; displayResults: Array<{ stepId?: string; data?: any }> }) => void;
+  /** Mutable notes array for the write_analysis_note tool — passed by reference from analyze() scope */
+  analysisNotes?: AnalysisNote[];
+  /** Optional artifact store for token-efficient skill result references */
+  artifactStore?: ArtifactStore;
+  /** Cached architecture detection result — avoids redundant re-detection */
+  cachedArchitecture?: import('../agent/detectors/types').ArchitectureInfo;
+  /** Per-session SQL error-fix pairs for in-context learning */
+  recentSqlErrors?: SqlErrorFixPair[];
+  /** Mutable analysis plan — passed by reference from analyze() scope */
+  analysisPlan?: { current: AnalysisPlanV3 | null };
 }
 
 /**
  * Creates an in-process MCP server scoped to a specific trace session.
- * Exposes 5 domain tools: execute_sql, invoke_skill, list_skills,
- * detect_architecture, lookup_sql_schema.
+ * Exposes domain tools: execute_sql, invoke_skill, list_skills,
+ * detect_architecture, lookup_sql_schema, and optionally write_analysis_note.
  */
 export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
-  const { traceId, traceProcessorService, skillExecutor, packageName, emitUpdate } = options;
+  const { traceId, traceProcessorService, skillExecutor, packageName, emitUpdate, onSkillResult, analysisNotes, artifactStore } = options;
+  const recentSqlErrors: SqlErrorFixPair[] = options.recentSqlErrors || [];
   const skillAdapter = getSkillAnalysisAdapter(traceProcessorService);
 
   const executeSql = tool(
     'execute_sql',
     'Execute a raw SQL query against the Perfetto trace_processor for the currently loaded trace. ' +
     'Returns columnar results. Use this for ad-hoc queries not covered by existing skills. ' +
-    'Prefer invoke_skill when a matching skill exists — it produces richer, layered output.',
+    'Prefer invoke_skill when a matching skill exists — it produces richer, layered output. ' +
+    'Set summary=true for large result sets to get column statistics + top sample rows instead of raw data.',
     {
       sql: z.string().describe(
         'The SQL query to execute. Use Perfetto stdlib tables/functions (e.g. android_jank_cuj, slice, thread, process).'
       ),
+      summary: z.boolean().optional().describe(
+        'When true, returns column statistics (min/max/avg/percentiles) + 10 most interesting sample rows instead of full results. Use for large result sets where you need aggregate understanding, not row-level data. Default: false.'
+      ),
     },
-    async ({ sql }) => {
+    async ({ sql, summary }) => {
       try {
+        const sqlStart = Date.now();
         const result = await traceProcessorService.query(traceId, sql);
         const truncated = result.rows.length > 200;
         const rows = truncated ? result.rows.slice(0, 200) : result.rows;
         const success = !result.error;
 
-        // SQL Learning: log errors and attempt auto-fix
-        if (result.error) {
-          try {
-            const learning = await getSqlLearning();
-            const fixResult = await learning.fixSQL(
-              sql,
-              result.error,
-              'execute_sql via Claude Agent',
-              () => ({ isValid: true, errors: [] }), // basic validator — let trace_processor validate
-              async (fixedSql) => {
-                const retryResult = await traceProcessorService.query(traceId, fixedSql);
-                return { ok: !retryResult.error, error: retryResult.error };
-              },
-            );
-            if (fixResult.success) {
-              // Auto-fix succeeded — retry with the fixed SQL
-              const retryResult = await traceProcessorService.query(traceId, fixResult.fixedSQL);
-              const retryRows = retryResult.rows.length > 200 ? retryResult.rows.slice(0, 200) : retryResult.rows;
-              if (emitUpdate && !retryResult.error && retryResult.columns.length > 0 && retryRows.length > 0) {
-                emitSqlDataEnvelope(emitUpdate, retryResult.columns, retryRows);
-              }
-              return {
-                content: [{
-                  type: 'text' as const,
-                  text: JSON.stringify({
-                    success: !retryResult.error,
-                    columns: retryResult.columns,
-                    rows: retryRows,
-                    totalRows: retryResult.rows.length,
-                    truncated: retryResult.rows.length > 200,
-                    durationMs: retryResult.durationMs,
-                    autoFixed: true,
-                    originalError: result.error,
-                    fixMethod: fixResult.method,
-                  }, null, 2),
-                }],
-              };
+        const sqlDuration = Date.now() - sqlStart;
+        if (emitUpdate && sqlDuration > 500) {
+          emitUpdate({
+            type: 'progress',
+            content: { phase: 'analyzing', message: `SQL 查询完成 (${result.rows.length} 行, ${sqlDuration}ms)` },
+            timestamp: Date.now(),
+          });
+        }
+
+        if (emitUpdate && success && result.columns.length > 0 && rows.length > 0) {
+          emitSqlDataEnvelope(emitUpdate, result.columns, rows);
+        }
+
+        if (emitUpdate && !success && result.error) {
+          emitUpdate({
+            type: 'progress',
+            content: { phase: 'analyzing', message: `SQL 查询错误: ${result.error.substring(0, 200)}` },
+            timestamp: Date.now(),
+          });
+        }
+
+        // SQL error-fix pair learning: capture errors and match subsequent fixes
+        if (!success && result.error) {
+          recentSqlErrors.push({ errorSql: sql, errorMessage: result.error, timestamp: Date.now() });
+          // Keep only last 10 errors in memory
+          if (recentSqlErrors.length > 10) recentSqlErrors.shift();
+        } else if (success && recentSqlErrors.length > 0) {
+          // Match error-fix pairs by timestamp proximity (same turn, within 60s)
+          // and structural similarity (>30% token overlap via Jaccard similarity).
+          // SQL structural keywords + Perfetto domain tokens are excluded to avoid
+          // false matches between unrelated queries that share common vocabulary.
+          const matchingError = recentSqlErrors.find(e => {
+            // Must be within 60 seconds (covers multi-turn reasoning gaps)
+            if (Date.now() - e.timestamp > 60_000) return false;
+            // Require reasonable structural similarity (not a totally different query)
+            const errorTokens = sqlContentTokens(e.errorSql);
+            const fixTokens = sqlContentTokens(sql);
+            if (errorTokens.size === 0) return false;
+            let intersection = 0;
+            for (const t of errorTokens) {
+              if (fixTokens.has(t)) intersection++;
             }
-          } catch {
-            // SQL learning is non-critical — fall through to original error response
+            const union = new Set([...errorTokens, ...fixTokens]).size;
+            const jaccard = union > 0 ? intersection / union : 0;
+            return jaccard > 0.3; // At least 30% token overlap
+          });
+          if (matchingError) {
+            await logSqlErrorFixPair({ ...matchingError, fixedSql: sql });
+            const idx = recentSqlErrors.indexOf(matchingError);
+            if (idx >= 0) recentSqlErrors.splice(idx, 1);
           }
         }
 
-        // Emit DataEnvelope for interactive table rendering in frontend
-        if (emitUpdate && success && result.columns.length > 0 && rows.length > 0) {
-          emitSqlDataEnvelope(emitUpdate, result.columns, rows);
+        // Summary mode: return column statistics + sample rows instead of raw data
+        if (summary && success && rows.length > 0) {
+          const summaryResult = summarizeSqlResult(result.columns, result.rows);
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: true,
+                mode: 'summary',
+                totalRows: summaryResult.totalRows,
+                columns: summaryResult.columns,
+                columnStats: summaryResult.columnStats,
+                sampleRows: summaryResult.sampleRows,
+                durationMs: result.durationMs,
+              }),
+            }],
+          };
         }
 
         return {
@@ -133,12 +333,18 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               truncated,
               durationMs: result.durationMs,
               ...(result.error ? { error: result.error } : {}),
-            }, null, 2),
+            }),
           }],
         };
       } catch (err) {
+        const errMsg = (err as Error).message;
+        emitUpdate?.({
+          type: 'progress',
+          content: { phase: 'analyzing', message: `SQL 查询失败: ${errMsg}` },
+          timestamp: Date.now(),
+        });
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: (err as Error).message }) }],
+          content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: errMsg }) }],
           isError: true,
         };
       }
@@ -163,18 +369,131 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         if (packageName && !effectiveParams.process_name) {
           effectiveParams.process_name = packageName;
         }
-        // YAML skills reference ${package} in SQL, not ${process_name}.
-        // Map process_name → package so skill SQL resolves correctly.
+        // YAML skills may use ${package} or ${process_name} — provide both.
+        // Keeping both ensures skills using either variable name work correctly.
         if (effectiveParams.process_name && !effectiveParams.package) {
           effectiveParams.package = effectiveParams.process_name;
         }
-        const result = await skillExecutor.execute(skillId, traceId, effectiveParams);
+        if (effectiveParams.package && !effectiveParams.process_name) {
+          effectiveParams.process_name = effectiveParams.package;
+        }
 
-        // Emit DataEnvelopes for interactive frontend tables
+        emitUpdate?.({
+          type: 'progress',
+          content: { phase: 'analyzing', message: `运行分析技能: ${skillId}...` },
+          timestamp: Date.now(),
+        });
+
+        const skillStart = Date.now();
+        const result = await skillExecutor.execute(skillId, traceId, effectiveParams);
+        const skillDuration = Date.now() - skillStart;
+
+        emitUpdate?.({
+          type: 'progress',
+          content: {
+            phase: 'analyzing',
+            message: `技能 ${skillId} 完成 (${skillDuration}ms, ${result.displayResults?.length || 0} 个结果层)`,
+          },
+          timestamp: Date.now(),
+        });
+
+        // Capture skill SQL errors in the learning system — skill SQL is the most complex
+        // and most likely to break across Perfetto versions.
+        // P1-3: Also persist to disk for cross-session learning (same as execute_sql errors).
+        if (!result.success && result.error && result.error.includes('SQL')) {
+          const errorPair: SqlErrorFixPair = {
+            errorSql: `[skill:${skillId}] ${JSON.stringify(effectiveParams)}`,
+            errorMessage: result.error,
+            timestamp: Date.now(),
+          };
+          recentSqlErrors.push(errorPair);
+          if (recentSqlErrors.length > 10) recentSqlErrors.shift();
+          // Persist to disk (fire-and-forget) for cross-session learning
+          logSqlErrorFixPair(errorPair).catch(() => {});
+        }
+
         if (emitUpdate && result.displayResults?.length) {
           emitSkillDataEnvelopes(result.displayResults as SkillDisplayResult[], result.skillId || skillId, emitUpdate);
         }
 
+        if (onSkillResult && result.success && result.displayResults?.length) {
+          onSkillResult({ skillId: result.skillId || skillId, displayResults: result.displayResults });
+        }
+
+        // Artifact mode: store displayResults AND synthesizeData as artifacts, return compact references
+        if (artifactStore && result.displayResults?.length) {
+          const artifacts = result.displayResults.map(dr => {
+            const artId = artifactStore.store({
+              skillId: result.skillId || skillId,
+              stepId: dr.stepId,
+              layer: dr.layer,
+              title: dr.title,
+              data: dr.data,
+              diagnostics: undefined,
+            });
+            const summary = artifactStore.generateSummary(artId);
+            return { artifactId: artId, ...summary };
+          });
+
+          // Store diagnostics as a separate artifact if present
+          let diagnosticsArtifactId: string | undefined;
+          if (result.diagnostics && Array.isArray(result.diagnostics) && result.diagnostics.length > 0) {
+            diagnosticsArtifactId = artifactStore.store({
+              skillId: result.skillId || skillId,
+              stepId: '_diagnostics',
+              layer: 'diagnosis',
+              title: `${skillId} diagnostics`,
+              data: { columns: ['diagnostic'], rows: result.diagnostics.map((d: any) => [d]) },
+              diagnostics: result.diagnostics,
+            });
+          }
+
+          // Store synthesizeData entries as artifacts too — these contain the raw step data
+          // (e.g. batch_frame_root_cause with 487 rows) that would otherwise overflow token limits.
+          // Claude can fetch them on demand via fetch_artifact with pagination.
+          let synthesizeArtifacts: Array<{ artifactId: string; stepId: string; rowCount: number; columns: string[] }> | undefined;
+          if (result.synthesizeData && Array.isArray(result.synthesizeData) && result.synthesizeData.length > 0) {
+            synthesizeArtifacts = result.synthesizeData
+              .filter((sd: any) => sd.data && sd.success !== false)
+              .map((sd: any) => {
+                // synthesizeData entries have data as array-of-objects or { columns, rows }
+                const normalizedData = normalizeSynthesizeDataForStorage(sd.data);
+                const artId = artifactStore.store({
+                  skillId: result.skillId || skillId,
+                  stepId: sd.stepId,
+                  layer: sd.layer || 'synthesize',
+                  title: sd.stepName || sd.stepId,
+                  data: normalizedData,
+                });
+                return {
+                  artifactId: artId,
+                  stepId: sd.stepId,
+                  rowCount: normalizedData.rows?.length ?? 0,
+                  columns: normalizedData.columns ?? [],
+                };
+              });
+          }
+
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: result.success,
+                skillId: result.skillId,
+                skillName: result.skillName,
+                ...(result.error ? { error: result.error } : {}),
+                artifacts,
+                ...(diagnosticsArtifactId ? { diagnosticsArtifactId } : {}),
+                ...(synthesizeArtifacts && synthesizeArtifacts.length > 0
+                  ? { synthesizeArtifacts }
+                  : {}),
+                hint: 'Use fetch_artifact(artifactId, detail="rows", offset=0, limit=50) to page through large datasets. All data is accessible — use offset/limit to paginate.',
+              }),
+            }],
+          };
+        }
+
+        // Default: return full displayResults (backward compatible)
         return {
           content: [{
             type: 'text' as const,
@@ -191,12 +510,18 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               })),
               diagnostics: result.diagnostics,
               synthesizeData: result.synthesizeData,
-            }, null, 2),
+            }),
           }],
         };
       } catch (err) {
+        const errMsg = (err as Error).message;
+        emitUpdate?.({
+          type: 'progress',
+          content: { phase: 'analyzing', message: `技能 ${skillId} 执行失败: ${errMsg}` },
+          timestamp: Date.now(),
+        });
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: (err as Error).message }) }],
+          content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: errMsg }) }],
           isError: true,
         };
       }
@@ -233,9 +558,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
                 description: s.description,
                 type: s.type,
                 keywords: s.keywords.slice(0, 5),
-              })),
-              null,
-              2
+              }))
             ),
           }],
         };
@@ -256,6 +579,24 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     {},
     async () => {
       try {
+        // Return cached result if available (already detected in analyze())
+        if (options.cachedArchitecture) {
+          const info = options.cachedArchitecture;
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                type: info.type,
+                confidence: info.confidence,
+                evidence: info.evidence.map(e => ({ source: e.source, type: e.type, weight: e.weight })),
+                flutter: info.flutter,
+                compose: info.compose,
+                webview: info.webview,
+                cached: true,
+              }),
+            }],
+          };
+        }
         const detector = createArchitectureDetector();
         const info = await detector.detect({ traceId, traceProcessorService, packageName });
         return {
@@ -268,7 +609,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               flutter: info.flutter,
               compose: info.compose,
               webview: info.webview,
-            }, null, 2),
+            }),
           }],
         };
       } catch (err) {
@@ -300,21 +641,305 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           type: 'text' as const,
           text: JSON.stringify({
             totalMatches: matches.length,
-            entries: matches.map(m => ({ name: m.name, type: m.type, category: m.category, description: m.description })),
-          }, null, 2),
+            entries: matches.map(m => {
+              const entry: Record<string, unknown> = { name: m.name, type: m.type, category: m.category, description: m.description };
+              if (m.columns?.length) entry.columns = m.columns;
+              if (m.params?.length) entry.params = m.params;
+              return entry;
+            }),
+          }),
         }],
       };
     }
   );
 
+  // Conditional tool: write_analysis_note (only available when analysisNotes array is provided)
+  const MAX_NOTES = 20;
+  const writeAnalysisNote = analysisNotes ? tool(
+    'write_analysis_note',
+    'Persist a structured analysis note that survives context compression. ' +
+    'Use this for important cross-domain observations, hypotheses, or findings that you want to reference later. ' +
+    'Do NOT overuse — only record observations that would be lost if context is compressed.',
+    {
+      section: z.enum(['hypothesis', 'finding', 'observation', 'next_step']).describe(
+        'Note category: hypothesis (untested theory), finding (confirmed result), observation (data point), next_step (planned action)'
+      ),
+      content: z.string().describe('The note content — be specific, include data references'),
+      priority: z.enum(['high', 'medium', 'low']).optional().describe('Priority for retention when notes exceed limit. Default: medium'),
+    },
+    async ({ section, content, priority }) => {
+      const note = { section, content, priority: priority || 'medium' as const, timestamp: Date.now() };
+      analysisNotes.push(note);
+
+      // Evict notes when over limit.
+      // Priority order: next_step (ephemeral) → low (oldest first) → medium (oldest first) → oldest high
+      if (analysisNotes.length > MAX_NOTES) {
+        const priorityRank = { low: 0, medium: 1, high: 2 };
+        // Find the best candidate to evict: lowest priority, then oldest timestamp
+        let evictIdx = -1;
+        let evictRank = Infinity;
+        let evictTs = Infinity;
+
+        for (let i = 0; i < analysisNotes.length; i++) {
+          const n = analysisNotes[i];
+          // Always prefer evicting next_step (ephemeral planning notes)
+          if (n.section === 'next_step') { evictIdx = i; break; }
+          const rank = priorityRank[n.priority as keyof typeof priorityRank] ?? 1;
+          if (rank < evictRank || (rank === evictRank && n.timestamp < evictTs)) {
+            evictRank = rank;
+            evictTs = n.timestamp;
+            evictIdx = i;
+          }
+        }
+        if (evictIdx >= 0) analysisNotes.splice(evictIdx, 1);
+      }
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ success: true, totalNotes: analysisNotes.length, section, priority: priority || 'medium' }),
+        }],
+      };
+    }
+  ) : null;
+
+  // Conditional tool: fetch_artifact (only available when artifactStore is provided)
+  const fetchArtifact = artifactStore ? tool(
+    'fetch_artifact',
+    'Retrieve detailed data for a previously stored artifact from invoke_skill results. ' +
+    'Supports pagination for large datasets — use offset/limit to page through rows without token overflow. ' +
+    'Response includes totalRows and hasMore to guide pagination. ALL data is accessible; nothing is hidden.',
+    {
+      artifactId: z.string().describe('Artifact ID (e.g. "art-1") from a previous invoke_skill response'),
+      detail: z.enum(['summary', 'rows', 'full']).optional().describe(
+        'Detail level: summary (default, compact stats), rows (paginated data rows), full (complete original structure — use with caution on large artifacts)'
+      ),
+      offset: z.number().optional().describe(
+        'Row offset for pagination (detail="rows" only). Default: 0. Use with limit to page through large datasets.'
+      ),
+      limit: z.number().optional().describe(
+        'Maximum rows to return (detail="rows" only). Default: 50. Increase up to 200 if you need more rows per page.'
+      ),
+    },
+    async ({ artifactId, detail, offset, limit }) => {
+      const effectiveDetail = detail || 'summary';
+      const result = artifactStore.fetch(artifactId, effectiveDetail, offset, limit);
+      if (!result) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: `Artifact ${artifactId} not found` }) }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ success: true, detail: effectiveDetail, ...result }),
+        }],
+      };
+    }
+  ) : null;
+
+  // query_perfetto_source: Search the Perfetto stdlib for SQL patterns and usage examples.
+  // Enables Claude to self-learn by finding how official code uses tables/functions.
+  const queryPerfettoSource = tool(
+    'query_perfetto_source',
+    'Search the Perfetto SQL stdlib source code for usage patterns. Use this when you encounter an unfamiliar table/function, get an SQL error, or need to find how the official codebase uses a specific table or column. Returns matching lines with file context.',
+    {
+      keyword: z.string().describe('Search keyword (table name, function name, column name, or SQL pattern)'),
+      max_results: z.number().optional().describe('Maximum number of matching files to return (default: 5)'),
+    },
+    async ({ keyword, max_results }) => {
+      const maxFiles = max_results ?? 5;
+      const stdlibDir = path.resolve(__dirname, '../../../perfetto/src/trace_processor/perfetto_sql/stdlib');
+
+      if (!fs.existsSync(stdlibDir)) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: 'Perfetto stdlib directory not found' }) }],
+          isError: true,
+        };
+      }
+
+      try {
+        const results: Array<{ file: string; matches: string[] }> = [];
+        const lowerKeyword = keyword.toLowerCase();
+
+        // Recursively search .sql files (async to avoid blocking event loop)
+        const searchDir = async (dir: string): Promise<void> => {
+          if (results.length >= maxFiles) return;
+          const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+          for (const entry of entries) {
+            if (results.length >= maxFiles) return;
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+              await searchDir(fullPath);
+            } else if (entry.name.endsWith('.sql')) {
+              const content = await fs.promises.readFile(fullPath, 'utf-8');
+              if (content.toLowerCase().includes(lowerKeyword)) {
+                const relPath = path.relative(stdlibDir, fullPath);
+                const lines = content.split('\n');
+                const matchLines: string[] = [];
+                for (let i = 0; i < lines.length; i++) {
+                  if (lines[i].toLowerCase().includes(lowerKeyword)) {
+                    // Include 1 line of context before and after
+                    const start = Math.max(0, i - 1);
+                    const end = Math.min(lines.length - 1, i + 1);
+                    const context = lines.slice(start, end + 1)
+                      .map((l, j) => `${start + j + 1}: ${l}`)
+                      .join('\n');
+                    matchLines.push(context);
+                    if (matchLines.length >= 8) break; // Cap matches per file
+                  }
+                }
+                results.push({ file: relPath, matches: matchLines });
+              }
+            }
+          }
+        };
+
+        await searchDir(stdlibDir);
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              keyword,
+              matchedFiles: results.length,
+              results: results.map(r => ({
+                file: r.file,
+                matchCount: r.matches.length,
+                matches: r.matches,
+              })),
+            }),
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: (err as Error).message }) }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // Planning tools: submit_plan + update_plan_phase (P0-1: Explicit planning capability)
+  const analysisPlanRef = options.analysisPlan;
+  const submitPlan = analysisPlanRef ? tool(
+    'submit_plan',
+    'Submit your structured analysis plan BEFORE starting any analysis. ' +
+    'Define phases with goals and expected tools. The system tracks plan adherence and warns on deviation. ' +
+    'You MUST call this tool as your first action in every analysis.',
+    {
+      phases: z.array(z.object({
+        id: z.string().describe('Phase identifier (e.g. "p1", "p2")'),
+        name: z.string().describe('Phase name (e.g. "Overview Collection")'),
+        goal: z.string().describe('What this phase aims to achieve'),
+        expectedTools: z.array(z.string()).describe('Tool names this phase will use (e.g. ["invoke_skill", "execute_sql"])'),
+      })).describe('Ordered list of analysis phases'),
+      successCriteria: z.string().describe('What constitutes a successful analysis (e.g. "Identify root cause of jank frames with evidence")'),
+    },
+    async ({ phases, successCriteria }) => {
+      const plan: AnalysisPlanV3 = {
+        phases: phases.map(p => ({
+          ...p,
+          status: 'pending' as const,
+        })),
+        successCriteria,
+        submittedAt: Date.now(),
+        toolCallLog: [],
+      };
+      analysisPlanRef.current = plan;
+
+      emitUpdate?.({
+        type: 'plan_submitted',
+        content: {
+          phases: plan.phases.map(p => ({ id: p.id, name: p.name, goal: p.goal, status: p.status })),
+          successCriteria,
+        },
+        timestamp: Date.now(),
+      });
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: true,
+            message: `Plan accepted: ${phases.length} phases. Now proceed with phase "${phases[0]?.id}".`,
+            phases: phases.map(p => p.id),
+          }),
+        }],
+      };
+    }
+  ) : null;
+
+  const updatePlanPhase = analysisPlanRef ? tool(
+    'update_plan_phase',
+    'Update the status of a plan phase. Call this when transitioning between phases or when skipping a phase. ' +
+    'This helps track analysis progress and enables plan adherence verification.',
+    {
+      phaseId: z.string().describe('Phase ID to update (e.g. "p1")'),
+      status: z.enum(['in_progress', 'completed', 'skipped']).describe('New phase status'),
+      summary: z.string().optional().describe('Brief summary of what was accomplished or why skipped'),
+    },
+    async ({ phaseId, status, summary }) => {
+      const plan = analysisPlanRef.current;
+      if (!plan) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: 'No plan submitted yet. Call submit_plan first.' }) }],
+          isError: true,
+        };
+      }
+
+      const phase = plan.phases.find(p => p.id === phaseId);
+      if (!phase) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: `Phase "${phaseId}" not found in plan` }) }],
+          isError: true,
+        };
+      }
+
+      phase.status = status;
+      if (status === 'completed' || status === 'skipped') {
+        phase.completedAt = Date.now();
+      }
+
+      emitUpdate?.({
+        type: 'plan_phase_updated',
+        content: { phaseId, status, summary: summary || '', phaseName: phase.name },
+        timestamp: Date.now(),
+      });
+
+      // Report overall plan progress
+      const completed = plan.phases.filter(p => p.status === 'completed' || p.status === 'skipped').length;
+      const nextPhase = plan.phases.find(p => p.status === 'pending');
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: true,
+            progress: `${completed}/${plan.phases.length} phases done`,
+            ...(nextPhase ? { nextPhase: nextPhase.id, nextGoal: nextPhase.name } : { allPhasesComplete: true }),
+          }),
+        }],
+      };
+    }
+  ) : null;
+
+  const tools: any[] = [executeSql, invokeSkill, listSkills, detectArchitecture, lookupSqlSchema, queryPerfettoSource];
+  if (writeAnalysisNote) tools.push(writeAnalysisNote);
+  if (fetchArtifact) tools.push(fetchArtifact);
+  if (submitPlan) tools.push(submitPlan);
+  if (updatePlanPhase) tools.push(updatePlanPhase);
+
   return createSdkMcpServer({
     name: 'smartperfetto',
     version: '1.0.0',
-    tools: [executeSql, invokeSkill, listSkills, detectArchitecture, lookupSqlSchema],
+    tools,
   });
 }
 
-/** Emit a DataEnvelope for SQL query results (used by execute_sql). */
+/** Emit a DataEnvelope for SQL query results. */
 function emitSqlDataEnvelope(
   emit: (update: StreamingUpdate) => void,
   columns: string[],
@@ -326,19 +951,24 @@ function emitSqlDataEnvelope(
       meta: { type: 'sql_result', version: '2.0', source: 'execute_sql' },
       data: { columns, rows },
       display: {
-        layer: 'detail',
+        layer: 'list',
         format: 'table',
         title: `SQL Query (${rows.length} rows)`,
         columns: columns.map((col: string) => ({
           name: col,
-          type: col.includes('ts') || col.includes('timestamp') ? 'timestamp' :
-                col.includes('dur') ? 'duration' :
-                col.includes('pct') || col.includes('percent') ? 'percentage' : 'string',
+          type: inferSqlColumnType(col),
         })),
       },
     }],
     timestamp: Date.now(),
   });
+}
+
+function inferSqlColumnType(col: string): string {
+  if (col.includes('ts') || col.includes('timestamp')) return 'timestamp';
+  if (col.includes('dur')) return 'duration';
+  if (col.includes('pct') || col.includes('percent')) return 'percentage';
+  return 'string';
 }
 
 /**
@@ -352,7 +982,10 @@ function emitSkillDataEnvelopes(
 ): void {
   const envelopes = displayResults
     .filter(dr => dr.data?.rows?.length)
-    .map(dr => displayResultToEnvelope(dr as any, skillId));
+    .map(dr => {
+      const explicitColumns = (dr as any).columnDefinitions;
+      return displayResultToEnvelope(dr as any, skillId, explicitColumns);
+    });
 
   if (envelopes.length > 0) {
     emit({ type: 'data', content: envelopes, timestamp: Date.now() });

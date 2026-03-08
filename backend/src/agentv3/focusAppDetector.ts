@@ -21,6 +21,11 @@ const SYSTEM_PROCESS_FILTERS = [
   'com.android.providers',
   '/system/bin/',
   'zygote',
+  // Google system apps that frequently appear in foreground but are rarely analysis targets
+  'com.google.android.inputmethod',   // Gboard
+  'com.google.android.apps.nexuslauncher', // Pixel Launcher
+  'com.android.inputmethod',          // AOSP keyboard
+  'com.google.android.apps.wallpaper', // Wallpaper picker
 ];
 
 function isSystemProcess(name: string): boolean {
@@ -98,7 +103,7 @@ export async function detectFocusApps(
           COUNT(*) AS switch_count
         FROM android_oom_adj_intervals oa
         JOIN process p USING(upid)
-        WHERE oa.oom_adj = 0
+        WHERE oa.oom_adj <= 0 AND oa.oom_adj > -900
           AND p.name IS NOT NULL
           AND p.name != ''
         GROUP BY p.name
