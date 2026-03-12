@@ -1,5 +1,7 @@
 # 多轮对话设计深度解析（同一 trace 的连续推理）
 
+> **⚠️ DEPRECATED (agentv2)** — 本文档描述 agentv2 的多轮对话机制（EnhancedSessionContext / TraceAgentState）。agentv3 通过 SDK `resume: sdkSessionId` 自动恢复上下文 + `entityStore` 实体追踪 + `analysisNotes` 磁盘持久化实现多轮对话。当前主链路见 [08-agentv3-content-system.md](./08-agentv3-content-system.md)。
+
 > 对齐版本：2026-02-06
 > 目标：让用户感觉在和"懂 Android + 懂当前 trace"的专家对话，而不是每轮重新跑一遍 pipeline。
 

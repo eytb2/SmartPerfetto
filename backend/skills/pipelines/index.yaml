@@ -13,7 +13,7 @@
 # =============================================================================
 
 version: "1.0"
-description: "Pipeline skills index - 24 rendering pipeline types"
+description: "Pipeline skills index - 25 rendering pipeline types"
 
 families:
   hwui:
@@ -25,6 +25,7 @@ families:
       - ANDROID_VIEW_SOFTWARE
       - ANDROID_VIEW_MIXED
       - ANDROID_VIEW_MULTI_WINDOW
+      - COMPOSE_STANDARD
 
   surface:
     name: "Surface-Based"
@@ -95,4 +96,5 @@ pipeline_files:
   CAMERA_PIPELINE: camera_pipeline.skill.yaml
   VIDEO_OVERLAY_HWC: video_overlay_hwc.skill.yaml
   HARDWARE_BUFFER_RENDERER: hardware_buffer_renderer.skill.yaml
+  COMPOSE_STANDARD: compose_standard.skill.yaml
   VARIABLE_REFRESH_RATE: variable_refresh_rate.skill.yaml

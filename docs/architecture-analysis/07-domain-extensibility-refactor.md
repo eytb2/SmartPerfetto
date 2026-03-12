@@ -1,5 +1,7 @@
 # 领域可扩展性架构重构计划（Domain Extensibility Refactor）
 
+> **⚠️ DEPRECATED (agentv2)** — 本文档描述 agentv2 的领域可扩展性重构蓝图（DomainManifest / Registry 驱动）。agentv3 中领域扩展通过添加 `.strategy.md`（场景策略）+ `.skill.yaml`（分析技能）实现，无需修改代码。当前主链路见 [08-agentv3-content-system.md](./08-agentv3-content-system.md)。
+
 > 更新日期：2026-02-10
 > 目标：避免新增分析场景（内存、跳转速度、交互等）时出现多处硬编码修改，建立可配置、可注册、可灰度的扩展架构。
 

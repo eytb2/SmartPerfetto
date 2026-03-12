@@ -12,6 +12,18 @@
 - 温启动 (Warm Start): 进程存在但 Activity 被销毁
 - 热启动 (Hot Start): 进程和 Activity 都存在，只需恢复
 
+### 1.4 启动类型判定规则 (Perfetto 信号)
+
+Perfetto `android_startups` 表的 `startup_type` 可能不准确，需基于 trace slice 信号重分类：
+
+| 类型 | 判定信号 | Android 框架路径 |
+|------|---------|-----------------|
+| 冷启动 (cold) | `bindApplication` slice 存在 | Zygote fork → handleBindApplication() |
+| 温启动 (warm) | `performCreate:*` 存在且**无** `bindApplication` | Activity.onCreate()（跳过 App 初始化）|
+| 热启动 (hot) | 两者均不存在 → 保留 Perfetto 原始分类 | Activity.onRestart() → onResume() |
+
+**⚠️ LMK 误分类：** 进程被 LMK 回收后重启，Perfetto 可能报 warm（ActivityManager 仍持有 Activity 记录），但 `bindApplication` 存在说明进程经历了完整初始化，实为 cold start。`startup_events_in_range` skill 的 SQL 层已实现此重分类逻辑。
+
 ### 1.3 启动阶段概览
 
 ```

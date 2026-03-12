@@ -1,5 +1,7 @@
 # Strategy 系统深度解析（确定性流水线作为"可调用工具"）
 
+> **⚠️ DEPRECATED (agentv2)** — 本文档描述 agentv2 的 Strategy 系统（StrategyExecutor / HypothesisExecutor / DirectSkillExecutor / Decision Trees）。agentv3 中 Strategy 不再作为代码控制的执行流水线，而是通过 `.strategy.md` 文件注入 system prompt，由 Claude 自主决策如何使用。Skill 则通过 MCP `invoke_skill` 工具由 Claude 直接调用。当前主链路见 [08-agentv3-content-system.md](./08-agentv3-content-system.md)。
+
 > 对齐版本：2026-02-10
 > 目标：把"稳定高频场景的确定性流水线"融入"目标驱动 Agent"闭环，而不是让系统退化成 pipeline + LLM 胶水。
 

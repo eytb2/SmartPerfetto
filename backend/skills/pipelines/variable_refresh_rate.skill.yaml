@@ -71,7 +71,7 @@ teaching:
       participant Disp as Display (VRR)
 
       Note over App,SF: 📍 Variable Refresh Rate (VRR/ARR)
-      App->>FT: setFrameRate (期望帧率)
+      Note over App: setFrameRate (一次性声明期望帧率)
       App->>RT: syncFrameState
 
       activate RT

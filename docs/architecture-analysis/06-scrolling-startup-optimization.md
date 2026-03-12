@@ -1,5 +1,7 @@
 # Scrolling / Startup 分析链路梳理与 Startup 持续优化计划（与代码对齐）
 
+> **⚠️ DEPRECATED (agentv2)** — 本文档描述 agentv2 下的 Scrolling/Startup 确定性流水线（scrollingStrategy 3 阶段、startupStrategy 3 阶段）。agentv3 中这些场景由 `.strategy.md` 注入 system prompt 指导 Claude 分析方向，Skill 通过 MCP `invoke_skill` 由 Claude 自主调用。当前主链路见 [08-agentv3-content-system.md](./08-agentv3-content-system.md)。
+
 > 更新日期：2026-02-10
 > 适用范围：`backend/src/agent/`、`backend/src/agent/strategies/`、`backend/skills/composite/`
 

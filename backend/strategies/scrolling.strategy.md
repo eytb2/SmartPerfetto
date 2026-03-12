@@ -68,6 +68,23 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
   响应包含 `totalRows` 和 `hasMore`，继续翻页获取所有数据。
   **必须获取完所有相关数据再出结论**，不可只看前 50 行就下结论
 
+**Phase 1.5 — 架构感知分支（基于 detect_architecture 结果）：**
+
+| 架构 | 调整动作 |
+|------|---------|
+| **Flutter** | 改用 `invoke_skill("flutter_scrolling_analysis")` 代替 `scrolling_analysis`。Flutter 的 1.ui/1.raster 线程模型与标准 RenderThread 不同，jank 帧的根因归属逻辑也不同 |
+| **WebView** | 使用标准 `scrolling_analysis`，但注意 CrRendererMain 线程的 slice 可能是卡顿主因 |
+| **标准 HWUI / Compose** | 使用标准 `scrolling_analysis` |
+
+**Phase 1.7 — 根因分支深钻（基于 batch_frame_root_cause 的 reason_code 和 jank_responsibility）：**
+
+| 条件 | 深钻动作 |
+|------|---------|
+| **多帧 `reason_code = gpu_bound`** | 调用 `invoke_skill("gpu_analysis")` 或 `execute_sql` 查询 GPU 频率/利用率。GPU 瓶颈通常与 GPU 频率受限或 shader 复杂度有关 |
+| **多帧 `jank_responsibility = SF`** | 调用 `invoke_skill("surfaceflinger_analysis")` 分析 SF 合成延迟、GPU/HWC 合成比例、Fence 超时 |
+| **多帧 `big_avg_freq_mhz` 显著低于设备峰值** | 调用 `invoke_skill("thermal_throttling")` 检查是否存在热节流。CPU 频率被 thermal 限制是常见的跨帧系统级根因 |
+| **VRR 设备（通过 `vrr_detection` 或 VSync 周期 ≠ 16.67ms 判断）** | 注意 1.5x VSync 阈值需基于检测到的实际 VSync 周期（如 120Hz = 8.33ms, 1.5x = 12.5ms），而非固定 16.67ms |
+
 **Phase 2 — 补充深钻（可选，仅在需要时执行）：**
 Phase 1 的 `batch_frame_root_cause` 已包含每帧的**完整详细分析数据**：
 - MainThread 四象限（Q1 大核运行 / Q2 小核运行 / Q3 调度等待 / Q4 休眠）

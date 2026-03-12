@@ -1,5 +1,7 @@
 # AgentRuntime 深度解析（目标驱动 Agent 主链路）
 
+> **⚠️ DEPRECATED (agentv2)** — 本文档描述 agentv2 的 AgentRuntime，已被 agentv3 的 `ClaudeRuntime`（Claude Agent SDK）替代。当前主链路见 [08-agentv3-content-system.md](./08-agentv3-content-system.md)。仅在 `AI_SERVICE=deepseek` 时激活。
+
 > 对齐版本：2026-02-06
 > 范围：`backend/src/agentv2/runtime/agentRuntime.ts` 及其直接依赖
 > 目标：解释"为什么它更像 Agent 而不是 pipeline"，以及关键闭环如何形成。

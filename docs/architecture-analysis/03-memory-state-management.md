@@ -1,5 +1,7 @@
 # Memory & State Management 深度解析（短期/长期 + trace 隔离）
 
+> **⚠️ DEPRECATED (agentv2)** — 本文档描述 agentv2 的 TraceAgentState / EnhancedSessionContext 记忆体系。agentv3 使用 `analysisPatternMemory`（跨会话正面/负面模式）+ `analysisNotes`（结构化笔记, 磁盘持久化）+ `entityStore`（跨轮次实体追踪）。当前主链路见 [08-agentv3-content-system.md](./08-agentv3-content-system.md)。
+
 > 对齐版本：2026-02-06
 > 核心目标：让系统具备"可持续推理的记忆"，同时保证 **不跨 trace 泄漏**、不无限膨胀、可持久化恢复。
 

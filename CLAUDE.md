@@ -66,9 +66,10 @@ The primary execution path uses Claude Agent SDK as the orchestrator. Claude rec
 | claudeRuntime.ts | 主编排器 — implements `IOrchestrator`, wraps `sdkQuery()` |
 | claudeMcpServer.ts | 15 MCP tools for Claude to access trace data |
 | claudeSystemPrompt.ts | 动态 system prompt — 按 SceneType 注入分析策略 + 上轮计划上下文 |
+| strategyLoader.ts | 加载 `*.strategy.md` 和 `*.template.md` — 解析 frontmatter + 变量替换 |
 | claudeSseBridge.ts | SDK stream → SSE events 桥接 (text buffering, tool tracking) |
 | claudeConfig.ts | 配置 + `isClaudeCodeEnabled()` 路由判断 |
-| sceneClassifier.ts | 关键词场景分类 (scrolling/startup/anr/general, <1ms) |
+| sceneClassifier.ts | 关键词场景分类 (scrolling/startup/anr/general, <1ms) — 匹配规则来自 strategy.md frontmatter |
 | focusAppDetector.ts | 焦点应用检测 (battery_stats/oom_adj/frame_timeline) |
 | claudeAgentDefinitions.ts | Sub-agent 定义 (feature-flagged: `CLAUDE_ENABLE_SUB_AGENTS=true`) |
 | claudeVerifier.ts | 4 层验证 (heuristic + plan adherence + hypothesis + scene completeness + LLM) + 可学习误诊模式. 默认开启 |
@@ -288,11 +289,43 @@ steps:
 - `atomic/` - 单步检测 (57 skills)
 - `composite/` - 组合分析 (28 skills)
 - `deep/` - 深度分析 (2 skills)
-- `pipelines/` - 渲染管线检测+教学 (26 skills)
+- `pipelines/` - 渲染管线检测+教学 (25 skills)
 - `modules/` - 模块配置 (app/framework/hardware/kernel)
 - `vendors/` - 厂商适配 (pixel/samsung/xiaomi/honor/oppo/vivo/qualcomm/mtk)
 
-### Pipeline Skills (26)
+### Content System (双轨数据流)
+
+agentv3 下的内容文件分两条路径，详见 `docs/architecture-analysis/08-agentv3-content-system.md`：
+
+**路径一：`.md` → System Prompt（Claude 的"大脑"）**
+
+| 文件类型 | 位置 | 用途 |
+|---------|------|------|
+| `*.strategy.md` | `backend/strategies/` | YAML frontmatter (场景匹配规则) + Markdown body (分析策略指导) |
+| `*.template.md` | `backend/strategies/` | 提示词模板 — 角色/方法论/输出格式/选区上下文/架构指导 |
+| `*.sop.md` | `backend/skills/docs/` | 标准操作流程（当前未自动注入，仅参考文档） |
+
+```
+classifyScene(query) → SceneType (由 strategy.md frontmatter keywords 匹配)
+    ↓
+buildSystemPrompt() → 组装: prompt-role + arch-* + prompt-methodology({{sceneStrategy}}) + selection-* + prompt-output-format
+    ↓
+System Prompt → Claude Agent SDK
+```
+
+**路径二：`.skill.yaml` → MCP 工具执行（Claude 的"手"）**
+
+```
+Claude 调用 list_skills → skillRegistry.getAllSkills() → 发现可用 Skill
+Claude 调用 invoke_skill(skillId, params) → skillExecutor.execute()
+    → YAML steps 遍历 → ${param|default} 替换 → SQL → trace_processor
+    → DisplayResult[] (L1-L4) → DataEnvelope → SSE → 前端表格
+    → ArtifactStore → 返回摘要引用（节省 token）
+```
+
+**修改后生效：** DEV 模式下修改 `.md` 或 `.yaml` 后刷新浏览器即可，无需重启后端。
+
+### Pipeline Skills (25)
 
 渲染管线检测和教学内容，每个 Pipeline Skill 包含:
 - `detection` - SQL 检测逻辑
@@ -301,7 +334,7 @@ steps:
 **Android View 系列:**
 - android_view_standard_blast, android_view_standard_legacy
 - android_view_software, android_view_mixed, android_view_multi_window
-- android_pip_freeform
+- android_pip_freeform, compose_standard
 
 **Surface/Texture 系列:**
 - surfaceview_blast, textureview_standard, surface_control_api
@@ -514,5 +547,5 @@ CLAUDE_MODEL=claude-sonnet-4-6          # Optional, default
 | agent (Shared) | ~50 source files |
 | agentv2 (Deprecated) | ~37 source files |
 | Services | ~31 service files |
-| Skills | 113 definitions (57 atomic + 28 composite + 26 pipelines + 2 deep) |
+| Skills | 114 definitions (57 atomic + 28 composite + 25 pipelines + 2 deep + 2 strategies: game, memory) |
 | Routes | 16 API handlers |

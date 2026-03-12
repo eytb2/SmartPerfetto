@@ -1,5 +1,7 @@
 # Domain Agents 深度解析（让系统"像专家"而不是"跑流程"）
 
+> **⚠️ DEPRECATED (agentv2)** — 本文档描述 agentv2 的 Domain Agents（frameAgent/cpuAgent/memoryAgent 等）。agentv3 中 Domain Agents 已被 Claude 自主推理 + 15 个 MCP 工具替代。可选的 Sub-Agents（feature-flagged: `CLAUDE_ENABLE_SUB_AGENTS=true`）仅有 frame-expert / system-expert / startup-expert 三个。当前主链路见 [08-agentv3-content-system.md](./08-agentv3-content-system.md)。
+
 > 对齐版本：2026-02-06
 > 目标：解释 Domain Agents 如何围绕"目标/假设/证据/下一步"闭环工作，以及 skills 在新架构下需要怎样的工具化改造。
 

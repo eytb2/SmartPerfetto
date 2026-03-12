@@ -1,0 +1,206 @@
+# =============================================================================
+# Jetpack Compose Standard Pipeline
+# =============================================================================
+# Jetpack Compose apps using HWUI RenderThread under the hood.
+# Compose has unique recomposition patterns visible in trace markers.
+# =============================================================================
+
+name: pipeline_compose_standard
+version: "1.0"
+type: pipeline_definition
+category: rendering
+
+meta:
+  pipeline_id: COMPOSE_STANDARD
+  display_name: "Jetpack Compose (Standard)"
+  description: "Jetpack Compose + HWUI RenderThread, Recomposition driven"
+  icon: "android"
+  family: hwui
+  doc_path: "rendering_pipelines/compose_standard.md"
+
+detection:
+  required_signals:
+    - thread: RenderThread
+      min_count: 1
+    - thread: main
+      min_count: 1
+
+  scoring_signals:
+    - signal: has_recomposition
+      slice_pattern: "Recompos*"
+      weight: 80
+    - signal: has_compose_prefix
+      slice_pattern: "Compose:*"
+      weight: 40
+    - signal: has_composition_local
+      slice_pattern: "*CompositionLocal*"
+      weight: 30
+    - signal: has_measure_layout
+      slice_pattern: "*measure*"
+      weight: 10
+    - signal: has_draw_frame
+      slice_pattern: "DrawFrame*"
+      weight: 15
+
+  exclude_if:
+    - thread: "1.ui"           # Flutter
+    - thread: CrRendererMain   # WebView
+
+teaching:
+  title: "Jetpack Compose 渲染管线"
+  summary: |
+    Jetpack Compose 基于 HWUI RenderThread 渲染，但在 UI 构建阶段有独特的机制：
+    - Composition 阶段: Recomposer 驱动 @Composable 函数重新执行
+    - Layout 阶段: Compose 自有的 measure/layout (非 View.onMeasure)
+    - Draw 阶段: 生成 DisplayList, 由 RenderThread 执行 GPU 渲染
+
+    性能关键点:
+    - Recomposition 风暴: 不必要的重组导致频繁重绘
+    - State 读取范围: 过宽的 State 读取触发过多组件重组
+    - LazyColumn/LazyRow: 类似 RecyclerView 的虚拟化列表
+
+  mermaid: |
+    sequenceDiagram
+      participant VA as VSync-app
+      participant Main as Main Thread
+      participant RC as Recomposer
+      participant RT as RenderThread
+      participant BQ as BLASTBufferQueue
+      participant VS as VSync-sf
+      participant SF as SurfaceFlinger
+
+      Note over VA,SF: Jetpack Compose (HWUI + BLAST)
+      VA->>Main: VSync -> Choreographer#doFrame
+      activate Main
+      Main->>RC: Recomposition (State changed)
+      RC->>RC: @Composable functions
+      RC->>Main: Layout (measure + place)
+      Main->>Main: Draw (Canvas -> DisplayList)
+      Main->>RT: syncFrameState
+      deactivate Main
+
+      activate RT
+      RT->>RT: DrawFrame (GPU commands)
+      RT->>BQ: queueBuffer + applyTransaction
+      deactivate RT
+
+      VS->>SF: VSync-sf
+      activate SF
+      SF->>SF: latchBuffer + Composite
+      deactivate SF
+
+  thread_roles:
+    - thread: main
+      role: "Composition + Layout + Draw"
+      description: "Recomposer 驱动 Composable 函数, Layout, 生成 DisplayList"
+      trace_tags:
+        - "Recompos*"
+        - "Compose:*"
+        - "Choreographer#doFrame"
+    - thread: RenderThread
+      role: "GPU 渲染"
+      description: "执行 DisplayList -> GPU 命令 -> queueBuffer"
+      trace_tags:
+        - "DrawFrame"
+        - "syncFrameState"
+        - "queueBuffer"
+    - thread: SurfaceFlinger
+      role: "合成显示"
+      description: "BLAST Transaction 接收, HWC/GPU 合成"
+
+  key_slices:
+    - name: "Recomposition"
+      thread: main
+      description: "Compose 重组 -- 当 State 变化时触发, 是性能问题的主要来源"
+    - name: "Compose:*"
+      thread: main
+      description: "Compose 内部操作 (CompositionLocal, SnapshotState 等)"
+    - name: "Choreographer#doFrame"
+      thread: main
+      description: "帧开始, 驱动 Composition -> Layout -> Draw"
+    - name: "DrawFrame"
+      thread: RenderThread
+      description: "GPU 渲染, 执行 DisplayList"
+    - name: "syncFrameState"
+      thread: RenderThread
+      description: "Main -> RenderThread 同步 DisplayList (阻塞 Main)"
+
+auto_pin:
+  instructions:
+    - pattern: "^VSYNC-app$"
+      match_by: name
+      priority: 1
+      reason: "VSync (App 开始生产帧)"
+
+    - pattern: "^main(\\s+\\d+)?$"
+      match_by: name
+      priority: 2
+      reason: "Composition + Layout + Draw (生产)"
+      expand: true
+      smart_filter:
+        enabled: true
+        description: "仅 Pin 有 Compose 重组活动的进程"
+        detection_sql: |
+          SELECT DISTINCT p.name as process_name, COUNT(*) as recomp_count
+          FROM slice s
+          JOIN thread_track tt ON s.track_id = tt.id
+          JOIN thread t ON tt.utid = t.utid
+          JOIN process p ON t.upid = p.upid
+          WHERE t.name = 'main'
+            AND s.name GLOB 'Recompos*'
+            AND p.name IS NOT NULL
+          GROUP BY p.upid
+          HAVING recomp_count > 3
+          ORDER BY recomp_count DESC
+          LIMIT 10
+
+    - pattern: "^RenderThread(\\s+\\d+)?$"
+      match_by: name
+      priority: 3
+      reason: "GPU 渲染 (传输)"
+      expand: true
+      smart_filter:
+        enabled: true
+        detection_sql: |
+          SELECT DISTINCT p.name as process_name, COUNT(*) as frame_count
+          FROM slice s
+          JOIN thread_track tt ON s.track_id = tt.id
+          JOIN thread t ON tt.utid = t.utid
+          JOIN process p ON t.upid = p.upid
+          WHERE t.name = 'RenderThread'
+            AND s.name GLOB 'DrawFrame*'
+            AND p.name IS NOT NULL
+          GROUP BY p.upid
+          HAVING frame_count > 5
+
+    - pattern: "^VSYNC-sf$"
+      match_by: name
+      priority: 5.5
+      reason: "VSync (SurfaceFlinger 消费/合成)"
+
+    - pattern: "^BufferTX"
+      match_by: name
+      priority: 6
+      reason: "BufferTX (SurfaceFlinger 事务)"
+
+    - pattern: "^[sS]urface[fF]linger"
+      match_by: name
+      priority: 7
+      reason: "SurfaceFlinger (最终合成/显示)"
+      main_thread_only: true
+
+analysis:
+  common_issues:
+    - id: recomposition_storm
+      name: "Recomposition 风暴"
+      description: "不必要的频繁重组, 通常由 State 读取范围过宽导致"
+      detection_skill: scrolling_analysis
+    - id: heavy_composition
+      name: "重量级 Composition"
+      description: "单帧 Composition 阶段耗时过长"
+      detection_skill: jank_frame_detail
+
+  recommended_skills:
+    - scrolling_analysis
+    - jank_frame_detail
+    - render_pipeline_latency

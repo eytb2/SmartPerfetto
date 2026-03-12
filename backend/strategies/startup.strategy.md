@@ -30,6 +30,23 @@ compound_patterns:
 3. **四象限 + 线程状态是定位根因的核心工具**，不是独立罗列的数据
 4. **使用 self_ms（exclusive time）做归因**：slice 数据包含 total_ms（wall time，含子 slice）和 self_ms（exclusive time，仅自身独占时间）。根因归因和优化收益估算必须基于 self_ms，避免父子 slice 重叠导致百分比超过 100%
 
+### 启动类型判定规则
+
+启动类型（cold/warm/hot）决定了分析策略和性能基线，必须在分析初期验证。Perfetto `android_startups` 表的 `startup_type` 可能不准确（尤其是 LMK 回收后的重启），需基于以下信号重分类：
+
+| 类型 | 判定信号 | Android 框架路径 |
+|------|---------|-----------------|
+| 冷启动 (cold) | `bindApplication` slice 存在 | Zygote fork → ActivityThread.main() → handleBindApplication() |
+| 温启动 (warm) | `performCreate:*` 存在且**无** `bindApplication` | handleLaunchActivity() → Activity.onCreate()（跳过 App 初始化）|
+| 热启动 (hot) | 两者均不存在 → 保留 Perfetto 原始分类 | Activity.onRestart() → onStart() → onResume() |
+
+**判定逻辑（优先级从高到低）：**
+1. 如果 Skill 返回的 `startup_type` 已经过重分类（`startup_events_in_range` 的 SQL 层重分类），直接信任
+2. 否则检查 trace 信号：`bindApplication` 存在 → cold；仅 `performCreate:*` 存在 → warm；均无 → hot
+3. 热启动无正向信号（没有专属的 trace slice），仅靠排除法判定——这是合理的，因为热启动不触发 Activity 重建
+
+**⚠️ LMK 边界场景：** 进程被 LMK 回收后重启时，ActivityManager 可能仍持有 Activity 记录，导致 Perfetto 报告 `warm`。但 `bindApplication` slice 存在说明进程经历了完整初始化（Zygote fork → handleBindApplication），实为 cold start。此时**必须以 `bindApplication` 信号为准**，覆盖 Perfetto 原始分类。
+
 **Phase 1 — 获取启动概览：**
 ```
 invoke_skill("startup_analysis", { enable_startup_details: false })
@@ -192,9 +209,20 @@ slice 的 wall time（如 ChaosTask 479ms）包含 Running + S + D + R 所有状
 - **布局 Inflation**：`inflate` 和自定义 View 构造函数是 CPU-bound，看 Q1 而非 Q4
 - **调度延迟**：>8ms 的严重延迟次数和最大值。频繁的调度延迟指向系统负载问题
 
+**第六步：TTFD（Time To Fully Drawn）分析**
+- `startup_events_in_range` 返回的数据包含 `ttfd_ms` 字段（来自 `android_startup_time_to_display`）
+- 如果 `ttfd_ms` 存在且 > `ttid_ms`：应用在首帧后仍有异步内容加载，分析 TTID→TTFD 之间的耗时去向
+- 常见原因：网络请求、数据库查询、图片异步加载、WebView 初始化
+- 如果 `ttfd_ms` 不存在：应用未调用 `reportFullyDrawn()`，无法分析 TTFD
+
+**第七步：特定阶段补充检查**
+- **ContentProvider**：冷启动时 `contentProviderCreate` slice 可能占显著时间（尤其多 ContentProvider 应用）。检查 `startup_main_thread_slices_in_range` 中是否有此 slice
+- **厂商特定 Slice**：部分 OEM 有专有 trace 标记（如 OPPO `HyperBoost*`、vivo `TurboX*`、Xiaomi `MiBoost*`），可作为辅助分析信号
+- **Zygote fork 阶段**：冷启动的 pre-`bindApplication` 阶段（进程 fork ~50ms）通常不是瓶颈，但极端情况下（系统负载高）可能贡献显著延迟
+
 **输出结构必须遵循：**
 
-1. **概览**：应用名、启动类型、总耗时、评级、数据质量提示
+1. **概览**：应用名、启动类型、总耗时、**TTID**、**TTFD**（如有）、评级、数据质量提示
    - 如果检测到模拟器/测试应用特征，必须在此标注
    - 如果启动类型与 bindApplication 存在矛盾，必须在此说明
 
