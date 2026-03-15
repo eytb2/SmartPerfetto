@@ -1,0 +1,83 @@
+# =============================================================================
+# 管线关键 Slice 时间线 (Pipeline Key Slices Overlay)
+# =============================================================================
+# 查询管线关键 Slice 的实际 ts/dur 数据用于时间线 overlay。
+# 教学模块检测到渲染管线后调用此 skill，将关键 Slice 高亮为 Perfetto 时间线
+# overlay，帮助用户对照理论管线图与实际 trace 数据。
+# =============================================================================
+
+name: pipeline_key_slices_overlay
+version: "1.0"
+type: atomic
+category: pipeline
+
+meta:
+  display_name: "管线关键 Slice 时间线"
+  description: "查询管线关键 Slice 的实际 ts/dur 数据用于时间线 overlay"
+  icon: "timeline"
+  tags: [pipeline, teaching, overlay, timeline, atomic]
+
+inputs:
+  - name: slice_names
+    type: string
+    required: true
+    description: "SQL IN 列表格式的 Slice 名称，如 'Choreographer#doFrame','DrawFrame','syncFrameState'"
+  - name: start_ts
+    type: number
+    required: false
+  - name: end_ts
+    type: number
+    required: false
+
+steps:
+  - id: pipeline_key_slices_overlay
+    type: atomic
+    name: "管线关键 Slice 查询"
+    display:
+      level: hidden
+      layer: deep
+      title: "管线关键 Slice"
+      columns:
+        - name: ts
+          type: timestamp
+          unit: ns
+        - name: dur
+          type: duration
+          unit: ns
+        - name: slice_name
+          type: string
+        - name: dur_ms
+          type: number
+        - name: thread_name
+          type: string
+        - name: process_name
+          type: string
+        - name: pipeline_stage
+          type: string
+        - name: description
+          type: string
+    sql: |
+      SELECT
+        s.ts,
+        s.dur,
+        s.name AS slice_name,
+        ROUND(CAST(s.dur AS REAL) / 1000000.0, 2) AS dur_ms,
+        t.name AS thread_name,
+        p.name AS process_name,
+        CASE
+          WHEN t.name = 'main' OR t.name LIKE '%.ui' THEN 'production'
+          WHEN t.name = 'RenderThread' OR t.name LIKE '%.raster' THEN 'transfer'
+          WHEN p.name LIKE '%surfaceflinger%' OR t.name LIKE '%HWC%' THEN 'consumption'
+          ELSE 'other'
+        END AS pipeline_stage,
+        '' AS description
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE s.name IN (${slice_names})
+        AND s.dur > 0
+        AND (${start_ts|NULL} IS NULL OR s.ts >= ${start_ts|NULL})
+        AND (${end_ts|NULL} IS NULL OR s.ts < ${end_ts|NULL})
+      ORDER BY s.ts
+      LIMIT 200

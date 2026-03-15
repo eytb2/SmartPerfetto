@@ -264,6 +264,24 @@ export function verifyHeuristic(
     }
   }
 
+  // Check 6e: Shallow root cause — CRITICAL/HIGH with quantitative data but no multi-level causal chain.
+  // A "deep" root cause has at least 2 causal connectors showing chain reasoning (A → B → C).
+  for (const f of highSeverity) {
+    const desc = f.description || '';
+    const hasQuantitative = /\d+(\.\d+)?\s*(ms|%|MB|KB|次|帧|fps)/i.test(desc);
+    // Count distinct causal chain connectors (not just presence, but DEPTH of reasoning)
+    const causalChainMarkers = (desc.match(/→|⇒|导致|因为|由于|caused by|because|进而|从而|根因|阻塞链|blocking_chain|waker|唤醒/gi) || []).length;
+    // Also check for mechanistic terms that indicate deep analysis
+    const mechanisticTerms = (desc.match(/futex|binder_wait|io_schedule|monitor contention|thermal|governor|ramp|pipeline|管线|调度器|GC pause|锁持有|lock hold/gi) || []).length;
+    if (f.severity === 'critical' && hasQuantitative && causalChainMarkers < 2 && mechanisticTerms < 1) {
+      issues.push({
+        type: 'missing_reasoning',
+        severity: 'warning',
+        message: `[CRITICAL] "${f.title}" 缺少深层根因链 — 有量化数据但因果推理不足 2 级。建议：用 blocking_chain_analysis 或 binder_root_cause 追踪阻塞源头，用 lookup_knowledge 解释机制。`,
+      });
+    }
+  }
+
   // Check 6c: Overall reasoning density — flag when most HIGH+ findings lack causal analysis
   if (highSeverity.length >= 3) {
     const withCausal = highSeverity.filter(f => {

@@ -132,6 +132,7 @@ export interface DisplayConfig {
   aggregate?: boolean;          // 是否汇总迭代结果
   highlight?: HighlightRule[];  // 高亮规则
   expandable?: boolean;         // 是否支持展开查看详细分析（用于 L2 列表关联 L4 deep 数据）
+  expandableBindSource?: string; // save_as 名，将该步骤的行数据绑定为当前步骤的 expandableData（批量绑定，替代 iterator）
   metadataFields?: string[];    // 提取到元数据的字段（这些字段从列表移到标题显示）
   hidden_columns?: string[];    // 隐藏的列（保留数据但不显示）
   collapsible?: boolean;        // 是否可折叠（点击展开/收起整个表格）

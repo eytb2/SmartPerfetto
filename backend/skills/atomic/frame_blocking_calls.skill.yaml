@@ -1,0 +1,130 @@
+# =============================================================================
+# 帧阻塞调用分析（原子 Skill）
+# =============================================================================
+# 将 android.critical_blocking_calls 模块识别的阻塞调用与
+# android.frames.timeline 的帧时间线做交叉匹配，找出每个掉帧帧
+# 期间发生的阻塞调用（GC、Binder、锁竞争、IO 等）。
+#
+# 核心逻辑：对掉帧帧和阻塞调用做时间区间重叠 JOIN，
+# 计算重叠时长，筛选出实际影响帧渲染的阻塞。
+
+name: frame_blocking_calls
+version: "1.0"
+type: atomic
+category: rendering
+
+meta:
+  display_name: "帧阻塞调用分析"
+  description: "识别每个掉帧帧期间的阻塞调用（GC、Binder、锁竞争、IO 等）"
+  icon: "block"
+  tags: [frame, blocking, jank, root_cause, diagnostics]
+
+prerequisites:
+  modules:
+    - android.frames.timeline
+    - android.critical_blocking_calls
+
+inputs:
+  - name: process_name
+    type: string
+    required: true
+    description: "目标进程名"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳(ns，可选)"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳(ns，可选)"
+
+display:
+  level: key
+  layer: list
+  title: "掉帧帧阻塞调用明细"
+  columns:
+    - name: frame_id
+      label: "帧 ID"
+      type: string
+    - name: frame_ts
+      label: "帧时间"
+      type: timestamp
+      unit: ns
+      clickAction: navigate_timeline
+    - name: frame_dur_ms
+      label: "帧耗时(ms)"
+      type: duration
+      format: duration_ms
+      unit: ms
+    - name: jank_type
+      label: "Jank 类型"
+      type: string
+    - name: blocking_call
+      label: "阻塞调用"
+      type: string
+    - name: overlap_ms
+      label: "重叠时间(ms)"
+      type: duration
+      format: duration_ms
+      unit: ms
+    - name: call_dur_ms
+      label: "调用耗时(ms)"
+      type: duration
+      format: duration_ms
+      unit: ms
+    - name: call_count
+      label: "调用次数"
+      type: number
+      format: compact
+
+sql: |
+  WITH jank_frames AS (
+    SELECT
+      a.display_frame_token as frame_id,
+      a.ts as frame_ts,
+      a.dur as frame_dur,
+      a.ts + a.dur as frame_end,
+      a.jank_type
+    FROM actual_frame_timeline_slice a
+    LEFT JOIN process p ON a.upid = p.upid
+    WHERE (p.name GLOB '${process_name}*' OR '${process_name}' = '')
+      AND COALESCE(a.jank_type, 'None') != 'None'
+      AND (${start_ts} IS NULL OR a.ts >= ${start_ts})
+      AND (${end_ts} IS NULL OR a.ts < ${end_ts})
+  ),
+  -- Note: _android_critical_blocking_calls is an internal Perfetto stdlib table (underscore prefix).
+  -- It is widely used within Perfetto's own codebase and is stable in practice.
+  -- No public equivalent exists without RUN_METRIC.
+  blocking AS (
+    SELECT
+      bc.name as blocking_call,
+      bc.ts as call_ts,
+      bc.dur as call_dur,
+      bc.process_name as call_process,
+      bc.utid
+    FROM _android_critical_blocking_calls bc
+    WHERE (bc.process_name GLOB '${process_name}*' OR '${process_name}' = '')
+  )
+  SELECT
+    printf('%d', jf.frame_id) as frame_id,
+    printf('%d', jf.frame_ts) as frame_ts,
+    ROUND(jf.frame_dur / 1e6, 2) as frame_dur_ms,
+    jf.jank_type,
+    b.blocking_call,
+    ROUND(
+      (MIN(b.call_ts + b.call_dur, jf.frame_end) - MAX(b.call_ts, jf.frame_ts)) / 1e6,
+      2
+    ) as overlap_ms,
+    ROUND(b.call_dur / 1e6, 2) as call_dur_ms,
+    COUNT(*) as call_count
+  FROM jank_frames jf
+  JOIN blocking b
+    ON b.call_ts < jf.frame_end
+    AND b.call_ts + b.call_dur > jf.frame_ts
+  GROUP BY jf.frame_id, b.blocking_call
+  HAVING overlap_ms > 0.5
+  ORDER BY jf.frame_ts, overlap_ms DESC
+  LIMIT 100
+
+output:
+  format: structured

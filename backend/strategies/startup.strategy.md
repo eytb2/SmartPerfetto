@@ -47,6 +47,10 @@ compound_patterns:
 
 **⚠️ LMK 边界场景：** 进程被 LMK 回收后重启时，ActivityManager 可能仍持有 Activity 记录，导致 Perfetto 报告 `warm`。但 `bindApplication` slice 存在说明进程经历了完整初始化（Zygote fork → handleBindApplication），实为 cold start。此时**必须以 `bindApplication` 信号为准**，覆盖 Perfetto 原始分类。
 
+#### 启动场景关键 Stdlib 表
+
+写 execute_sql 时优先使用（完整列表见方法论模板）：`android_startup_opinionated_breakdown`、`android_garbage_collection_events`、`android_oom_adj_intervals`、`android_screen_state`、`slice_self_dur`、`cpu_process_utilization_in_interval(ts, dur)`、`cpu_frequency_counters`、`android_dvfs_counter_stats`
+
 **Phase 1 — 获取启动概览：**
 ```
 invoke_skill("startup_analysis", { enable_startup_details: false })
@@ -93,6 +97,22 @@ invoke_skill 返回 artifact 摘要（仅含列名和行数）。**必须用 fet
 fetch_artifact("art-N", detail="rows", offset=0, limit=50)  // 对每个关键 artifact
 ```
 **在所有关键 artifact 数据到手之前，不要开始写结论。**
+
+**Phase 2.6 — 官方启动慢原因交叉验证（推荐，仅冷启动）：**
+```
+invoke_skill("startup_slow_reasons")
+```
+将 Google 官方启动慢原因分类与自有分析交叉验证。重点关注 RUN_METRIC 是否检测到自有分析未覆盖的因素（如 DEX2OAT 并发、missing baseline profiles、debuggable 模式等）。
+
+**Phase 2.7 — 阻塞链深钻（对 Q4>25% 的热点 slice）：**
+
+对 `hot_slice_states` 中 S(Sleeping) 占比 >40% 的热点 slice，追踪阻塞链：
+```
+invoke_skill("blocking_chain_analysis", { start_ts: "<slice_start>", end_ts: "<slice_end>", process_name: "<包名>" })
+```
+- 找出谁阻塞了主线程、唤醒者是谁、唤醒者在做什么
+- 如果 blocked_function 含 binder，进一步调用 `binder_root_cause` 定位服务端原因
+- 用 `lookup_knowledge` 获取相关机制解释（如锁竞争、Binder IPC）
 
 **Phase 2.8 — Compose 启动特有分析（当架构检测为 Compose 时）：**
 
@@ -155,15 +175,16 @@ execute_sql("SELECT name, dur/1e6 as dur_ms FROM slice s JOIN thread_track tt ON
 
 **Phase 3 — 综合结论（基于根因诊断决策树）：**
 
-### 预检查：识别测试/模拟器应用
+### 预检查：识别测试/基准应用
 
-在开始根因分析前，检查热点 slice 名称是否包含测试/模拟特征词：
-`LoadSimulator`、`ChaosTask`、`SimulateInflation`、`Benchmark`、`StressTest`、`TestRunner`、`FakeLoad`
+在开始根因分析前，检查热点 slice 名称是否包含测试/基准特征模式：
+- 常见关键词：`Benchmark`、`StressTest`、`TestRunner`、`Mock`、`Synthetic`、`Dummy`
+- 特征：slice 名称中含有 `Simulator`、`Fake`、`Test` 前缀/后缀，或非标准 AOSP 框架 slice 占据大量启动时间
 
 如果检测到这些特征：
 - 在**概览**中明确标注：**"⚠️ 此应用为性能测试/基准应用，slice 名称含有模拟负载标记"**
 - 不要给出通用的"检查 synchronized 块"/"使用 AsyncLayoutInflater"等优化建议（对测试 App 无意义）
-- 改为描述模拟负载的性能特征（如"ChaosTask 模拟了 70 次纯 CPU 计算"），帮助用户理解测试 App 的行为
+- 改为描述模拟负载的性能特征，帮助用户理解测试 App 的行为
 - 如果用户的目标是验证测试框架本身，可以分析模拟负载是否符合预期
 
 ### Slice 嵌套感知（⚠️ 关键）
@@ -175,8 +196,8 @@ execute_sql("SELECT name, dur/1e6 as dur_ms FROM slice s JOIN thread_track tt ON
 **必须遵循的规则：**
 1. **根因归因用 self_ms**，不要用 total_ms。例如 `activityStart` 的 total_ms=832ms 但 self_ms 可能只有 5ms（其余全是子 slice 贡献），这意味着 activityStart 本身不是问题
 2. **根因分析树中，嵌套 slice 必须体现父子关系**：
-   - ✅ 正确：`activityStart (832ms wall) → performCreate (827ms) → LoadSimulator (710ms)`
-   - ❌ 错误：将 activityStart (62%)、performCreate (61%)、LoadSimulator (53%) 作为独立根因并列
+   - ✅ 正确：`activityStart (832ms wall) → performCreate (827ms) → inflate (710ms)`
+   - ❌ 错误：将 activityStart (62%)、performCreate (61%)、inflate (53%) 作为独立根因并列
 3. **优化建议的收益估算必须基于 self_ms**，不能把父子 slice 的 wall time 简单相加（会导致预期节省超过总时长）
 4. **识别叶子 slice**：self_ms ≈ total_ms 的 slice 是叶子（无子 slice），是真正的耗时归因点；self_ms << total_ms 的 slice 是容器（框架包裹），优化价值低
 
@@ -185,7 +206,7 @@ execute_sql("SELECT name, dur/1e6 as dur_ms FROM slice s JOIN thread_track tt ON
 Android 启动有两个串行大阶段，**分析结论必须覆盖两个阶段**，不能遗漏：
 
 1. **bindApplication 阶段**（Application.onCreate / ContentProvider.onCreate）
-   - 典型 slice：`bindApplication`、`app.onCreate`、`LoadSimulator_AppInit`
+   - 典型 slice：`bindApplication`、`app.onCreate`、`contentProviderCreate`、`OpenDexFilesFromOat`
    - 冷启动特有；温启动出现 bindApplication 说明启动类型可能被误判
 
 2. **activityStart 阶段**（Activity.onCreate / onStart / onResume → 首帧）
@@ -240,15 +261,15 @@ Android 启动有两个串行大阶段，**分析结论必须覆盖两个阶段*
 **这是判断某个 slice 为什么慢的最直接证据**，优先于间接推理。
 
 使用方式：
-- 如果 `LoadSimulator_AppInit` 的 hot_slice_states 显示 S=400ms + blocked_functions=`futex_wait_queue`
+- 如果 `app.onCreate` 的 hot_slice_states 显示 S=400ms + blocked_functions=`futex_wait_queue`
   → **确证**：此 slice 被锁等待阻塞了 400ms
-- 如果 `ChaosTask` 的 hot_slice_states 显示 Running=300ms + S=150ms + blocked_functions 为空
+- 如果 `inflate` 的 hot_slice_states 显示 Running=300ms + S=150ms + blocked_functions 为空
   → 结论：部分 CPU-bound + 部分阻塞，blocked_functions 为空则需结合上下文推断阻塞原因
-- 如果 `SqliteLoad` 的 hot_slice_states 显示 D=30ms + blocked_functions=`io_schedule`
-  → **确证**：主线程直接执行数据库查询产生磁盘 IO 阻塞
+- 如果 `contentProviderCreate` 的 hot_slice_states 显示 D=30ms + blocked_functions=`io_schedule`
+  → **确证**：ContentProvider 初始化中执行了数据库操作产生磁盘 IO 阻塞
 
 ⚠️ **重要：slice 的 wall time ≠ 线程状态时间的直接对比**
-slice 的 wall time（如 ChaosTask 479ms）包含 Running + S + D + R 所有状态。
+slice 的 wall time（如 inflate 479ms）包含 Running + S + D + R 所有状态。
 不能直接用 slice wall time 与全区间的 S 状态总量做数值对比来推断因果关系。
 必须用 `hot_slice_states` 的 per-slice 线程状态数据来确认具体比例。
 
@@ -303,13 +324,12 @@ slice 的 wall time（如 ChaosTask 479ms）包含 Running + S + D + R 所有状
    启动总耗时 XXms
    ├── [Phase 1] bindApplication = XXms wall
    │     └── app.onCreate = XXms wall (self=YYms)
-   │           ├── LoadSimulator_AppInit = XXms (self=YYms) ← 根因: [...]
-   │           └── ChaosTask ×N = XXms (self=YYms) ← CPU-bound
+   │           ├── contentProviderCreate = XXms (self=YYms) ← 根因: [IO/锁等待/...]
+   │           └── OpenDexFilesFromOat = XXms (self=YYms) ← DEX 加载
    ├── [Phase 2] activityStart = XXms wall
    │     └── performCreate = XXms wall (self=YYms)
-   │           ├── LoadSimulator_ActivityInit = XXms (self=YYms) ← 根因: [...]
-   │           ├── SimulateInflation = XXms (self=YYms) ← CPU-bound
-   │           └── ChaosTask ×N = XXms (self=YYms) ← CPU-bound
+   │           ├── inflate = XXms (self=YYms) ← CPU-bound (布局复杂度)
+   │           └── Choreographer#doFrame = XXms (self=YYms) ← 首帧渲染
    └── [可排除因素]
          ├── Binder 阻塞 < Xms ✓
          ├── GC [主线程/后台线程] ✓
@@ -329,7 +349,7 @@ slice 的 wall time（如 ChaosTask 479ms）包含 Running + S + D + R 所有状
 - 把所有 Q4 时间统称为"休眠/阻塞"而不区分 S（锁/Binder/sleep）vs D（IO/页缺失）
 - 不区分 GC 在主线程还是后台线程
 - 把延迟归因（opinionated_breakdown）的 category 字段（IO/Layout/Other 等）当作真实的阻塞原因。这些 category 是 Perfetto 基于 slice 名称的**启发式分类**，不代表实际线程状态。例如 bind_application 被标记为 IO 类别，但实际阻塞原因可能是锁等待。**必须用线程状态数据（特别是 hot_slice_states）来验证真实根因**
-- 用 slice wall time 与全区间线程状态总量做直接数值对比来推断因果（如"ChaosTask 479ms ≈ S状态 468ms 所以它是 S 状态的根因"）。wall time 包含所有线程状态，正确做法是使用 hot_slice_states 的 per-slice 状态分解
+- 用 slice wall time 与全区间线程状态总量做直接数值对比来推断因果（如"inflate 479ms ≈ S状态 468ms 所以它是 S 状态的根因"）。wall time 包含所有线程状态，正确做法是使用 hot_slice_states 的 per-slice 状态分解
 - **将嵌套 slice 的 wall time 作为独立根因并列报告**，导致百分比总和超过 100%。必须用 self_ms 归因
 - **只分析 activityStart 阶段而遗漏 bindApplication 阶段**（反之亦然）。两个阶段都必须覆盖
 - **给出过于精确的 CPU 频率收益估算**（如"升频可降低 28%"），除非有多频率对比的实测数据

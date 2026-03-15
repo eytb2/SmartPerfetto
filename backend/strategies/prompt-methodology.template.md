@@ -42,6 +42,36 @@ successCriteria: "确定掉帧根因并提供可操作的优化建议"
 
 {{sceneStrategy}}
 
+### Perfetto SQL Stdlib（优先使用）
+Perfetto 内建 240+ stdlib 模块，覆盖帧分析、启动、Binder、GPU、调度、功耗等领域。写 execute_sql 前，**优先检查 stdlib 是否已有现成表/视图**：
+
+**已预加载的关键模块（直接可用，无需 INCLUDE）：**
+- `android_frames` / `android_frame_stats` / `android_frames_overrun` — 帧时序、jank 分类、deadline 超时量
+- `android_binder_txns` / `android_binder_client_server_breakdown` — Binder 事务 + 阻塞原因归因
+- `android_startups` / `android_startup_time_to_display` / `android_startup_opinionated_breakdown` — 启动检测 + TTID/TTFD + 阶段归因
+- `android_monitor_contention` / `android_monitor_contention_chain` — 锁竞争解析 + 链式分析
+- `android_surfaceflinger_workloads` — SF 逐帧工作负载细分（CPU/HWC/GPU 各阶段耗时）
+- `android_gpu_frequency` — GPU 频率区间（含 prev/next 频率）
+- `sched_latency_for_running_interval` — 调度延迟（Runnable→Running 等待时间）
+- `cpu_utilization_per_second` / `cpu_utilization_in_interval(ts, dur)` — 系统级 CPU 利用率（归一化 0-1）
+- `cpu_process_utilization_in_interval(ts, dur)` — 每进程 CPU 利用率（帧窗口级精度）
+- `cpu_thread_utilization_in_interval(ts, dur)` — 每线程 CPU 利用率（MainThread vs RenderThread 拆分）
+- `cpu_frequency_counters` — CPU 频率变化区间（ts, dur, freq, cpu）
+- `android_garbage_collection_events` — 精确 GC 分类（gc_type/is_mark_compact/reclaimed_mb/gc_running_dur）
+- `android_oom_adj_intervals` — 每进程 OOM adj 历史（score/bucket/reason）
+- `android_screen_state` — 屏幕状态（off/doze/on）+ `android_suspend_state`（awake/suspended）
+- `slice_self_dur` — 预计算的 slice 排他耗时（self_dur = dur - child_dur），JOIN slice.id 即可使用
+- `android_dvfs_counters` / `android_dvfs_counter_stats` — DVFS 频率统计（CPU 域 + GPU + 内存）
+
+**高效 SQL 写法（减少样板代码）：**
+- `thread_slice` — 预 JOIN 的 slice + thread + process 视图，**替代** `slice JOIN thread_track JOIN thread JOIN process` 四表连接。直接 `SELECT * FROM thread_slice WHERE process_name GLOB '包名*' AND ...`
+- `slice_self_dur` — `JOIN slice_self_dur USING (id)` 获取排他耗时，**替代**手写 `dur - (SELECT SUM(c.dur) FROM slice c WHERE c.parent_id = s.id)` 子查询
+- `android_is_app_jank_type(jank_type)` / `android_is_sf_jank_type(jank_type)` — Jank 类型分类函数，**替代**手写 GLOB 匹配 CASE 语句
+- `android_standardize_slice_name(name)` — 标准化 slice 名称（去除参数、ID），适用于跨厂商 GROUP BY
+- `SELECT RUN_METRIC('android/android_startup.sql')` — 执行 Perfetto 预置 Metric（创建中间表/视图），然后查询结果表。适用于需要完整标准分析（如启动分解、帧时序统计）的场景
+
+**发现新领域时：** 用 `list_stdlib_modules` 查看可用模块（如 `wattson.*` 功耗、`chrome.*` 浏览器、`linux.*` 内核），然后在 SQL 中用 `INCLUDE PERFETTO MODULE <name>` 加载。
+
 ### SQL 错误自纠正
 当 execute_sql 返回 error：
 1. 读取错误消息中的行号和列名
@@ -56,6 +86,16 @@ successCriteria: "确定掉帧根因并提供可操作的优化建议"
 - 批量调用：如果多个工具不互相依赖，在同一轮中并行调用（这是最重要的效率优化）
 - 结论阶段：综合已有数据直接给出结论，不需要额外验证查询
 - 每轮最多 3-4 个工具调用，总轮次不超过 15 轮
+
+### 根因深度规则（适用于所有场景）
+
+对每个 [CRITICAL] 或 [HIGH] 发现，必须执行至少 1 次根因深钻：
+
+- **Level 1（已有）：** 症状识别 — "这个帧/阶段超时了"
+- **Level 2（必须）：** 机制定位 — "超时因为主线程被 X 阻塞 / CPU 在小核 / GPU 频率被限"。工具：`hot_slice_states` / `batch_frame_root_cause` 数据
+- **Level 3（尽力）：** 源头追踪 — "X 阻塞因为 Binder 服务端 Y 在做 Z"。工具：`blocking_chain_analysis` / `binder_root_cause` / `frame_blocking_calls`
+
+**背景知识：** 当根因涉及 Binder/GC/锁/频率/thermal/管线时，调用 `lookup_knowledge` 获取机制解释并附在发现中。
 
 ### 推理可见性（结构化推理）
 你的推理过程必须对用户可见且有结构。遵循以下规则：

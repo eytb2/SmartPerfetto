@@ -15,6 +15,8 @@ import type { SqlSchemaIndex, AnalysisNote, AnalysisPlanV3, PlanRevision, Hypoth
 import type { SceneType } from './sceneClassifier';
 import { summarizeSqlResult } from './sqlSummarizer';
 import { matchPatterns, matchNegativePatterns, extractTraceFeatures } from './analysisPatternMemory';
+import { getPerfettoStdlibModules } from '../services/perfettoStdlibScanner';
+import { loadPromptTemplate } from './strategyLoader';
 import type { ArtifactStore } from './artifactStore';
 
 /** MCP tool name prefix — derived from the server name 'smartperfetto'.
@@ -874,6 +876,101 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     }
   ) : null;
 
+  // list_stdlib_modules: Expose Perfetto stdlib module inventory to the agent.
+  // Enables Claude to discover available stdlib modules by namespace (e.g., "android.frames", "sched").
+  const listStdlibModules = tool(
+    'list_stdlib_modules',
+    'List available Perfetto SQL stdlib modules by namespace. Use this to discover what pre-built tables, views, and functions ' +
+    'are available before writing custom SQL. Modules can be loaded via INCLUDE PERFETTO MODULE <name> in SQL queries. ' +
+    'Critical modules (android.frames.*, android.binder*, android.startup.*, sched.*, android.surfaceflinger, android.gpu.frequency) ' +
+    'are pre-loaded at trace startup.',
+    {
+      namespace: z.string().optional().describe(
+        'Filter by namespace prefix (e.g., "android", "android.frames", "sched", "chrome", "wattson"). Omit to list all.'
+      ),
+    },
+    async ({ namespace }) => {
+      const allModules = getPerfettoStdlibModules();
+      // Enforce dot-boundary matching to avoid "android" matching a hypothetical "androidos.*"
+      const filtered = namespace
+        ? allModules.filter(m => m === namespace || m.startsWith(namespace + '.'))
+        : allModules;
+
+      // Group by top-level namespace
+      const grouped: Record<string, string[]> = {};
+      for (const mod of filtered) {
+        const ns = mod.split('.')[0];
+        if (!grouped[ns]) grouped[ns] = [];
+        grouped[ns].push(mod);
+      }
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            totalModules: filtered.length,
+            namespaces: Object.keys(grouped).sort(),
+            // When filtering by namespace, return full module list.
+            // When unfiltered, return only counts per namespace to save context tokens (~1500 tokens).
+            modules: namespace
+              ? filtered.sort()
+              : Object.fromEntries(Object.entries(grouped).map(([ns, mods]) => [ns, mods.length])),
+            hint: namespace
+              ? 'Use lookup_sql_schema to find specific tables/views/functions within a module.'
+              : 'Call again with a namespace (e.g., "android.frames") to see full module list. ' +
+                'Critical modules (android.frames.*, android.binder*, android.startup.*, sched.*) are pre-loaded.',
+          }),
+        }],
+      };
+    }
+  );
+
+  // lookup_knowledge: Load background knowledge on performance analysis topics on demand.
+  // The agent calls this when it needs to explain a root cause mechanism to the user.
+  // Topics are auto-discovered from knowledge-*.template.md files in the strategies directory.
+  const knowledgeTopics = (() => {
+    const strategiesDir = path.resolve(__dirname, '../../../strategies');
+    try {
+      return fs.readdirSync(strategiesDir)
+        .filter(f => f.startsWith('knowledge-') && f.endsWith('.template.md'))
+        .map(f => f.replace('knowledge-', '').replace('.template.md', ''))
+        .sort();
+    } catch {
+      return ['rendering-pipeline', 'binder-ipc', 'gc-dynamics', 'cpu-scheduler', 'thermal-throttling', 'lock-contention'];
+    }
+  })();
+
+  const lookupKnowledge = tool(
+    'lookup_knowledge',
+    'Load background knowledge about a performance analysis topic. Use this when you discover a root cause ' +
+    'and want to explain the underlying mechanism to the user. Returns concise explanations of how the ' +
+    'system works, common trace signatures, and typical solutions. ' +
+    `Available topics: ${knowledgeTopics.join(', ')}.`,
+    {
+      topic: z.string().describe(
+        `Knowledge topic: ${knowledgeTopics.map(t => `"${t}"`).join(' | ')}`
+      ),
+    },
+    async ({ topic }) => {
+      const content = loadPromptTemplate('knowledge-' + topic);
+      if (!content) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: `Unknown topic "${topic}". Available: ${knowledgeTopics.join(', ')}`,
+            }),
+          }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: 'text' as const, text: content }],
+      };
+    }
+  );
+
   // query_perfetto_source: Search the Perfetto stdlib for SQL patterns and usage examples.
   // Enables Claude to self-learn by finding how official code uses tables/functions.
   const queryPerfettoSource = tool(
@@ -1468,6 +1565,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     { tool: detectArchitecture, name: 'detect_architecture' },
     { tool: lookupSqlSchema, name: 'lookup_sql_schema' },
     { tool: queryPerfettoSource, name: 'query_perfetto_source' },
+    { tool: listStdlibModules, name: 'list_stdlib_modules' },
+    { tool: lookupKnowledge, name: 'lookup_knowledge' },
   ];
   if (writeAnalysisNote) toolEntries.push({ tool: writeAnalysisNote, name: 'write_analysis_note' });
   if (fetchArtifact) toolEntries.push({ tool: fetchArtifact, name: 'fetch_artifact' });

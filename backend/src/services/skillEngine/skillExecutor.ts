@@ -1506,7 +1506,197 @@ export class SkillExecutor {
       }
     }
 
+    // Batch-to-expandable binding: bind batch step row data as expandableData for list steps.
+    // This avoids N+1 iterator queries by reusing a single batch SQL result.
+    this.applyExpandableBindSources(skill.steps!, context, displayResults);
+
     return { aiSummary };
+  }
+
+  /**
+   * Apply expandableBindSource declarations: for each step that declares an expandableBindSource,
+   * find the batch data in context.variables and bind it as expandableData on the target DisplayResult.
+   */
+  private applyExpandableBindSources(
+    steps: SkillStep[],
+    context: SkillExecutionContext,
+    displayResults: DisplayResult[]
+  ): void {
+    for (const step of steps) {
+      const display = this.getDisplayConfig(step);
+      const bindSource = display?.expandableBindSource;
+      if (!bindSource) continue;
+
+      const sourceData = context.variables[bindSource];
+      const targetDisplayResult = displayResults.find(dr => dr.stepId === step.id);
+
+      if (!Array.isArray(sourceData) || sourceData.length === 0) continue;
+      if (!targetDisplayResult?.data?.rows?.length || !targetDisplayResult.data.columns?.length) continue;
+
+      targetDisplayResult.data.expandableData = this.buildExpandableFromBatch(
+        targetDisplayResult.data.rows,
+        targetDisplayResult.data.columns,
+        sourceData
+      );
+    }
+  }
+
+  /**
+   * Build expandableData by matching batch source rows to target list rows.
+   *
+   * Matching strategy: both datasets are ordered by (session_id, frame_start), so
+   * we match by frame_index when available, falling back to start_ts, then positional index.
+   *
+   * Accepts two data shapes:
+   * - Columnar: targetRows (any[][]) + targetColumns (string[]) — from executeStepBasedSkill DisplayResults
+   * - Object array: targetObjects (Record<string, any>[]) — from executeCompositeSkill StepResults
+   */
+  private buildExpandableFromBatch(
+    targetRows: any[][] | null,
+    targetColumns: string[] | null,
+    sourceData: Record<string, any>[],
+    targetObjects?: Record<string, any>[]
+  ): NonNullable<DisplayResult['data']['expandableData']> {
+    const isColumnar = targetRows != null && targetColumns != null;
+    const rowCount = isColumnar ? targetRows.length : (targetObjects?.length ?? 0);
+
+    // Build lookup maps lazily — only construct the map if its matching column exists
+    const frameIndexCol = isColumnar ? targetColumns.indexOf('frame_index') : -1;
+    const hasFrameIndex = isColumnar ? frameIndexCol >= 0 : targetObjects?.some(o => o.frame_index != null);
+    const startTsCol = isColumnar ? targetColumns.indexOf('start_ts') : -1;
+    const hasStartTs = isColumnar ? startTsCol >= 0 : targetObjects?.some(o => o.start_ts != null);
+
+    let sourceByFrameIndex: Map<number, Record<string, any>> | undefined;
+    let sourceByStartTs: Map<string, Record<string, any>> | undefined;
+
+    if (hasFrameIndex) {
+      sourceByFrameIndex = new Map();
+      for (const row of sourceData) {
+        if (row.frame_index != null) sourceByFrameIndex.set(Number(row.frame_index), row);
+      }
+    }
+    if (hasStartTs && !sourceByFrameIndex) {
+      sourceByStartTs = new Map();
+      for (const row of sourceData) {
+        if (row.start_ts != null) sourceByStartTs.set(String(row.start_ts), row);
+      }
+    }
+
+    const expandableData: NonNullable<DisplayResult['data']['expandableData']> = [];
+
+    for (let i = 0; i < rowCount; i++) {
+      // Get matching keys without constructing the full item yet
+      let frameIndexVal: any;
+      let startTsVal: any;
+      if (isColumnar) {
+        const row = targetRows[i];
+        if (frameIndexCol >= 0) frameIndexVal = row[frameIndexCol];
+        if (startTsCol >= 0) startTsVal = row[startTsCol];
+      } else {
+        const obj = targetObjects![i];
+        frameIndexVal = obj.frame_index;
+        startTsVal = obj.start_ts;
+      }
+
+      // Find matching source row: frame_index → start_ts → positional
+      let matched: Record<string, any> | undefined;
+      if (sourceByFrameIndex && frameIndexVal != null) {
+        matched = sourceByFrameIndex.get(Number(frameIndexVal));
+      }
+      if (!matched && sourceByStartTs && startTsVal != null) {
+        matched = sourceByStartTs.get(String(startTsVal));
+      }
+      if (!matched && i < sourceData.length) {
+        matched = sourceData[i];
+      }
+
+      if (!matched) {
+        // Push undefined for unmatched rows — front-end checks truthiness per entry
+        expandableData.push(undefined as any);
+        continue;
+      }
+
+      // Reconstruct item object only for matched rows
+      let item: Record<string, any>;
+      if (isColumnar) {
+        item = {};
+        for (let c = 0; c < targetColumns.length; c++) {
+          item[targetColumns[c]] = targetRows[i][c];
+        }
+      } else {
+        item = { ...targetObjects![i] };
+      }
+
+      expandableData.push({
+        item,
+        result: { success: true, sections: this.groupBatchRowIntoSections(matched) },
+      });
+    }
+
+    return expandableData;
+  }
+
+  /**
+   * Group a batch root cause row into named sections for the expandable UI.
+   */
+  private groupBatchRowIntoSections(row: Record<string, any>): Record<string, any> {
+    const sections: Record<string, any> = {};
+
+    // Section 1: Root cause diagnosis
+    const diagnosisFields = ['reason_code', 'primary_cause', 'confidence', 'top_slice_name', 'top_slice_ms'];
+    const diagnosisData: Record<string, any> = {};
+    for (const f of diagnosisFields) {
+      if (row[f] != null) diagnosisData[f] = row[f];
+    }
+    if (Object.keys(diagnosisData).length > 0) {
+      sections['根因诊断'] = { title: '根因诊断', data: [diagnosisData] };
+    }
+
+    // Section 2: MainThread quadrant
+    const mainFields = ['main_q1_pct', 'main_q2_pct', 'main_q3_pct', 'main_q4a_pct', 'main_q4b_pct'];
+    const mainData: Record<string, any> = {};
+    let hasMainData = false;
+    for (const f of mainFields) {
+      if (row[f] != null) { mainData[f.replace('main_', '').replace('_pct', '%')] = row[f] + '%'; hasMainData = true; }
+    }
+    if (hasMainData) {
+      sections['主线程四象限'] = { title: '主线程四象限 (Q1大核运行/Q2小核运行/Q3调度等待/Q4a IO阻塞/Q4b 锁等待)', data: [mainData] };
+    }
+
+    // Section 3: RenderThread quadrant
+    const renderFields = ['render_q1_pct', 'render_q2_pct', 'render_q3_pct', 'render_q4a_pct', 'render_q4b_pct'];
+    const renderData: Record<string, any> = {};
+    let hasRenderData = false;
+    for (const f of renderFields) {
+      if (row[f] != null) { renderData[f.replace('render_', 'RT_').replace('_pct', '%')] = row[f] + '%'; hasRenderData = true; }
+    }
+    if (hasRenderData) {
+      sections['渲染线程四象限'] = { title: '渲染线程四象限 (Q1大核运行/Q2小核运行/Q3调度等待/Q4a IO阻塞/Q4b 锁等待)', data: [renderData] };
+    }
+
+    // Section 4: CPU frequency
+    const cpuFields = ['big_avg_freq_mhz', 'big_max_freq_mhz', 'ramp_ms'];
+    const cpuData: Record<string, any> = {};
+    let hasCpuData = false;
+    for (const f of cpuFields) {
+      if (row[f] != null) { cpuData[f] = row[f]; hasCpuData = true; }
+    }
+    if (hasCpuData) {
+      sections['CPU 频率'] = { title: 'CPU 频率', data: [cpuData] };
+    }
+
+    // Section 5: Interference factors
+    const interferenceFields = ['binder_overlap_ms', 'gc_overlap_ms'];
+    const interferenceData: Record<string, any> = {};
+    let hasInterference = false;
+    for (const f of interferenceFields) {
+      if (row[f] != null && Number(row[f]) > 0) { interferenceData[f] = row[f]; hasInterference = true; }
+    }
+    if (hasInterference) {
+      sections['干扰因素'] = { title: '干扰因素', data: [interferenceData] };
+    }
+
+    return sections;
   }
 
   /**
@@ -1641,6 +1831,25 @@ export class SkillExecutor {
             (sourceResult.data as any).expandableData = expandableData;
           }
         }
+      }
+    }
+
+    // Batch-to-expandable binding for executeCompositeSkill path (object-array variant)
+    if (skill.steps) {
+      for (const step of skill.steps) {
+        const display = step.display && typeof step.display === 'object' ? step.display as DisplayConfig : undefined;
+        const bindSource = display?.expandableBindSource;
+        if (!bindSource) continue;
+
+        const sourceData = execContext.variables[bindSource];
+        const targetResult = stepResults.find(sr => sr.stepId === step.id);
+
+        if (!Array.isArray(sourceData) || sourceData.length === 0) continue;
+        if (!targetResult?.data || !Array.isArray(targetResult.data) || targetResult.data.length === 0) continue;
+        if (typeof targetResult.data[0] !== 'object' || targetResult.data[0] === null) continue;
+
+        const expandableData = this.buildExpandableFromBatch(null, null, sourceData, targetResult.data);
+        (targetResult.data as any).expandableData = expandableData;
       }
     }
 

@@ -10,8 +10,8 @@
 
 **规则**：根因归因和优化收益估算必须基于 self_ms。嵌套 slice 的 wall time 不能简单相加（会导致百分比超过 100%）。根因分析树中的 slice 必须体现父子嵌套关系。
 
-#### 测试/模拟器应用检测
-当热点 slice 名称包含 `LoadSimulator`、`ChaosTask`、`SimulateInflation`、`Benchmark`、`StressTest`、`TestRunner`、`FakeLoad` 等特征词时，在概览中标注这是测试/基准应用，并调整分析措辞：描述模拟负载的性能特征，而不是给出通用的生产环境优化建议。
+#### 测试/基准应用检测
+当热点 slice 名称包含 `Benchmark`、`StressTest`、`TestRunner`、`Simulator`、`Mock`、`Synthetic` 等特征词，或非标准 AOSP 框架 slice 占据大量时间时，在概览中标注这是测试/基准应用，并调整分析措辞：描述模拟负载的性能特征，而不是给出通用的生产环境优化建议。
 
 #### CPU 频率估算
 - 均频是加权平均值，不代表恒定频率（min/max 可能差异很大）
@@ -35,8 +35,53 @@
 - [LOW]: 轻微性能问题或优化建议
 - [INFO]: 性能特征描述，非问题
 
+### 根因推理链格式（[CRITICAL] 和 [HIGH] 必须包含）
+
+每个高严重度发现必须包含至少 2 级深的根因推理链：
+
+```
+**[CRITICAL] 主线程 XXX 耗时 YYms**
+根因推理链：
+  ① 症状：XXX 耗时 YYms（预算 ZZms），self_ms=AAms
+  ② 机制：hot_slice_states 显示 Running=BBms + S=CCms
+  ③ 阻塞原因：blocking_chain/binder_root_cause 追踪到具体阻塞源
+  ④ 系统因素：CPU 频率/thermal/调度等系统级上下文
+  ⑤ 背景知识：[来自 lookup_knowledge 的机制解释]
+```
+
+### 背景知识注入规则
+
+当报告以下类型的根因时，使用 `lookup_knowledge` 获取背景知识并在结论中包含：
+
+| 根因类型 | lookup_knowledge 参数 | 输出位置 |
+|---------|---------------------|---------|
+| Binder 阻塞 | `binder-ipc` | 在 Binder 相关发现后 |
+| GC 导致卡顿 | `gc-dynamics` | 在 GC 发现后 |
+| CPU 频率/调度 | `cpu-scheduler` | 在频率/小核发现后 |
+| 热节流 | `thermal-throttling` | 在 thermal 发现后 |
+| 锁竞争 | `lock-contention` | 在锁等待发现后 |
+| 帧渲染管线 | `rendering-pipeline` | 首次解释帧延迟时 |
+
+背景知识必须**与当前 trace 数据关联**，不能是纯理论解释。格式：
+```
+> 📚 **背景知识：[主题]**
+> [2-3 句话解释机制] + [当前 trace 中的具体体现]
+```
+
+### 因果链可视化（跨线程/跨进程根因时）
+
+当根因涉及跨线程或跨进程因果关系时，用 Mermaid 流程图展示因果链：
+
+```mermaid
+graph LR
+    A[主线程 操作<br/>XXms] -->|阻塞| B[Binder 事务<br/>→ 服务进程]
+    B -->|服务端慢| C[根因<br/>锁/GC/IO]
+    style A fill:#ff6b6b,color:#fff
+    style C fill:#ffa07a,color:#fff
+```
+
 ### 结论结构
 1. **概览**: 一句话总结性能状况
-2. **关键发现**: 按严重程度排列的发现列表
-3. **根因分析**: 如果能确定根因
+2. **关键发现**: 按严重程度排列的发现列表（含根因推理链 + 📚 背景知识）
+3. **根因分析**: 因果链可视化（Mermaid 图）
 4. **优化建议**: 可操作的建议，按优先级排列

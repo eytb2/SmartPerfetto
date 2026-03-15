@@ -1,0 +1,122 @@
+# =============================================================================
+# 启动慢原因（Google 官方分类）
+# =============================================================================
+# 使用 Google Perfetto 官方 android_startup 指标，基于 stdlib 的
+# android.startup.startups 和 android.startup.time_to_display 模块
+# 提取启动事件及 TTID/TTFD 数据，交叉验证自有启动分析结果。
+#
+# 典型使用场景：
+# - 与自有启动分析结果交叉验证
+# - 快速获取所有启动事件的 TTID/TTFD 耗时
+# - 按 startup_type 分类（冷启动/温启动/热启动）
+
+name: startup_slow_reasons
+version: "1.0"
+type: composite
+category: app_lifecycle
+
+meta:
+  display_name: "启动慢原因（官方分类）"
+  description: "使用 Google Perfetto 官方 30+ 启动慢原因分类，交叉验证自有分析"
+  icon: "checklist"
+  tags: [startup, slow_reasons, official, google, diagnostics]
+
+prerequisites:
+  modules:
+    - android.startup.startups
+    - android.startup.time_to_display
+
+inputs: []
+
+steps:
+  # ==========================================================================
+  # Step 1: 加载启动指标
+  # ==========================================================================
+  - id: run_metric
+    type: atomic
+    name: "加载启动指标"
+    display:
+      level: overview
+      layer: overview
+      title: "启动指标加载状态"
+      columns:
+        - name: status
+          label: "状态"
+          type: string
+    sql: |
+      SELECT RUN_METRIC('android/android_startup.sql');
+      SELECT 'metric_loaded' as status
+    save_as: metric_status
+    optional: true
+
+  # ==========================================================================
+  # Step 2: 启动事件及耗时汇总
+  # ==========================================================================
+  - id: slow_reasons
+    type: atomic
+    name: "启动事件汇总"
+    display:
+      level: key
+      layer: list
+      title: "启动事件及 TTID/TTFD 耗时"
+      columns:
+        - name: startup_id
+          label: "启动 ID"
+          type: number
+          format: compact
+        - name: package
+          label: "包名"
+          type: string
+        - name: startup_type
+          label: "启动类型"
+          type: string
+        - name: dur_ms
+          label: "启动耗时(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: ttid_ms
+          label: "TTID(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: ttfd_ms
+          label: "TTFD(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+    synthesize:
+      role: overview
+      fields:
+        - key: package
+          label: 包名
+        - key: startup_type
+          label: 启动类型
+        - key: dur_ms
+          label: 耗时
+          format: "{{value}} ms"
+        - key: ttid_ms
+          label: TTID
+          format: "{{value}} ms"
+      insights:
+        - condition: "ttid_ms > 1000"
+          template: "{{package}} 的 TTID 为 {{ttid_ms}}ms，超过 1 秒，启动体验较差"
+        - condition: "ttfd_ms > 3000"
+          template: "{{package}} 的 TTFD 为 {{ttfd_ms}}ms，超过 3 秒，建议优化内容加载"
+    sql: |
+      SELECT
+        s.startup_id,
+        s.package,
+        s.startup_type,
+        ROUND(s.dur / 1e6, 1) as dur_ms,
+        ROUND(ttd.time_to_initial_display / 1e6, 1) as ttid_ms,
+        ROUND(ttd.time_to_full_display / 1e6, 1) as ttfd_ms
+      FROM android_startups s
+      LEFT JOIN android_startup_time_to_display ttd USING (startup_id)
+      ORDER BY s.dur DESC
+    save_as: slow_reasons
+    optional: true
+
+output:
+  format: layered
+  default_expanded: [slow_reasons]

@@ -61,9 +61,9 @@ steps:
           AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
           AND (${end_ts} IS NULL OR c.ts < ${end_ts})
       ),
-      raw_period AS (
-        SELECT COALESCE(
-          (SELECT CAST((SELECT AVG(i.interval_ns) FROM (SELECT interval_ns, PERCENT_RANK() OVER (ORDER BY interval_ns) AS pct FROM sf_vsync_intervals WHERE interval_ns > 4000000 AND interval_ns < 50000000) i WHERE i.pct BETWEEN 0.25 AND 0.75) AS INTEGER)
+      vsync_median AS (
+        SELECT CAST(COALESCE(
+          (SELECT PERCENTILE(interval_ns, 0.5)
            FROM sf_vsync_intervals
            WHERE interval_ns > 4000000 AND interval_ns < 50000000),
           (SELECT CAST(PERCENTILE(dur, 0.5) AS INTEGER)
@@ -72,26 +72,12 @@ steps:
              AND (${start_ts} IS NULL OR ts >= ${start_ts})
              AND (${end_ts} IS NULL OR ts < ${end_ts})),
           16666667
-        ) as period_ns
-      ),
-      snapped AS (
-        SELECT
-          CASE
-            WHEN period_ns < 4880000 THEN 240
-            WHEN period_ns < 6300000 THEN 175
-            WHEN period_ns < 7610000 THEN 144
-            WHEN period_ns < 9620000 THEN 120
-            WHEN period_ns < 13610000 THEN 90
-            WHEN period_ns < 23570000 THEN 60
-            WHEN period_ns < 37270000 THEN 30
-            ELSE 24
-          END as refresh_rate_hz
-        FROM raw_period
+        ) AS INTEGER) as vsync_period_ns
       )
       SELECT
-        CAST(ROUND(1e9 / refresh_rate_hz, 0) AS INTEGER) as vsync_period_ns,
-        refresh_rate_hz
-      FROM snapped
+        vsync_period_ns,
+        CAST(ROUND(1e9 / vsync_period_ns) AS INTEGER) as refresh_rate_hz
+      FROM vsync_median
     save_as: vsync_config
 
   # Step 2: 检测真正的掉帧（基于实际呈现间隔）
@@ -154,8 +140,8 @@ steps:
           AND (${end_ts} IS NULL OR c.ts < ${end_ts})
       ),
       vsync_period AS (
-        SELECT COALESCE(
-          (SELECT CAST((SELECT AVG(i.interval_ns) FROM (SELECT interval_ns, PERCENT_RANK() OVER (ORDER BY interval_ns) AS pct FROM vsync_ticks WHERE interval_ns > 4000000 AND interval_ns < 50000000) i WHERE i.pct BETWEEN 0.25 AND 0.75) AS INTEGER)
+        SELECT CAST(COALESCE(
+          (SELECT PERCENTILE(interval_ns, 0.5)
            FROM vsync_ticks
            WHERE interval_ns > 4000000 AND interval_ns < 50000000),
           (SELECT CAST(PERCENTILE(dur, 0.5) AS INTEGER)
@@ -164,7 +150,7 @@ steps:
              AND (${start_ts} IS NULL OR ts >= ${start_ts})
              AND (${end_ts} IS NULL OR ts < ${end_ts})),
           16666667
-        ) as vsync_period_ns
+        ) AS INTEGER) as vsync_period_ns
       ),
       raw_frames AS (
         SELECT
@@ -317,8 +303,8 @@ steps:
           AND (${end_ts} IS NULL OR c.ts < ${end_ts})
       ),
       vsync_period AS (
-        SELECT COALESCE(
-          (SELECT CAST((SELECT AVG(i.interval_ns) FROM (SELECT interval_ns, PERCENT_RANK() OVER (ORDER BY interval_ns) AS pct FROM vsync_ticks WHERE interval_ns > 4000000 AND interval_ns < 50000000) i WHERE i.pct BETWEEN 0.25 AND 0.75) AS INTEGER)
+        SELECT CAST(COALESCE(
+          (SELECT PERCENTILE(interval_ns, 0.5)
            FROM vsync_ticks
            WHERE interval_ns > 4000000 AND interval_ns < 50000000),
           (SELECT CAST(PERCENTILE(dur, 0.5) AS INTEGER)
@@ -327,7 +313,7 @@ steps:
              AND (${start_ts} IS NULL OR ts >= ${start_ts})
              AND (${end_ts} IS NULL OR ts < ${end_ts})),
           16666667
-        ) as vsync_period_ns
+        ) AS INTEGER) as vsync_period_ns
       ),
       vsync_events AS (
         SELECT
@@ -449,8 +435,8 @@ steps:
           AND (${end_ts} IS NULL OR c.ts < ${end_ts})
       ),
       vsync_period AS (
-        SELECT COALESCE(
-          (SELECT CAST((SELECT AVG(i.interval_ns) FROM (SELECT interval_ns, PERCENT_RANK() OVER (ORDER BY interval_ns) AS pct FROM vsync_ticks WHERE interval_ns > 4000000 AND interval_ns < 50000000) i WHERE i.pct BETWEEN 0.25 AND 0.75) AS INTEGER)
+        SELECT CAST(COALESCE(
+          (SELECT PERCENTILE(interval_ns, 0.5)
            FROM vsync_ticks
            WHERE interval_ns > 4000000 AND interval_ns < 50000000),
           (SELECT CAST(PERCENTILE(dur, 0.5) AS INTEGER)
@@ -459,7 +445,7 @@ steps:
              AND (${start_ts} IS NULL OR ts >= ${start_ts})
              AND (${end_ts} IS NULL OR ts < ${end_ts})),
           16666667
-        ) as vsync_period_ns
+        ) AS INTEGER) as vsync_period_ns
       ),
       vsync_events AS (
         SELECT

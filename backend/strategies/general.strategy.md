@@ -33,3 +33,7 @@ keywords: []
 - **概览/场景还原**: scene_reconstruction → 按场景路由到对应 Skill
 
 也可以使用 `list_skills` 发现更多可用技能，或使用 `execute_sql` 做自定义查询。
+
+#### 通用场景关键 Stdlib 表
+
+写 execute_sql 时优先使用（完整列表见方法论模板）：`slice_self_dur`、`cpu_utilization_in_interval(ts, dur)`、`cpu_frequency_counters`、`android_garbage_collection_events`、`android_oom_adj_intervals`、`android_screen_state`、`android_dvfs_counters`

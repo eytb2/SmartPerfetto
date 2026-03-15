@@ -128,6 +128,20 @@ lookup_sql_schema("<table_or_view_name>")
    - 该组件相关的常见性能问题（2-3 条）
    - 每条包含：问题表现、典型原因、排查方向
 
+**Phase 5 — 时间线可视化（可选）：**
+
+当你完成管线教学内容后，如果已检测到管线类型并获取了关键 Slice 列表，调用以下 skill 将关键 Slice 高亮为 Perfetto 时间线 overlay，帮助用户对照理论管线图与实际 trace：
+
+```
+invoke_skill('pipeline_key_slices_overlay', {
+  slice_names: "'Choreographer#doFrame','DrawFrame','syncFrameState',...",
+  start_ts: <分析区间起始>,
+  end_ts: <分析区间结束>
+})
+```
+
+注意：`slice_names` 参数使用 SQL IN 列表格式，每个名称用单引号包裹、逗号分隔。从管线教学的 `key_slices` 列表中提取名称。
+
 **教学原则：**
 - **先教后诊**：先解释正常行为，再指出异常
 - **分层教学**：第一轮给概览，用户追问再深入

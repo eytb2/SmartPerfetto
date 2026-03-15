@@ -19,12 +19,40 @@ const IS_TEST_ENV = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_I
 const TRACE_PROCESSOR_PATH = process.env.TRACE_PROCESSOR_PATH ||
   path.resolve(__dirname, '../../../perfetto/out/ui/trace_processor_shell');
 
-// Small subset used by core Android analysis paths that query stdlib views directly.
+// Critical stdlib modules preloaded at startup to make key views/tables available.
+// These cover the most common analysis paths; additional modules can be loaded on demand
+// via INCLUDE PERFETTO MODULE in SQL queries or skill prerequisites.
 const CRITICAL_STDLIB_MODULES = [
+  // Frame analysis
   'android.frames.timeline',
+  'android.frames.per_frame_metrics',
+  'android.frames.jank_type',
+  // IPC & blocking
   'android.binder',
+  'android.binder_breakdown',
+  'android.monitor_contention',
+  'android.critical_blocking_calls',
+  // App lifecycle
   'android.startup.startups',
+  'android.startup.startup_breakdowns',
+  'android.startup.time_to_display',
+  // Input & display
   'android.input',
+  'android.surfaceflinger',
+  // GPU
+  'android.gpu.frequency',
+  // Scheduling & CPU (core: states + latency; utilization loaded on demand or via background prewarm)
+  'sched.states',
+  'sched.latency',
+  'linux.cpu.utilization.system',
+  'linux.cpu.utilization.process',
+  'linux.cpu.utilization.thread',
+  // Memory & GC
+  'android.garbage_collection',
+  'android.oom_adjuster',
+  // Slice analysis
+  'slices.self_dur',
+  'slices.with_context',
 ];
 
 /**

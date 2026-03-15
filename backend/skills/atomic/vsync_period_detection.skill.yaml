@@ -5,9 +5,9 @@
 # multiple composite skills to avoid code duplication.
 #
 # Resolution Priority:
-# 1. VSYNC-sf counter intervals (most accurate)
-# 2. expected_frame_timeline_slice durations
-# 3. Snap to nearest standard refresh rate (60/90/120/144/165/240 Hz)
+# 1. VSYNC-sf counter intervals median (most accurate)
+# 2. expected_frame_timeline_slice duration median
+# 3. Default 60Hz (16666667 ns)
 #
 # Output: vsync_period_ns, detected_refresh_rate_hz, detection_method, confidence
 
@@ -15,9 +15,8 @@ name: vsync_period_detection
 type: atomic
 version: "1.0.0"
 description: |
-  Detect VSync period from trace data using statistical analysis.
-  Handles 60Hz, 90Hz, 120Hz, 144Hz, 165Hz, and 240Hz displays.
-  Returns detected period, refresh rate, and confidence score.
+  Detect VSync period from trace data using median of VSYNC-sf intervals.
+  Returns detected period, refresh rate (computed dynamically), and confidence score.
 
 category: frame
 tags:
@@ -25,6 +24,10 @@ tags:
   - refresh_rate
   - frame_timing
   - detection
+
+prerequisites:
+  modules:
+    - android.frames.timeline
 
 inputs:
   - name: start_ts
@@ -40,28 +43,17 @@ steps:
   - id: detect_vsync_period
     description: Detect VSync period using multiple data sources
     sql: |
-      -- VSync Period Detection with Multiple Sources and Statistical Robustness
+      -- VSync Period Detection with Multiple Sources
       --
       -- Strategy:
-      -- 1. Try VSYNC-sf counter (most reliable)
-      -- 2. Fall back to expected_frame_timeline_slice
-      -- 3. Use interquartile range to filter outliers
-      -- 4. Snap to nearest standard refresh rate
+      -- 1. Try VSYNC-sf counter median (most reliable)
+      -- 2. Fall back to expected_frame_timeline_slice median
+      -- 3. Default 60Hz fallback
 
       WITH params AS (
         SELECT
           COALESCE(${start_ts}, 0) AS start_ts,
           COALESCE(${end_ts}, (SELECT MAX(ts) FROM counter)) AS end_ts
-      ),
-
-      -- Standard refresh rates with their periods (in nanoseconds)
-      standard_rates AS (
-        SELECT 60 AS hz, 16666667 AS period_ns UNION ALL
-        SELECT 90, 11111111 UNION ALL
-        SELECT 120, 8333333 UNION ALL
-        SELECT 144, 6944444 UNION ALL
-        SELECT 165, 6060606 UNION ALL
-        SELECT 240, 4166667
       ),
 
       -- Source 1: VSYNC-sf counter intervals
@@ -77,45 +69,27 @@ steps:
           AND c.ts <= p.end_ts
       ),
 
-      -- Filter to valid intervals and compute percentiles
-      vsync_sf_intervals AS (
-        SELECT
-          interval_ns,
-          PERCENT_RANK() OVER (ORDER BY interval_ns) AS pct
-        FROM vsync_sf_raw
-        WHERE interval_ns IS NOT NULL
-          AND interval_ns > 4000000  -- > 4ms (min for 240Hz)
-          AND interval_ns < 20000000 -- < 20ms (max reasonable)
-      ),
-
-      -- Use interquartile range (P25-P75) for robustness
       vsync_sf_stats AS (
         SELECT
-          AVG(interval_ns) AS mean_period_ns,
+          CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER) AS median_period_ns,
           COUNT(*) AS sample_count
-        FROM vsync_sf_intervals
-        WHERE pct BETWEEN 0.25 AND 0.75
+        FROM vsync_sf_raw
+        WHERE interval_ns IS NOT NULL
+          AND interval_ns > 4000000
+          AND interval_ns < 50000000
       ),
 
       -- Source 2: expected_frame_timeline_slice durations (fallback)
-      frame_timeline_raw AS (
+      frame_timeline_stats AS (
         SELECT
-          dur AS interval_ns,
-          PERCENT_RANK() OVER (ORDER BY dur) AS pct
+          CAST(PERCENTILE(dur, 0.5) AS INTEGER) AS median_period_ns,
+          COUNT(*) AS sample_count
         FROM expected_frame_timeline_slice e
         CROSS JOIN params p
         WHERE e.ts >= p.start_ts
           AND e.ts <= p.end_ts
           AND e.dur > 4000000
-          AND e.dur < 20000000
-      ),
-
-      frame_timeline_stats AS (
-        SELECT
-          AVG(interval_ns) AS mean_period_ns,
-          COUNT(*) AS sample_count
-        FROM frame_timeline_raw
-        WHERE pct BETWEEN 0.25 AND 0.75
+          AND e.dur < 50000000
       ),
 
       -- Choose best source
@@ -123,11 +97,11 @@ steps:
         SELECT
           CASE
             WHEN (SELECT sample_count FROM vsync_sf_stats) >= 10
-              THEN (SELECT mean_period_ns FROM vsync_sf_stats)
+              THEN (SELECT median_period_ns FROM vsync_sf_stats)
             WHEN (SELECT sample_count FROM frame_timeline_stats) >= 10
-              THEN (SELECT mean_period_ns FROM frame_timeline_stats)
+              THEN (SELECT median_period_ns FROM frame_timeline_stats)
             ELSE 16666667  -- Default 60Hz
-          END AS raw_period_ns,
+          END AS vsync_period_ns,
           CASE
             WHEN (SELECT sample_count FROM vsync_sf_stats) >= 10 THEN 'vsync_sf'
             WHEN (SELECT sample_count FROM frame_timeline_stats) >= 10 THEN 'frame_timeline'
@@ -145,33 +119,17 @@ steps:
             (SELECT sample_count FROM frame_timeline_stats),
             0
           ) AS sample_count
-      ),
-
-      -- Snap to nearest standard refresh rate
-      snapped AS (
-        SELECT
-          d.raw_period_ns,
-          d.detection_method,
-          d.confidence,
-          d.sample_count,
-          sr.hz AS refresh_rate_hz,
-          sr.period_ns AS vsync_period_ns,
-          ABS(d.raw_period_ns - sr.period_ns) AS distance
-        FROM detected_period d
-        CROSS JOIN standard_rates sr
-        ORDER BY distance
-        LIMIT 1
       )
 
       SELECT
         vsync_period_ns,
-        refresh_rate_hz AS detected_refresh_rate_hz,
-        raw_period_ns AS measured_period_ns,
+        CAST(ROUND(1e9 / vsync_period_ns) AS INTEGER) AS detected_refresh_rate_hz,
+        vsync_period_ns AS measured_period_ns,
         detection_method,
         confidence,
         sample_count,
         ROUND(1000000000.0 / vsync_period_ns, 1) AS theoretical_fps
-      FROM snapped
+      FROM detected_period
 
     display:
       level: summary

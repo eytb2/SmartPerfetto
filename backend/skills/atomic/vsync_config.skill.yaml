@@ -4,8 +4,8 @@
 # 从 trace 中解析实际的 Vsync 周期和刷新率设置
 #
 # 数据来源 (按优先级):
-#   1. VSYNC-sf counter track 间隔的中位数 (直接反映显示侧消费节奏，和滑动分析口径一致)
-#   2. expected_frame_timeline_slice 的帧 duration (作为回退)
+#   1. VSYNC-sf counter track 间隔的中位数 (PERCENTILE 0.5, 直接反映显示侧消费节奏)
+#   2. expected_frame_timeline_slice 的帧 duration 中位数 (作为回退)
 #   3. 默认 60Hz (16.67ms)
 #
 # 输出:
@@ -58,7 +58,7 @@ steps:
           AND (${start_ts} IS NULL OR ts >= ${start_ts})
           AND (${end_ts} IS NULL OR ts < ${end_ts})
       ),
-      -- 方法2: 从 VSYNC-sf counter track 推算周期 (备选)
+      -- 方法2: 从 VSYNC-sf counter track 推算周期 (优先来源)
       -- counter 值在 0/1 间交替，每次变化代表一个 vsync tick
       sf_vsync_intervals AS (
         SELECT
@@ -70,49 +70,35 @@ steps:
           AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
           AND (${end_ts} IS NULL OR c.ts < ${end_ts})
       ),
-      sf_vsync AS (
+      -- 合并结果，sf_vsync 优先，expected_frame 回退
+      vsync_median AS (
         SELECT
-          CAST((SELECT AVG(i.interval_ns) FROM (SELECT interval_ns, PERCENT_RANK() OVER (ORDER BY interval_ns) AS pct FROM sf_vsync_intervals WHERE interval_ns > 4000000 AND interval_ns < 50000000) i WHERE i.pct BETWEEN 0.25 AND 0.75) AS INTEGER) as vsync_period_ns,
-          'sf_vsync_counter' as source
-        FROM sf_vsync_intervals
-        WHERE interval_ns > 4000000 AND interval_ns < 50000000
-        LIMIT 1
-      ),
-      -- 合并结果，按优先级选择 (sf_vsync 优先，expected_frame 回退)
-      combined AS (
-        SELECT vsync_period_ns, source FROM sf_vsync WHERE vsync_period_ns > 0
-        UNION ALL
-        SELECT vsync_period_ns, source FROM expected_frame_vsync WHERE vsync_period_ns > 0
-      ),
-      -- 将原始周期 snap 到最近的标准刷新率（边界为相邻标准率周期的几何均值）
-      raw_period AS (
-        SELECT
-          COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 16666667) as period_ns,
-          COALESCE((SELECT source FROM combined LIMIT 1), 'default_60hz') as source
-      ),
-      snapped AS (
-        SELECT
+          CAST(COALESCE(
+            (SELECT PERCENTILE(interval_ns, 0.5)
+             FROM sf_vsync_intervals
+             WHERE interval_ns > 4000000 AND interval_ns < 50000000),
+            (SELECT vsync_period_ns FROM expected_frame_vsync WHERE vsync_period_ns > 0),
+            16666667
+          ) AS INTEGER) as vsync_period_ns,
           CASE
-            WHEN period_ns < 4880000 THEN 240   -- < sqrt(4.17ms * 5.71ms)
-            WHEN period_ns < 6300000 THEN 175   -- < sqrt(5.71ms * 6.94ms)
-            WHEN period_ns < 7610000 THEN 144   -- < sqrt(6.94ms * 8.33ms)
-            WHEN period_ns < 9620000 THEN 120   -- < sqrt(8.33ms * 11.11ms)
-            WHEN period_ns < 13610000 THEN 90   -- < sqrt(11.11ms * 16.67ms)
-            WHEN period_ns < 23570000 THEN 60   -- < sqrt(16.67ms * 33.33ms)
-            WHEN period_ns < 37270000 THEN 30   -- < sqrt(33.33ms * 41.67ms)
-            WHEN period_ns < 52700000 THEN 24   -- < sqrt(41.67ms * 66.67ms)
-            ELSE 15
-          END as refresh_rate_hz,
-          source
-        FROM raw_period
+            WHEN (SELECT COUNT(*) FROM sf_vsync_intervals WHERE interval_ns > 4000000 AND interval_ns < 50000000) > 0 THEN 'sf_vsync_counter'
+            WHEN (SELECT vsync_period_ns FROM expected_frame_vsync WHERE vsync_period_ns > 0) IS NOT NULL THEN 'expected_frame_dur'
+            ELSE 'default_60hz'
+          END as source
       )
       SELECT
-        CAST(ROUND(1e9 / refresh_rate_hz, 0) AS INTEGER) as vsync_period_ns,
+        vsync_period_ns,
         refresh_rate_hz,
-        ROUND(1e9 / refresh_rate_hz / 1e6, 2) as vsync_period_ms,
+        ROUND(vsync_period_ns / 1e6, 2) as vsync_period_ms,
         source as vsync_source,
         refresh_rate_hz as detected_refresh_rate
-      FROM snapped
+      FROM (
+        SELECT
+          vsync_period_ns,
+          CAST(ROUND(1e9 / vsync_period_ns) AS INTEGER) as refresh_rate_hz,
+          source
+        FROM vsync_median
+      )
     save_as: vsync_config
 
 output:

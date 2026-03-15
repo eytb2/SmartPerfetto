@@ -1026,8 +1026,19 @@ export class ExtendedSqlKnowledgeBase extends SqlKnowledgeBase {
       '电池': ['battery', 'charging', 'power'],
       'power': ['power', 'power_rails', 'wattson'],
       '功耗': ['power', 'power_rails', 'wattson'],
-      'gpu': ['gpu', 'graphics'],
+      'gpu': ['gpu', 'graphics', 'gpu_frequency'],
       'io': ['io', 'file', 'disk'],
+      'gc': ['garbage_collection', 'gc_type', 'heap'],
+      'utilization': ['cpu_utilization', 'utilization', 'cpu_cycles'],
+      'oom': ['oom_adj', 'lmk', 'memory'],
+      'screen': ['screen_state', 'suspend', 'power_state'],
+      'self_dur': ['self_dur', 'slice_self_dur', 'exclusive'],
+      'dvfs': ['dvfs', 'frequency', 'residency'],
+      'workload': ['surfaceflinger_workloads', 'surfaceflinger'],
+      'latency': ['sched_latency', 'scheduling', 'runnable'],
+      '利用率': ['cpu_utilization', 'utilization', 'cpu_cycles'],
+      '屏幕': ['screen_state', 'suspend'],
+      '排他': ['self_dur', 'slice_self_dur'],
     };
 
     const queryLower = userQuery.toLowerCase();

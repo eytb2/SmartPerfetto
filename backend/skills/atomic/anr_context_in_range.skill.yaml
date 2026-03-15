@@ -32,6 +32,10 @@ meta:
   icon: "error"
   tags: [anr, context, atomic]
 
+prerequisites:
+  modules:
+    - android.anrs
+
 inputs:
   - name: process_name
     type: string

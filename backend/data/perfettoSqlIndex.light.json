@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "generatedAt": "2026-03-08T09:04:00.857796",
+  "generatedAt": "2026-03-15T11:31:51.174316",
   "source": "/Users/chris/Code/SmartPerfetto/SmartPerfetto/perfetto/src/trace_processor/perfetto_sql/stdlib",
   "templates": [
     {
@@ -1131,7 +1131,7 @@
       "name": "_extended_frame_boundary",
       "category": "android",
       "type": "view",
-      "description": "For cases when a blocking call starts within a frame, but does not end before the actual frame ends, a part of the blocking call can be missed while calculating the metric. To avoid this issue, the frame boundary is extended, spanning from the start of the current actual frame, till the start of the next actual frame.",
+      "description": "For cases when a blocking call starts within a frame, but does not end before the actual frame ends, a part of the blocking call can be missed while calculating the metric. To avoid this issue, the frame boundary is extended, spanning from the start of the current actual frame, till the start of either next actual frame or the next doFrame slice - whichever is earliest; we are relying on both types of slices to get more stable metrics for cases where, for instance, doFrame blocks are running without any visible changes on the screen - leading to no actual frames being drawn. When this happens there might be gaps in actual frame timeline, so then the next doFrame would be resolved as an earlier boundary for an extended frame.",
       "columns": []
     },
     {
@@ -1625,6 +1625,117 @@
       "category": "android",
       "type": "table",
       "description": "Tracks for GPU work period events originating from the `power/gpu_work_period` Linux ftrace tracepoint. This tracepoint is usually only available on selected Android devices."
+    },
+    {
+      "id": "stdlib.android._normalize_event_channel",
+      "name": "_normalize_event_channel",
+      "category": "android",
+      "type": "function",
+      "description": "TODO: consider all cases",
+      "columns": [
+        {
+          "name": "input_id",
+          "type": "STRING"
+        },
+        {
+          "name": "channel",
+          "type": "STRING"
+        },
+        {
+          "name": "total_latency",
+          "type": "LONG"
+        },
+        {
+          "name": "ts_reader",
+          "type": "LONG"
+        },
+        {
+          "name": "ts_dispatch",
+          "type": "LONG"
+        },
+        {
+          "name": "ts_receive",
+          "type": "LONG"
+        },
+        {
+          "name": "ts_consume",
+          "type": "LONG"
+        },
+        {
+          "name": "ts_frame",
+          "type": "LONG"
+        },
+        {
+          "name": "id_reader",
+          "type": "LONG"
+        },
+        {
+          "name": "track_reader",
+          "type": "LONG"
+        },
+        {
+          "name": "dur_reader",
+          "type": "LONG"
+        },
+        {
+          "name": "id_dispatch",
+          "type": "LONG"
+        },
+        {
+          "name": "track_dispatch",
+          "type": "LONG"
+        },
+        {
+          "name": "dur_dispatch",
+          "type": "LONG"
+        },
+        {
+          "name": "id_receive",
+          "type": "LONG"
+        },
+        {
+          "name": "track_receive",
+          "type": "LONG"
+        },
+        {
+          "name": "dur_receive",
+          "type": "LONG"
+        },
+        {
+          "name": "id_consume",
+          "type": "LONG"
+        },
+        {
+          "name": "track_consume",
+          "type": "LONG"
+        },
+        {
+          "name": "dur_consume",
+          "type": "LONG"
+        },
+        {
+          "name": "id_frame",
+          "type": "LONG"
+        },
+        {
+          "name": "track_frame",
+          "type": "LONG"
+        },
+        {
+          "name": "dur_frame",
+          "type": "LONG"
+        },
+        {
+          "name": "is_speculative_frame",
+          "type": "BOOL"
+        }
+      ],
+      "params": [
+        {
+          "name": "event_channel",
+          "type": "STRING"
+        }
+      ]
     },
     {
       "id": "stdlib.android.android_input_events",
@@ -2322,6 +2433,20 @@
       "description": "Android Low-Memory Kill (LMK) events"
     },
     {
+      "id": "stdlib.android.android_process_memory_intervals",
+      "name": "android_process_memory_intervals",
+      "category": "android",
+      "type": "table",
+      "description": "A table of process memory counter intervals, clipped to the process lifetime. Provides a comprehensive view of memory usage, including raw values and zygote-adjusted values. NOTE: For 'mem.rss.anon', 'mem.swap', 'mem.rss.file', and 'mem.heap' tracks, we subtract the Zygote's average memory usage. This provides a better estimate of the child process's unique memory usage by accounting for the baseline memory inherited from the Zygote. NOTE: Some tracks may have a spike greater than 100MiB. This can be legitimate or an accounting issue: see b/418231246 for more details."
+    },
+    {
+      "id": "stdlib.android.android_process_memory_intervals_by_oom_bucket",
+      "name": "android_process_memory_intervals_by_oom_bucket",
+      "category": "android",
+      "type": "table",
+      "description": "Correlates memory counters with OOM adjustment scores. This table joins memory counters with OOM adjustment scores, providing insights into memory usage under system memory pressure. NOTE: For 'mem.rss.anon', 'mem.swap', 'mem.rss.file', and 'mem.heap' tracks, we subtract the Zygote's average memory usage. This provides a better estimate of the child process's unique memory usage by accounting for the baseline memory inherited from the Zygote. NOTE: Some tracks may have a spike greater than 100MiB. This can be legitimate or an accounting issue: see b/418231246 for more details."
+    },
+    {
       "id": "stdlib.android.memory_oom_score_with_rss_and_swap_per_process",
       "name": "memory_oom_score_with_rss_and_swap_per_process",
       "category": "android",
@@ -2808,6 +2933,33 @@
       "category": "android",
       "type": "table",
       "description": "High level metadata about each of the power rails."
+    },
+    {
+      "id": "stdlib.android._app_id_to_base_package",
+      "name": "_app_id_to_base_package",
+      "category": "android",
+      "type": "function",
+      "description": "Account for android-specific functionality (sdk sandbox, pcc) that is not encoded in the canonical app_id concept but is still required to understand the package see system/core/libcutils/include/private/android_filesystem_config.h",
+      "columns": [
+        {
+          "name": "package_name",
+          "type": "STRING"
+        },
+        {
+          "name": "version_code",
+          "type": "LONG"
+        },
+        {
+          "name": "debuggable",
+          "type": "BOOL"
+        }
+      ],
+      "params": [
+        {
+          "name": "app_id",
+          "type": "LONG"
+        }
+      ]
     },
     {
       "id": "stdlib.android._android_package_for_process",
@@ -4053,6 +4205,38 @@
         {
           "name": "window_id",
           "type": "LONG"
+        },
+        {
+          "name": "mode",
+          "type": "LONG"
+        },
+        {
+          "name": "flags",
+          "type": "LONG"
+        },
+        {
+          "name": "start_display_id",
+          "type": "LONG"
+        },
+        {
+          "name": "end_display_id",
+          "type": "LONG"
+        },
+        {
+          "name": "start_rotation",
+          "type": "LONG"
+        },
+        {
+          "name": "end_rotation",
+          "type": "LONG"
+        },
+        {
+          "name": "start_abs_bounds_rect_id",
+          "type": "LONG"
+        },
+        {
+          "name": "end_abs_bounds_rect_id",
+          "type": "LONG"
         }
       ]
     },
@@ -4563,6 +4747,99 @@
       "category": "chrome",
       "type": "table",
       "description": "All critical user interaction events, including type and table with associated metrics."
+    },
+    {
+      "id": "stdlib.chrome._chrome_jetstream_3_benchmark_name",
+      "name": "_chrome_jetstream_3_benchmark_name",
+      "category": "chrome",
+      "type": "view",
+      "description": "Mapping of JetStream 3 leaf benchmarks to their top-level groups and worst-case counts. Each top-level group has its score calculated separately, before all group scores are combined. Null top-level groups become ungrouped benchmarks.",
+      "columns": [
+        {
+          "name": "name",
+          "type": "STRING"
+        },
+        {
+          "name": "top_level_name",
+          "type": "STRING"
+        },
+        {
+          "name": "worst_case_count",
+          "type": "LONG"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.chrome.chrome_jetstream_3_renderer_main_utid",
+      "name": "chrome_jetstream_3_renderer_main_utid",
+      "category": "chrome",
+      "type": "function",
+      "description": "Find the main thread of the JetStream 3 renderer.",
+      "columns": [
+        {
+          "name": "utid",
+          "type": "LONG"
+        }
+      ],
+      "params": [
+        {
+          "name": "utid",
+          "type": "LONG"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.chrome._chrome_jetstream_3_measure_slice",
+      "name": "_chrome_jetstream_3_measure_slice",
+      "category": "chrome",
+      "type": "view",
+      "description": "Find JetStream 3 iteration slices.",
+      "columns": []
+    },
+    {
+      "id": "stdlib.chrome._chrome_jetstream_3_wsl_slice",
+      "name": "_chrome_jetstream_3_wsl_slice",
+      "category": "chrome",
+      "type": "view",
+      "description": "Find WSL slices.",
+      "columns": []
+    },
+    {
+      "id": "stdlib.chrome.chrome_jetstream_3_measure",
+      "name": "chrome_jetstream_3_measure",
+      "category": "chrome",
+      "type": "table",
+      "description": "Final list of JetStream 3 measures. Classified into: * 'First' (Iteration 0), * 'Average' (Iteration 1..N) * 'Worst' (slowest iterations). Note: 'Average' includes all iterations except the first and the worst ones. In the actual benchmark scoring, 'Average' includes 'Worst', but the measure table avoids listing the same slice twice. For WSL, the subtest name is the slice name (e.g., 'WSL-stdlib')."
+    },
+    {
+      "id": "stdlib.chrome._chrome_jetstream_3_subtest_score",
+      "name": "_chrome_jetstream_3_subtest_score",
+      "category": "chrome",
+      "type": "view",
+      "description": "Calculate score for each subtest classification. A subtest score is 5000 / arithmetic mean of durations in milliseconds.",
+      "columns": []
+    },
+    {
+      "id": "stdlib.chrome._chrome_jetstream_3_leaf_benchmark_score",
+      "name": "_chrome_jetstream_3_leaf_benchmark_score",
+      "category": "chrome",
+      "type": "view",
+      "description": "Calculate the score for each leaf benchmark. A benchmark's score is the geometric mean of its subtest scores (First, Average, Worst). Note: some benchmarks might not have exactly these three subtests, e.g. WSL.",
+      "columns": []
+    },
+    {
+      "id": "stdlib.chrome.chrome_jetstream_3_benchmark_score",
+      "name": "chrome_jetstream_3_benchmark_score",
+      "category": "chrome",
+      "type": "table",
+      "description": "Calculate the score for each top-level benchmark. - If a benchmark is grouped, its score is the geometric mean of its children's scores. Otherwise, for ungrouped benchmarks, their score is the top-level score."
+    },
+    {
+      "id": "stdlib.chrome.chrome_jetstream_3_score",
+      "name": "chrome_jetstream_3_score",
+      "category": "chrome",
+      "type": "function",
+      "description": "Overall JetStream 3 score. The final score is the geometric mean of all top-level benchmark scores."
     },
     {
       "id": "stdlib.chrome._chrome_get_next_presentation_time_by_pid",
@@ -5543,6 +5820,13 @@
       "category": "chrome",
       "type": "table",
       "description": "Scroll frames which are janky according to Chrome's v4 scroll jank metric together with the assigned causes. Contains exactly one row for each janky frame in `chrome_scroll_frame_info_v4`."
+    },
+    {
+      "id": "stdlib.chrome._chrome_scroll_jank_v4_sub_slice",
+      "name": "_chrome_scroll_jank_v4_sub_slice",
+      "category": "chrome",
+      "type": "macro",
+      "description": "Finds the timestamps and durations of sub-slices of 'ScrollJankV4' main slices with the given `sub_slice_names`. If available (in newer Chrome versions), we associate sub-slices with the main slice based on the `scroll_jank_v4.result_id` argument. Otherwise (in older Chrome versions), we associate sub-slices with the main slice based on the `descendant_slice` operator instead. We prefer the former approach because it's more robust. See below for more details. The returned table is guaranteed to contain at most one row for each 'ScrollJankV4' slice ID in `scroll_jank_v4_slice`."
     },
     {
       "id": "stdlib.chrome.chrome_scroll_jank_v4_results",
@@ -7074,6 +7358,13 @@
       "category": "graphs",
       "type": "macro",
       "description": "Computes the \"reachable\" set of nodes in a directed graph from a set of starting (root) nodes by performing a depth-first search from each root node on the graph. The search is bounded by the sum of edge weights on the path and the root node specifies the max weight (inclusive) allowed before stopping the search. The returned nodes are structured as a tree with parent-child relationships corresponding to the order in which nodes were encountered by the DFS. Each row also has the root node from which where the edge was encountered. While this macro can be used directly by end users (hence being public), it is primarily intended as a lower-level building block upon which higher level functions/macros in the standard library can be built. Example usage on traces with sched info: ``` -- Compute the reachable nodes from a sched wakeup chain INCLUDE PERFETTO MODULE sched.thread_executing_spans; SELECT * FROM graph_reachable_dfs_bounded !( ( SELECT id AS source_node_id, COALESCE(parent_id, id) AS dest_node_id, id - COALESCE(parent_id, id) AS edge_weight FROM _wakeup_chain ), ( SELECT id AS root_node_id, id - COALESCE(prev_id, id) AS root_target_weight FROM _wakeup_chain )); ```"
+    },
+    {
+      "id": "stdlib.intervals._interval_create",
+      "name": "_interval_create",
+      "category": "intervals",
+      "type": "macro",
+      "description": "Given a table of start timestamps and a table of end timestamps, creates intervals by matching each start with the next end timestamp strictly greater than it. Both input tables must have a column named `ts`. Uses an efficient O(n+m) two-pointer algorithm implemented in C++. Example: ``` SELECT * FROM _interval_create!( (SELECT ts FROM starts_table), (SELECT ts FROM ends_table) ) ```"
     },
     {
       "id": "stdlib.intervals._ii_df_agg",
@@ -9367,6 +9658,919 @@
       ]
     },
     {
+      "id": "stdlib.prelude.flow",
+      "name": "flow",
+      "category": "prelude",
+      "type": "view",
+      "description": "Contains flow events linking slices.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "slice_out",
+          "type": "JOINID(slice.id)"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.android_game_intervention_list",
+      "name": "android_game_intervention_list",
+      "category": "prelude",
+      "type": "view",
+      "description": "A table presenting all game modes and interventions of games installed on the system.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "package_name",
+          "type": "STRING"
+        },
+        {
+          "name": "uid",
+          "type": "LONG"
+        },
+        {
+          "name": "current_mode",
+          "type": "LONG"
+        },
+        {
+          "name": "standard_mode_supported",
+          "type": "LONG"
+        },
+        {
+          "name": "standard_mode_downscale",
+          "type": "DOUBLE"
+        },
+        {
+          "name": "standard_mode_use_angle",
+          "type": "LONG"
+        },
+        {
+          "name": "standard_mode_fps",
+          "type": "DOUBLE"
+        },
+        {
+          "name": "perf_mode_supported",
+          "type": "LONG"
+        },
+        {
+          "name": "perf_mode_downscale",
+          "type": "DOUBLE"
+        },
+        {
+          "name": "perf_mode_use_angle",
+          "type": "LONG"
+        },
+        {
+          "name": "perf_mode_fps",
+          "type": "DOUBLE"
+        },
+        {
+          "name": "battery_mode_supported",
+          "type": "LONG"
+        },
+        {
+          "name": "battery_mode_downscale",
+          "type": "DOUBLE"
+        },
+        {
+          "name": "battery_mode_use_angle",
+          "type": "LONG"
+        },
+        {
+          "name": "battery_mode_fps",
+          "type": "DOUBLE"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.android_dumpstate",
+      "name": "android_dumpstate",
+      "category": "prelude",
+      "type": "view",
+      "description": "Dumpsys entries from Android dumpstate.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "section",
+          "type": "STRING"
+        },
+        {
+          "name": "service",
+          "type": "STRING"
+        },
+        {
+          "name": "line",
+          "type": "STRING"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.profiler_smaps",
+      "name": "profiler_smaps",
+      "category": "prelude",
+      "type": "view",
+      "description": "The profiler smaps contains the memory stats for virtual memory ranges.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "upid",
+          "type": "LONG"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "path",
+          "type": "STRING"
+        },
+        {
+          "name": "size_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "private_dirty_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "swap_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "file_name",
+          "type": "STRING"
+        },
+        {
+          "name": "start_address",
+          "type": "LONG"
+        },
+        {
+          "name": "module_timestamp",
+          "type": "LONG"
+        },
+        {
+          "name": "module_debugid",
+          "type": "STRING"
+        },
+        {
+          "name": "module_debug_path",
+          "type": "STRING"
+        },
+        {
+          "name": "protection_flags",
+          "type": "LONG"
+        },
+        {
+          "name": "private_clean_resident_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "shared_dirty_resident_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "shared_clean_resident_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "locked_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "proportional_resident_kb",
+          "type": "LONG"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.package_list",
+      "name": "package_list",
+      "category": "prelude",
+      "type": "view",
+      "description": "Metadata about packages installed on the system.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "package_name",
+          "type": "STRING"
+        },
+        {
+          "name": "uid",
+          "type": "LONG"
+        },
+        {
+          "name": "debuggable",
+          "type": "LONG"
+        },
+        {
+          "name": "profileable_from_shell",
+          "type": "LONG"
+        },
+        {
+          "name": "version_code",
+          "type": "LONG"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.stack_profile_mapping",
+      "name": "stack_profile_mapping",
+      "category": "prelude",
+      "type": "view",
+      "description": "A mapping (binary / library) in a process.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "build_id",
+          "type": "STRING"
+        },
+        {
+          "name": "exact_offset",
+          "type": "LONG"
+        },
+        {
+          "name": "start_offset",
+          "type": "LONG"
+        },
+        {
+          "name": "start",
+          "type": "LONG"
+        },
+        {
+          "name": "end",
+          "type": "LONG"
+        },
+        {
+          "name": "load_bias",
+          "type": "LONG"
+        },
+        {
+          "name": "name",
+          "type": "STRING"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.stack_profile_frame",
+      "name": "stack_profile_frame",
+      "category": "prelude",
+      "type": "view",
+      "description": "A frame on the callstack. This is a location in a program.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "name",
+          "type": "STRING"
+        },
+        {
+          "name": "mapping",
+          "type": "JOINID(stack_profile_mapping.id)"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.stack_profile_callsite",
+      "name": "stack_profile_callsite",
+      "category": "prelude",
+      "type": "view",
+      "description": "A callsite. This is a list of frames that were on the stack.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "depth",
+          "type": "LONG"
+        },
+        {
+          "name": "parent_id",
+          "type": "JOINID(stack_profile_callsite.id)"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.cpu_profile_stack_sample",
+      "name": "cpu_profile_stack_sample",
+      "category": "prelude",
+      "type": "view",
+      "description": "Table containing stack samples from CPU profiling.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "callsite_id",
+          "type": "JOINID(stack_profile_callsite.id)"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.instruments_sample",
+      "name": "instruments_sample",
+      "category": "prelude",
+      "type": "view",
+      "description": "Samples from MacOS Instruments.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "utid",
+          "type": "LONG"
+        },
+        {
+          "name": "callsite_id",
+          "type": "JOINID(stack_profile_callsite.id)"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.stack_profile_symbol",
+      "name": "stack_profile_symbol",
+      "category": "prelude",
+      "type": "view",
+      "description": "Symbolization data for a frame.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "symbol_set_id",
+          "type": "LONG"
+        },
+        {
+          "name": "name",
+          "type": "STRING"
+        },
+        {
+          "name": "source_file",
+          "type": "STRING"
+        },
+        {
+          "name": "line_number",
+          "type": "LONG"
+        },
+        {
+          "name": "inlined",
+          "type": "LONG"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.heap_profile_allocation",
+      "name": "heap_profile_allocation",
+      "category": "prelude",
+      "type": "view",
+      "description": "Allocations that happened at a callsite.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "upid",
+          "type": "LONG"
+        },
+        {
+          "name": "heap_name",
+          "type": "STRING"
+        },
+        {
+          "name": "callsite_id",
+          "type": "JOINID(stack_profile_callsite.id)"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.vulkan_memory_allocations",
+      "name": "vulkan_memory_allocations",
+      "category": "prelude",
+      "type": "view",
+      "description": "Vulkan memory allocations.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "arg_set_id",
+          "type": "ARGSETID"
+        },
+        {
+          "name": "source",
+          "type": "STRING"
+        },
+        {
+          "name": "operation",
+          "type": "STRING"
+        },
+        {
+          "name": "timestamp",
+          "type": "LONG"
+        },
+        {
+          "name": "upid",
+          "type": "LONG"
+        },
+        {
+          "name": "device",
+          "type": "LONG"
+        },
+        {
+          "name": "device_memory",
+          "type": "LONG"
+        },
+        {
+          "name": "memory_type",
+          "type": "LONG"
+        },
+        {
+          "name": "heap",
+          "type": "LONG"
+        },
+        {
+          "name": "function_name",
+          "type": "STRING"
+        },
+        {
+          "name": "object_handle",
+          "type": "LONG"
+        },
+        {
+          "name": "memory_address",
+          "type": "LONG"
+        },
+        {
+          "name": "memory_size",
+          "type": "LONG"
+        },
+        {
+          "name": "scope",
+          "type": "STRING"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.gpu_counter_group",
+      "name": "gpu_counter_group",
+      "category": "prelude",
+      "type": "view",
+      "description": "GPU counter group.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "group_id",
+          "type": "LONG"
+        },
+        {
+          "name": "track_id",
+          "type": "JOINID(track.id)"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.spurious_sched_wakeup",
+      "name": "spurious_sched_wakeup",
+      "category": "prelude",
+      "type": "view",
+      "description": "Spurious scheduling wakeups.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "thread_state_id",
+          "type": "LONG"
+        },
+        {
+          "name": "irq_context",
+          "type": "LONG"
+        },
+        {
+          "name": "utid",
+          "type": "LONG"
+        },
+        {
+          "name": "waker_utid",
+          "type": "LONG"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.machine",
+      "name": "machine",
+      "category": "prelude",
+      "type": "view",
+      "description": "Contains raw machine_id of trace packets emitted from remote machines.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "raw_id",
+          "type": "LONG"
+        },
+        {
+          "name": "sysname",
+          "type": "STRING"
+        },
+        {
+          "name": "release",
+          "type": "STRING"
+        },
+        {
+          "name": "version",
+          "type": "STRING"
+        },
+        {
+          "name": "arch",
+          "type": "STRING"
+        },
+        {
+          "name": "num_cpus",
+          "type": "LONG"
+        },
+        {
+          "name": "android_build_fingerprint",
+          "type": "STRING"
+        },
+        {
+          "name": "android_device_manufacturer",
+          "type": "STRING"
+        },
+        {
+          "name": "android_sdk_version",
+          "type": "LONG"
+        },
+        {
+          "name": "system_ram_bytes",
+          "type": "LONG"
+        },
+        {
+          "name": "system_ram_gb",
+          "type": "LONG"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.filedescriptor",
+      "name": "filedescriptor",
+      "category": "prelude",
+      "type": "view",
+      "description": "Contains information of filedescriptors collected during the trace.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "ufd",
+          "type": "LONG"
+        },
+        {
+          "name": "fd",
+          "type": "LONG"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "upid",
+          "type": "LONG"
+        },
+        {
+          "name": "path",
+          "type": "STRING"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.experimental_missing_chrome_processes",
+      "name": "experimental_missing_chrome_processes",
+      "category": "prelude",
+      "type": "view",
+      "description": "Experimental table for missing Chrome processes.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "upid",
+          "type": "LONG"
+        },
+        {
+          "name": "reliable_from",
+          "type": "LONG"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.clock_snapshot",
+      "name": "clock_snapshot",
+      "category": "prelude",
+      "type": "view",
+      "description": "Contains all the mapping between clock snapshots and trace time.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "clock_id",
+          "type": "LONG"
+        },
+        {
+          "name": "clock_name",
+          "type": "STRING"
+        },
+        {
+          "name": "clock_value",
+          "type": "LONG"
+        },
+        {
+          "name": "snapshot_id",
+          "type": "LONG"
+        },
+        {
+          "name": "machine_id",
+          "type": "JOINID(machine.id)"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.surfaceflinger_layers_snapshot",
+      "name": "surfaceflinger_layers_snapshot",
+      "category": "prelude",
+      "type": "view",
+      "description": "SurfaceFlinger layers snapshot.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "arg_set_id",
+          "type": "ARGSETID"
+        },
+        {
+          "name": "base64_proto_id",
+          "type": "LONG"
+        },
+        {
+          "name": "sequence_id",
+          "type": "LONG"
+        },
+        {
+          "name": "has_invalid_elapsed_ts",
+          "type": "LONG"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.surfaceflinger_layer",
+      "name": "surfaceflinger_layer",
+      "category": "prelude",
+      "type": "view",
+      "description": "SurfaceFlinger layer.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "snapshot_id",
+          "type": "JOINID(surfaceflinger_layers_snapshot.id)"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.surfaceflinger_transactions",
+      "name": "surfaceflinger_transactions",
+      "category": "prelude",
+      "type": "view",
+      "description": "SurfaceFlinger transactions.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "arg_set_id",
+          "type": "ARGSETID"
+        },
+        {
+          "name": "base64_proto_id",
+          "type": "LONG"
+        },
+        {
+          "name": "vsync_id",
+          "type": "LONG"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.window_manager_shell_transitions",
+      "name": "window_manager_shell_transitions",
+      "category": "prelude",
+      "type": "view",
+      "description": "Window Manager Shell Transitions.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "transition_id",
+          "type": "LONG"
+        },
+        {
+          "name": "arg_set_id",
+          "type": "ARGSETID"
+        },
+        {
+          "name": "transition_type",
+          "type": "LONG"
+        },
+        {
+          "name": "send_time_ns",
+          "type": "LONG"
+        },
+        {
+          "name": "dispatch_time_ns",
+          "type": "LONG"
+        },
+        {
+          "name": "duration_ns",
+          "type": "LONG"
+        },
+        {
+          "name": "finish_time_ns",
+          "type": "LONG"
+        },
+        {
+          "name": "shell_abort_time_ns",
+          "type": "LONG"
+        },
+        {
+          "name": "wm_abort_time_ns",
+          "type": "LONG"
+        },
+        {
+          "name": "merge_time_ns",
+          "type": "LONG"
+        },
+        {
+          "name": "create_time_ns",
+          "type": "LONG"
+        },
+        {
+          "name": "handler",
+          "type": "LONG"
+        },
+        {
+          "name": "status",
+          "type": "STRING"
+        },
+        {
+          "name": "flags",
+          "type": "LONG"
+        },
+        {
+          "name": "start_transaction_id",
+          "type": "LONG"
+        },
+        {
+          "name": "finish_transaction_id",
+          "type": "LONG"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.window_manager_shell_transition_handlers",
+      "name": "window_manager_shell_transition_handlers",
+      "category": "prelude",
+      "type": "view",
+      "description": "Window Manager Shell Transition Handlers.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "handler_id",
+          "type": "LONG"
+        },
+        {
+          "name": "handler_name",
+          "type": "STRING"
+        },
+        {
+          "name": "base64_proto_id",
+          "type": "LONG"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.protolog",
+      "name": "protolog",
+      "category": "prelude",
+      "type": "view",
+      "description": "Protolog entries.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "level",
+          "type": "STRING"
+        },
+        {
+          "name": "tag",
+          "type": "STRING"
+        },
+        {
+          "name": "message",
+          "type": "STRING"
+        },
+        {
+          "name": "stacktrace",
+          "type": "STRING"
+        },
+        {
+          "name": "location",
+          "type": "STRING"
+        }
+      ]
+    },
+    {
       "id": "stdlib.prelude._trace_import_logs",
       "name": "_trace_import_logs",
       "category": "prelude",
@@ -9421,6 +10625,179 @@
         {
           "name": "replacement",
           "type": "STRING"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.reverse",
+      "name": "reverse",
+      "category": "prelude",
+      "type": "function",
+      "description": "Reverses a string.",
+      "params": [
+        {
+          "name": "input",
+          "type": "STRING"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.base64_encode",
+      "name": "base64_encode",
+      "category": "prelude",
+      "type": "function",
+      "description": "Encodes bytes into a base64 string.",
+      "params": [
+        {
+          "name": "input",
+          "type": "BYTES"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.base64_decode",
+      "name": "base64_decode",
+      "category": "prelude",
+      "type": "function",
+      "description": "Decodes a base64-encoded string into bytes.",
+      "params": [
+        {
+          "name": "input",
+          "type": "STRING"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.demangle",
+      "name": "demangle",
+      "category": "prelude",
+      "type": "function",
+      "description": "Demangles a C++ mangled symbol name.",
+      "params": [
+        {
+          "name": "input",
+          "type": "STRING"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.regexp_extract",
+      "name": "regexp_extract",
+      "category": "prelude",
+      "type": "function",
+      "description": "Extracts the first match of a regular expression from a string.",
+      "params": [
+        {
+          "name": "input",
+          "type": "STRING"
+        },
+        {
+          "name": "regex",
+          "type": "STRING"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.UNHEX",
+      "name": "UNHEX",
+      "category": "prelude",
+      "type": "function",
+      "description": "Converts a hex string (with optional 0x prefix) to an integer.",
+      "params": [
+        {
+          "name": "input",
+          "type": "STRING"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.abs_time_str",
+      "name": "abs_time_str",
+      "category": "prelude",
+      "type": "function",
+      "description": "Converts a trace timestamp to an absolute ISO 8601 time string.",
+      "params": [
+        {
+          "name": "ts",
+          "type": "INT"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.to_monotonic",
+      "name": "to_monotonic",
+      "category": "prelude",
+      "type": "function",
+      "description": "Converts a trace timestamp to monotonic clock time.",
+      "params": [
+        {
+          "name": "ts",
+          "type": "INT"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.to_realtime",
+      "name": "to_realtime",
+      "category": "prelude",
+      "type": "function",
+      "description": "Converts a trace timestamp to realtime clock time.",
+      "params": [
+        {
+          "name": "ts",
+          "type": "INT"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.to_timecode",
+      "name": "to_timecode",
+      "category": "prelude",
+      "type": "function",
+      "description": "Converts a trace timestamp to a human-readable timecode (HH:MM:SS mmm uuu nnn).",
+      "params": [
+        {
+          "name": "ts",
+          "type": "INT"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.ln",
+      "name": "ln",
+      "category": "prelude",
+      "type": "function",
+      "description": "Computes the natural logarithm of a number.",
+      "params": [
+        {
+          "name": "input",
+          "type": "DOUBLE"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.exp",
+      "name": "exp",
+      "category": "prelude",
+      "type": "function",
+      "description": "Computes e raised to the power of a number.",
+      "params": [
+        {
+          "name": "input",
+          "type": "DOUBLE"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.sqrt",
+      "name": "sqrt",
+      "category": "prelude",
+      "type": "function",
+      "description": "Computes the square root of a number.",
+      "params": [
+        {
+          "name": "input",
+          "type": "DOUBLE"
         }
       ]
     },

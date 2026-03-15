@@ -27,6 +27,10 @@ compound_patterns:
 游戏渲染管线与标准 Android View 不同：没有 FrameTimeline，不使用 Choreographer/RenderThread 流程。
 需要使用 `game_fps_analysis`（非 `scrolling_analysis`）作为入口。
 
+#### 游戏场景关键 Stdlib 表
+
+写 execute_sql 时优先使用（完整列表见方法论模板）：`android_gpu_frequency`、`cpu_utilization_per_second`、`cpu_frequency_counters`、`android_dvfs_counters`、`android_screen_state`
+
 **Phase 1 — 游戏帧率分析（1 次调用）：**
 ```
 invoke_skill("game_fps_analysis", { process_name: "<游戏进程名>" })

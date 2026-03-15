@@ -1,0 +1,185 @@
+# =============================================================================
+# Binder 根因归因（原子 Skill）
+# =============================================================================
+# 使用 Perfetto stdlib 的 android_binder_client_server_breakdown 表
+# 对慢 Binder 事务进行服务端/客户端阻塞原因归因。
+#
+# breakdown 原因类型包括：
+# - GC (垃圾回收导致服务端暂停)
+# - lock_contention (锁竞争)
+# - binder (嵌套 Binder 调用)
+# - monitor_contention (Java monitor 等待)
+# - IO (磁盘 IO)
+# - CPU scheduling (调度延迟)
+# 等系统级根因分类。
+
+name: binder_root_cause
+version: "1.0"
+type: composite
+category: ipc
+
+meta:
+  display_name: "Binder 根因归因"
+  description: "分析慢 Binder 事务的服务端/客户端阻塞原因（GC/锁/IO/内存回收）"
+  icon: "call_split"
+  tags: [binder, root_cause, breakdown, diagnostics]
+
+prerequisites:
+  modules:
+    - android.binder_breakdown
+
+inputs:
+  - name: process_name
+    type: string
+    required: true
+    description: "目标进程名"
+  - name: start_ts
+    type: timestamp
+    required: true
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: true
+    description: "分析结束时间戳(ns)"
+  - name: min_dur_ms
+    type: number
+    required: false
+    description: "最小 Binder 事务时长阈值(ms)，默认 1ms"
+
+steps:
+  # ==========================================================================
+  # Step 1: 慢 Binder 事务的 breakdown 归因
+  # ==========================================================================
+  - id: slow_binder_breakdown
+    type: atomic
+    name: "慢 Binder 事务阻塞归因"
+    display:
+      level: key
+      layer: list
+      title: "慢 Binder 事务阻塞原因明细"
+      columns:
+        - name: interface
+          label: "接口"
+          type: string
+        - name: server_process
+          label: "服务端进程"
+          type: string
+        - name: client_dur_ms
+          label: "客户端耗时(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: server_dur_ms
+          label: "服务端耗时(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: reason
+          label: "阻塞原因"
+          type: string
+        - name: reason_type
+          label: "原因类型"
+          type: string
+        - name: reason_dur_ms
+          label: "原因耗时(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: reason_pct
+          label: "原因占比(%)"
+          type: percentage
+          format: percentage
+    sql: |
+      WITH slow_txns AS (
+        SELECT binder_txn_id, binder_reply_id, client_ts, client_dur, server_dur,
+               aidl_name, client_process, server_process
+        FROM android_binder_txns
+        WHERE is_sync = 1
+          AND (client_process GLOB '${process_name}*' OR '${process_name}' = '')
+          AND client_dur > ${min_dur_ms|1} * 1000000
+          AND (${start_ts} IS NULL OR client_ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR client_ts < ${end_ts})
+        ORDER BY client_dur DESC
+        LIMIT 20
+      )
+      SELECT
+        COALESCE(st.aidl_name, 'unknown') as interface,
+        st.server_process,
+        ROUND(st.client_dur / 1e6, 2) as client_dur_ms,
+        ROUND(st.server_dur / 1e6, 2) as server_dur_ms,
+        bd.reason,
+        bd.reason_type,
+        ROUND(SUM(bd.dur) / 1e6, 2) as reason_dur_ms,
+        ROUND(100.0 * SUM(bd.dur) / st.client_dur, 1) as reason_pct
+      FROM slow_txns st
+      JOIN android_binder_client_server_breakdown bd
+        ON st.binder_txn_id = bd.binder_txn_id
+        AND st.binder_reply_id = bd.binder_reply_id
+      GROUP BY st.binder_txn_id, bd.reason, bd.reason_type
+      ORDER BY st.client_dur DESC, reason_dur_ms DESC
+    save_as: slow_binder_breakdown
+    optional: true
+
+  # ==========================================================================
+  # Step 2: 阻塞原因汇总
+  # ==========================================================================
+  - id: blame_summary
+    type: atomic
+    name: "阻塞原因汇总"
+    display:
+      level: key
+      layer: overview
+      title: "Binder 阻塞原因汇总"
+      columns:
+        - name: reason
+          label: "阻塞原因"
+          type: string
+        - name: reason_type
+          label: "原因类型"
+          type: string
+        - name: txn_count
+          label: "事务数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+    synthesize:
+      role: overview
+      fields:
+        - key: reason
+          label: 原因
+        - key: total_dur_ms
+          label: 总耗时
+          format: "{{value}} ms"
+        - key: txn_count
+          label: 事务数
+      insights:
+        - condition: "reason_type === 'gc' && total_dur_ms > 5"
+          template: "GC 导致 Binder 阻塞 {{total_dur_ms}}ms，影响 {{txn_count}} 个事务"
+        - condition: "reason_type === 'lock_contention' && total_dur_ms > 5"
+          template: "锁竞争导致 Binder 阻塞 {{total_dur_ms}}ms，需检查同步代码"
+    sql: |
+      SELECT
+        bd.reason,
+        bd.reason_type,
+        COUNT(DISTINCT bd.binder_txn_id) as txn_count,
+        ROUND(SUM(bd.dur) / 1e6, 2) as total_dur_ms
+      FROM android_binder_client_server_breakdown bd
+      JOIN android_binder_txns bt ON bd.binder_txn_id = bt.binder_txn_id
+        AND bd.binder_reply_id = bt.binder_reply_id
+      WHERE bt.is_sync = 1
+        AND (bt.client_process GLOB '${process_name}*' OR '${process_name}' = '')
+        AND bt.client_dur > ${min_dur_ms|1} * 1000000
+        AND (${start_ts} IS NULL OR bt.client_ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR bt.client_ts < ${end_ts})
+      GROUP BY bd.reason, bd.reason_type
+      ORDER BY total_dur_ms DESC
+    save_as: blame_summary
+    optional: true
+
+output:
+  format: layered
+  default_expanded: [blame_summary, slow_binder_breakdown]

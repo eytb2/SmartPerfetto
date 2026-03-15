@@ -35,20 +35,18 @@ keywords:
 
 **⚠️ 核心原则：**
 1. **逐帧根因诊断是最重要的**。概览统计（帧率、卡顿率）只是入口，真正有价值的是每一个掉帧帧的根因分析。
-2. **区分真实掉帧 vs 框架标记**：
-   - **真实掉帧（real_jank）**：消费端帧呈现间隔 > 1.5x VSync 周期，用户肉眼可见的卡顿
-   - **App 超时（App Deadline Missed）**：App 生产帧超过帧预算，是真实掉帧的子集
-   - **隐形掉帧**：框架标记为 `jank_type=None`，但消费端检测到真实掉帧。这类帧往往是 SurfaceFlinger 合成延迟或管线积压导致的，**不可忽略**
-   - **Buffer Stuffing 假阳性**：框架标记为 Buffer Stuffing，但消费端间隔正常（false_positive=9 表示 9 帧是假阳性）
-3. **如何计算真实掉帧总数**：
-   - scrolling_analysis 的 `jank_type_stats` step 返回每种 `jank_type` 的 `real_jank_count` 字段
-   - **总真实掉帧 = 所有行的 `real_jank_count` 之和**（不是只看 `jank_type != 'None'` 的行！）
-   - 例如：`None` 行 `real_jank_count=165` + `App Deadline Missed` 行 `real_jank_count=135` = 总真实掉帧 300
-   - `jank_type=None` 但 `real_jank_count > 0` 表示 **隐形掉帧**，必须在报告中明确指出
+2. **Per-Layer Buffer 枯竭检测（token-gap 模型）**：
+   - 掉帧检测基于 `display_frame_token` 序列缺口：当 App Layer 在连续 SF DisplayFrame 中出现 token 跳跃（gap > 1），说明 SF 在中间帧合成时该 Layer 没有新 Buffer = 缓冲区枯竭 = 用户可见卡顿
+   - `token_gap = 1` → 正常（每帧都有新 buffer），`token_gap = N` → 跳过 N-1 个 DisplayFrame
+   - 这是 per-layer 检测，不受 SF 全局合成状态影响（SF 可能在消费其他 Layer 的 buffer）
+3. **Guilty Frame 溯源**：
+   - BlastBufferQueue 三缓冲下，可见卡顿通常出现在慢帧 2-3 帧之后（管线排空）
+   - `guilty_frame_id` 字段指向导致管线枯竭的实际慢帧（向前回溯 ≤5 帧，取最慢的超预算帧）
+   - 根因分析（四象限/CPU/Binder）应针对 guilty frame 而非枯竭帧本身
 4. **get_app_jank_frames 结果中的 `jank_responsibility` 字段**：
    - `APP`：App 侧原因（App Deadline Missed / Self Jank）
    - `SF`：SurfaceFlinger 侧原因
-   - `HIDDEN`：隐形掉帧（框架未标记，消费端检测到）
+   - `HIDDEN`：缓冲区枯竭但框架未标记（Perfetto 帧颜色为绿色）
    - `BUFFER_STUFFING`：Buffer Stuffing
 
 **Phase 1 — 概览 + 掉帧列表 + 批量根因分类（1 次调用）：**
@@ -85,6 +83,23 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
 | **多帧 `jank_responsibility = SF`** | 调用 `invoke_skill("surfaceflinger_analysis")` 分析 SF 合成延迟、GPU/HWC 合成比例、Fence 超时 |
 | **多帧 `big_avg_freq_mhz` 显著低于设备峰值** | 调用 `invoke_skill("thermal_throttling")` 检查是否存在热节流。CPU 频率被 thermal 限制是常见的跨帧系统级根因 |
 | **VRR 设备（通过 `vrr_detection` 或 VSync 周期 ≠ 16.67ms 判断）** | 注意 1.5x VSync 阈值需基于检测到的实际 VSync 周期（如 120Hz = 8.33ms, 1.5x = 12.5ms），而非固定 16.67ms |
+
+**Phase 1.9 — 根因深钻（对主要根因类别追问 WHY）：**
+
+对 `batch_frame_root_cause` 中占比 >15% 的每个 reason_code，选最严重的 1 帧执行深钻：
+
+| 条件 | 深钻动作 | 目标 |
+|------|---------|------|
+| **任何 reason_code + Q4>20%** | `invoke_skill("blocking_chain_analysis", {start_ts, end_ts, process_name})` | 阻塞链：谁阻塞了主线程？是锁？Binder？IO？唤醒者是谁？ |
+| **binder_overlap >5ms** | `invoke_skill("binder_root_cause", {start_ts, end_ts, process_name})` | 服务端还是客户端慢？具体原因（GC？锁？IO？内存回收？）|
+| **gc_overlap >3ms** | 查询 `android_garbage_collection_events` WHERE gc_ts 在帧窗口内 | 哪种 GC？回收了多少？GC 运行耗时？|
+| **freq_ramp_slow** | `lookup_knowledge("cpu-scheduler")` | 是 governor 升频延迟还是 thermal 限频？|
+| **small_core_placement** | `lookup_knowledge("cpu-scheduler")` | 为什么被调度到小核？大核被谁占用？|
+| **gpu_bound** | `lookup_knowledge("rendering-pipeline")` | GPU 频率是否被限？SF 合成是否是瓶颈？|
+
+**WHY 链深度要求：** 每个 [CRITICAL]/[HIGH] 发现的根因推理链必须至少 2 级：
+- ✅ Level 1: "帧超时" → Level 2: "Binder 阻塞" → Level 3: "服务端 system_server monitor_contention"
+- ❌ 仅 Level 1: "帧超时 45ms，workload_heavy"（缺少机制解释）
 
 **Phase 2 — 补充深钻（可选，仅在需要时执行）：**
 Phase 1 的 `batch_frame_root_cause` 已包含每帧的**完整详细分析数据**：
@@ -146,8 +161,19 @@ invoke_skill("jank_frame_detail", {
 
 4. **优化建议**：按根因类别给出可操作建议，优先级按帧数占比排序
 
+**当报告隐形掉帧时，必须提醒用户：**
+- 隐形掉帧在 Perfetto 时间线上帧颜色为**绿色**（框架标记 jank_type=None）
+- 真实卡顿证据是 **VSYNC-sf 计数器轨道**上的呈现间隔异常（> 1.5x VSync 周期）
+- 可参考帧列表中的"呈现间隔"列确认
+
 ⚠️ **结论必须覆盖所有掉帧帧的根因分布**，不能只报告少数几帧。
    batch_frame_root_cause 提供了全量分类和详细指标，结论中的"全帧根因分布"和"代表帧分析"都应基于它。
+
+---
+
+#### 滑动场景关键 Stdlib 表
+
+写 execute_sql 时优先使用（完整列表见方法论模板）：`android_frame_stats`、`android_frames_overrun`、`android_surfaceflinger_workloads`、`android_gpu_frequency`、`cpu_thread_utilization_in_interval(ts, dur)`、`cpu_frequency_counters`、`slice_self_dur`、`android_screen_state`
 
 ---
 

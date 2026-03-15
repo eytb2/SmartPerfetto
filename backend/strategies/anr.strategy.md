@@ -36,6 +36,10 @@ keywords:
 | CONTENT_PROVIDER_NOT_RESPONDING | 10s | ContentProvider 发布超时 |
 | NO_FOCUSED_WINDOW | 5s | 无焦点窗口（通常是 Activity 启动异常） |
 
+#### ANR 场景关键 Stdlib 表
+
+写 execute_sql 时优先使用（完整列表见方法论模板）：`android_oom_adj_intervals`、`android_monitor_contention_chain`、`android_screen_state`、`sched_latency_for_running_interval`、`cpu_utilization_in_interval(ts, dur)`、`android_garbage_collection_events`
+
 **Phase 1 — ANR 检测 + 系统健康评估（1 次调用）：**
 ```
 invoke_skill("anr_analysis")

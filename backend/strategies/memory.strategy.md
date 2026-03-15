@@ -25,6 +25,10 @@ compound_patterns:
 
 #### 内存分析（用户提到 内存、memory、OOM、泄漏、LMK）
 
+#### 内存场景关键 Stdlib 表
+
+写 execute_sql 时优先使用（完整列表见方法论模板）：`android_garbage_collection_events`、`android_oom_adj_intervals`、`android_screen_state`
+
 **Phase 1 — 内存概览（1 次调用）：**
 ```
 invoke_skill("memory_analysis")

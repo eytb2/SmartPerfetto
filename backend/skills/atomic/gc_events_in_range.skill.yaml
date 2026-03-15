@@ -26,6 +26,10 @@ meta:
   icon: "memory"
   tags: [gc, memory, events, atomic]
 
+prerequisites:
+  modules:
+    - android.garbage_collection
+
 inputs:
   - name: package
     type: string
@@ -66,36 +70,42 @@ display:
     - name: is_main_thread
       label: "主线程"
       type: number
+    - name: reclaimed_mb
+      label: "回收(MB)"
+      type: number
+    - name: gc_running_dur
+      label: "GC运行时间"
+      type: duration
+      format: duration_ms
+      unit: ns
 
 sql: |
+  -- Use Perfetto stdlib android_garbage_collection_events (precise gc_type classification,
+  -- heap metrics, and CPU state breakdown). Note: returns 0 rows on older traces that
+  -- lack GC tracepoints; the agent should fall back to manual GLOB-based slice query.
   SELECT
-    s.ts,
-    s.dur,
-    s.name as gc_name,
-    t.name as thread_name,
-    t.tid,
-    p.pid,
-    p.name as process_name,
-    CASE WHEN t.tid = p.pid THEN 1 ELSE 0 END as is_main_thread,
-    CASE
-      WHEN s.name GLOB '*ConcurrentCopying*' THEN 'ConcurrentCopying'
-      WHEN s.name GLOB '*MarkSweep*' THEN 'MarkSweep'
-      WHEN s.name GLOB '*Explicit*' THEN 'Explicit'
-      WHEN s.name GLOB '*Alloc*' THEN 'Alloc'
-      WHEN s.name GLOB '*Background*' THEN 'Background'
-      WHEN s.name GLOB '*young*' OR s.name GLOB '*Young*' THEN 'Young'
-      WHEN s.name GLOB '*full*' OR s.name GLOB '*Full*' THEN 'Full'
-      ELSE 'Other'
-    END as gc_type
-  FROM slice s
-  JOIN thread_track tt ON s.track_id = tt.id
-  JOIN thread t ON tt.utid = t.utid
-  JOIN process p ON t.upid = p.upid
-  WHERE p.name GLOB '${package}*'
-    AND (s.name GLOB '*GC*' OR s.name GLOB '*gc*' OR s.name GLOB '*ConcurrentCopying*')
-    AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
-    AND (${end_ts} IS NULL OR s.ts < ${end_ts})
-  ORDER BY s.ts
+    gc_ts as ts,
+    gc_dur as dur,
+    gc_type as gc_name,
+    thread_name,
+    tid,
+    pid,
+    process_name,
+    CASE WHEN tid = pid THEN 1 ELSE 0 END as is_main_thread,
+    gc_type,
+    -- Stdlib bonus columns (not available in fallback)
+    is_mark_compact,
+    reclaimed_mb,
+    min_heap_mb,
+    max_heap_mb,
+    gc_running_dur,
+    gc_runnable_dur,
+    gc_unint_io_dur
+  FROM android_garbage_collection_events
+  WHERE process_name GLOB '${package}*'
+    AND (${start_ts} IS NULL OR gc_ts >= ${start_ts})
+    AND (${end_ts} IS NULL OR gc_ts < ${end_ts})
+  ORDER BY gc_ts
 
 save_as: gc_events
 

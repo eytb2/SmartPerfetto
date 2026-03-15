@@ -1,0 +1,304 @@
+# =============================================================================
+# 阻塞链分析（通用版）
+# =============================================================================
+# 分析指定时间范围内主线程的阻塞链：线程状态分布、唤醒链、阻塞函数分布。
+# 与 anr_main_thread_blocking 不同，此技能不依赖 ANR 时间戳，
+# 可用于任意时间范围的阻塞根因分析。
+#
+# 典型使用场景：
+# - 滚动卡顿期间的主线程阻塞根因
+# - 启动慢时某阶段的阻塞分析
+# - 任意用户选定时间范围的诊断
+
+name: blocking_chain_analysis
+version: "1.0"
+type: composite
+category: diagnostics
+
+meta:
+  display_name: "阻塞链分析"
+  description: "分析指定时间范围内主线程的阻塞链：谁阻塞了主线程？唤醒者是谁？唤醒者在做什么？"
+  icon: "link"
+  tags: [blocking, waker, chain, root_cause, diagnostics]
+
+prerequisites:
+  required_tables:
+    - thread_state
+    - thread
+    - process
+
+inputs:
+  - name: process_name
+    type: string
+    required: true
+    description: "目标进程名"
+  - name: start_ts
+    type: timestamp
+    required: true
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: true
+    description: "分析结束时间戳(ns)"
+
+steps:
+  # ==========================================================================
+  # Step 1: 主线程状态分布
+  # ==========================================================================
+  - id: thread_state_distribution
+    type: atomic
+    name: "主线程状态分布"
+    display:
+      level: key
+      layer: overview
+      title: "主线程状态分布（指定时间范围）"
+      columns:
+        - name: state
+          label: "线程状态"
+          type: string
+        - name: state_display
+          label: "状态说明"
+          type: string
+        - name: total_dur_ms
+          label: "总时间(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: pct
+          label: "占比(%)"
+          type: percentage
+          format: percentage
+        - name: blocked_function
+          label: "主要阻塞函数"
+          type: string
+    synthesize:
+      role: overview
+      fields:
+        - key: state_display
+          label: 状态
+        - key: pct
+          label: 占比
+          format: "{{value}}%"
+        - key: total_dur_ms
+          label: 总时间
+          format: "{{value}} ms"
+      insights:
+        - condition: "state === 'S' && pct > 50"
+          template: "主线程 {{pct}}% 时间处于 Sleep 状态，可能在等待锁或 Binder"
+        - condition: "state === 'D' && pct > 20"
+          template: "主线程 {{pct}}% 时间处于不可中断睡眠 (D)，可能存在 IO 阻塞"
+        - condition: "state === 'R' && pct > 80"
+          template: "主线程 {{pct}}% 时间处于 Runnable/Running，CPU 争抢或繁忙"
+    sql: |
+      WITH main_thread AS (
+        SELECT t.utid
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE p.name GLOB '${process_name}*'
+          AND (t.is_main_thread = 1 OR t.tid = p.pid)
+        LIMIT 1
+      ),
+      state_dist AS (
+        SELECT
+          ts_tbl.state,
+          COUNT(*) as count,
+          SUM(
+            MIN(ts_tbl.ts + ts_tbl.dur, ${end_ts})
+            - MAX(ts_tbl.ts, ${start_ts})
+          ) as total_dur_ns,
+          -- 找到该状态下最常见的 blocked_function
+          (SELECT bf.blocked_function
+           FROM thread_state bf
+           CROSS JOIN main_thread mt2
+           WHERE bf.utid = mt2.utid
+             AND bf.state = ts_tbl.state
+             AND bf.blocked_function IS NOT NULL
+             AND bf.blocked_function != ''
+             AND bf.ts + bf.dur > ${start_ts}
+             AND bf.ts < ${end_ts}
+           GROUP BY bf.blocked_function
+           ORDER BY SUM(bf.dur) DESC
+           LIMIT 1
+          ) as top_blocked_function
+        FROM thread_state ts_tbl
+        CROSS JOIN main_thread mt
+        WHERE ts_tbl.utid = mt.utid
+          AND ts_tbl.ts + ts_tbl.dur > ${start_ts}
+          AND ts_tbl.ts < ${end_ts}
+        GROUP BY ts_tbl.state
+      ),
+      total AS (
+        SELECT SUM(total_dur_ns) as total_ns FROM state_dist
+      )
+      SELECT
+        sd.state,
+        CASE sd.state
+          WHEN 'Running' THEN 'Running (运行中)'
+          WHEN 'R' THEN 'Runnable (可运行)'
+          WHEN 'R+' THEN 'Runnable (Preempted)'
+          WHEN 'S' THEN 'Sleeping (睡眠/等待)'
+          WHEN 'D' THEN 'Uninterruptible Sleep (不可中断睡眠/IO)'
+          WHEN 'T' THEN 'Stopped (已停止)'
+          WHEN 'X' THEN 'Dead (已退出)'
+          ELSE sd.state
+        END as state_display,
+        ROUND(sd.total_dur_ns / 1e6, 2) as total_dur_ms,
+        sd.count,
+        ROUND(100.0 * sd.total_dur_ns / NULLIF((SELECT total_ns FROM total), 0), 1) as pct,
+        sd.top_blocked_function as blocked_function
+      FROM state_dist sd
+      ORDER BY total_dur_ns DESC
+    save_as: thread_state_distribution
+
+  # ==========================================================================
+  # Step 2: 唤醒链分析
+  # ==========================================================================
+  - id: waker_chain
+    type: atomic
+    name: "唤醒链分析"
+    display:
+      level: key
+      layer: list
+      title: "主线程唤醒链（谁唤醒了主线程）"
+      columns:
+        - name: ts
+          label: "唤醒时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: waker_thread_name
+          label: "唤醒者线程"
+          type: string
+        - name: waker_process_name
+          label: "唤醒者进程"
+          type: string
+        - name: blocked_function
+          label: "阻塞函数"
+          type: string
+        - name: total_sleep_dur_ms
+          label: "总 Sleep 时长(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: max_sleep_dur_ms
+          label: "最大 Sleep 时长(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: wakeup_count
+          label: "唤醒次数"
+          type: number
+          format: compact
+    sql: |
+      WITH main_thread AS (
+        SELECT t.utid
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE p.name GLOB '${process_name}*'
+          AND (t.is_main_thread = 1 OR t.tid = p.pid)
+        LIMIT 1
+      ),
+      wakeups AS (
+        SELECT
+          ts_tbl.ts + ts_tbl.dur as wakeup_ts,
+          ts_tbl.dur as sleep_dur,
+          ts_tbl.blocked_function,
+          wt.name as waker_thread_name,
+          wp.name as waker_process_name
+        FROM thread_state ts_tbl
+        CROSS JOIN main_thread mt
+        LEFT JOIN thread wt ON ts_tbl.waker_utid = wt.utid
+        LEFT JOIN process wp ON wt.upid = wp.upid
+        WHERE ts_tbl.utid = mt.utid
+          AND ts_tbl.state IN ('S', 'D')
+          AND ts_tbl.waker_utid IS NOT NULL
+          AND ts_tbl.ts + ts_tbl.dur > ${start_ts}
+          AND ts_tbl.ts < ${end_ts}
+      )
+      SELECT
+        printf('%d', MIN(wakeup_ts)) as ts,
+        waker_thread_name,
+        waker_process_name,
+        blocked_function,
+        ROUND(SUM(sleep_dur) / 1e6, 2) as total_sleep_dur_ms,
+        ROUND(MAX(sleep_dur) / 1e6, 2) as max_sleep_dur_ms,
+        COUNT(*) as wakeup_count
+      FROM wakeups
+      WHERE waker_thread_name IS NOT NULL
+      GROUP BY waker_thread_name, waker_process_name, blocked_function
+      ORDER BY SUM(sleep_dur) DESC
+      LIMIT 15
+    save_as: waker_chain
+    optional: true
+
+  # ==========================================================================
+  # Step 3: 阻塞函数汇总
+  # ==========================================================================
+  - id: blocked_function_summary
+    type: atomic
+    name: "阻塞函数汇总"
+    display:
+      level: key
+      layer: list
+      title: "主线程阻塞函数分布 Top 10"
+      columns:
+        - name: blocked_function
+          label: "阻塞函数"
+          type: string
+        - name: total_dur_ms
+          label: "总阻塞时间(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: pct
+          label: "占比(%)"
+          type: percentage
+          format: percentage
+    sql: |
+      WITH main_thread AS (
+        SELECT t.utid
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE p.name GLOB '${process_name}*'
+          AND (t.is_main_thread = 1 OR t.tid = p.pid)
+        LIMIT 1
+      ),
+      blocked AS (
+        SELECT
+          ts_tbl.blocked_function,
+          ts_tbl.dur
+        FROM thread_state ts_tbl
+        CROSS JOIN main_thread mt
+        WHERE ts_tbl.utid = mt.utid
+          AND ts_tbl.state IN ('S', 'D')
+          AND ts_tbl.blocked_function IS NOT NULL
+          AND ts_tbl.blocked_function != ''
+          AND ts_tbl.ts + ts_tbl.dur > ${start_ts}
+          AND ts_tbl.ts < ${end_ts}
+      ),
+      total AS (
+        SELECT SUM(dur) as total_ns FROM blocked
+      )
+      SELECT
+        blocked_function,
+        ROUND(SUM(dur) / 1e6, 2) as total_dur_ms,
+        COUNT(*) as count,
+        ROUND(100.0 * SUM(dur) / NULLIF((SELECT total_ns FROM total), 0), 1) as pct
+      FROM blocked
+      GROUP BY blocked_function
+      ORDER BY SUM(dur) DESC
+      LIMIT 10
+    save_as: blocked_function_summary
+    optional: true
+
+output:
+  format: layered
+  default_expanded: [thread_state_distribution, waker_chain, blocked_function_summary]
