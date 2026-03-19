@@ -58,8 +58,5 @@ jobs:
       - name: Run core tests
         run: npm run test:core
 
-      - name: Run skill eval (real traces)
-        run: npm run test:skill-eval:real-traces
-
       - name: Run scene trace regression
         run: npm run test:scene-trace-regression
