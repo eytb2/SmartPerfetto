@@ -27,7 +27,7 @@ export class StrategyFrameEnvelopeCoordinator {
           const layer = env.display?.layer;
           const format = env.display?.format;
 
-          if (stepId === 'get_app_jank_frames' && layer === 'list' && (format === 'table' || !format)) {
+          if ((stepId === 'get_app_jank_frames' || stepId === 'batch_frame_root_cause') && layer === 'list' && (format === 'table' || !format)) {
             deferred.push(env);
             continue;
           }

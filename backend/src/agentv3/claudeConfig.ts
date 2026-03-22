@@ -18,8 +18,9 @@ export interface ClaudeAgentConfig {
 }
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
-// Scrolling pipeline needs: 1 time-range query + 1 scrolling_analysis + 5 jank_frame_detail + conclusion = ~8-10 turns
-const DEFAULT_MAX_TURNS = 15;
+// Scrolling pipeline: 1 time-range + 1 scrolling_analysis + 2-3 deep-drill (blocking_chain/binder_root_cause)
+// + 1-2 jank_frame_detail + hypothesis submit/resolve + conclusion = ~20-25 turns
+const DEFAULT_MAX_TURNS = 30;
 const DEFAULT_EFFORT: EffortLevel = 'high';
 
 export function loadClaudeConfig(overrides?: Partial<ClaudeAgentConfig>): ClaudeAgentConfig {
@@ -71,3 +72,16 @@ export function isClaudeCodeEnabled(): boolean {
   return false;
 }
 isClaudeCodeEnabled._warned = false;
+
+/**
+ * Create a sanitized copy of process.env for SDK subprocess spawning.
+ * Strips Claude Code nesting-detection env vars so the SDK subprocess
+ * doesn't refuse to start when the backend runs inside a Claude Code session.
+ */
+export function createSdkEnv(): Record<string, string | undefined> {
+  const env = { ...process.env };
+  delete env.CLAUDECODE;
+  delete env.CLAUDE_CODE_ENTRYPOINT;
+  delete env.CLAUDE_CODE_SESSION_ACCESS_TOKEN;
+  return env;
+}

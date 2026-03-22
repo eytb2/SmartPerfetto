@@ -2,17 +2,7 @@ import dotenv from 'dotenv';
 // Load environment variables FIRST before importing routes
 dotenv.config();
 
-// Prevent EPIPE on stdout/stderr from crashing the process.
-// This happens when the piped consumer (e.g., tee in start-dev.sh) is killed
-// while the Node process is still writing logs.
-process.stdout?.on('error', (err: NodeJS.ErrnoException) => {
-  if (err.code === 'EPIPE') return;
-  throw err;
-});
-process.stderr?.on('error', (err: NodeJS.ErrnoException) => {
-  if (err.code === 'EPIPE') return;
-  throw err;
-});
+import { installEpipeGuard } from './utils/epipeGuard';
 
 import express from 'express';
 import cors from 'cors';
@@ -165,16 +155,9 @@ function gracefulShutdown(signal: string) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// Handle uncaught exceptions
-process.on('uncaughtException', (error: NodeJS.ErrnoException) => {
-  // EPIPE occurs when writing to a closed pipe/socket (e.g., SSE client disconnected,
-  // or SDK stream pipe broke). This is a transient I/O condition, NOT a fatal error.
-  // Killing the entire backend for an EPIPE during one analysis session is catastrophic
-  // — it terminates all other active sessions and requires a manual restart.
-  if (error.code === 'EPIPE') {
-    console.warn('[EPIPE] Write to closed pipe (non-fatal, likely SSE client disconnect or SDK stream):', error.message);
-    return; // Do NOT shut down — the specific analysis will fail gracefully via its own error handling
-  }
+// EPIPE guard: prevent stdout/stderr/uncaughtException EPIPE from crashing the server.
+// Non-EPIPE uncaught exceptions still trigger graceful shutdown.
+installEpipeGuard((error) => {
   console.error('❌ Uncaught Exception:', error);
   gracefulShutdown('uncaughtException');
 });

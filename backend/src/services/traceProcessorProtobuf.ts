@@ -170,8 +170,13 @@ function parseCellsBatch(buf: Buffer, offset: number, length: number): {
     }
   }
 
-  // Split string cells by NUL character
-  const stringCells = stringCellsRaw ? stringCellsRaw.split('\0').filter(s => s.length > 0) : [];
+  // Split string cells by NUL terminator.
+  // Each string is NUL-terminated, so split produces a trailing empty element which we remove.
+  // IMPORTANT: Do NOT filter out empty strings — they are valid cell values (e.g. COALESCE(x, '')).
+  // Filtering empties would shift all subsequent string indices.
+  const stringCells = stringCellsRaw
+    ? stringCellsRaw.split('\0').slice(0, -1)  // remove only the trailing empty from final NUL
+    : [];
 
   return { cells, varintCells, float64Cells, stringCells, blobCells, isLastBatch };
 }

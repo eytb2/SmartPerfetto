@@ -14,6 +14,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
+import { createSdkEnv } from './claudeConfig';
 import type { Finding, StreamingUpdate } from '../agent/types';
 import type { VerificationResult, VerificationIssue, AnalysisPlanV3, Hypothesis } from './types';
 import type { SceneType } from './sceneClassifier';
@@ -659,6 +660,10 @@ ${conclusionPreview}${truncationNote}
         maxTurns: 1,
         permissionMode: 'bypassPermissions' as const,
         allowDangerouslySkipPermissions: true,
+        env: createSdkEnv(),
+        stderr: (data: string) => {
+          console.warn(`[ClaudeVerifier] SDK stderr: ${data.trimEnd()}`);
+        },
       },
     });
 

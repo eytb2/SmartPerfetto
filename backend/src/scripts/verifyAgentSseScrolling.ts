@@ -1,4 +1,7 @@
 import 'dotenv/config';
+import { installEpipeGuard } from '../utils/epipeGuard';
+installEpipeGuard();
+
 import cors from 'cors';
 import express from 'express';
 import fs from 'fs';

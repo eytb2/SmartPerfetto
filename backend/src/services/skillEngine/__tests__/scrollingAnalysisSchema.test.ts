@@ -19,23 +19,29 @@ describe('scrolling_analysis skill schema', () => {
     return column;
   };
 
-  it('keeps jank frame ms fields as duration_ms with ms unit', () => {
+  it('get_app_jank_frames has display: false (hidden, data-only step)', () => {
     const step = getStep('get_app_jank_frames');
+    expect(step.display).toBe(false);
+    // synthesize and save_as must remain for downstream Agent references
+    expect(step.synthesize).toBeDefined();
+    expect(step.save_as).toBe('app_jank_frames');
+  });
 
-    const mainDur = getColumn(step, 'main_dur_ms');
-    expect(mainDur.type).toBe('duration');
-    expect(mainDur.format).toBe('duration_ms');
-    expect(mainDur.unit).toBe('ms');
+  it('batch_frame_root_cause has duration_ms fields correctly typed', () => {
+    const step = getStep('batch_frame_root_cause');
 
-    const renderDur = getColumn(step, 'render_dur_ms');
-    expect(renderDur.type).toBe('duration');
-    expect(renderDur.format).toBe('duration_ms');
-    expect(renderDur.unit).toBe('ms');
+    const durMs = getColumn(step, 'dur_ms');
+    expect(durMs.type).toBe('duration');
+    expect(durMs.format).toBe('duration_ms');
 
-    const dur = getColumn(step, 'dur_ms');
-    expect(dur.type).toBe('duration');
-    expect(dur.format).toBe('duration_ms');
-    expect(dur.unit).toBe('ms');
+    const topSliceMs = getColumn(step, 'top_slice_ms');
+    expect(topSliceMs.type).toBe('duration');
+    expect(topSliceMs.format).toBe('duration_ms');
+
+    const presentInterval = getColumn(step, 'present_interval_ms');
+    expect(presentInterval.type).toBe('duration');
+    expect(presentInterval.format).toBe('duration_ms');
+    expect(presentInterval.unit).toBe('ms');
   });
 
   it('keeps ns-based frame durations explicitly normalized to ms display', () => {
@@ -69,12 +75,10 @@ describe('scrolling_analysis skill schema', () => {
     expect(maxDur.unit).toBe('ns');
   });
 
-  it('keeps timestamp-range binding for jank frame navigation', () => {
-    const step = getStep('get_app_jank_frames');
+  it('keeps timestamp-range binding for batch_frame_root_cause navigation', () => {
+    const step = getStep('batch_frame_root_cause');
     const startTs = getColumn(step, 'start_ts');
     const dur = getColumn(step, 'dur');
-    const mainDur = getColumn(step, 'main_dur');
-    const renderDur = getColumn(step, 'render_dur');
 
     expect(startTs.type).toBe('timestamp');
     expect(startTs.unit).toBe('ns');
@@ -82,15 +86,24 @@ describe('scrolling_analysis skill schema', () => {
     expect(startTs.durationColumn).toBe('dur');
 
     expect(dur.type).toBe('duration');
-    expect(dur.format).toBe('duration_ms');
     expect(dur.unit).toBe('ns');
+    expect(dur.hidden).toBe(true);
+  });
 
-    expect(mainDur.type).toBe('duration');
-    expect(mainDur.format).toBe('duration_ms');
-    expect(mainDur.unit).toBe('ns');
+  it('batch_frame_root_cause has expandable self-binding', () => {
+    const step = getStep('batch_frame_root_cause');
+    expect(step.display.expandable).toBe(true);
+    expect(step.display.expandableBindSource).toBe('batch_root_cause');
+    expect(step.display.layer).toBe('list');
+    expect(step.display.title).toBe('掉帧列表');
+  });
 
-    expect(renderDur.type).toBe('duration');
-    expect(renderDur.format).toBe('duration_ms');
-    expect(renderDur.unit).toBe('ns');
+  it('batch_frame_root_cause has synthesize with groupBy', () => {
+    const step = getStep('batch_frame_root_cause');
+    expect(step.synthesize).toBeDefined();
+    expect(step.synthesize.role).toBe('list');
+    const fields = step.synthesize.groupBy.map((g: any) => g.field);
+    expect(fields).toContain('jank_responsibility');
+    expect(fields).toContain('reason_code');
   });
 });

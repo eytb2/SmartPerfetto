@@ -36,7 +36,7 @@ cd backend && npx tsx src/scripts/verifyAgentSseScrolling.ts \
 **Scrolling (strategy/skill/verifier changes affecting scrolling):**
 ```bash
 cd backend && npx tsx src/scripts/verifyAgentSseScrolling.ts \
-  --trace "../test-traces/Xiaomi17Pro-scrolling-aosp-customscroller-heavy_mixed.ptrace" \
+  --trace "../test-traces/scroll-demo-customer-scroll.pftrace" \
   --query "分析滑动性能" \
   --output test-output/e2e-scrolling.json \
   --keep-session

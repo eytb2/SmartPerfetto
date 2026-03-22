@@ -61,7 +61,7 @@ const ENTITY_DESCRIPTORS: Record<ReferencedEntityType, EntityDescriptor> = {
 };
 
 const ENTITY_CAPTURE_STEP_PATTERNS: Record<EntityCaptureKind, readonly string[]> = {
-  frame: ['get_app_jank_frames', 'jank_frames', 'frame_list', 'frames'],
+  frame: ['get_app_jank_frames', 'batch_frame_root_cause', 'jank_frames', 'frame_list', 'frames'],
   session: ['scroll_sessions', 'sessions', 'session_list'],
   cpu_slice: ['cpu_slices', 'sched_slices', 'thread_slices', 'scheduling', 'cpu_timeline'],
   binder: ['binder_transactions', 'binder_calls', 'ipc_transactions', 'binder_blocking'],

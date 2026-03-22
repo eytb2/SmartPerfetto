@@ -10,6 +10,7 @@
  * - Executable SQL for reproduction
  */
 
+import markdownit from 'markdown-it';
 import {
   AnalysisSession,
   CollectedResult,
@@ -136,6 +137,28 @@ export class HTMLReportGenerator {
   // Monotonic counter to ensure DOM ids are unique within a generated report.
   // Using Date.now() is not reliable because multiple sections can be rendered within the same millisecond.
   private domIdSeq = 0;
+
+  // Shared markdown-it instance for report rendering.
+  // Uses html:false for XSS safety, breaks:true for \n → <br>, with mermaid fence handler.
+  private static reportMd: ReturnType<typeof markdownit> | null = null;
+  private getReportMd(): ReturnType<typeof markdownit> {
+    if (HTMLReportGenerator.reportMd) return HTMLReportGenerator.reportMd;
+    const md = markdownit({ html: false, linkify: true, breaks: true });
+    const defaultFence = md.renderer.rules.fence ||
+      ((tokens: any[], idx: number, options: any, _env: any, self: any) => self.renderToken(tokens, idx, options));
+    md.renderer.rules.fence = (tokens: any[], idx: number, options: any, env: any, self: any) => {
+      const token = tokens[idx];
+      const info = String(token.info || '').trim().split(/\s+/)[0].toLowerCase();
+      if (info === 'mermaid') {
+        const code = String(token.content || '').trim();
+        if (!code) return '<div class="mermaid-error">Mermaid 源码为空</div>';
+        return `<pre class="mermaid">${md.utils.escapeHtml(code)}</pre>`;
+      }
+      return defaultFence(tokens, idx, options, env, self);
+    };
+    HTMLReportGenerator.reportMd = md;
+    return md;
+  }
 
   /**
    * 【P2 Fix】可配置的元数据列名
@@ -413,8 +436,9 @@ export class HTMLReportGenerator {
     .chat-box {
       background: #f8fafc;
       border-radius: 8px;
-      padding: 20px;
+      padding: 16px 20px;
       font-size: 14px;
+      line-height: 1.5;
       border: 1px solid var(--border-color);
     }
 
@@ -428,9 +452,33 @@ export class HTMLReportGenerator {
 
     .chat-message.system {
       color: #374151;
-      white-space: pre-wrap;
-      line-height: 1.6;
+      line-height: 1.5;
     }
+
+    /* Markdown typography for .chat-box (matches .answer-box rules) */
+    .chat-box p { margin: 2px 0; line-height: 1.5; }
+    .chat-box ul, .chat-box ol { margin: 2px 0; padding-left: 20px; }
+    .chat-box li { margin: 1px 0; line-height: 1.5; }
+    .chat-box li > ul, .chat-box li > ol { margin: 0; }
+    .chat-box blockquote {
+      margin: 6px 0; padding: 8px 14px; background: #eef6ff;
+      border-left: 4px solid #3b82f6; color: #1e40af; border-radius: 0 4px 4px 0;
+    }
+    .chat-box blockquote p { margin: 1px 0; }
+    .chat-box code { background: rgba(0,0,0,0.06); padding: 1px 5px; border-radius: 3px; font-size: 13px; }
+    .chat-box pre {
+      background: #1e1e2e; color: #cdd6f4; padding: 12px; border-radius: 8px;
+      overflow-x: auto; font-size: 13px; line-height: 1.4; margin: 6px 0;
+    }
+    .chat-box pre code { background: none; padding: 0; color: inherit; font-size: inherit; }
+    .chat-box hr { border: none; border-top: 1px solid #e5e7eb; margin: 8px 0; }
+    .chat-box h2 { margin: 12px 0 4px; font-size: 15px; color: #111827; }
+    .chat-box h3 { margin: 10px 0 3px; font-size: 14px; color: #1f2937; }
+    .chat-box h4 { margin: 8px 0 2px; font-size: 13.5px; color: #374151; }
+    .chat-box h5 { margin: 6px 0 2px; font-size: 13px; color: #374151; font-weight: 600; }
+    .chat-box table { width: 100%; border-collapse: collapse; margin: 6px 0; font-size: 13px; }
+    .chat-box th { padding: 6px 10px; border: 1px solid #e2e8f0; text-align: left; font-weight: 600; color: #374151; background: #f8fafc; }
+    .chat-box td { padding: 5px 10px; border: 1px solid #e2e8f0; }
 
     /* Tables */
     .table-container {
@@ -2640,77 +2688,13 @@ export class HTMLReportGenerator {
   }
 
   /**
-   * Convert Markdown to HTML
-   * Supports: tables, headers, bold, lists, line breaks
+   * Convert Markdown to HTML using markdown-it.
+   * Handles nested lists, tables, blockquotes, fenced code blocks (incl. mermaid),
+   * and all standard markdown features with proper XSS safety (html:false).
    */
   private markdownToHtml(text: string): string {
     if (!text) return '';
-
-    // P0-2: Escape HTML first to prevent XSS from LLM-generated content,
-    // then apply markdown transformations on the safe escaped text.
-    let result = this.escapeHtml(text);
-
-    // First, convert tables (must be done before other transformations)
-    // Store tables as placeholders to protect them from newline conversion
-    const tablePlaceholders: string[] = [];
-    result = this.convertMarkdownTables(result);
-
-    // Replace tables with placeholders
-    result = result.replace(/<table[\s\S]*?<\/table>/g, (match) => {
-      const idx = tablePlaceholders.length;
-      // Remove internal newlines from table HTML
-      const cleanTable = match.replace(/\n\s*/g, '');
-      tablePlaceholders.push(cleanTable);
-      return `__TABLE_PLACEHOLDER_${idx}__`;
-    });
-
-    // Blockquotes (must be before header conversion)
-    result = result.replace(/^> (.*$)/gm, '<blockquote style="margin: 10px 0; padding: 10px 15px; background: #f0f9ff; border-left: 4px solid #3b82f6; color: #1e40af; font-style: italic;">$1</blockquote>');
-
-    // Headers (must be before line break conversion)
-    result = result.replace(/^#### (.*$)/gm, '<h5 style="margin: 12px 0 8px; font-size: 14px; color: #374151;">$1</h5>');
-    result = result.replace(/^### (.*$)/gm, '<h4 style="margin: 16px 0 10px; font-size: 15px; color: #1f2937;">$1</h4>');
-    result = result.replace(/^## (.*$)/gm, '<h3 style="margin: 20px 0 12px; font-size: 16px; color: #111827;">$1</h3>');
-
-    // Bold
-    result = result.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-
-    // Inline code
-    result = result.replace(/`([^`]+)`/g, '<code style="background: #f3f4f6; padding: 2px 6px; border-radius: 4px; font-size: 13px;">$1</code>');
-
-    // Unordered lists
-    result = result.replace(/^- (.*$)/gm, '<li style="margin: 4px 0;">$1</li>');
-
-    // Ordered lists
-    result = result.replace(/^\d+\. (.*$)/gm, '<li style="margin: 4px 0;">$1</li>');
-
-    // Wrap consecutive <li> elements in <ul>
-    result = result.replace(/(<li[^>]*>.*?<\/li>\s*)+/g, (match) => {
-      return `<ul style="margin: 8px 0; padding-left: 20px;">${match}</ul>`;
-    });
-
-    // Paragraphs (double newlines) - but not before/after HTML tags
-    result = result.replace(/([^>])\n\n([^<])/g, '$1</p><p style="margin: 10px 0;">$2');
-
-    // Single line breaks (but not after HTML tags or before opening tags)
-    result = result.replace(/([^>])\n([^<])/g, '$1<br>$2');
-
-    // Clean up extra newlines around HTML tags
-    result = result.replace(/>\n+</g, '><');
-    result = result.replace(/\n+>/g, '>');
-    result = result.replace(/<\n+/g, '<');
-
-    // Restore tables from placeholders
-    tablePlaceholders.forEach((table, idx) => {
-      result = result.replace(`__TABLE_PLACEHOLDER_${idx}__`, table);
-    });
-
-    // Wrap in paragraph if not already wrapped and not starting with block element
-    if (!result.startsWith('<h') && !result.startsWith('<table') && !result.startsWith('<ul') && !result.startsWith('<blockquote')) {
-      result = `<p style="margin: 10px 0;">${result}</p>`;
-    }
-
-    return result;
+    return this.getReportMd().render(text).trim();
   }
 
   /**
@@ -2818,7 +2802,7 @@ export class HTMLReportGenerator {
     }
     .answer-box {
       background: #f0f9ff; padding: 20px; border-radius: 8px;
-      border-left: 4px solid #3b82f6; line-height: 1.8;
+      border-left: 4px solid #3b82f6; line-height: 1.5; font-size: 14px;
     }
     .plan-task {
       padding: 12px 15px; margin-bottom: 10px; background: #fafafa;
@@ -3102,7 +3086,7 @@ export class HTMLReportGenerator {
     .intent-box .goal { font-size: 18px; font-weight: 600; color: #166534; margin-bottom: 8px; }
     .answer-box {
       background: #f8f9fa; padding: 20px; border-radius: 8px;
-      white-space: pre-wrap; font-size: 15px; line-height: 1.8;
+      font-size: 14px; line-height: 1.5;
     }
     .stage-section { margin-bottom: 20px; }
     .stage-header {
@@ -4128,7 +4112,7 @@ export class HTMLReportGenerator {
     .evidence-contradict { color: #ef4444; }
     .answer-box {
       background: #f8f9fa; padding: 20px; border-radius: 8px;
-      white-space: pre-wrap; font-size: 15px; line-height: 1.8;
+      font-size: 14px; line-height: 1.5;
     }
     .timeline-list {
       display: flex; flex-direction: column; gap: 10px;
@@ -4204,6 +4188,46 @@ export class HTMLReportGenerator {
     .cell-critical { color: #dc2626; font-weight: 600; }
     .empty-state { padding: 20px; text-align: center; color: #9ca3af; font-size: 13px; }
     .footer { padding: 20px; text-align: center; color: #999; font-size: 13px; background: #f8f9fa; }
+    /* Markdown rendered content (markdown-it output) — compact typography */
+    pre.mermaid { background: #f8f9fa; padding: 16px; border-radius: 8px; text-align: center; margin: 10px 0; }
+    .answer-box p, .finding-description p { margin: 2px 0; line-height: 1.5; }
+    .answer-box ul, .answer-box ol,
+    .finding-description ul, .finding-description ol { margin: 2px 0; padding-left: 20px; }
+    .answer-box li, .finding-description li { margin: 1px 0; line-height: 1.5; }
+    .answer-box li > ul, .answer-box li > ol,
+    .finding-description li > ul, .finding-description li > ol { margin: 0; }
+    .answer-box blockquote, .finding-description blockquote {
+      margin: 6px 0; padding: 8px 14px; background: #eef6ff;
+      border-left: 4px solid #3b82f6; color: #1e40af; border-radius: 0 4px 4px 0;
+    }
+    .answer-box blockquote p, .finding-description blockquote p { margin: 1px 0; }
+    .answer-box code, .finding-description code {
+      background: rgba(0,0,0,0.06); padding: 1px 5px; border-radius: 3px; font-size: 13px;
+    }
+    .answer-box pre, .finding-description pre {
+      background: #1e1e2e; color: #cdd6f4; padding: 12px; border-radius: 8px;
+      overflow-x: auto; font-size: 13px; line-height: 1.4; margin: 6px 0;
+    }
+    .answer-box pre code, .finding-description pre code {
+      background: none; padding: 0; color: inherit; font-size: inherit;
+    }
+    .answer-box hr, .finding-description hr {
+      border: none; border-top: 1px solid #e5e7eb; margin: 8px 0;
+    }
+    .answer-box h2, .finding-description h2 { margin: 12px 0 4px; font-size: 15px; color: #111827; }
+    .answer-box h3, .finding-description h3 { margin: 10px 0 3px; font-size: 14px; color: #1f2937; }
+    .answer-box h4, .finding-description h4 { margin: 8px 0 2px; font-size: 13.5px; color: #374151; }
+    .answer-box h5, .finding-description h5 { margin: 6px 0 2px; font-size: 13px; color: #374151; font-weight: 600; }
+    .answer-box table, .finding-description table {
+      width: 100%; border-collapse: collapse; margin: 6px 0; font-size: 13px;
+    }
+    .answer-box th, .finding-description th {
+      padding: 6px 10px; border: 1px solid #e2e8f0; text-align: left;
+      font-weight: 600; color: #374151; background: #f8fafc;
+    }
+    .answer-box td, .finding-description td {
+      padding: 5px 10px; border: 1px solid #e2e8f0;
+    }
   </style>
 </head>
 <body>
@@ -4413,6 +4437,13 @@ export class HTMLReportGenerator {
       filterConversationTimeline(sectionId, phase, activeFilterBtn);
     }
   </script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script>
+    if (typeof mermaid !== 'undefined') {
+      mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'strict' });
+      mermaid.run({ querySelector: 'pre.mermaid' });
+    }
+  </script>
 </body>
 </html>`;
   }
@@ -4422,7 +4453,7 @@ export class HTMLReportGenerator {
 
     const hasScrollingJankFrames = envelopes.some((env) => {
       const stepId = String(env?.meta?.stepId || '');
-      return stepId === 'get_app_jank_frames' || stepId === 'app_jank_frames';
+      return stepId === 'get_app_jank_frames' || stepId === 'app_jank_frames' || stepId === 'batch_frame_root_cause';
     });
 
     const filtered = envelopes.filter((env) => {

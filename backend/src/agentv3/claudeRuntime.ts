@@ -17,7 +17,7 @@ import { createClaudeMcpServer, loadLearnedSqlFixPairs, MCP_NAME_PREFIX } from '
 import { buildSystemPrompt } from './claudeSystemPrompt';
 import { createSseBridge } from './claudeSseBridge';
 import { extractFindingsFromText, extractFindingsFromSkillResult, mergeFindings } from './claudeFindingExtractor';
-import { loadClaudeConfig, resolveEffort, type ClaudeAgentConfig } from './claudeConfig';
+import { loadClaudeConfig, resolveEffort, createSdkEnv, type ClaudeAgentConfig } from './claudeConfig';
 import { detectFocusApps } from './focusAppDetector';
 import { classifyScene } from './sceneClassifier';
 import { buildAgentDefinitions } from './claudeAgentDefinitions';
@@ -275,6 +275,9 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       });
 
       const existingSdkSessionId = this.sessionMap.get(sessionId)?.sdkSessionId;
+
+      const sdkEnv = createSdkEnv();
+
       const stream = sdkQueryWithRetry({
         prompt: query,
         options: {
@@ -288,6 +291,10 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           cwd: this.config.cwd,
           effort: ctx.effectiveEffort,
           allowedTools: ctx.allowedTools,
+          env: sdkEnv,
+          stderr: (data: string) => {
+            console.warn(`[ClaudeRuntime] SDK stderr [${sessionId}]: ${data.trimEnd()}`);
+          },
           ...(this.config.maxBudgetUsd ? { maxBudgetUsd: this.config.maxBudgetUsd } : {}),
           ...(existingSdkSessionId ? { resume: existingSdkSessionId } : {}),
           ...(ctx.agents ? { agents: ctx.agents } : {}),
@@ -666,6 +673,10 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
                   effort: ctx.effectiveEffort,
                   allowedTools: ctx.allowedTools,
                   resume: sdkSessionId,
+                  env: sdkEnv,
+                  stderr: (data: string) => {
+                    console.warn(`[ClaudeRuntime] SDK stderr (correction) [${sessionId}]: ${data.trimEnd()}`);
+                  },
                 },
               }, { emitUpdate: (update) => this.emitUpdate(update) });
 

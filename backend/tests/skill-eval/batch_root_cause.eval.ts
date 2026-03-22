@@ -63,7 +63,7 @@ describe('batch_frame_root_cause step', () => {
     expect(result.data.length).toBeGreaterThan(8);
   }, 120000);
 
-  it('should match get_app_jank_frames frame count', async () => {
+  it('should match get_app_jank_frames frame count and identity', async () => {
     const batchResult = await evaluator.executeStep('batch_frame_root_cause');
     const jankFrames = await evaluator.executeStep('get_app_jank_frames');
 
@@ -71,6 +71,28 @@ describe('batch_frame_root_cause step', () => {
     expect(jankFrames.success).toBe(true);
     // Both use same consumer-side detection + same default limit → same count
     expect(batchResult.data.length).toBe(jankFrames.data.length);
+
+    // Verify frame identity sets match (not just count) — guards against SQL drift
+    const batchStartTs = new Set(batchResult.data.map((r: any) => String(r.start_ts)));
+    const jankStartTs = new Set(jankFrames.data.map((r: any) => String(r.start_ts)));
+    expect(batchStartTs.size).toBe(jankStartTs.size);
+    for (const ts of batchStartTs) {
+      expect(jankStartTs).toContain(ts);
+    }
+  }, 120000);
+
+  it('should include frame_id, vsync_missed, present_interval_ms columns', async () => {
+    const result = await evaluator.executeStep('batch_frame_root_cause');
+    expect(result.success).toBe(true);
+    expect(result.data.length).toBeGreaterThan(0);
+
+    for (const row of result.data) {
+      // frame_id should be present (from display_frame_token)
+      expect(row.frame_id).toBeDefined();
+      // vsync_missed should be a positive integer
+      expect(row.vsync_missed).toBeDefined();
+      expect(Number(row.vsync_missed)).toBeGreaterThanOrEqual(1);
+    }
   }, 120000);
 
   it('should have valid confidence values', async () => {
