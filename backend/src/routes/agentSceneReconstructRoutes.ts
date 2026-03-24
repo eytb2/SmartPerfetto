@@ -151,6 +151,10 @@ export function registerSceneReconstructRoutes<TSession extends SceneReconstruct
         trackEvents: [],
         conversationOrdinal: 0,
         conversationSteps: [],
+        queryHistory: [],
+        conclusionHistory: [],
+        sseEventSeq: 0,
+        sseEventBuffer: [],
       } as unknown as TSession;
       deps.assistantAppService.setSession(analysisId, session);
 

@@ -108,6 +108,7 @@ function extractScenesAsIntervals(
   const intervals: FocusInterval[] = [];
   const jankRowsForFallback: Array<Record<string, any>> = [];
   let hasGestureLikeInterval = false;
+  let traceDurationSec = 0;
 
   for (const resp of responses) {
     if (!resp.success) continue;
@@ -120,6 +121,12 @@ function extractScenesAsIntervals(
         const stepId = env.meta?.stepId;
         const rows = helpers.payloadToObjectRows(env.data);
         if (!Array.isArray(rows) || rows.length === 0) continue;
+
+        // Extract trace duration from the trace_time_range step for dynamic scene cap
+        if (stepId === 'trace_time_range' && rows[0]?.duration_sec) {
+          traceDurationSec = Number(rows[0].duration_sec) || 0;
+          continue;
+        }
 
         // From scene_reconstruction.skill.yaml:
         // - app_launches: ts, dur, startup_type, package
@@ -141,6 +148,7 @@ function extractScenesAsIntervals(
               : 'cold_start';
 
             const durationMs = nsToMs(dur);
+            if (!Number.isFinite(durationMs)) continue;
             const priority = computeScenePriority(sceneType, durationMs, row);
             const startupId = Number(row.startup_id || row.startupId || intervals.length + 1);
             const normalizedStartupId = Number.isFinite(startupId) && startupId > 0
@@ -187,6 +195,7 @@ function extractScenesAsIntervals(
               : 'tap';
 
             const durationMs = nsToMs(dur);
+            if (!Number.isFinite(durationMs)) continue;
             const priority = computeScenePriority(sceneType, durationMs, row);
 
             const processName = resolveSceneProcessName(row);
@@ -218,6 +227,7 @@ function extractScenesAsIntervals(
             if (!endTs) continue;
 
             const durationMs = nsToMs(dur);
+            if (!Number.isFinite(durationMs)) continue;
             const sceneType: SceneCategory = 'inertial_scroll';
             const priority = computeScenePriority(sceneType, durationMs, row);
 
@@ -248,6 +258,7 @@ function extractScenesAsIntervals(
             if (!endTs) continue;
 
             const durationMs = nsToMs(dur);
+            if (!Number.isFinite(durationMs)) continue;
             const sceneType: SceneCategory = 'idle';
             const priority = computeScenePriority(sceneType, durationMs, row);
 
@@ -277,6 +288,7 @@ function extractScenesAsIntervals(
 
             const sceneType = 'app_switch';
             const durationMs = nsToMs(dur);
+            if (!Number.isFinite(durationMs)) continue;
             const priority = computeScenePriority(sceneType, durationMs, row);
 
             intervals.push({
@@ -331,8 +343,10 @@ function extractScenesAsIntervals(
   // Sort by priority (higher first)
   intervals.sort((a, b) => b.priority - a.priority);
 
-  // Guardrail: scene reconstruction can detect many gestures; only deep dive the top N.
-  return intervals.slice(0, 5);
+  // Dynamic cap: ~1 deep-dive scene per 10s of trace, min 5, max 20.
+  // This controls Stage 2 LLM cost — more intervals = more skill invocations.
+  const maxScenes = Math.min(Math.max(5, Math.ceil(traceDurationSec / 10)), 20);
+  return intervals.slice(0, maxScenes);
 }
 
 // =============================================================================
@@ -464,7 +478,7 @@ function nsToMs(ns: string): number {
   try {
     return Number(BigInt(ns) / 1_000_000n);
   } catch {
-    return 0;
+    return NaN;
   }
 }
 
@@ -660,7 +674,7 @@ export const sceneReconstructionStrategy: StagedAnalysisStrategy = {
   trigger: isOverviewQuery,
   stages: [stage1_sceneDetection, stage2_problemSceneAnalysis],
   defaults: {
-    maxScenesPerStage: 5,
+    maxScenesPerStage: 20,  // Dynamic cap in extractScenesAsIntervals; this is the hard max
     priorityThreshold: 50,
   },
 };

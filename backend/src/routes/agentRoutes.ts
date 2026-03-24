@@ -223,6 +223,9 @@ interface AnalysisSession {
   // Optional scene reconstruction artifacts (unified into agent-driven sessions)
   scenes?: DetectedScene[];
   trackEvents?: TrackEvent[];
+  // Continuous state timeline lanes (from state_timeline skill)
+  stateTimeline?: Record<string, StateLaneSegment[]>;
+  laneAvailability?: Record<string, 'available' | 'table_missing' | 'no_data'>;
   agentDialogue: Array<{
     agentId: string;
     type: 'task' | 'response' | 'question';
@@ -1584,6 +1587,57 @@ function buildSceneExtractionEnvelopesFromRawResults(rawResults: any): DataEnvel
   return envelopes;
 }
 
+/**
+ * Execute the state_timeline skill directly (bypasses Agent decision-making).
+ * Returns DataEnvelopes suitable for SSE broadcast and track overlay rendering.
+ * agentv3's ClaudeRuntime doesn't auto-execute strategy tasks, so this must be
+ * called explicitly from the scene reconstruction flow.
+ */
+async function executeStateTimelineSkill(
+  traceProcessorService: ReturnType<typeof getTraceProcessorService>,
+  traceId: string
+): Promise<DataEnvelope[]> {
+  await ensureSkillRegistryInitialized();
+
+  const skillExecutor = new SkillExecutor(traceProcessorService);
+  skillExecutor.registerSkills(skillRegistry.getAllSkills());
+
+  const skillResult = await skillExecutor.execute('state_timeline', traceId, {
+    trace_id: traceId,
+  });
+
+  if (!skillResult.success) {
+    console.warn('[StateTimeline] state_timeline skill failed:', skillResult.error);
+    return [];
+  }
+
+  // Convert rawResults to DataEnvelopes (same pattern as scene_reconstruction)
+  const envelopes: DataEnvelope[] = [];
+  if (!skillResult.rawResults || typeof skillResult.rawResults !== 'object') return envelopes;
+
+  for (const [stepId, stepResult] of Object.entries(skillResult.rawResults as Record<string, any>)) {
+    const rows = Array.isArray((stepResult as any)?.data)
+      ? ((stepResult as any).data as Array<Record<string, any>>)
+      : [];
+    if (rows.length === 0) continue;
+
+    const payload = objectRowsToEnvelopePayload(rows);
+    if (payload.columns.length === 0) continue;
+
+    envelopes.push(createDataEnvelope(payload, {
+      type: 'skill_result',
+      source: `state_timeline:${stepId}`,
+      skillId: 'state_timeline',
+      stepId,
+      title: stepId,
+      layer: 'list',
+      format: 'table',
+    }));
+  }
+
+  return envelopes;
+}
+
 async function detectScenesQuickViaSkill(
   traceProcessorService: ReturnType<typeof getTraceProcessorService>,
   traceId: string
@@ -2053,6 +2107,43 @@ async function runAgentDrivenAnalysis(
   }
   session.orchestratorUpdateHandler = handleUpdate;
   session.orchestrator.on('update', handleUpdate);
+
+  // Run state_timeline skill in parallel with Agent analysis (fire-and-forget).
+  // This bypasses Agent decision-making to guarantee state lane tracks are always created.
+  if (shouldGenerateTracks && options.traceProcessorService) {
+    executeStateTimelineSkill(options.traceProcessorService, traceId)
+      .then((envelopes) => {
+        if (envelopes.length === 0) return;
+        // Process envelopes through the same pipeline as Agent-produced data
+        const changed = updateSceneReconstructionArtifactsFromEnvelopes(session, envelopes);
+        // Broadcast each envelope as a 'data' event so frontend track_overlay picks it up
+        for (const env of envelopes) {
+          broadcastToAgentDrivenClients(sessionId, {
+            type: 'data',
+            content: env,
+            timestamp: Date.now(),
+            id: generateEventId('data', sessionId),
+          });
+        }
+        if (changed) {
+          broadcastToAgentDrivenClients(sessionId, {
+            type: 'track_data',
+            content: { tracks: session.trackEvents || [], scenes: session.scenes || [] },
+            timestamp: Date.now(),
+            id: generateEventId('track_data', sessionId),
+          });
+        }
+        logger.info('StateTimeline', 'State timeline lanes broadcast', {
+          laneCount: Object.keys(session.stateTimeline || {}).length,
+          envelopeCount: envelopes.length,
+        });
+      })
+      .catch((err) => {
+        logger.warn('StateTimeline', 'state_timeline skill failed (non-fatal)', {
+          error: String(err?.message || err),
+        });
+      });
+  }
 
   try {
     console.log('[AgentRoutes.AgentDriven] Starting orchestrator.analyze...');
@@ -2663,14 +2754,136 @@ const SCENE_COLOR_SCHEMES: Record<SceneCategory, TrackEvent['colorScheme']> = {
   jank_region: 'jank',  // Use jank color to highlight performance issues
 };
 
+/** A single continuous segment in a state timeline lane. */
+interface StateLaneSegment {
+  lane: string;
+  state: string;
+  stateLabel: string;
+  startTs: string;
+  endTs: string;
+  durMs: number;
+  sourceStatus: string;
+  confidence?: string;
+}
+
+/** Lane step IDs from state_timeline skill */
+const STATE_LANE_STEP_IDS = new Set([
+  'device_state_lane',
+  'input_state_lane',
+  'app_state_lane',
+  'system_state_lane',
+]);
+
+/** Map stepId → lane name */
+const STEP_TO_LANE: Record<string, string> = {
+  device_state_lane: 'device',
+  input_state_lane: 'input',
+  app_state_lane: 'app',
+  system_state_lane: 'system',
+};
+
+type LaneStatus = 'available' | 'table_missing' | 'no_data';
+const VALID_LANE_STATUSES = new Set<string>(['available', 'table_missing', 'no_data']);
+
+/**
+ * Single-pass extraction of state timeline lanes + lane availability from DataEnvelopes.
+ * Combines what would otherwise be two separate iterations over the same envelope array.
+ */
+function extractStateTimelineData(envelopes: DataEnvelope[]): {
+  timeline: Record<string, StateLaneSegment[]>;
+  availability: Record<string, LaneStatus>;
+} {
+  const timeline: Record<string, StateLaneSegment[]> = {};
+  const availability: Record<string, LaneStatus> = {};
+
+  for (const env of envelopes) {
+    if (!env || env.meta?.skillId !== 'state_timeline') continue;
+    const stepId = env.meta.stepId || '';
+
+    // Lane summary → extract availability
+    if (stepId === 'lane_summary') {
+      const rows = payloadToObjectRowsLocal(env.data);
+      for (const row of rows) {
+        const lane = String(row.lane || '');
+        const status = String(row.source_status || 'available');
+        if (lane) {
+          availability[lane] = VALID_LANE_STATUSES.has(status) ? status as LaneStatus : 'available';
+        }
+      }
+      continue;
+    }
+
+    // Lane data steps → extract segments
+    if (!STATE_LANE_STEP_IDS.has(stepId)) continue;
+
+    const laneName = STEP_TO_LANE[stepId] || stepId;
+    const rows = payloadToObjectRowsLocal(env.data);
+    if (rows.length === 0) continue;
+
+    const segments: StateLaneSegment[] = [];
+    for (const row of rows) {
+      const startTs = String(row.start_ts || '');
+      const endTs = String(row.end_ts || '');
+      const durMs = Number(row.dur_ms || 0);
+      if (!startTs || !endTs || durMs <= 0) continue;
+
+      segments.push({
+        lane: laneName,
+        state: String(row.state || 'UNKNOWN'),
+        stateLabel: String(row.state_label || ''),
+        startTs,
+        endTs,
+        durMs,
+        sourceStatus: String(row.source_status || 'available'),
+        confidence: row.confidence ? String(row.confidence) : undefined,
+      });
+    }
+
+    if (segments.length > 0) {
+      timeline[laneName] = segments;
+    }
+  }
+
+  // Reconcile: if a lane has segments, it's available; if lane_summary said
+  // 'available' but we got no segments, it's really 'no_data'.
+  for (const lane of Object.keys(STEP_TO_LANE).map(k => STEP_TO_LANE[k])) {
+    if (timeline[lane] && timeline[lane].length > 0) {
+      // Has real data — check if it's all UNKNOWN (empty-source fallback)
+      const allUnknown = timeline[lane].every(s => s.state === 'UNKNOWN' || s.state === 'IDLE');
+      if (!availability[lane]) {
+        availability[lane] = allUnknown ? 'no_data' : 'available';
+      }
+    } else if (availability[lane] === 'available') {
+      // lane_summary said available, but no segments arrived → no_data
+      availability[lane] = 'no_data';
+    }
+  }
+
+  return { timeline, availability };
+}
+
 function updateSceneReconstructionArtifactsFromEnvelopes(
   session: AnalysisSession,
   envelopes: DataEnvelope[]
 ): boolean {
   if (!Array.isArray(envelopes) || envelopes.length === 0) return false;
 
+  // Extract scene events (from scene_reconstruction skill)
   const extractedScenes = extractDetectedScenesFromEnvelopes(envelopes);
-  if (extractedScenes.length === 0) return false;
+
+  // Extract state timeline + lane availability in a single pass
+  const { timeline, availability } = extractStateTimelineData(envelopes);
+  let hasTimelineUpdate = false;
+
+  if (Object.keys(timeline).length > 0) {
+    session.stateTimeline = Object.assign(session.stateTimeline || {}, timeline);
+    hasTimelineUpdate = true;
+  }
+  if (Object.keys(availability).length > 0) {
+    session.laneAvailability = Object.assign(session.laneAvailability || {}, availability);
+  }
+
+  if (extractedScenes.length === 0) return hasTimelineUpdate;
 
   const mergedScenes = mergeDetectedScenes(session.scenes || [], extractedScenes);
   const mergedTracks = buildTrackEventsFromScenes(mergedScenes);
