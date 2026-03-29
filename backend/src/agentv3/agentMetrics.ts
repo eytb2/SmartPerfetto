@@ -41,6 +41,16 @@ export interface TurnInfo {
   timestamp: number;
 }
 
+export interface CacheMetrics {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  totalCostUsd: number;
+  /** Ratio of cache-read tokens to total input tokens (0-1). Higher = better prefix caching. */
+  cacheHitRate: number;
+}
+
 export interface SessionMetrics {
   sessionId: string;
   startTime: number;
@@ -55,6 +65,8 @@ export interface SessionMetrics {
     failureCount: number;
     byTool: Record<string, { calls: number; totalMs: number; avgMs: number; failures: number }>;
   };
+  /** SDK token usage and prompt cache metrics (recorded from result message). */
+  cache?: CacheMetrics;
 }
 
 // =============================================================================
@@ -66,6 +78,7 @@ export class AgentMetricsCollector {
   private startTime: number;
   private toolExecutions: ToolExecution[] = [];
   private turnCount = 0;
+  private cacheMetrics: CacheMetrics | null = null;
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
@@ -130,6 +143,42 @@ export class AgentMetricsCollector {
     this.turnCount++;
   }
 
+  /**
+   * Record SDK result usage metrics for prompt cache analysis.
+   * Called once per analysis when the SDK result message arrives.
+   */
+  recordSdkUsage(result: {
+    usage?: Record<string, number | null>;
+    modelUsage?: Record<string, Record<string, number>>;
+    total_cost_usd?: number;
+  }): void {
+    const usage = result.usage;
+    if (!usage) return;
+
+    const inputTokens = (usage.input_tokens ?? 0) as number;
+    const outputTokens = (usage.output_tokens ?? 0) as number;
+    const cacheCreation = (usage.cache_creation_input_tokens ?? 0) as number;
+    const cacheRead = (usage.cache_read_input_tokens ?? 0) as number;
+    const totalInput = inputTokens + cacheCreation + cacheRead;
+
+    this.cacheMetrics = {
+      inputTokens,
+      outputTokens,
+      cacheCreationInputTokens: cacheCreation,
+      cacheReadInputTokens: cacheRead,
+      totalCostUsd: (result.total_cost_usd ?? 0) as number,
+      cacheHitRate: totalInput > 0 ? cacheRead / totalInput : 0,
+    };
+
+    // Log cache effectiveness for monitoring
+    const hitPct = (this.cacheMetrics.cacheHitRate * 100).toFixed(1);
+    console.log(
+      `[AgentMetrics] [${this.sessionId}] Prompt cache: ` +
+      `${cacheRead} read / ${cacheCreation} created / ${inputTokens} uncached ` +
+      `(hit rate: ${hitPct}%, cost: $${this.cacheMetrics.totalCostUsd.toFixed(4)})`,
+    );
+  }
+
   /** Generate session metrics summary. */
   summarize(): SessionMetrics {
     const endTime = Date.now();
@@ -166,6 +215,7 @@ export class AgentMetricsCollector {
         failureCount: this.toolExecutions.length - successCount,
         byTool,
       },
+      ...(this.cacheMetrics ? { cache: this.cacheMetrics } : {}),
     };
   }
 }

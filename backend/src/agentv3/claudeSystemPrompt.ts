@@ -220,8 +220,24 @@ export function buildSystemPrompt(context: ClaudeAnalysisContext, maxTokens?: nu
   const effectiveMaxTokens = maxTokens ?? MAX_PROMPT_TOKENS;
   const sections: string[] = [];
 
+  // ── Section ordering rationale ───────────────────────────────────────────
+  // Anthropic API auto-caches system prompts >1024 tokens via prefix matching.
+  // Sections are ordered STATIC → PER-TRACE → PER-QUERY → DYNAMIC so that
+  // the stable prefix is as long as possible across multi-turn conversations:
+  //   Same trace + same scene: ~4000 tokens cached (~80% savings)
+  //   Same trace + different scene: ~800 tokens cached (~18% savings)
+  //   Different trace: ~400 tokens cached (~8% savings)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // ── Tier 1: STATIC (never changes within process lifetime) ──
+
   const roleContent = loadPromptTemplate('prompt-role');
   sections.push(roleContent ?? '# 角色\n\n你是 SmartPerfetto 的 Android 性能分析专家。');
+
+  const outputFormat = loadPromptTemplate('prompt-output-format');
+  if (outputFormat) sections.push(outputFormat);
+
+  // ── Tier 2: PER-TRACE STABLE (changes between traces, stable within a trace) ──
 
   if (context.architecture) {
     sections.push(buildArchitectureSection(context.architecture, context.packageName, true));
@@ -233,22 +249,14 @@ export function buildSystemPrompt(context: ClaudeAnalysisContext, maxTokens?: nu
     sections.push(buildFocusAppSection(context.focusApps, context.focusMethod));
   }
 
-  // User selection context — scopes analysis to a specific time range or slice.
-  // Intentionally NOT in droppableSections: selection is user's explicit intent and must never be dropped.
-  if (context.selectionContext) {
-    sections.push(buildSelectionContextSection(context.selectionContext));
+  if (context.knowledgeBaseContext) {
+    sections.push(`## Perfetto SQL 知识库参考
+
+${context.knowledgeBaseContext}
+> 以上是根据用户问题从官方 Perfetto SQL stdlib 索引中匹配到的相关表/视图/函数。写 execute_sql 查询时可参考这些定义。`);
   }
 
-  // Comparison mode context — orthogonal to scene type, injected when referenceTraceId is present
-  if (context.comparison) {
-    sections.push(buildComparisonContextSection(context.comparison, context.packageName));
-
-    // Load comparison methodology template (additive to scene strategy)
-    const compMethodology = loadPromptTemplate('comparison-methodology');
-    if (compMethodology) {
-      sections.push(compMethodology);
-    }
-  }
+  // ── Tier 3: PER-QUERY (changes when scene/query changes) ──
 
   // Scene-specific strategy injection (progressive disclosure)
   const sceneStrategy = buildSceneStrategySection(context.sceneType);
@@ -292,8 +300,24 @@ export function buildSystemPrompt(context: ClaudeAnalysisContext, maxTokens?: nu
 ${parallelGuidance}`);
   }
 
-  const outputFormat = loadPromptTemplate('prompt-output-format');
-  if (outputFormat) sections.push(outputFormat);
+  // ── Tier 4: PER-INTERACTION DYNAMIC (changes every query) ──
+
+  // User selection context — scopes analysis to a specific time range or slice.
+  // Intentionally NOT in droppableSections: selection is user's explicit intent and must never be dropped.
+  if (context.selectionContext) {
+    sections.push(buildSelectionContextSection(context.selectionContext));
+  }
+
+  // Comparison mode context — orthogonal to scene type, injected when referenceTraceId is present
+  if (context.comparison) {
+    sections.push(buildComparisonContextSection(context.comparison, context.packageName));
+
+    // Load comparison methodology template (additive to scene strategy)
+    const compMethodology = loadPromptTemplate('comparison-methodology');
+    if (compMethodology) {
+      sections.push(compMethodology);
+    }
+  }
 
   const hasConversationContext = (context.previousFindings && context.previousFindings.length > 0)
     || context.entityContext
@@ -391,13 +415,6 @@ ${context.conversationSummary}`);
 ${plansSummary}
 
 > 你可以在新计划中引用之前的发现，或对未完成的阶段进行补充分析。也可以使用 \`recall_patterns\` 查询跨会话的历史分析经验。`);
-  }
-
-  if (context.knowledgeBaseContext) {
-    sections.push(`## Perfetto SQL 知识库参考
-
-${context.knowledgeBaseContext}
-> 以上是根据用户问题从官方 Perfetto SQL stdlib 索引中匹配到的相关表/视图/函数。写 execute_sql 查询时可参考这些定义。`);
   }
 
   // P1-2: Enforce token budget by progressively dropping low-priority sections.

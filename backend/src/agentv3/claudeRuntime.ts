@@ -573,6 +573,12 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
             if ((msg as any).subtype === 'success') {
               finalResult = (msg as any).result;
             }
+            // Record SDK token usage and prompt cache metrics
+            metricsCollector.recordSdkUsage({
+              usage: (msg as any).usage,
+              modelUsage: (msg as any).modelUsage,
+              total_cost_usd: (msg as any).total_cost_usd,
+            });
           }
         }
         // Clean up any remaining sub-agent timers
