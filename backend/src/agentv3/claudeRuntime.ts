@@ -386,6 +386,34 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
        *  potentially losing early-turn details. We log this for diagnostics. */
       let sdkCompactDetected = false;
 
+      // ── Per-turn metrics collection ──
+      // Turn boundary: assistant message = start, next assistant message = end of previous turn.
+      // Usage is attributed to the turn that triggered the API call.
+      interface TurnMetrics {
+        turnIndex: number;
+        startMs: number;
+        durationMs?: number;
+        firstTokenLatencyMs?: number;
+        toolCalls: string[];
+        toolResultPayloadBytes: number;
+        hasExtendedThinking: boolean;
+        inputTokens?: number;
+        outputTokens?: number;
+        cacheReadTokens?: number;
+        cacheCreationTokens?: number;
+      }
+      const turnMetricsList: TurnMetrics[] = [];
+      let currentTurnMetrics: TurnMetrics | null = null;
+      let turnCounter = 0;
+      let firstTokenReceived = false;
+
+      function finalizeTurnMetrics(): void {
+        if (currentTurnMetrics) {
+          currentTurnMetrics.durationMs = Date.now() - currentTurnMetrics.startMs;
+          turnMetricsList.push(currentTurnMetrics);
+        }
+      }
+
       const processStream = async () => {
         for await (const msg of stream) {
           if (timedOut) break; // P0-1: Actually cancel stream on timeout
@@ -458,17 +486,51 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
             console.warn('[ClaudeRuntime] SSE bridge error (non-fatal):', (bridgeErr as Error).message);
           }
 
-          // P2-1: Watchdog — track tool calls for repetitive failure detection
-          if (msg.type === 'assistant' && Array.isArray((msg as any).message?.content)) {
-            for (const block of (msg as any).message.content) {
-              if (block.type === 'tool_use') {
-                toolCallHistory.push({ name: block.name, success: true, startTime: Date.now() }); // assume success, update on result
-              }
+          // ── Per-turn metrics: track stream_event signals ──
+          if (msg.type === 'stream_event' && currentTurnMetrics) {
+            const event = (msg as any).event;
+            // First token latency
+            if (!firstTokenReceived &&
+                event?.type === 'content_block_delta' &&
+                (event.delta?.type === 'text_delta' || event.delta?.type === 'tool_use')) {
+              firstTokenReceived = true;
+              currentTurnMetrics.firstTokenLatencyMs = Date.now() - currentTurnMetrics.startMs;
+            }
+            // Extended thinking detection
+            if (event?.type === 'content_block_start' && event.content_block?.type === 'thinking') {
+              currentTurnMetrics.hasExtendedThinking = true;
             }
           }
+
+          // assistant message = new turn starts; finalize previous turn + watchdog tracking
+          if (msg.type === 'assistant' && Array.isArray((msg as any).message?.content)) {
+            finalizeTurnMetrics();
+            turnCounter++;
+            firstTokenReceived = false;
+            const toolNames: string[] = [];
+            for (const block of (msg as any).message.content) {
+              if (block.type === 'tool_use') {
+                toolNames.push(block.name.replace(MCP_NAME_PREFIX, ''));
+                // P2-1: Watchdog — track tool calls for repetitive failure detection
+                toolCallHistory.push({ name: block.name, success: true, startTime: Date.now() });
+              }
+            }
+            currentTurnMetrics = {
+              turnIndex: turnCounter,
+              startMs: Date.now(),
+              toolCalls: toolNames,
+              toolResultPayloadBytes: 0,
+              hasExtendedThinking: false,
+            };
+          }
+
           if (msg.type === 'user' && (msg as any).tool_use_result !== undefined) {
             const result = (msg as any).tool_use_result;
             const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+            // Per-turn metrics: track tool result payload size
+            if (currentTurnMetrics) {
+              currentTurnMetrics.toolResultPayloadBytes += Buffer.byteLength(resultStr, 'utf-8');
+            }
             const isFailed = resultStr.includes('"success":false') || resultStr.includes('"isError":true');
             if (toolCallHistory.length > 0) {
               const lastTool = toolCallHistory[toolCallHistory.length - 1];
@@ -568,7 +630,24 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
             }
           }
 
+          // Per-turn metrics: capture usage from stream_event message_delta (per API turn)
+          if (msg.type === 'stream_event' && currentTurnMetrics) {
+            const event = (msg as any).event;
+            if (event?.type === 'message_delta' && event.usage) {
+              currentTurnMetrics.outputTokens = event.usage.output_tokens;
+            }
+            if (event?.type === 'message_start' && event.message?.usage) {
+              currentTurnMetrics.inputTokens = event.message.usage.input_tokens;
+              currentTurnMetrics.cacheReadTokens = event.message.usage.cache_read_input_tokens;
+              currentTurnMetrics.cacheCreationTokens = event.message.usage.cache_creation_input_tokens;
+            }
+          }
+
           if (msg.type === 'result') {
+            // Finalize last turn metrics before stream ends
+            finalizeTurnMetrics();
+            currentTurnMetrics = null;
+
             rounds = (msg as any).num_turns || rounds;
             if ((msg as any).subtype === 'success') {
               finalResult = (msg as any).result;
@@ -584,6 +663,30 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         // Clean up any remaining sub-agent timers
         for (const timer of activeSubAgentTimers.values()) clearTimeout(timer);
         activeSubAgentTimers.clear();
+
+        // Log per-turn metrics for performance analysis
+        if (turnMetricsList.length > 0) {
+          const summary = {
+            totalTurns: turnMetricsList.length,
+            totalDurationMs: turnMetricsList.reduce((s, t) => s + (t.durationMs || 0), 0),
+            totalToolCalls: turnMetricsList.reduce((s, t) => s + t.toolCalls.length, 0),
+            totalPayloadBytes: turnMetricsList.reduce((s, t) => s + t.toolResultPayloadBytes, 0),
+            turns: turnMetricsList.map(t => ({
+              turn: t.turnIndex,
+              durationMs: t.durationMs,
+              firstTokenMs: t.firstTokenLatencyMs,
+              tools: t.toolCalls,
+              payloadBytes: t.toolResultPayloadBytes,
+              thinking: t.hasExtendedThinking,
+              inputTokens: t.inputTokens,
+              outputTokens: t.outputTokens,
+              cacheReadTokens: t.cacheReadTokens,
+              cacheCreationTokens: t.cacheCreationTokens,
+            })),
+          };
+          console.log(`[ClaudeRuntime] Turn metrics [${sessionId}]:`, JSON.stringify(summary));
+          metricsCollector.recordTurnMetrics(summary);
+        }
       };
 
       let safetyTimer: ReturnType<typeof setTimeout> | undefined;

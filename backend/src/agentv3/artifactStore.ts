@@ -38,6 +38,22 @@ export interface ArtifactSummary {
   diagnosticCount: number;
 }
 
+/**
+ * Compact artifact summary optimized for Claude's context window.
+ * Removes redundant fields (skillId already in parent, layer unused for fetch decisions)
+ * and merges columns+sampleRow into a self-describing preview object.
+ */
+export interface CompactArtifactSummary {
+  id: string;
+  stepId?: string;
+  title?: string;
+  rowCount: number;
+  /** First row as {column: value} object — self-describing, no separate columns array needed. */
+  preview?: Record<string, any>;
+  /** Only present when diagnostics exist (> 0). */
+  diagnosticCount?: number;
+}
+
 export class ArtifactStore {
   private artifacts: Map<string, StoredArtifact> = new Map();
   private counter = 0;
@@ -116,6 +132,35 @@ export class ArtifactStore {
       columns,
       sampleRow: rows.length > 0 ? rows[0] : undefined,
       diagnosticCount: Array.isArray(artifact.diagnostics) ? artifact.diagnostics.length : 0,
+    };
+  }
+
+  /**
+   * Generate a compact summary optimized for Claude's context window.
+   * Delegates to generateSummary(), then reshapes:
+   * - skillId/layer: omitted (already in parent invoke_skill result)
+   * - diagnosticCount: only included when > 0
+   * - columns + sampleRow → preview: { column: value } (self-describing)
+   */
+  generateCompactSummary(id: string): CompactArtifactSummary | undefined {
+    const full = this.generateSummary(id);
+    if (!full) return undefined;
+
+    let preview: Record<string, any> | undefined;
+    if (full.sampleRow && full.columns.length > 0) {
+      preview = {};
+      for (let i = 0; i < full.columns.length; i++) {
+        preview[full.columns[i]] = i < full.sampleRow.length ? full.sampleRow[i] : null;
+      }
+    }
+
+    return {
+      id: full.id,
+      stepId: full.stepId,
+      title: full.title,
+      rowCount: full.rowCount,
+      ...(preview ? { preview } : {}),
+      ...(full.diagnosticCount > 0 ? { diagnosticCount: full.diagnosticCount } : {}),
     };
   }
 

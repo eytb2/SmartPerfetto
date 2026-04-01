@@ -51,6 +51,26 @@ export interface CacheMetrics {
   cacheHitRate: number;
 }
 
+/** Per-turn performance metrics collected from SDK stream. */
+export interface TurnMetricsSummary {
+  totalTurns: number;
+  totalDurationMs: number;
+  totalToolCalls: number;
+  totalPayloadBytes: number;
+  turns: Array<{
+    turn: number;
+    durationMs?: number;
+    firstTokenMs?: number;
+    tools: string[];
+    payloadBytes: number;
+    thinking: boolean;
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+  }>;
+}
+
 export interface SessionMetrics {
   sessionId: string;
   startTime: number;
@@ -67,6 +87,8 @@ export interface SessionMetrics {
   };
   /** SDK token usage and prompt cache metrics (recorded from result message). */
   cache?: CacheMetrics;
+  /** Per-turn performance metrics for optimization analysis. */
+  turnMetrics?: TurnMetricsSummary;
 }
 
 // =============================================================================
@@ -79,6 +101,7 @@ export class AgentMetricsCollector {
   private toolExecutions: ToolExecution[] = [];
   private turnCount = 0;
   private cacheMetrics: CacheMetrics | null = null;
+  private turnMetricsSummary: TurnMetricsSummary | null = null;
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
@@ -179,6 +202,11 @@ export class AgentMetricsCollector {
     );
   }
 
+  /** Record per-turn metrics collected from SDK stream processing. */
+  recordTurnMetrics(summary: TurnMetricsSummary): void {
+    this.turnMetricsSummary = summary;
+  }
+
   /** Generate session metrics summary. */
   summarize(): SessionMetrics {
     const endTime = Date.now();
@@ -216,6 +244,7 @@ export class AgentMetricsCollector {
         byTool,
       },
       ...(this.cacheMetrics ? { cache: this.cacheMetrics } : {}),
+      ...(this.turnMetricsSummary ? { turnMetrics: this.turnMetricsSummary } : {}),
     };
   }
 }

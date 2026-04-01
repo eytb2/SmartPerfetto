@@ -304,6 +304,15 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     });
   }
 
+  // Phase 1-C: Conditional REASONING_NUDGE — only append for first N data tool calls.
+  // After N calls, Claude should have internalized the reflect habit from system prompt.
+  const REASONING_NUDGE_MAX_CALLS = 4;
+  let dataToolCallCount = 0;
+  function getReasoningNudge(): string {
+    dataToolCallCount++;
+    return dataToolCallCount <= REASONING_NUDGE_MAX_CALLS ? REASONING_NUDGE : '';
+  }
+
   const executeSql = tool(
     'execute_sql',
     'Execute a raw SQL query against the Perfetto trace_processor for the currently loaded trace. ' +
@@ -402,7 +411,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
                 columnStats: summaryResult.columnStats,
                 sampleRows: summaryResult.sampleRows,
                 durationMs: result.durationMs,
-              })) + REASONING_NUDGE,
+              })) + getReasoningNudge(),
             }],
           };
         }
@@ -418,7 +427,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               truncated,
               durationMs: result.durationMs,
               ...(result.error ? { error: result.error } : {}),
-            })) + (success ? REASONING_NUDGE : ''),
+            })) + (success ? getReasoningNudge() : ''),
           }],
         };
       } catch (err) {
@@ -433,7 +442,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           isError: true,
         };
       }
-    }
+    },
+    { annotations: { readOnlyHint: true } },
   );
 
   const invokeSkill = tool(
@@ -549,8 +559,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               data: dr.data,
               diagnostics: undefined,
             });
-            const summary = artifactStore.generateSummary(artId);
-            return { artifactId: artId, ...summary };
+            const summary = artifactStore.generateCompactSummary(artId);
+            return summary;
           });
 
           // Store diagnostics as a separate artifact if present
@@ -606,8 +616,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
                   ? { synthesizeArtifacts }
                   : {}),
                 ...(vendorOverrideHint ? { vendorOverride: vendorOverrideHint } : {}),
-                hint: 'Use fetch_artifact(artifactId, detail="rows", offset=0, limit=50) to page through large datasets. All data is accessible — use offset/limit to paginate.',
-              })) + (result.success ? REASONING_NUDGE : ''),
+                hint: 'Use fetch_artifact(artifactId=<id>, detail="rows", offset=0, limit=50) to page through large datasets. All data is accessible — use offset/limit to paginate.',
+              })) + (result.success ? getReasoningNudge() : ''),
             }],
           };
         }
@@ -630,7 +640,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               })),
               diagnostics: result.diagnostics,
               synthesizeData: result.synthesizeData,
-            })) + (result.success ? REASONING_NUDGE : ''),
+            })) + (result.success ? getReasoningNudge() : ''),
           }],
         };
       } catch (err) {
@@ -645,7 +655,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           isError: true,
         };
       }
-    }
+    },
+    { annotations: { readOnlyHint: true } },
   );
 
   const listSkills = tool(
@@ -688,7 +699,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           isError: true,
         };
       }
-    }
+    },
+    { annotations: { readOnlyHint: true } },
   );
 
   const detectArchitecture = tool(
@@ -738,7 +750,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           isError: true,
         };
       }
-    }
+    },
+    { annotations: { readOnlyHint: true } },
   );
 
   const lookupSqlSchema = tool(
@@ -805,7 +818,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           }),
         }],
       };
-    }
+    },
+    { annotations: { readOnlyHint: true } },
   );
 
   // Conditional tool: write_analysis_note (only available when analysisNotes array is provided)
@@ -900,7 +914,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           text: JSON.stringify({ success: true, detail: effectiveDetail, ...result }),
         }],
       };
-    }
+    },
+    { annotations: { readOnlyHint: true } },
   ) : null;
 
   // list_stdlib_modules: Expose Perfetto stdlib module inventory to the agent.
@@ -949,7 +964,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           }),
         }],
       };
-    }
+    },
+    { annotations: { readOnlyHint: true } },
   );
 
   // lookup_knowledge: Load background knowledge on performance analysis topics on demand.
@@ -995,7 +1011,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       return {
         content: [{ type: 'text' as const, text: content }],
       };
-    }
+    },
+    { annotations: { readOnlyHint: true } },
   );
 
   // query_perfetto_source: Search the Perfetto stdlib for SQL patterns and usage examples.
@@ -1078,7 +1095,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           isError: true,
         };
       }
-    }
+    },
+    { annotations: { readOnlyHint: true } },
   );
 
   // P1-G11: Scene plan templates — mandatory aspects per scene type
@@ -1190,18 +1208,16 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         timestamp: Date.now(),
       });
 
+      // Compact return: only include scene warnings when present
+      const response: Record<string, any> = { success: true };
+      if (planWarnings.length > 0) {
+        response.sceneWarnings = planWarnings;
+        response.hint = `检测到 ${options.sceneType} 场景，建议补充以下分析阶段。可使用 revise_plan 调整计划。`;
+      }
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({
-            success: true,
-            message: `Plan accepted: ${phases.length} phases. Now proceed with phase "${phases[0]?.id}".`,
-            phases: phases.map(p => p.id),
-            ...(planWarnings.length > 0 ? {
-              sceneWarnings: planWarnings,
-              hint: `检测到 ${options.sceneType} 场景，建议补充以下分析阶段。可使用 revise_plan 调整计划。`,
-            } : {}),
-          }),
+          text: JSON.stringify(response),
         }],
       };
     }
@@ -1257,15 +1273,14 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         summaryFeedback = 'Warning: phase summary is too brief. Include specific evidence (数据、数值、发现) for plan adherence verification.';
       }
 
+      // Compact return: only include feedback when needed (normal path = minimal ACK)
+      const response: Record<string, any> = { success: true };
+      if (!nextPhase) response.allPhasesComplete = true;
+      if (summaryFeedback) response.summaryFeedback = summaryFeedback;
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({
-            success: true,
-            progress: `${completed}/${plan.phases.length} phases done`,
-            ...(nextPhase ? { nextPhase: nextPhase.id, nextGoal: nextPhase.name } : { allPhasesComplete: true }),
-            ...(summaryFeedback ? { summaryFeedback } : {}),
-          }),
+          text: JSON.stringify(response),
         }],
       };
     }
@@ -1404,9 +1419,6 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           text: JSON.stringify({
             success: true,
             hypothesisId: hypothesis.id,
-            message: `Hypothesis ${hypothesis.id} recorded. Now collect evidence to confirm or reject it.`,
-            totalHypotheses: hypothesesRef.length,
-            unresolvedCount: hypothesesRef.filter(h => h.status === 'formed').length,
           }),
         }],
       };
@@ -1454,9 +1466,6 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             success: true,
             hypothesisId,
             status,
-            message: unresolvedCount === 0
-              ? `Hypothesis ${hypothesisId} ${status}. All hypotheses resolved — ready to conclude.`
-              : `Hypothesis ${hypothesisId} ${status}. ${unresolvedCount} hypothesis(es) still unresolved.`,
             unresolvedCount,
           }),
         }],
@@ -1587,7 +1596,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             (learnedMisdiagnosis.length > 0 ? ` Also ${learnedMisdiagnosis.length} learned misdiagnosis avoidance patterns.` : ''),
         }) }],
       };
-    }
+    },
+    { annotations: { readOnlyHint: true } },
   );
 
   // ---------------------------------------------------------------------------
@@ -1637,7 +1647,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             totalRows: result.rows.length,
             durationMs,
           });
-          return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(text + REASONING_NUDGE) }] };
+          return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(text + getReasoningNudge()) }] };
         }
 
         const durationMs = Date.now() - sqlStart;
@@ -1651,11 +1661,12 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           durationMs,
           error: result.error,
         });
-        return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(success ? text + REASONING_NUDGE : text) }] };
+        return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(success ? text + getReasoningNudge() : text) }] };
       } catch (e: any) {
         return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, trace: traceLabel, error: e.message }) }] };
       }
-    }
+    },
+    { annotations: { readOnlyHint: true } },
   ) : null;
 
   const compareSkill = referenceTraceId ? tool(
@@ -1748,11 +1759,11 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           hint: '使用 execute_sql_on 深钻具体差异指标，或使用 fetch_artifact 获取详细数据。',
         });
 
-        return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(text + REASONING_NUDGE) }] };
+        return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(text + getReasoningNudge()) }] };
       } catch (e: any) {
         return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: e.message }) }] };
       }
-    }
+    },
   ) : null;
 
   const getComparisonContext = (referenceTraceId && comparisonContext) ? tool(
@@ -1784,7 +1795,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         capabilityDiff: ctx.capabilityDiff,
       });
       return { content: [{ type: 'text' as const, text }] };
-    }
+    },
+    { annotations: { readOnlyHint: true } },
   ) : null;
 
   // P2-G1: Co-locate tool objects with their names — auto-derives allowedTools

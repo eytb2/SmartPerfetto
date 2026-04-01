@@ -42,7 +42,7 @@ function printUsage(): void {
   console.log('Options:');
   console.log('  --trace <path>                    Trace path (default: ../test-traces/app_aosp_scrolling_heavy_jank.pftrace)');
   console.log('  --query <text>                    Analyze query (default: 分析滑动性能)');
-  console.log('  --timeout-ms <number>             SSE timeout in ms (default: 300000)');
+  console.log('  --timeout-ms <number>             SSE timeout in ms (default: 600000)');
   console.log('  --max-rounds <number>             Analysis max rounds (default: 3)');
   console.log('  --confidence-threshold <number>   Analysis confidence threshold (default: 0.5)');
   console.log('  --output <path>                   JSON report output path');
@@ -55,7 +55,7 @@ function parseArgs(argv: string[]): VerifyOptions {
   const options: VerifyOptions = {
     tracePath: path.resolve(process.cwd(), DEFAULT_TRACE),
     query: DEFAULT_QUERY,
-    timeoutMs: 300_000,
+    timeoutMs: 600_000,
     maxRounds: 3,
     confidenceThreshold: 0.5,
     keepSession: false,

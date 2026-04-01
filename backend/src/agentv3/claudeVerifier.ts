@@ -500,6 +500,57 @@ export function verifySceneCompleteness(
           });
         }
       }
+
+      // Root cause ID references (A1-A18, B1-B12 from knowledge-startup-root-causes)
+      // Two-step match: first find a valid ID, then require nearby context words
+      // NOTE: Do NOT suggest lookup_knowledge in the message — loading the 41KB template
+      // during a correction retry can blow up the session context and prevent report generation
+      const validIdPattern = /\b(?:A(?:1[0-8]?|[2-9])|B(?:1[0-2]?|[2-9]))\b/;
+      const hasIdWithContext = validIdPattern.test(allText) &&
+        /(?:根因|疑似|对应|导致|阻塞|← [AB]\d).{0,30}\b(?:A(?:1[0-8]?|[2-9])|B(?:1[0-2]?|[2-9]))\b|\b(?:A(?:1[0-8]?|[2-9])|B(?:1[0-2]?|[2-9]))\b.{0,30}(?:根因|初始化|阻塞|竞争|开销|加载|压力|节流|干扰|延迟)/i.test(allText);
+      if (!hasIdWithContext) {
+        issues.push({
+          type: 'missing_check',
+          severity: 'warning',
+          message: '启动分析结论缺少根因编号引用 — 在关键发现中标注根因编号（如 A2: 磁盘IO、B3: 内存压力、A5: DEX加载），便于交叉引用',
+        });
+      }
+
+      // Extended SR codes (SR09-SR20) acknowledgment when detected
+      // No longer requires skill name as precondition — Agent may only mention SR codes
+      const hasExtendedSR = /SR(?:09|1[0-9]|20)(?!\d)/i.test(allText);
+      if (hasExtendedSR) {
+        // SR codes detected — verify conclusion mentions corresponding root causes
+        // Primary check: root cause ID (\bA9\b etc.); secondary: domain-specific keywords
+        const srToRootCause: Record<string, RegExp> = {
+          'SR09': /\bA1\b|ContentProvider.*(?:过多|初始化.*[重慢长])/i,
+          'SR10': /\bA9\b|SharedPreference|SP.*(?:阻塞|同步读取)/i,
+          'SR11': /\bA17\b|Thread\.sleep|nanosleep|显式.*sleep/i,
+          'SR12': /\bA11\b|SDK.*初始化|三方.*初始化/i,
+          'SR13': /\bA14\b|native.*(?:库|lib).*(?:加载|耗时)|dlopen/i,
+          'SR14': /\bA10\b|WebView.*初始化/i,
+          'SR15': /\bA4\b|inflate.*(?:过[重长]|耗时)|布局.*膨胀/i,
+          'SR16': /\bB4\b|热节流|thermal.*throttl/i,
+          'SR17': /\bB9\b|后台.*干扰|Runnable.*(?:高|>\s*1[0-9])/i,
+          'SR18': /\bB7\b|system_server.*(?:锁|contention)/i,
+          'SR19': /\bB12\b|并发.*启动|boot.*storm/i,
+          'SR20': /\bA8\b|数据库.*(?:IO|阻塞|初始化)|fsync.*(?:阻塞|主线程)/i,
+        };
+        for (const [sr, pattern] of Object.entries(srToRootCause)) {
+          const srRegex = new RegExp(`${sr}(?!\\d)`, 'i');
+          if (!srRegex.test(allText)) continue;
+          // Skip if the SR code only appears in a negation context (排除/not hit/未命中/可排除)
+          const negationPattern = new RegExp(`${sr}(?!\\d).{0,20}(?:not\\s*hit|未命中|可排除|未触发|未检出|无|排除)`, 'i');
+          if (negationPattern.test(allText) && !pattern.test(allText)) continue;
+          if (!pattern.test(allText)) {
+            issues.push({
+              type: 'missing_check',
+              severity: 'warning',
+              message: `${sr} 被检测到但结论中缺少对应根因分析 — 请在结论中解释该 SR code 的根因和影响`,
+            });
+          }
+        }
+      }
       break;
     }
     case 'anr': {
@@ -815,10 +866,30 @@ export async function verifyConclusion(
     heuristicIssues.push(...sceneIssues);
   }
 
-  // Layer 3: LLM verification (optional)
+  // Layer 3: LLM verification (conditional skip — Phase 1-B optimization)
+  // Skip when all heuristic/plan/hypothesis checks pass cleanly.
+  // Match on issue `type` (not message text) — robust against message rewording.
+  const HIGH_RISK_ISSUE_TYPES = new Set(['missing_evidence', 'missing_reasoning', 'severity_mismatch', 'truncation']);
+
+  const hasErrors = heuristicIssues.some(i => i.severity === 'error');
+  const hasHighRiskWarnings = heuristicIssues.some(i =>
+    i.severity === 'warning' && HIGH_RISK_ISSUE_TYPES.has(i.type)
+  );
+  const evidenceCount = findings.filter(f => f.description && f.description.length > 50).length;
+  const hasEnoughEvidence = evidenceCount >= 3;
+  const hasCrossArtifactReasoning = conclusion.includes('对比') || conclusion.includes('综合') ||
+    (conclusion.match(/art-\d+/g) || []).length > 3;
+
+  const canSkipLLM = !hasErrors && !hasHighRiskWarnings && hasEnoughEvidence && !hasCrossArtifactReasoning;
+
   let llmIssues: VerificationIssue[] | undefined;
-  if (enableLLM) {
+  if (enableLLM && !canSkipLLM) {
     llmIssues = await verifyWithLLM(findings, conclusion);
+  } else if (enableLLM && canSkipLLM) {
+    console.log(
+      `[Verifier] LLM verification skipped: errors=${hasErrors}, highRiskWarnings=${hasHighRiskWarnings}, ` +
+      `evidenceCount=${evidenceCount}, crossArtifact=${hasCrossArtifactReasoning}`,
+    );
   }
 
   const allIssues = [...heuristicIssues, ...(llmIssues || [])];
