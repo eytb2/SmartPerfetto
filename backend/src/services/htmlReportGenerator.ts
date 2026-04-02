@@ -4440,6 +4440,12 @@ export class HTMLReportGenerator {
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script>
     if (typeof mermaid !== 'undefined') {
+      // Sanitize HTML tags in mermaid code before rendering.
+      // LLMs often generate <br/> for line breaks in node labels,
+      // which breaks securityLevel:'strict'. Replace with newlines.
+      document.querySelectorAll('pre.mermaid').forEach(function(el) {
+        el.textContent = (el.textContent || '').replace(/<br\s*\/?>/gi, '\n');
+      });
       mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'strict' });
       mermaid.run({ querySelector: 'pre.mermaid' });
     }

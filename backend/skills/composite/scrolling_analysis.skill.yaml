@@ -1767,6 +1767,15 @@ steps:
           type: duration
           format: duration_ms
           hidden: true
+        - name: device_peak_freq_mhz
+          label: "设备峰值频率"
+          type: number
+          hidden: true
+        - name: file_io_overlap_ms
+          label: "文件IO重叠"
+          type: duration
+          format: duration_ms
+          hidden: true
         - name: cpu_freq_clusters_json
           label: "CPU频率详情"
           type: string
@@ -1835,6 +1844,17 @@ steps:
             ) AS INTEGER) AS raw_ns
           )
         )
+      ),
+      -- ========== 1b. 设备峰值频率（全 trace 大核最高频率，用于温控/限频检测）==========
+      -- 不加 start_ts/end_ts 过滤 — 求设备硬件频率上限
+      -- 用 MAX — P95 会被大量空闲低频样本主导（CPU 大部分时间低频运行）
+      -- 优先级已从 P0.6 下调到 P4.5，配合 60% 阈值足以防止误判
+      device_peak_freq AS (
+        SELECT COALESCE(ROUND(MAX(c.value) / 1000, 0), 0) as device_peak_freq_mhz
+        FROM counter c
+        JOIN cpu_counter_track cct ON c.track_id = cct.id AND cct.name = 'cpufreq'
+        LEFT JOIN _cpu_topology ct ON cct.cpu = ct.cpu_id
+        WHERE ct.core_type IN ('prime', 'big')
       ),
       -- ========== 2. Per-layer 帧序列 + 双信号混合掉帧检测（与 get_app_jank_frames 一致）==========
       layer_frames AS (
@@ -2390,6 +2410,29 @@ steps:
         WHERE rn <= 5
         GROUP BY frame_start
       ),
+      -- 10h. 主线程文件 IO 检测（SharedPreferences/sqlite/fsync 等 IO slice 与帧窗口重叠）
+      per_frame_file_io AS (
+        SELECT fl.frame_start,
+          ROUND(SUM(
+            MAX(MIN(s.ts + s.dur, fl.frame_end) - MAX(s.ts, fl.frame_start), 0)
+          ) / 1e6, 2) as file_io_overlap_ms
+        FROM jank_frame_list fl
+        JOIN per_frame_thread_roles ptr ON ptr.frame_start = fl.frame_start AND ptr.role = 'main'
+        JOIN thread_track tt ON tt.utid = ptr.utid
+        JOIN slice s ON s.track_id = tt.id
+          AND s.ts < fl.frame_end AND s.ts + s.dur > fl.frame_start
+          AND s.dur > 500000
+        WHERE s.name GLOB '*SharedPreferences*'
+          OR s.name GLOB '*getSharedPreferences*'
+          OR s.name GLOB '*commit*SharedPref*'
+          OR s.name GLOB '*QueuedWork*'
+          OR s.name GLOB '*waitToFinish*'
+          OR s.name GLOB '*sqlite*'
+          OR s.name GLOB '*SQLiteDatabase*'
+          OR s.name GLOB '*openFile*'
+          OR s.name GLOB '*fsync*'
+        GROUP BY fl.frame_start
+      ),
       -- ========== 11. 综合分析 ==========
       analysis AS (
         SELECT
@@ -2442,9 +2485,12 @@ steps:
           COALESCE(pfrts.render_slices_json, '[]') as render_slices_json,
           COALESCE(pfbd.binder_calls_json, '[]') as binder_calls_json,
           COALESCE(pfgd.gc_events_json, '[]') as gc_events_json,
-          COALESCE(pfld.lock_contention_json, '[]') as lock_contention_json
+          COALESCE(pfld.lock_contention_json, '[]') as lock_contention_json,
+          COALESCE(pfio.file_io_overlap_ms, 0) as file_io_overlap_ms,
+          dpf.device_peak_freq_mhz
         FROM jank_frame_list fl
         CROSS JOIN timing_config tc
+        CROSS JOIN device_peak_freq dpf
         LEFT JOIN top_slices ts ON ts.frame_start = fl.frame_start
         LEFT JOIN per_frame_cpu_mix pcm ON pcm.frame_start = fl.frame_start
         LEFT JOIN per_frame_quadrants pfq ON pfq.frame_start = fl.frame_start
@@ -2462,6 +2508,7 @@ steps:
         LEFT JOIN per_frame_binder_detail pfbd ON pfbd.frame_start = fl.frame_start
         LEFT JOIN per_frame_gc_detail pfgd ON pfgd.frame_start = fl.frame_start
         LEFT JOIN per_frame_lock_detail pfld ON pfld.frame_start = fl.frame_start
+        LEFT JOIN per_frame_file_io pfio ON pfio.frame_start = fl.frame_start
       ),
       -- ========== 11. 根因分类（与 jank_frame_detail 相同优先级 CASE 树） ==========
       classified AS (
@@ -2472,12 +2519,20 @@ steps:
             -- 主线程 S 状态来自 syncFrameState 等待，非锁/Binder 问题
             WHEN jank_responsibility = 'BUFFER_STUFFING'
               THEN 'buffer_stuffing'
+            -- P0.5: SF 合成超时 — 短路：jank_responsibility 指向 SF，跳过 App 侧分析
+            -- Perfetto FrameTimeline 判定 SurfaceFlinger 为掉帧责任方
+            WHEN jank_responsibility = 'SF'
+              THEN 'sf_composition_slow'
             -- P1: Binder 同步阻塞（top slice 内有大量同步 Binder 重叠）
             WHEN top_slice_ms > slice_critical_ms AND binder_overlap_ms >= binder_overlap_critical_ms
               THEN 'binder_sync_blocking'
             -- P1.5: GC 暂停（帧窗口内 GC 重叠 > 1ms）
             WHEN gc_overlap_ms > 1.0
               THEN 'gc_jank'
+            -- P1.6: GC 压力级联 — 帧窗口内多次 GC（>=3 次），内存压力高
+            -- 即使单次 GC 重叠 <1ms，密集 GC 累积也会显著影响帧耗时
+            WHEN gc_count >= 3 AND gc_overlap_ms > 0.5
+              THEN 'gc_pressure_cascade'
             -- P2: 小核调度（top slice 多数时间在小核执行）
             WHEN top_slice_ms > slice_critical_ms AND little_run_pct >= 45
               THEN 'small_core_placement'
@@ -2490,9 +2545,25 @@ steps:
             -- P3.6: GPU fence 等待（RenderThread 长时间等待 GPU fence > 50% 帧预算）
             WHEN max_fence_dur_ns > vsync_period_ns * 0.5
               THEN 'gpu_fence_wait'
+            -- P3.7: RenderThread 负载过重 — RT 主动运行占比高（>70%），非 GPU/Shader 等待
+            -- 到达此处说明 Shader/GPU fence 已排除；RT 自身计算密集是瓶颈
+            WHEN (render_q1_pct + render_q2_pct) > 70 AND render_q4b_pct < 20
+              THEN 'render_thread_heavy'
             -- P4: 重度业务负载（>2× 帧预算，即使满频也会超时）
             WHEN top_slice_ms > frame_budget_ms * 2.0
               THEN 'workload_heavy'
+            -- P4.5: 温控降频 — 帧内大核最高频率显著低于设备 P95 峰值（<60%）
+            -- 放在 workload_heavy 之后：如果帧有明确的 App 侧直接原因（Binder/GC/heavy workload），
+            -- 优先归因到直接原因。温控降频是供给侧约束，仅在无更强直接原因时才作为主因
+            WHEN device_peak_freq_mhz > 0 AND big_max_freq_mhz > 0
+              AND big_max_freq_mhz < device_peak_freq_mhz * 0.60
+              AND top_slice_ms > slice_critical_ms
+              THEN 'thermal_throttling'
+            -- P4.6: CPU 最大频率被限 — 中等程度限频（60%-75%）
+            WHEN device_peak_freq_mhz > 0 AND big_max_freq_mhz > 0
+              AND big_max_freq_mhz < device_peak_freq_mhz * 0.75
+              AND top_slice_ms > slice_critical_ms
+              THEN 'cpu_max_limited'
             -- P5: 大核低频（边际情况：slice 在 1x-2x 帧预算区间）
             WHEN top_slice_ms > slice_critical_ms AND big_run_pct >= 40
               AND big_avg_freq_mhz > 0 AND big_max_freq_mhz > 0
@@ -2503,21 +2574,32 @@ steps:
               AND ramp_to_high_ms > freq_ramp_critical_ms
               AND top_slice_offset_ms <= ramp_to_high_ms
               THEN 'freq_ramp_slow'
-            -- P7: 工作负载超时兜底（1x-2x 帧预算，无特定供给侧因素）
-            WHEN top_slice_ms > slice_critical_ms
-              THEN 'workload_heavy'
-            -- P8: 无 top slice 时的调度延迟
+            -- ========== 四象限/IO/Binder 信号（不依赖 top_slice_ms 阈值）==========
+            -- P7: CPU 全核饱和 — 双线程同时调度等待高
+            WHEN main_q3_pct > 15 AND render_q3_pct > 15
+              THEN 'cpu_saturation'
+            -- P7.5: 调度延迟（仅主线程 Runnable 高）
             WHEN main_q3_pct > 20
               THEN 'scheduling_delay'
-            -- P9a: IO 阻塞（D/DK 状态 — 不可中断睡眠，通常为磁盘/页缺失）
+            -- P8: 主线程文件 IO — SharedPreferences/SQLite/fsync 等具体 IO slice
+            WHEN file_io_overlap_ms > 1.0
+              THEN 'main_thread_file_io'
+            -- P8.5: IO 阻塞（D/DK 状态，无具体 IO slice 匹配）
             WHEN main_q4a_pct > 20
               THEN 'blocking_io'
-            -- P9b: 锁/Binder 等待（S/I 状态 — 可中断睡眠，通常为 futex/binder/条件变量）
+            -- P9: Binder 超时 — 帧窗口内 Binder 累计 >500ms
+            WHEN binder_overlap_ms > 500
+              THEN 'binder_timeout'
+            -- P9.5: 锁/Binder 等待（S/I 状态）
             WHEN main_q4b_pct > 30
               THEN 'lock_binder_wait'
             -- P10: 小核调度（按四象限判断）
             WHEN main_q2_pct > 50
               THEN 'small_core_placement'
+            -- ========== 兜底分类 ==========
+            -- P11: 工作负载超时兜底（top_slice > critical 但无特定供给侧/四象限因素）
+            WHEN top_slice_ms > slice_critical_ms
+              THEN 'workload_heavy'
             ELSE 'unknown'
           END as reason_code
         FROM analysis
@@ -2537,22 +2619,38 @@ steps:
         reason_code,
         CASE
           WHEN reason_code = 'buffer_stuffing' THEN 'Buffer Stuffing: 管线背压，帧耗时 ' || dur_ms || 'ms，BufferQueue 积压导致跳帧（非 App 问题）'
+          WHEN reason_code = 'sf_composition_slow' THEN 'SF合成超时: SurfaceFlinger 侧导致掉帧（非 App 问题），帧耗时 ' || dur_ms || 'ms'
+          WHEN reason_code = 'thermal_throttling' THEN '温控降频: 大核最高 ' || big_max_freq_mhz || 'MHz (设备峰值 ' || device_peak_freq_mhz || 'MHz, 仅 ' || ROUND(100.0 * big_max_freq_mhz / NULLIF(device_peak_freq_mhz, 0), 0) || '%)'
           WHEN reason_code = 'binder_sync_blocking' THEN '同步Binder阻塞: "' || top_slice_name || '" 中 Binder 重叠 ' || binder_overlap_ms || 'ms'
           WHEN reason_code = 'gc_jank' THEN 'GC暂停: 帧窗口内 GC 重叠 ' || gc_overlap_ms || 'ms (' || gc_count || ' 次)'
+          WHEN reason_code = 'gc_pressure_cascade' THEN 'GC压力级联: 帧窗口内 ' || gc_count || ' 次 GC，总重叠 ' || gc_overlap_ms || 'ms（内存压力高）'
           WHEN reason_code = 'small_core_placement' THEN '小核调度: "' || top_slice_name || '" 小核占比 ' || little_run_pct || '%'
           WHEN reason_code = 'sched_delay_in_slice' THEN '调度延迟: "' || top_slice_name || '" Runnable 占比 ' || runnable_pct || '%'
           WHEN reason_code = 'shader_compile' THEN 'Shader编译: ' || shader_count || ' 次编译，总计 ' || ROUND(total_shader_dur_ns / 1e6, 2) || 'ms'
           WHEN reason_code = 'gpu_fence_wait' THEN 'GPU Fence等待: 最长 ' || ROUND(max_fence_dur_ns / 1e6, 2) || 'ms'
+          WHEN reason_code = 'render_thread_heavy' THEN 'RT负载过重: RenderThread 运行占比 ' || (render_q1_pct + render_q2_pct) || '%, 等待仅 ' || render_q4b_pct || '%'
           WHEN reason_code = 'workload_heavy' THEN '负载过重: "' || top_slice_name || '" 耗时 ' || top_slice_ms || 'ms (预算 ' || frame_budget_ms || 'ms)'
+          WHEN reason_code = 'cpu_max_limited' THEN 'CPU限频: 大核最高 ' || big_max_freq_mhz || 'MHz (设备峰值 ' || device_peak_freq_mhz || 'MHz, ' || ROUND(100.0 * big_max_freq_mhz / NULLIF(device_peak_freq_mhz, 0), 0) || '%), "' || top_slice_name || '" 耗时 ' || top_slice_ms || 'ms'
           WHEN reason_code = 'big_core_low_freq' THEN '大核低频: 平均 ' || big_avg_freq_mhz || 'MHz (峰值 ' || big_max_freq_mhz || 'MHz)'
           WHEN reason_code = 'freq_ramp_slow' THEN '升频慢: ' || ramp_to_high_ms || 'ms 才达高频'
           WHEN reason_code = 'scheduling_delay' THEN '调度等待: Q3=' || main_q3_pct || '%'
+          WHEN reason_code = 'cpu_saturation' THEN 'CPU全核饱和: 主线程 Q3=' || main_q3_pct || '%, RT Q3=' || render_q3_pct || '%（双线程同时调度等待）'
           WHEN reason_code = 'blocking_io' THEN 'IO阻塞: Q4a(D/DK)=' || main_q4a_pct || '%'
+          WHEN reason_code = 'main_thread_file_io' THEN '主线程文件IO: 帧内 IO overlap ' || file_io_overlap_ms || 'ms (SharedPreferences/SQLite/fsync)'
           WHEN reason_code = 'lock_binder_wait' THEN '锁/Binder等待: Q4b(S/I)=' || main_q4b_pct || '%'
+          WHEN reason_code = 'binder_timeout' THEN 'Binder超时: 帧内 Binder 累计 ' || binder_overlap_ms || 'ms (>500ms)'
           ELSE '未分类 (帧耗时 ' || dur_ms || 'ms)'
         END as primary_cause,
         CASE
           WHEN reason_code = 'buffer_stuffing' THEN '高'
+          WHEN reason_code = 'sf_composition_slow' THEN '高'
+          WHEN reason_code = 'thermal_throttling' THEN '高'
+          WHEN reason_code = 'gc_pressure_cascade' THEN '高'
+          WHEN reason_code = 'render_thread_heavy' THEN '中'
+          WHEN reason_code = 'cpu_max_limited' THEN '中'
+          WHEN reason_code = 'cpu_saturation' THEN '中'
+          WHEN reason_code = 'main_thread_file_io' THEN '高'
+          WHEN reason_code = 'binder_timeout' THEN '高'
           WHEN top_slice_ms > slice_critical_ms THEN '高'
           WHEN shader_count > 0 THEN '高'
           WHEN max_fence_dur_ns > vsync_period_ns * 0.5 THEN '中'
@@ -2593,6 +2691,10 @@ steps:
         gc_count,
         -- 帧预算参考
         frame_budget_ms,
+        -- 设备峰值频率（温控/限频参考）
+        device_peak_freq_mhz,
+        -- 文件 IO 重叠
+        file_io_overlap_ms,
         -- 批量详情 JSON 列（供展开行使用）
         cpu_freq_clusters_json,
         freq_timeline_json,
@@ -2605,6 +2707,97 @@ steps:
       ORDER BY session_id, frame_start
     save_as: batch_root_cause
     condition: "frame_timeline.data[0]?.has_frame_timeline === 1 && environment?.data?.[0]?.has_data === 1 && ((perf_summary?.data?.[0]?.janky_frames || 0) > 0 || (jank_stats?.data?.[0]?.real_jank_count || 0) > 0)"
+
+  # ==========================================================================
+  # L0: 全局上下文标志（非帧级根因，场景过滤器 / 干扰检测）
+  # 用于 Agent 在 Phase 1.3 中修饰和过滤帧级结论
+  # ==========================================================================
+  - id: global_context_flags
+    type: atomic
+    name: "全局上下文标志"
+    optional: true
+    display:
+      level: hidden
+    sql: |
+      WITH
+      -- 1. 视频解码活动检测：滑动期间是否有 MediaCodec/视频线程活跃
+      video_check AS (
+        SELECT COUNT(*) as video_slice_count
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        WHERE (t.name GLOB '*MediaCodec*' OR t.name GLOB '*CodecLooper*'
+               OR t.name GLOB '*VideoDecoder*' OR t.name GLOB '*NuPlayer*'
+               OR s.name GLOB '*queueVideoBuffer*' OR s.name GLOB '*onOutputBufferAvailable*')
+          AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR s.ts + s.dur < ${end_ts})
+          AND s.dur > 100000
+      ),
+      -- 2. 插帧帧数检测：frame_id = -1 通常是 OEM 插帧功能
+      interpolation_check AS (
+        SELECT COUNT(*) as interpolation_frame_count
+        FROM actual_frame_timeline_slice a
+        LEFT JOIN process p ON a.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND p.name NOT LIKE '/system/%'
+          AND COALESCE(a.display_frame_token, -999) = -1
+          AND (${start_ts} IS NULL OR a.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR a.ts < ${end_ts})
+      ),
+      -- 3. 温控活跃检测：trace 中是否有明显的频率天花板下降
+      -- 对比全程峰值 vs 尾部 2s 内最低值，检测持续降频趋势
+      cpufreq_tail_threshold AS (
+        SELECT MAX(c.ts) - 2000000000 AS threshold
+        FROM counter c
+        JOIN cpu_counter_track cct ON c.track_id = cct.id AND cct.name = 'cpufreq'
+        LEFT JOIN _cpu_topology ct ON cct.cpu = ct.cpu_id
+        WHERE ct.core_type IN ('prime', 'big')
+          AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
+      ),
+      thermal_check AS (
+        SELECT
+          COALESCE(ROUND(MAX(c.value) / 1000, 0), 0) as trace_peak_freq_mhz,
+          COALESCE(ROUND(MIN(
+            CASE WHEN c.ts > (SELECT threshold FROM cpufreq_tail_threshold) THEN c.value END
+          ) / 1000, 0), 0) as tail_min_freq_mhz
+        FROM counter c
+        JOIN cpu_counter_track cct ON c.track_id = cct.id AND cct.name = 'cpufreq'
+        LEFT JOIN _cpu_topology ct ON cct.cpu = ct.cpu_id
+        WHERE ct.core_type IN ('prime', 'big')
+          AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
+      ),
+      -- 4. 非 App 大核 CPU 占用（后台干扰指标）
+      background_cpu AS (
+        SELECT
+          ROUND(100.0 * SUM(CASE WHEN '${package}' != '' AND p.name NOT GLOB '${package}*' AND ts.state = 'Running' THEN ts.dur ELSE 0 END)
+            / NULLIF(SUM(CASE WHEN ts.state = 'Running' THEN ts.dur ELSE 0 END), 0), 1) as non_app_big_core_pct
+        FROM thread_state ts
+        JOIN thread t ON ts.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
+        WHERE ct.core_type IN ('prime', 'big')
+          AND (${start_ts} IS NULL OR ts.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
+          AND ts.dur > 0
+      )
+      SELECT
+        CASE WHEN COALESCE(v.video_slice_count, 0) > 20 THEN 1 ELSE 0 END as video_during_scroll,
+        COALESCE(v.video_slice_count, 0) as video_slice_count,
+        COALESCE(i.interpolation_frame_count, 0) as interpolation_frame_count,
+        CASE WHEN COALESCE(i.interpolation_frame_count, 0) > 10 THEN 1 ELSE 0 END as interpolation_active,
+        th.trace_peak_freq_mhz,
+        th.tail_min_freq_mhz,
+        -- thermal_trending 仅在分析窗口 >5s 时有效（短 trace 正常 governor 波动会误报）
+        CASE WHEN th.trace_peak_freq_mhz > 0 AND th.tail_min_freq_mhz > 0
+          AND th.tail_min_freq_mhz < th.trace_peak_freq_mhz * 0.70
+          AND (SELECT threshold FROM cpufreq_tail_threshold) > COALESCE(${start_ts}, 0)
+          THEN 1 ELSE 0 END as thermal_trending,
+        COALESCE(bg.non_app_big_core_pct, 0) as non_app_big_core_pct,
+        CASE WHEN COALESCE(bg.non_app_big_core_pct, 0) > 60 THEN 1 ELSE 0 END as background_cpu_heavy
+      FROM video_check v, interpolation_check i, thermal_check th, background_cpu bg
+    save_as: global_context
 
   # ==========================================================================
   # L2: Session-Level Quadrant Distribution (MainThread + RenderThread)

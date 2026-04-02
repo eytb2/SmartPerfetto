@@ -1561,6 +1561,8 @@ steps:
             ELSE '低'
           END as confidence,
           CASE
+            -- SF 合成超时短路：jank_responsibility 指向 SF，App 侧指标不相关
+            WHEN '${jank_responsibility}' = 'SF' THEN 'sf_composition'
             WHEN slice_dur > slice_critical_ms THEN 'slice'
             WHEN fence_ms > gpu_fence_critical_ms THEN 'gpu_fence'
             WHEN max_sched_ms > sched_max_critical_ms THEN 'sched_latency'
@@ -1569,7 +1571,11 @@ steps:
             WHEN total_sched_ms > total_sched_critical_ms THEN 'sched_latency'
             WHEN main_q4a > 20 THEN 'io_blocking'
             WHEN main_q4b > 30 THEN 'blocking'
-            WHEN render_q4 > 50 THEN 'render_wait'
+            -- RenderThread 负载过重：RT 主动运行，非等待 GPU/SF
+            WHEN render_q4a < 10 AND render_q4b < 20 AND COALESCE(shader_ms, 0) <= gpu_fence_warning_ms
+              AND fence_ms <= gpu_fence_warning_ms
+              THEN 'render_heavy'
+            WHEN (render_q4a + render_q4b) > 50 THEN 'render_wait'
             WHEN COALESCE(shader_ms, 0) > gpu_fence_warning_ms THEN 'shader_compile'
             WHEN gc_overlap_ms > 1.0 THEN 'gc_pause'
             WHEN main_q2 > 50 THEN 'small_core'
@@ -1640,16 +1646,23 @@ steps:
           WHEN cause_type IN ('sched_latency', 'cpu_contention', 'small_core', 'freq_limit', 'cpu_overload') THEN 'supply'
           WHEN cause_type IN ('gpu_fence', 'render_wait', 'shader_compile') THEN 'amplification'
           WHEN cause_type = 'gc_pause' THEN 'trigger'
+          WHEN cause_type = 'sf_composition' THEN 'amplification'
+          WHEN cause_type = 'render_heavy' THEN 'trigger'
           ELSE 'unknown'
         END as mechanism_group,
         CASE
           WHEN reason_code = 'buffer_stuffing' THEN 'none'
-          WHEN reason_code IN ('binder_sync_blocking', 'blocking_io', 'lock_binder_wait') THEN 'blocking_wait'
+          WHEN reason_code = 'sf_composition_slow' THEN 'none'
+          WHEN reason_code = 'thermal_throttling' THEN 'thermal_throttle'
+          WHEN reason_code IN ('binder_sync_blocking', 'blocking_io', 'lock_binder_wait', 'binder_timeout') THEN 'blocking_wait'
           WHEN reason_code = 'gc_jank' THEN 'gc_pause'
+          WHEN reason_code = 'gc_pressure_cascade' THEN 'gc_pause'
           WHEN reason_code = 'small_core_placement' THEN 'core_placement'
-          WHEN reason_code IN ('big_core_low_freq', 'freq_ramp_slow') THEN 'frequency_insufficient'
+          WHEN reason_code IN ('big_core_low_freq', 'freq_ramp_slow', 'cpu_max_limited') THEN 'frequency_insufficient'
           WHEN reason_code IN ('sched_delay_in_slice', 'scheduling_delay') THEN 'scheduling_delay'
-          WHEN reason_code = 'cpu_load_high' THEN 'load_high'
+          WHEN reason_code IN ('cpu_load_high', 'cpu_saturation') THEN 'load_high'
+          WHEN reason_code = 'main_thread_file_io' THEN 'blocking_wait'
+          WHEN reason_code = 'render_thread_heavy' THEN 'none'
           WHEN reason_code = 'shader_compile' THEN 'none'
           WHEN reason_code = 'workload_heavy' THEN 'none'
           WHEN io_block_ms > io_block_critical_ms OR main_q4a > 20 OR main_q4b > 30 THEN 'blocking_wait'
@@ -1666,15 +1679,18 @@ steps:
         END as supply_constraint,
         CASE
           WHEN reason_code = 'buffer_stuffing' THEN 'buffer_pipeline'
-          WHEN cause_type IN ('slice', 'blocking', 'io_blocking', 'sched_latency', 'cpu_contention', 'small_core', 'freq_limit', 'cpu_overload', 'gc_pause') THEN 'app_producer'
-          WHEN cause_type IN ('gpu_fence', 'render_wait', 'shader_compile') THEN 'sf_consumer'
+          WHEN reason_code = 'sf_composition_slow' THEN 'sf_consumer'
+          WHEN cause_type IN ('slice', 'blocking', 'io_blocking', 'sched_latency', 'cpu_contention', 'small_core', 'freq_limit', 'cpu_overload', 'gc_pause', 'render_heavy') THEN 'app_producer'
+          WHEN cause_type IN ('gpu_fence', 'render_wait', 'shader_compile', 'sf_composition') THEN 'sf_consumer'
           ELSE 'unknown'
         END as trigger_layer,
         CASE
           WHEN reason_code = 'buffer_stuffing' THEN 'buffer_queue_backpressure'
+          WHEN reason_code = 'sf_composition_slow' THEN 'sf_consumer_backpressure'
           WHEN cause_type = 'gpu_fence' THEN 'gpu_fence_wait'
           WHEN cause_type = 'shader_compile' THEN 'shader_compile_stall'
-          WHEN cause_type = 'render_wait' THEN 'render_pipeline_wait'
+          WHEN cause_type IN ('render_wait', 'sf_composition') THEN 'render_pipeline_wait'
+          WHEN cause_type = 'render_heavy' THEN 'app_deadline_miss'
           WHEN jank_responsibility = 'SF' THEN 'sf_consumer_backpressure'
           WHEN jank_responsibility = 'APP' THEN 'app_deadline_miss'
           ELSE 'unknown'

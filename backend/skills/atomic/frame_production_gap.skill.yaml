@@ -1,0 +1,320 @@
+# =============================================================================
+# Frame Production Gap Analysis
+# =============================================================================
+# 检测帧生产间隙（缺帧）：连续帧之间的 gap 超过 1.5x VSync 周期。
+# 分析 gap 期间 UI Thread 和 RenderThread 的活动状态，区分缺帧类型：
+#   - ui_no_frame: UI Thread 未触发 doFrame（无渲染请求）
+#   - rt_no_drawframe: 有 doFrame 但 RenderThread 未执行 DrawFrame
+#   - sf_backpressure: 有 DrawFrame 但 SF 端未消费（背压或丢弃）
+#   - production_gap: 其他原因的帧生产中断
+#
+# 典型使用场景：
+# - 滑动中出现"跳帧"但 batch_frame_root_cause 无对应 jank 帧
+# - SurfaceTexture 单 buffer 场景下的帧吞噬检测
+# - 滑动到边界时的帧率自然下降确认
+
+name: frame_production_gap
+version: "1.0"
+type: composite
+category: diagnostics
+
+meta:
+  display_name: "帧生产 Gap 分析"
+  description: "检测帧间隙（缺帧）并分析 UI Thread/RenderThread 在 gap 期间的活动状态"
+  icon: "broken_image"
+  tags: [frame, gap, missing, production, diagnostics]
+
+prerequisites:
+  required_tables:
+    - actual_frame_timeline_slice
+    - slice
+    - thread
+    - process
+
+inputs:
+  - name: process_name
+    type: string
+    required: true
+    description: "目标进程名"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳(ns)"
+  - name: min_gap_vsync
+    type: number
+    required: false
+    description: "最小 gap 阈值（VSync 倍数，默认 1.5）"
+
+steps:
+  # Step 1: Gap 检测 + 分类
+  - id: gap_summary
+    type: atomic
+    name: "帧 Gap 概览"
+    display:
+      level: summary
+      layer: overview
+      title: "帧生产 Gap 概览"
+      columns:
+        - name: total_frames
+          label: "总帧数"
+          type: number
+        - name: total_gaps
+          label: "Gap 数"
+          type: number
+        - name: ui_no_frame_count
+          label: "UI无帧"
+          type: number
+        - name: rt_no_drawframe_count
+          label: "RT无DrawFrame"
+          type: number
+        - name: sf_backpressure_count
+          label: "SF背压"
+          type: number
+        - name: max_gap_ms
+          label: "最长Gap"
+          type: duration
+          format: duration_ms
+    sql: |
+      WITH
+      vsync_intervals AS (
+        SELECT c.ts - LAG(c.ts) OVER (ORDER BY c.ts) as interval_ns
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE t.name = 'VSYNC-sf'
+          AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
+      ),
+      vsync_config AS (
+        SELECT COALESCE(
+          (SELECT CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER)
+           FROM vsync_intervals
+           WHERE interval_ns BETWEEN 4000000 AND 50000000),
+          16666667
+        ) as period_ns
+      ),
+      -- 帧序列（按 present_ts 排序）
+      frame_seq AS (
+        SELECT
+          a.display_frame_token as frame_id,
+          a.ts as frame_start,
+          a.ts + a.dur as frame_end,
+          a.dur,
+          a.upid,
+          a.layer_name,
+          -- 前一帧的结束时间
+          LAG(a.ts + a.dur) OVER (PARTITION BY a.layer_name ORDER BY a.ts) as prev_frame_end,
+          LAG(a.display_frame_token) OVER (PARTITION BY a.layer_name ORDER BY a.ts) as prev_frame_id
+        FROM actual_frame_timeline_slice a
+        JOIN process p ON a.upid = p.upid
+        WHERE (p.name GLOB '${process_name}*')
+          AND p.name NOT LIKE '/system/%'
+          AND (${start_ts} IS NULL OR a.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR a.ts < ${end_ts})
+          AND COALESCE(a.display_frame_token, a.surface_frame_token) IS NOT NULL
+      ),
+      -- Gap 检测：帧间隔 > min_gap_vsync × VSync
+      gaps AS (
+        SELECT
+          fs.prev_frame_id as before_frame_id,
+          fs.frame_id as after_frame_id,
+          fs.prev_frame_end as gap_start,
+          fs.frame_start as gap_end,
+          fs.frame_start - fs.prev_frame_end as gap_ns,
+          ROUND((fs.frame_start - fs.prev_frame_end) / 1e6, 2) as gap_ms,
+          ROUND((fs.frame_start - fs.prev_frame_end) * 1.0 / vc.period_ns, 1) as gap_vsync_count,
+          fs.upid
+        FROM frame_seq fs
+        CROSS JOIN vsync_config vc
+        WHERE fs.prev_frame_end IS NOT NULL
+          AND (fs.frame_start - fs.prev_frame_end) > vc.period_ns * COALESCE(${min_gap_vsync}, 1.5)
+          AND (fs.frame_start - fs.prev_frame_end) < vc.period_ns * 30  -- 排除非滑动 gap
+      ),
+      -- Gap 期间 UI Thread / RenderThread 活动检测
+      -- 先筛选 main thread + RenderThread 的 utid，避免全线程笛卡尔积
+      relevant_threads AS (
+        SELECT DISTINCT t.utid, t.tid,
+          CASE WHEN t.tid = p.pid THEN 'main' ELSE 'render' END as role
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE p.name GLOB '${process_name}*'
+          AND p.name NOT LIKE '/system/%'
+          AND (t.tid = p.pid OR t.name = 'RenderThread')
+      ),
+      gap_ui_activity AS (
+        SELECT
+          g.gap_start,
+          g.gap_end,
+          COUNT(DISTINCT CASE WHEN s.name LIKE 'Choreographer#doFrame%' THEN s.id END) as doframe_count,
+          COUNT(DISTINCT CASE WHEN s.name LIKE 'DrawFrame%' OR s.name LIKE 'draw:%' THEN s.id END) as drawframe_count
+        FROM gaps g
+        JOIN relevant_threads rt ON 1=1
+        JOIN thread_track tt ON tt.utid = rt.utid
+        JOIN slice s ON s.track_id = tt.id
+          AND s.ts >= g.gap_start AND s.ts < g.gap_end
+          AND s.dur > 100000
+        GROUP BY g.gap_start, g.gap_end
+      ),
+      -- Gap 分类
+      classified_gaps AS (
+        SELECT
+          g.*,
+          COALESCE(ua.doframe_count, 0) as doframe_count,
+          COALESCE(ua.drawframe_count, 0) as drawframe_count,
+          CASE
+            WHEN COALESCE(ua.doframe_count, 0) = 0 THEN 'ui_no_frame'
+            WHEN COALESCE(ua.drawframe_count, 0) = 0 THEN 'rt_no_drawframe'
+            ELSE 'sf_backpressure'
+          END as gap_type
+        FROM gaps g
+        LEFT JOIN gap_ui_activity ua ON ua.gap_start = g.gap_start AND ua.gap_end = g.gap_end
+      )
+      SELECT
+        (SELECT COUNT(*) FROM frame_seq) as total_frames,
+        COUNT(*) as total_gaps,
+        SUM(CASE WHEN gap_type = 'ui_no_frame' THEN 1 ELSE 0 END) as ui_no_frame_count,
+        SUM(CASE WHEN gap_type = 'rt_no_drawframe' THEN 1 ELSE 0 END) as rt_no_drawframe_count,
+        SUM(CASE WHEN gap_type = 'sf_backpressure' THEN 1 ELSE 0 END) as sf_backpressure_count,
+        MAX(gap_ms) as max_gap_ms,
+        (SELECT ROUND(period_ns / 1e6, 2) FROM vsync_config) as vsync_period_ms
+      FROM classified_gaps
+    save_as: gap_overview
+
+  # Step 2: Gap 列表（按严重程度排序）
+  - id: gap_list
+    type: atomic
+    name: "帧 Gap 列表"
+    display:
+      level: list
+      layer: list
+      title: "帧 Gap 列表"
+      columns:
+        - name: gap_start
+          label: "Gap 起始"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_range
+          durationColumn: gap_ns
+        - name: gap_ns
+          label: "Gap 时长(ns)"
+          type: duration
+          unit: ns
+          hidden: true
+        - name: gap_ms
+          label: "Gap 时长"
+          type: duration
+          format: duration_ms
+        - name: gap_vsync_count
+          label: "跳过 VSync 数"
+          type: number
+        - name: gap_type
+          label: "Gap 类型"
+          type: string
+        - name: doframe_count
+          label: "doFrame 数"
+          type: number
+        - name: drawframe_count
+          label: "DrawFrame 数"
+          type: number
+        - name: before_frame_id
+          label: "前帧 ID"
+          type: string
+        - name: after_frame_id
+          label: "后帧 ID"
+          type: string
+    sql: |
+      WITH
+      vsync_intervals AS (
+        SELECT c.ts - LAG(c.ts) OVER (ORDER BY c.ts) as interval_ns
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE t.name = 'VSYNC-sf'
+          AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR c.ts < ${end_ts})
+      ),
+      vsync_config AS (
+        SELECT COALESCE(
+          (SELECT CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER)
+           FROM vsync_intervals
+           WHERE interval_ns BETWEEN 4000000 AND 50000000),
+          16666667
+        ) as period_ns
+      ),
+      frame_seq AS (
+        SELECT
+          CAST(a.display_frame_token AS TEXT) as frame_id,
+          a.ts as frame_start,
+          a.ts + a.dur as frame_end,
+          a.upid,
+          a.layer_name,
+          LAG(a.ts + a.dur) OVER (PARTITION BY a.layer_name ORDER BY a.ts) as prev_frame_end,
+          CAST(LAG(a.display_frame_token) OVER (PARTITION BY a.layer_name ORDER BY a.ts) AS TEXT) as prev_frame_id
+        FROM actual_frame_timeline_slice a
+        JOIN process p ON a.upid = p.upid
+        WHERE (p.name GLOB '${process_name}*')
+          AND p.name NOT LIKE '/system/%'
+          AND (${start_ts} IS NULL OR a.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR a.ts < ${end_ts})
+          AND COALESCE(a.display_frame_token, a.surface_frame_token) IS NOT NULL
+      ),
+      gaps AS (
+        SELECT
+          fs.prev_frame_id as before_frame_id,
+          fs.frame_id as after_frame_id,
+          fs.prev_frame_end as gap_start,
+          fs.frame_start as gap_end,
+          fs.frame_start - fs.prev_frame_end as gap_ns,
+          ROUND((fs.frame_start - fs.prev_frame_end) / 1e6, 2) as gap_ms,
+          ROUND((fs.frame_start - fs.prev_frame_end) * 1.0 / vc.period_ns, 1) as gap_vsync_count,
+          fs.upid
+        FROM frame_seq fs
+        CROSS JOIN vsync_config vc
+        WHERE fs.prev_frame_end IS NOT NULL
+          AND (fs.frame_start - fs.prev_frame_end) > vc.period_ns * COALESCE(${min_gap_vsync}, 1.5)
+          AND (fs.frame_start - fs.prev_frame_end) < vc.period_ns * 30
+      ),
+      relevant_threads AS (
+        SELECT DISTINCT t.utid, t.tid,
+          CASE WHEN t.tid = p.pid THEN 'main' ELSE 'render' END as role
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE p.name GLOB '${process_name}*'
+          AND p.name NOT LIKE '/system/%'
+          AND (t.tid = p.pid OR t.name = 'RenderThread')
+      ),
+      gap_ui_activity AS (
+        SELECT
+          g.gap_start,
+          g.gap_end,
+          COUNT(DISTINCT CASE WHEN s.name LIKE 'Choreographer#doFrame%' THEN s.id END) as doframe_count,
+          COUNT(DISTINCT CASE WHEN s.name LIKE 'DrawFrame%' OR s.name LIKE 'draw:%' THEN s.id END) as drawframe_count
+        FROM gaps g
+        JOIN relevant_threads rt ON 1=1
+        JOIN thread_track tt ON tt.utid = rt.utid
+        JOIN slice s ON s.track_id = tt.id
+          AND s.ts >= g.gap_start AND s.ts < g.gap_end
+          AND s.dur > 100000
+        GROUP BY g.gap_start, g.gap_end
+      )
+      SELECT
+        printf('%d', g.gap_start) as gap_start,
+        printf('%d', g.gap_ns) as gap_ns,
+        g.gap_ms,
+        g.gap_vsync_count,
+        CASE
+          WHEN COALESCE(ua.doframe_count, 0) = 0 THEN 'ui_no_frame'
+          WHEN COALESCE(ua.drawframe_count, 0) = 0 THEN 'rt_no_drawframe'
+          ELSE 'sf_backpressure'
+        END as gap_type,
+        COALESCE(ua.doframe_count, 0) as doframe_count,
+        COALESCE(ua.drawframe_count, 0) as drawframe_count,
+        g.before_frame_id,
+        g.after_frame_id
+      FROM gaps g
+      LEFT JOIN gap_ui_activity ua ON ua.gap_start = g.gap_start AND ua.gap_end = g.gap_end
+      ORDER BY g.gap_ns DESC
+      LIMIT 50
+    save_as: gap_list

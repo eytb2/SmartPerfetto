@@ -98,18 +98,28 @@ export const CAUSE_TYPE_LABELS: Record<string, string> = {
   io_blocking: 'IO 阻塞',
   blocking: '主线程阻塞 (Binder/锁)',
   render_wait: 'RenderThread 等待',
+  render_heavy: 'RenderThread 负载过重',
+  sf_composition: 'SF 合成超时',
   small_core: '小核运行',
   freq_limit: 'CPU 限频',
+  thermal_limit: '温控降频',
+  gc_pause: 'GC 暂停',
+  gc_cascade: 'GC 压力级联',
   cpu_overload: 'CPU 负载过高',
+  cpu_saturation: 'CPU 全核饱和',
+  file_io: '主线程文件 IO',
+  binder_timeout: 'Binder 超时',
   unknown: '其他原因',
 };
 
 const SUPPLY_CONSTRAINT_LABELS: Record<string, string> = {
   load_high: '负载偏高',
   frequency_insufficient: '频率不足',
+  thermal_throttle: '温控限频',
   scheduling_delay: '调度延迟',
   core_placement: '核心摆放',
   blocking_wait: '阻塞等待',
+  gc_pause: 'GC 暂停',
   none: SUPPLY_NONE_TEXT,
 };
 
@@ -119,7 +129,9 @@ const WORKLOAD_DOMINANT_CAUSE_TYPES = new Set([
 
 const AMPLIFICATION_PATH_LABELS: Record<string, string> = {
   gpu_fence_wait: 'GPU Fence 等待放大',
+  shader_compile_stall: 'Shader 编译阻塞',
   render_pipeline_wait: 'RenderPipeline 等待放大',
+  buffer_queue_backpressure: 'BufferQueue 背压',
   sf_consumer_backpressure: 'SF 消费端背压',
   app_deadline_miss: 'APP 截止超时',
   unknown: AMPLIFICATION_UNKNOWN_TEXT,

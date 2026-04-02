@@ -1,0 +1,144 @@
+# =============================================================================
+# SurfaceFlinger Layer Count Analysis
+# =============================================================================
+# 统计指定时间范围内 SurfaceFlinger 活跃图层数量和合成特征。
+# 用于诊断 sf_composition_slow 根因：Layer 过多会增加 SF 合成开销。
+#
+# 典型使用场景：
+# - sf_composition_slow 帧的深钻：是 Layer 过多还是 HWC 回退？
+# - 比较不同滑动区间的 Layer 数差异
+# - 检测后台 Layer 对合成性能的影响
+
+name: sf_layer_count_in_range
+version: "1.0"
+type: composite
+category: diagnostics
+
+meta:
+  display_name: "SF 图层数统计"
+  description: "统计时间范围内 SurfaceFlinger 活跃图层数量，辅助 SF 合成性能诊断"
+  icon: "layers"
+  tags: [surfaceflinger, layer, composition, diagnostics]
+
+prerequisites:
+  required_tables:
+    - actual_frame_timeline_slice
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: true
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: true
+    description: "分析结束时间戳(ns)"
+  - name: process_name
+    type: string
+    required: false
+    description: "聚焦进程名（可选，用于区分前台 App Layer 和其他 Layer）"
+
+steps:
+  # Step 1: 活跃 Layer 统计
+  - id: layer_summary
+    type: atomic
+    name: "活跃图层统计"
+    display:
+      level: summary
+      layer: overview
+      title: "SF 图层概览"
+      columns:
+        - name: total_layers
+          label: "总图层数"
+          type: number
+        - name: app_layers
+          label: "App 图层数"
+          type: number
+        - name: system_layers
+          label: "系统图层数"
+          type: number
+        - name: avg_concurrent_layers
+          label: "平均并发图层数"
+          type: number
+        - name: max_concurrent_layers
+          label: "最大并发图层数"
+          type: number
+    sql: |
+      WITH
+      -- 时间范围内所有帧的 Layer 信息
+      active_layers AS (
+        SELECT DISTINCT
+          a.layer_name,
+          CASE
+            WHEN '${process_name}' != '' AND a.layer_name GLOB '*${process_name}*' THEN 'app'
+            WHEN a.layer_name GLOB '*StatusBar*' OR a.layer_name GLOB '*NavigationBar*'
+              OR a.layer_name GLOB '*Wallpaper*' OR a.layer_name GLOB '*InputMethod*'
+              OR a.layer_name GLOB '*SystemUI*' THEN 'system'
+            ELSE 'other'
+          END as layer_type
+        FROM actual_frame_timeline_slice a
+        WHERE a.ts >= ${start_ts} AND a.ts < ${end_ts}
+          AND a.layer_name IS NOT NULL
+      ),
+      -- 每个 SF 合成帧的并发 Layer 数
+      per_sf_frame_layers AS (
+        SELECT
+          a.display_frame_token,
+          COUNT(DISTINCT a.layer_name) as layer_count
+        FROM actual_frame_timeline_slice a
+        WHERE a.ts >= ${start_ts} AND a.ts < ${end_ts}
+          AND a.layer_name IS NOT NULL
+        GROUP BY a.display_frame_token
+      )
+      SELECT
+        (SELECT COUNT(*) FROM active_layers) as total_layers,
+        (SELECT COUNT(*) FROM active_layers WHERE layer_type = 'app') as app_layers,
+        (SELECT COUNT(*) FROM active_layers WHERE layer_type = 'system') as system_layers,
+        COALESCE((SELECT ROUND(AVG(layer_count), 1) FROM per_sf_frame_layers), 0) as avg_concurrent_layers,
+        COALESCE((SELECT MAX(layer_count) FROM per_sf_frame_layers), 0) as max_concurrent_layers
+    save_as: sf_layer_summary
+
+  # Step 2: Layer 列表（按出帧数排序）
+  - id: layer_list
+    type: atomic
+    name: "图层列表"
+    display:
+      level: list
+      layer: list
+      title: "活跃图层列表"
+      columns:
+        - name: layer_name
+          label: "图层名"
+          type: string
+        - name: layer_type
+          label: "类型"
+          type: string
+        - name: frame_count
+          label: "帧数"
+          type: number
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: jank_count
+          label: "掉帧数"
+          type: number
+    sql: |
+      SELECT
+        a.layer_name,
+        CASE
+          WHEN '${process_name}' != '' AND a.layer_name GLOB '*${process_name}*' THEN 'app'
+          WHEN a.layer_name GLOB '*StatusBar*' OR a.layer_name GLOB '*NavigationBar*'
+            OR a.layer_name GLOB '*Wallpaper*' OR a.layer_name GLOB '*InputMethod*'
+            OR a.layer_name GLOB '*SystemUI*' THEN 'system'
+          ELSE 'other'
+        END as layer_type,
+        COUNT(*) as frame_count,
+        ROUND(AVG(a.dur) / 1e6, 2) as avg_dur_ms,
+        SUM(CASE WHEN a.jank_type IS NOT NULL AND a.jank_type != 'None' THEN 1 ELSE 0 END) as jank_count
+      FROM actual_frame_timeline_slice a
+      WHERE a.ts >= ${start_ts} AND a.ts < ${end_ts}
+        AND a.layer_name IS NOT NULL
+      GROUP BY a.layer_name
+      ORDER BY frame_count DESC
+    save_as: sf_layer_list

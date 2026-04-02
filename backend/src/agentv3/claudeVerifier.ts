@@ -425,15 +425,45 @@ export function verifySceneCompleteness(
       }
 
       // Phase 1.9: Deep drill should be executed for major root causes
-      // Check if any deep-drill evidence is present (blocking_chain, lookup_knowledge, binder_root_cause)
-      const hasDeepDrill = /blocking_chain|lookup_knowledge|binder_root_cause|阻塞链|waker|cpu.scheduler|rendering.pipeline|thermal.throttling/i.test(allText);
+      // Require at least one REAL analysis tool (not just lookup_knowledge which only reads background docs)
+      // blocking_chain_analysis/binder_root_cause/jank_frame_detail/surfaceflinger_analysis/frame_production_gap = real deep-drill skills
+      // lookup_knowledge is supplementary — counts as evidence only when combined with analysis output patterns
+      const hasAnalysisTool = /blocking_chain_analysis|binder_root_cause|jank_frame_detail|surfaceflinger_analysis|frame_production_gap|阻塞链.*(?:唤醒|waker|blocker)|server_dur/i.test(allText);
+      const hasKnowledgeDrill = /lookup_knowledge|cpu[\.\-]scheduler|rendering[\.\-]pipeline|thermal[\.\-]throttling/i.test(allText);
+      const hasDeepDrill = hasAnalysisTool || hasKnowledgeDrill;
       // Check if there are significant jank frames (the analysis mentions percentage distributions)
-      const hasSignificantJank = /(?:[2-9]\d|[1-9]\d{2,})\s*帧|(?:[1-9]\d+)\s*%.*(?:freq_ramp|workload|sched_delay|lock_binder|binder_wait)/i.test(allText);
+      const hasSignificantJank = /(?:[2-9]\d|[1-9]\d{2,})\s*帧|(?:[1-9]\d+)\s*%.*(?:freq_ramp|workload|sched_delay|lock_binder|binder_wait|thermal|sf_composition|render_thread|gc_pressure|cpu_max)/i.test(allText);
       if (hasSignificantJank && !hasDeepDrill) {
         issues.push({
           type: 'missing_check',
           severity: 'error',
-          message: '滑动分析有掉帧但缺少 Phase 1.9 根因深钻 — reason_code 只是分类标签，不是真正的根因。必须对占比 >15% 的根因类别调用 blocking_chain_analysis/lookup_knowledge/binder_root_cause/jank_frame_detail 获取机制级证据，回答"WHY 这帧慢"',
+          message: '滑动分析有掉帧但缺少 Phase 1.9 根因深钻 — reason_code 只是分类标签，不是真正的根因。必须对占比 >15% 的根因类别调用 blocking_chain_analysis/lookup_knowledge/binder_root_cause/jank_frame_detail/surfaceflinger_analysis 获取机制级证据，回答"WHY 这帧慢"',
+        });
+      }
+
+      // Check: thermal_throttling/cpu_max_limited should mention temperature or thermal policy
+      // Only fire when conclusion CLAIMS thermal as a root cause, not when it merely mentions or rules it out
+      const hasThermalJank = /thermal_throttling|cpu_max_limited|温控降频|CPU限频/i.test(allText);
+      const thermalRuledOut = /(?:thermal|温控|限频).*(?:已排除|完全排除|不存在|ruled out|not.*cause|未检出|无.*证据)/i.test(allText);
+      // Match thermal deep-drill evidence: tool invocations or distinctive thermal output (not reason_code labels)
+      const hasThermalEvidence = /invoke_skill.*thermal|lookup_knowledge.*thermal|thermal[_\s]*zone|温度.*[℃°C]|trip_point|cooling_device|freq[_\s]*cap.*policy/i.test(allText);
+      if (hasThermalJank && !hasThermalEvidence && !thermalRuledOut) {
+        issues.push({
+          type: 'missing_check',
+          severity: 'warning',
+          message: '滑动分析检测到温控/限频帧但缺少机制解释 — 应调用 thermal_throttling skill 或 lookup_knowledge("thermal-throttling") 分析限频原因（thermal zone 温度 vs policy governor）',
+        });
+      }
+
+      // Check: sf_composition_slow should be followed by SF analysis
+      const hasSfJank = /sf_composition_slow|SF合成超时/i.test(allText);
+      // Match SF deep-drill evidence: tool invocations or distinctive SF analysis output (not reason_code labels)
+      const hasSfEvidence = /invoke_skill.*surfaceflinger|surfaceflinger_analysis|doComposition|rebuildLayerStacks|HWC.*(?:delay|回退|fallback)|GPU.*composition.*(?:fallback|回退)|layer.*(?:数量|count).*(?:过多|high)/i.test(allText);
+      if (hasSfJank && !hasSfEvidence) {
+        issues.push({
+          type: 'missing_check',
+          severity: 'warning',
+          message: '滑动分析检测到 SF 合成超时帧但缺少 SF 深钻 — 应调用 surfaceflinger_analysis 分析 HWC/GPU 合成比例和 Layer 状态',
         });
       }
 
