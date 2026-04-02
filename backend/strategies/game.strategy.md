@@ -2,6 +2,12 @@
 scene: game
 priority: 4
 effort: medium
+required_capabilities:
+  - cpu_scheduling
+optional_capabilities:
+  - gpu
+  - thermal_throttling
+  - surfaceflinger
 keywords:
   - 游戏
   - game

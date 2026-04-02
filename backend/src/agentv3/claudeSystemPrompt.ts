@@ -1,4 +1,4 @@
-import type { ClaudeAnalysisContext, ComparisonContext, SelectionContext, SelectionTrackInfo } from './types';
+import type { ClaudeAnalysisContext, ComparisonContext, SelectionContext, SelectionTrackInfo, TraceCompleteness } from './types';
 import type { SceneType } from './sceneClassifier';
 import type { ArchitectureInfo } from '../agent/detectors/types';
 import type { DetectedFocusApp } from './focusAppDetector';
@@ -216,6 +216,47 @@ function buildComparisonContextSection(ctx: ComparisonContext, currentPackageNam
   return lines.join('\n');
 }
 
+/**
+ * Build a compact data completeness section for the system prompt.
+ * Only reports missing/insufficient capabilities — available ones are omitted to save tokens.
+ * The agent can use `lookup_knowledge("data-sources")` for detailed capture guidance.
+ */
+function buildCompletenessSection(completeness: TraceCompleteness): string {
+  const lines: string[] = ['## Trace 数据完整度'];
+
+  const totalProbed = completeness.available.length
+    + completeness.missingConfig.length
+    + completeness.notApplicable.length
+    + completeness.insufficient.length;
+  lines.push(`\n已探测 ${totalProbed} 项分析能力，${completeness.available.length} 项数据就绪。`);
+
+  // Only report actionable items (missing config + insufficient)
+  if (completeness.missingConfig.length > 0) {
+    lines.push('\n### 数据缺失（可能需要调整 Trace 配置）');
+    for (const cap of completeness.missingConfig) {
+      lines.push(`- **${cap.displayName}** (${cap.id}): ${cap.reason}`);
+    }
+    lines.push('\n> 使用 `lookup_knowledge("data-sources")` 获取各项的详细采集配置指南。');
+  }
+
+  if (completeness.insufficient.length > 0) {
+    lines.push('\n### 数据不足（可能 trace 时长不够或场景未发生）');
+    for (const cap of completeness.insufficient) {
+      lines.push(`- **${cap.displayName}**: ${cap.reason}`);
+    }
+  }
+
+  // Only include the section if there are actionable items
+  if (completeness.missingConfig.length === 0 && completeness.insufficient.length === 0) {
+    return '';
+  }
+
+  lines.push('\n### 输出要求');
+  lines.push('当分析结论涉及缺失数据的能力时，在结论末尾添加**「数据采集建议」**小节，为用户列出具体的 Perfetto 配置调整建议。');
+
+  return lines.join('\n');
+}
+
 export function buildSystemPrompt(context: ClaudeAnalysisContext, maxTokens?: number): string {
   const effectiveMaxTokens = maxTokens ?? MAX_PROMPT_TOKENS;
   const sections: string[] = [];
@@ -247,6 +288,12 @@ export function buildSystemPrompt(context: ClaudeAnalysisContext, maxTokens?: nu
 
   if (context.focusApps && context.focusApps.length > 0) {
     sections.push(buildFocusAppSection(context.focusApps, context.focusMethod));
+  }
+
+  // Trace data completeness (stable per trace — important for analysis scoping)
+  if (context.traceCompleteness) {
+    const completenessSection = buildCompletenessSection(context.traceCompleteness);
+    if (completenessSection) sections.push(completenessSection);
   }
 
   if (context.knowledgeBaseContext) {
@@ -427,6 +474,7 @@ ${plansSummary}
     // Drop full sections by their opening text marker (lowest value first)
     const droppableSections = [
       '## Perfetto SQL 知识库参考',  // Claude can use lookup_sql_schema tool instead
+      '## Trace 数据完整度',          // Helpful guidance but agent can still detect gaps at runtime
       '## 历史分析经验',              // Pattern memory — helpful but not critical
       '## 历史踩坑记录',              // Negative memory — important but droppable under pressure
       '## SQL 踩坑记录',              // Nice-to-have, not critical

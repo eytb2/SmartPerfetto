@@ -2,6 +2,13 @@
 scene: touch_tracking
 priority: 3
 effort: medium
+required_capabilities:
+  - input_latency
+  - frame_rendering
+  - surfaceflinger
+optional_capabilities:
+  - cpu_scheduling
+  - gpu
 keywords:
   - 跟手度
   - 跟手

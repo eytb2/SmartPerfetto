@@ -2,6 +2,9 @@
 scene: general
 priority: 99
 effort: high
+required_capabilities:
+  - cpu_scheduling
+optional_capabilities: []
 keywords: []
 ---
 

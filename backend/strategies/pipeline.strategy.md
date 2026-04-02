@@ -2,6 +2,11 @@
 scene: pipeline
 priority: 4
 effort: medium
+required_capabilities:
+  - frame_rendering
+optional_capabilities:
+  - surfaceflinger
+  - gpu
 keywords:
   - 管线识别
   - pipeline识别

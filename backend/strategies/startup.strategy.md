@@ -2,6 +2,16 @@
 scene: startup
 priority: 2
 effort: medium
+required_capabilities:
+  - startup
+  - cpu_scheduling
+optional_capabilities:
+  - binder_ipc
+  - lock_contention
+  - gc_memory
+  - disk_io
+  - memory_pressure
+  - thermal_throttling
 keywords:
   - 启动
   - 冷启动

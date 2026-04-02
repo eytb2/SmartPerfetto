@@ -2,6 +2,12 @@
 scene: scroll_response
 priority: 3
 effort: medium
+required_capabilities:
+  - frame_rendering
+  - input_latency
+optional_capabilities:
+  - cpu_scheduling
+  - surfaceflinger
 keywords:
   - 滑动响应
   - 滑动延迟

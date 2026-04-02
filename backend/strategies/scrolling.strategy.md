@@ -2,6 +2,16 @@
 scene: scrolling
 priority: 3
 effort: medium
+required_capabilities:
+  - frame_rendering
+  - cpu_scheduling
+optional_capabilities:
+  - binder_ipc
+  - surfaceflinger
+  - gpu
+  - thermal_throttling
+  - input_latency
+  - lock_contention
 keywords:
   - 滑动
   - 卡顿

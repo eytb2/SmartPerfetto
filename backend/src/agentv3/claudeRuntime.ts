@@ -23,7 +23,7 @@ import { classifyScene, type SceneType } from './sceneClassifier';
 import { classifyQueryComplexity } from './queryComplexityClassifier';
 import { buildAgentDefinitions } from './claudeAgentDefinitions';
 import { getExtendedKnowledgeBase } from '../services/sqlKnowledgeBase';
-import type { AnalysisNote, AnalysisPlanV3, ClaudeAnalysisContext, ComplexityClassifierInput, FailedApproach, Hypothesis, UncertaintyFlag } from './types';
+import type { AnalysisNote, AnalysisPlanV3, ClaudeAnalysisContext, ComplexityClassifierInput, FailedApproach, Hypothesis, TraceCompleteness, UncertaintyFlag } from './types';
 import { ArtifactStore } from './artifactStore';
 import type { SessionStateSnapshot, SessionFieldsForSnapshot } from './sessionStateSnapshot';
 import { AgentMetricsCollector, persistSessionMetrics } from './agentMetrics';
@@ -36,6 +36,7 @@ import {
   buildNegativePatternSection,
 } from './analysisPatternMemory';
 import { verifyConclusion, generateCorrectionPrompt, isConclusionIncomplete } from './claudeVerifier';
+import { probeTraceCompleteness } from './traceCompletenessProber';
 import {
   captureEntitiesFromResponses,
   applyCapturedEntities,
@@ -188,6 +189,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
   private architectureCache: Map<string, ArchitectureInfo> = new Map();
   /** Cache vendor detection results per traceId (deterministic per trace). */
   private vendorCache: Map<string, string> = new Map();
+  /** Cache trace completeness probe results per traceId (deterministic per trace). */
+  private completenessCache: Map<string, TraceCompleteness> = new Map();
   /** Per-session artifact stores — persist across turns within a session. */
   private artifactStores: Map<string, ArtifactStore> = new Map();
   /** Per-session analysis notes — persist across turns within a session. */
@@ -1460,6 +1463,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
   reset(): void {
     this.architectureCache.clear();
     this.vendorCache.clear();
+    this.completenessCache.clear();
     // Also clear all session-scoped stores to prevent unbounded growth
     this.artifactStores.clear();
     this.sessionNotes.clear();
@@ -1698,6 +1702,25 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         `capDiff=${capabilityDiff ? `cur=${capabilityDiff.currentOnly.length}/ref=${capabilityDiff.referenceOnly.length}` : 'none'}`);
     }
 
+    // Phase 2.9: Trace data completeness probe (cached per traceId, ~50ms first run)
+    let traceCompleteness = this.completenessCache.get(traceId);
+    if (!traceCompleteness) {
+      try {
+        traceCompleteness = await probeTraceCompleteness(
+          this.traceProcessorService,
+          traceId,
+          architecture?.type,
+        );
+        this.completenessCache.set(traceId, traceCompleteness);
+        if (this.completenessCache.size > 50) {
+          const firstKey = this.completenessCache.keys().next().value;
+          if (firstKey) this.completenessCache.delete(firstKey);
+        }
+      } catch (err) {
+        console.warn('[ClaudeRuntime] Trace completeness probe failed (non-fatal):', (err as Error).message);
+      }
+    }
+
     // Phase 3: Session context + conversation history (reuse precomputed if available)
     const sessionContext = precomputed?.sessionContext ?? sessionContextManager.getOrCreate(sessionId, traceId);
     const previousTurns = precomputed?.previousTurns ?? (sessionContext.getAllTurns?.() || []);
@@ -1865,6 +1888,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       planHistory: analysisPlan.history.length > 0 ? analysisPlan.history : undefined,
       selectionContext: options.selectionContext,
       comparison: comparisonContext,
+      traceCompleteness,
     };
     const systemPrompt = buildSystemPrompt(analysisContextForRebuild);
 

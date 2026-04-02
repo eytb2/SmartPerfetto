@@ -2,6 +2,15 @@
 scene: overview
 priority: 5
 effort: high
+required_capabilities:
+  - cpu_scheduling
+  - device_state
+optional_capabilities:
+  - frame_rendering
+  - startup
+  - binder_ipc
+  - gc_memory
+  - thermal_throttling
 keywords:
   - 发生了什么
   - 有什么问题

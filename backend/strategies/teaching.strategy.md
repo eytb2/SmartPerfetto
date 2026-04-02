@@ -2,6 +2,8 @@
 scene: teaching
 priority: 3
 effort: medium
+required_capabilities: []
+optional_capabilities: []
 keywords:
   - 教学
   - 是什么

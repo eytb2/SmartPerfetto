@@ -2,6 +2,13 @@
 scene: anr
 priority: 1
 effort: medium
+required_capabilities:
+  - anr
+  - cpu_scheduling
+optional_capabilities:
+  - binder_ipc
+  - lock_contention
+  - gc_memory
 keywords:
   - anr
   - 无响应

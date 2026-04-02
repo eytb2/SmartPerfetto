@@ -24,6 +24,10 @@ export interface StrategyDefinition {
   effort: string;
   keywords: string[];
   compoundPatterns: RegExp[];
+  /** Capability IDs required for this scene (missing = critical gap) */
+  requiredCapabilities: string[];
+  /** Capability IDs that enhance analysis but are not required */
+  optionalCapabilities: string[];
   content: string;
 }
 
@@ -51,6 +55,8 @@ function parseStrategyFile(filePath: string): StrategyDefinition | null {
     effort: (frontmatter.effort as string) ?? 'high',
     keywords: (frontmatter.keywords as string[]) || [],
     compoundPatterns,
+    requiredCapabilities: (frontmatter.required_capabilities as string[]) || [],
+    optionalCapabilities: (frontmatter.optional_capabilities as string[]) || [],
     content,
   };
 }

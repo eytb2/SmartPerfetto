@@ -77,6 +77,8 @@ export interface ClaudeAnalysisContext {
   selectionContext?: SelectionContext;
   /** Comparison mode — when present, a reference trace is available for dual-trace analysis */
   comparison?: ComparisonContext;
+  /** Trace data completeness diagnosis — injected at session init, informs data gap guidance */
+  traceCompleteness?: TraceCompleteness;
 }
 
 // =============================================================================
@@ -106,6 +108,44 @@ export interface CompareAnchor {
   type: 'phase' | 'interaction_window' | 'relative_time';
   currentRange?: { startNs: number; endNs: number };
   referenceRange?: { startNs: number; endNs: number };
+}
+
+// =============================================================================
+// Trace Data Completeness (data source availability diagnosis)
+// =============================================================================
+
+/** Status of a single analysis capability's data availability. */
+export type CapabilityStatus =
+  | 'available'                    // Data present, analysis possible
+  | 'missing_config_suspected'     // Schema missing or empty — likely trace config issue
+  | 'not_applicable'               // Architecture/version mismatch — not a config issue
+  | 'insufficient_or_scene_absent'; // Sparse data — short trace or scene didn't occur
+
+/** A single capability probe result. */
+export interface CapabilityProbeResult {
+  id: string;
+  displayName: string;
+  status: CapabilityStatus;
+  /** Primary table probed */
+  primaryTable: string;
+  /** Approximate row count (only when status is 'available' or 'insufficient_or_scene_absent') */
+  rowEstimate?: number;
+  /** Human-readable reason when not available */
+  reason?: string;
+}
+
+/** Complete trace data availability diagnosis. */
+export interface TraceCompleteness {
+  /** Capabilities with data ready for analysis */
+  available: CapabilityProbeResult[];
+  /** Capabilities missing due to suspected config issues — actionable */
+  missingConfig: CapabilityProbeResult[];
+  /** Capabilities not applicable to this trace's architecture/version */
+  notApplicable: CapabilityProbeResult[];
+  /** Capabilities with sparse data — ambiguous cause */
+  insufficient: CapabilityProbeResult[];
+  /** Timestamp of diagnosis */
+  diagnosedAt: number;
 }
 
 // =============================================================================

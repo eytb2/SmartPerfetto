@@ -2,6 +2,13 @@
 scene: interaction
 priority: 4
 effort: medium
+required_capabilities:
+  - input_latency
+  - frame_rendering
+optional_capabilities:
+  - cpu_scheduling
+  - binder_ipc
+  - surfaceflinger
 keywords:
   - 点击
   - 触摸

@@ -2,6 +2,12 @@
 scene: memory
 priority: 4
 effort: medium
+required_capabilities:
+  - gc_memory
+  - memory_pressure
+optional_capabilities:
+  - cpu_scheduling
+  - binder_ipc
 keywords:
   - 内存
   - memory
