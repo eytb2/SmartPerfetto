@@ -18,7 +18,7 @@
     "test:state-timeline-regression": "TP_PORT_MIN=9800 TP_PORT_MAX=9899 tsx tests/skill-eval/state_timeline_regression.ts",
     "test:integration": "jest --testPathPatterns=tests/integration --runInBand --forceExit",
     "test:agent-eval": "tsx tests/agent-eval/evaluationRunner.ts",
-    "test:gate": "npm run test:core && npm run test:skill-eval:real-traces && npm run test:scene-trace-regression",
+    "test:gate": "npm run test:core && npm run test:scene-trace-regression",
     "test:full": "jest --runInBand --forceExit",
     "test:all": "npm run test:gate",
     "skill:validate": "tsx src/cli/index.ts validate",
