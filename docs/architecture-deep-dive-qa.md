@@ -600,7 +600,7 @@ keywords:
 | 架构 | 渲染管线 | 分析差异 |
 |------|---------|---------|
 | Standard Android | UI Thread → RenderThread → SurfaceFlinger | 主线程 + RenderThread 双线分析 |
-| Flutter TextureView | 1.ui → texture → RenderThread updateTexImage | 双出图管线，需要分析 Flutter engine 线程 |
+| Flutter TextureView | 1.ui → 1.raster → JNISurfaceTexture → RenderThread updateTexImage | 双出图管线，需要分析 Flutter engine 线程 + 纹理桥接 |
 | Flutter SurfaceView | 1.ui → 1.raster → BufferQueue → SurfaceFlinger | 单出图管线，不经过 RenderThread |
 | WebView | CrRendererMain → Viz Compositor | Chromium 渲染管线，线程名不同 |
 | Compose | UI Thread (Composition) → RenderThread | 和 Standard 类似但有 Composition 阶段 |

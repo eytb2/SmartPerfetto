@@ -98,7 +98,7 @@ describe('buildSystemPrompt', () => {
           type: 'FLUTTER',
           confidence: 0.9,
           evidence: [],
-          flutter: { engine: 'IMPELLER', versionHint: '3.x', newThreadModel: true },
+          flutter: { engine: 'IMPELLER', surfaceType: 'SURFACEVIEW', versionHint: '3.x', newThreadModel: true },
         },
       }));
       expect(prompt).toContain('Flutter');

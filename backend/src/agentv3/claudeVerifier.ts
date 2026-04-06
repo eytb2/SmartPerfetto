@@ -316,10 +316,12 @@ export function verifyHeuristic(
                               /^\|.*\|$/.test(lastLine) ||
                               /^---+$/.test(lastLine);
       if (!hasProperEnding) {
+        // Severity: error — triggers correction retry so the agent can complete the conclusion.
+        // Truncation is a broken deliverable, not just a cosmetic issue.
         issues.push({
           type: 'truncation',
-          severity: 'warning',
-          message: `结论文本可能被截断 — 最后一行不以完整语句结尾: "...${lastLine.slice(-40)}"`,
+          severity: 'error',
+          message: `结论文本被截断 — 最后一行不以完整语句结尾: "...${lastLine.slice(-40)}"`,
         });
       }
     }
@@ -359,15 +361,17 @@ export function verifyPlanAdherence(plan: AnalysisPlanV3 | null): VerificationIs
     });
   }
 
-  // Check tool-to-phase matching: completed phases should have at least one matched tool call
+  // Check tool-to-phase matching: completed phases should have at least one matched tool call.
+  // If a phase has expectedTools but zero actual tool calls, it means the Agent skipped
+  // substantive work. This is ERROR severity to trigger correction retry.
   const completedPhases = plan.phases.filter(p => p.status === 'completed');
   for (const phase of completedPhases) {
     const matchedCalls = plan.toolCallLog.filter(t => t.matchedPhaseId === phase.id);
     if (matchedCalls.length === 0 && phase.expectedTools.length > 0) {
       issues.push({
         type: 'plan_deviation',
-        severity: 'warning',
-        message: `阶段 "${phase.name}" 标记为完成但无匹配的工具调用 (预期: ${phase.expectedTools.join(', ')})`,
+        severity: 'error',
+        message: `阶段 "${phase.name}" (${phase.id}) 标记为完成但无匹配的工具调用 (预期: ${phase.expectedTools.join(', ')})。必须执行该阶段的工具调用或将其标记为 skipped。`,
       });
     }
   }
@@ -700,6 +704,43 @@ export function normalizeLLMSeverity(raw: string): VerificationIssue['severity']
 }
 
 /**
+ * Attempt to repair truncated JSON arrays from LLM output.
+ * Handles common truncation patterns: unclosed strings, missing brackets.
+ * Returns best-effort repaired JSON string.
+ */
+function repairTruncatedJson(json: string): string {
+  let s = json.trim();
+
+  // Remove trailing incomplete object (e.g., `{"type": "foo", "mes` → drop it)
+  const lastCompleteObj = s.lastIndexOf('}');
+  const lastOpenBrace = s.lastIndexOf('{');
+  if (lastOpenBrace > lastCompleteObj) {
+    // There's an unclosed object — remove everything from the last `{` or preceding `,`
+    const cutPoint = s.lastIndexOf(',', lastOpenBrace);
+    if (cutPoint > 0) {
+      s = s.substring(0, cutPoint);
+    } else {
+      s = s.substring(0, lastOpenBrace);
+    }
+  }
+
+  // Close unclosed strings: count quotes
+  const quoteCount = (s.match(/(?<!\\)"/g) || []).length;
+  if (quoteCount % 2 !== 0) {
+    s += '"';
+  }
+
+  // Ensure array is closed
+  if (!s.trimEnd().endsWith(']')) {
+    // Remove trailing comma if any
+    s = s.replace(/,\s*$/, '');
+    s += ']';
+  }
+
+  return s;
+}
+
+/**
  * Run LLM-based verification using a lightweight model (haiku).
  * Validates evidence support, severity consistency, and completeness.
  * Returns undefined if LLM call fails (graceful degradation).
@@ -759,10 +800,25 @@ ${conclusionPreview}${truncationNote}
       }
     }
 
-    // Parse JSON from the result
-    const jsonMatch = result.match(/\[[\s\S]*?\]/);
+    // Parse JSON from the result. LLM responses may be truncated mid-JSON,
+    // so we attempt repair (close unclosed strings/brackets) before giving up.
+    // Use greedy match first; fall back to `[` without closing `]` (truncated).
+    const jsonMatch = result.match(/\[[\s\S]*\]/) || result.match(/\[[\s\S]+/);
     if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]) as VerificationIssue[];
+      let jsonStr = jsonMatch[0];
+      let parsed: VerificationIssue[];
+      try {
+        parsed = JSON.parse(jsonStr);
+      } catch {
+        // Attempt repair: close unclosed strings and brackets
+        jsonStr = repairTruncatedJson(jsonStr);
+        try {
+          parsed = JSON.parse(jsonStr);
+        } catch (repairErr) {
+          console.warn('[ClaudeVerifier] JSON repair failed:', (repairErr as Error).message);
+          return [];
+        }
+      }
       // LLM may return non-standard severity levels (e.g. "critical", "high", "medium")
       // that don't match the VerificationIssue type union ('error' | 'warning').
       // Normalize to prevent these from silently bypassing the correction retry logic

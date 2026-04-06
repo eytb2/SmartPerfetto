@@ -109,6 +109,9 @@ export async function detectArchitectureViaSkill(
         engine: flutterEngine === 'IMPELLER' ? 'IMPELLER'
               : flutterEngine === 'SKIA' ? 'SKIA'
               : 'UNKNOWN',
+        surfaceType: pipelineId.includes('SURFACEVIEW') ? 'SURFACEVIEW'
+                   : pipelineId.includes('TEXTUREVIEW') ? 'TEXTUREVIEW'
+                   : 'UNKNOWN',
       };
     }
 

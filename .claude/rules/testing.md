@@ -53,7 +53,7 @@ After the test completes:
 TextureView（双出图）和 SurfaceView（单出图）的渲染管线完全不同，必须分别验证。
 
 ```bash
-# Flutter TextureView — 双出图：1.ui → texture → RenderThread updateTexImage → composite
+# Flutter TextureView — 双出图：1.ui → 1.raster → JNISurfaceTexture → RenderThread(updateTexImage + composite)
 cd backend && npx tsx src/scripts/verifyAgentSseScrolling.ts \
   --trace "../test-traces/Scroll-Flutter-327-TextureView.pftrace" \
   --query "分析 Flutter 滑动性能" \

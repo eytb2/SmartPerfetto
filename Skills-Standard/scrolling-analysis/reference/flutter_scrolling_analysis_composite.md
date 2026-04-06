@@ -25,7 +25,7 @@ Flutter 应用帧渲染分析：UI 线程 + Raster 线程 + 帧时序。处理 F
 本 skill 自动检测 Flutter 的两种渲染模式:
 
 **TextureView 模式（双出图）**:
-- 管线: 1.ui -> texture -> RenderThread updateTexImage -> composite
+- 管线: 1.ui → 1.raster(光栅化) → JNISurfaceTexture(纹理桥接) → RenderThread(updateTexImage + composite)
 - 特征: 存在 `1.ui` 线程 + `updateTexImage`/`SurfaceTexture` slice > 5 个
 - 额外分析: RenderThread 上的 updateTexImage/DrawFrame/queueBuffer
 

@@ -29,6 +29,7 @@ export type RenderingArchitectureType =
  * Flutter 渲染引擎类型
  */
 export type FlutterEngine = 'SKIA' | 'IMPELLER' | 'UNKNOWN';
+export type FlutterSurfaceType = 'SURFACEVIEW' | 'TEXTUREVIEW' | 'UNKNOWN';
 
 /**
  * WebView Surface 类型
@@ -80,6 +81,8 @@ export interface ArchitectureInfo {
   flutter?: {
     /** 渲染引擎 */
     engine: FlutterEngine;
+    /** Surface 类型 — 决定渲染管线 */
+    surfaceType: FlutterSurfaceType;
     /** 预估版本范围 */
     versionHint?: string;
     /** 是否使用新的线程模型 (3.29+) */

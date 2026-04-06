@@ -263,7 +263,7 @@ describe('verifyPlanAdherence', () => {
     expect(issues.some(i => i.type === 'plan_deviation' && i.severity === 'error')).toBe(true);
   });
 
-  it('should warn on completed phase without matched tool calls', () => {
+  it('should error on completed phase without matched tool calls', () => {
     const plan = makePlan({
       phases: [{
         id: 'p1', name: 'Phase 1', goal: 'G1',
@@ -275,7 +275,7 @@ describe('verifyPlanAdherence', () => {
     });
     const issues = verifyPlanAdherence(plan);
     expect(issues.some(i =>
-      i.type === 'plan_deviation' && i.message.includes('无匹配的工具调用'),
+      i.type === 'plan_deviation' && i.severity === 'error' && i.message.includes('无匹配的工具调用'),
     )).toBe(true);
   });
 

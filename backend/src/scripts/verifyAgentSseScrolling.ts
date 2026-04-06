@@ -25,12 +25,22 @@ interface VerifyOptions {
 interface SseSummary {
   totalEvents: number;
   terminalEvent?: string;
+  /** agentv3 event type counts */
+  progressCount: number;
+  agentTaskDispatchedCount: number;
+  agentResponseCount: number;
+  answerTokenCount: number;
+  conclusionCount: number;
+  dataEnvelopeCount: number;
+  planSubmittedCount: number;
+  architectureDetectedCount: number;
+  errorEvents: string[];
+  /** Legacy agentv2 fields (kept for backwards compat) */
   stageNames: string[];
   stageTransitionCount: number;
   directSkillProgressCount: number;
   directSkillCompletedCount: number;
   directSkillFindingCount: number;
-  errorEvents: string[];
 }
 
 const DEFAULT_TRACE = '../test-traces/app_aosp_scrolling_heavy_jank.pftrace';
@@ -189,12 +199,20 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 async function collectSseSummary(baseUrl: string, sessionId: string, timeoutMs: number): Promise<SseSummary> {
   const summary: SseSummary = {
     totalEvents: 0,
+    progressCount: 0,
+    agentTaskDispatchedCount: 0,
+    agentResponseCount: 0,
+    answerTokenCount: 0,
+    conclusionCount: 0,
+    dataEnvelopeCount: 0,
+    planSubmittedCount: 0,
+    architectureDetectedCount: 0,
+    errorEvents: [],
     stageNames: [],
     stageTransitionCount: 0,
     directSkillProgressCount: 0,
     directSkillCompletedCount: 0,
     directSkillFindingCount: 0,
-    errorEvents: [],
   };
 
   const stageNameSet = new Set<string>();
@@ -256,8 +274,39 @@ async function collectSseSummary(baseUrl: string, sessionId: string, timeoutMs: 
           summary.terminalEvent = event;
 
           const parsedRecord = asRecord(parsed);
-          const payload = asRecord(parsedRecord?.data);
+          const payload = asRecord(parsedRecord?.data) ?? parsedRecord;
 
+          // --- agentv3 event counting ---
+          switch (event) {
+            case 'progress':
+              summary.progressCount += 1;
+              break;
+            case 'agent_task_dispatched':
+              summary.agentTaskDispatchedCount += 1;
+              break;
+            case 'agent_response':
+              summary.agentResponseCount += 1;
+              break;
+            case 'answer_token':
+              summary.answerTokenCount += 1;
+              break;
+            case 'conclusion':
+              summary.conclusionCount += 1;
+              break;
+            case 'data':
+              summary.dataEnvelopeCount += 1;
+              break;
+            case 'plan_submitted':
+              summary.planSubmittedCount += 1;
+              break;
+            case 'architecture_detected':
+              summary.architectureDetectedCount += 1;
+              break;
+            default:
+              break;
+          }
+
+          // --- Legacy agentv2 counting (backwards compat) ---
           if (event === 'stage_transition') {
             const stageName = typeof payload?.stageName === 'string' ? payload.stageName : undefined;
             if (stageName) {
@@ -389,19 +438,27 @@ async function main(): Promise<void> {
 
     const sse = await collectSseSummary(baseUrl, sessionId, options.timeoutMs);
 
-    const stageSet = new Set(sse.stageNames);
-    const checks = {
-      hasOverviewStage: stageSet.has('overview'),
-      hasSessionOverviewStage: stageSet.has('session_overview'),
-      hasFrameAnalysisStage: stageSet.has('frame_analysis'),
-      hasDirectSkillProgress: sse.directSkillProgressCount > 0,
-      hasDirectSkillCompleted: sse.directSkillCompletedCount > 0,
-      hasDirectSkillFindings: sse.directSkillFindingCount > 0,
+    // Quick-mode analyses skip plan submission and architecture detection,
+    // so those checks are informational only — not required for pass/fail.
+    const isQuickMode = sse.planSubmittedCount === 0 && sse.agentResponseCount <= 3;
+
+    const requiredChecks = {
+      hasProgressEvents: sse.progressCount > 0,
+      hasAgentResponses: sse.agentResponseCount > 0,
+      hasConclusionEvent: sse.conclusionCount > 0,
       hasAnalysisCompletedEvent: sse.terminalEvent === 'analysis_completed' || sse.terminalEvent === 'end',
       hasNoSseErrors: sse.errorEvents.length === 0,
     };
 
-    const passed = Object.values(checks).every(Boolean);
+    const fullModeChecks = {
+      hasDataEnvelopes: sse.dataEnvelopeCount > 0,
+      hasPlanSubmitted: sse.planSubmittedCount > 0,
+      hasArchitectureDetected: sse.architectureDetectedCount > 0,
+    };
+
+    const checks = { ...requiredChecks, ...fullModeChecks };
+    const passed = Object.values(requiredChecks).every(Boolean)
+      && (isQuickMode || Object.values(fullModeChecks).every(Boolean));
     const sessionLogFile = findSessionLogFile(sessionId);
 
     const output = {

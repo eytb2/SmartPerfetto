@@ -1594,7 +1594,7 @@ FROM scored
 
 - **Skill**: `flutter_scrolling_analysis` (composite, 5+ steps)
 - **Chinese name**: Flutter 滑动分析
-- **Description**: Flutter-specific frame analysis using `actual_frame_timeline_slice` and Flutter's thread model (`1.ui` / `1.raster` / `1.io`). Handles both SurfaceView (single pipeline: 1.ui -> 1.raster -> BufferQueue -> SurfaceFlinger) and TextureView (dual pipeline: 1.ui -> texture -> RenderThread updateTexImage -> composite).
+- **Description**: Flutter-specific frame analysis using `actual_frame_timeline_slice` and Flutter's thread model (`1.ui` / `1.raster` / `1.io`). Handles both SurfaceView (single pipeline: 1.ui -> 1.raster -> BufferQueue -> SurfaceFlinger) and TextureView (dual pipeline: 1.ui -> 1.raster -> JNISurfaceTexture -> RenderThread updateTexImage + composite).
 
 #### Step 1: Flutter Frame Overview
 

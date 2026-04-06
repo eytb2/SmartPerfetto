@@ -385,7 +385,7 @@ LIMIT 20
 Flutter 应用需要不同的分析流程：
 
 - **关键线程**：`1.ui`（Dart UI）和 `1.raster`（GPU rasterization），而非标准 RenderThread
-- **TextureView 模式**：双出图管线（1.ui -> texture -> RenderThread updateTexImage -> composite）
+- **TextureView 模式**：双出图管线（1.ui → 1.raster(光栅化) → JNISurfaceTexture(纹理桥接) → RenderThread(updateTexImage + composite)）
 - **SurfaceView 模式**：单出图管线（1.ui -> 1.raster -> BufferQueue -> SurfaceFlinger）
 - **Jank 来源**：检查 1.ui 和 1.raster 线程的 depth=0 slice 是否超过 VSync 预算
 

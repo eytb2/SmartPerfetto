@@ -42,6 +42,12 @@ function buildArchitectureSection(
   let desc = `## 当前 Trace 架构\n\n- **渲染架构**: ${arch.type} (置信度: ${(arch.confidence * 100).toFixed(0)}%)`;
   if (arch.flutter) {
     desc += `\n- **Flutter 引擎**: ${arch.flutter.engine}`;
+    desc += `\n- **Flutter Surface**: ${arch.flutter.surfaceType}`;
+    if (arch.flutter.surfaceType === 'SURFACEVIEW') {
+      desc += ` — 单出图管线: 1.ui → 1.raster → BufferQueue → SurfaceFlinger`;
+    } else if (arch.flutter.surfaceType === 'TEXTUREVIEW') {
+      desc += ` — 双出图管线: 1.ui → 1.raster(光栅化) → JNISurfaceTexture(纹理桥接) → RenderThread(updateTexImage + composite)`;
+    }
     if (detailed && arch.flutter.versionHint) desc += ` (${arch.flutter.versionHint})`;
     if (detailed && arch.flutter.newThreadModel) desc += ` — 新线程模型`;
   }
