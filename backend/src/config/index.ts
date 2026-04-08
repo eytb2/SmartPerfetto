@@ -308,6 +308,27 @@ export const featureFlagsConfig = {
 } as const;
 
 // =============================================================================
+// Scene Story Pipeline Configuration
+// =============================================================================
+
+export const sceneStoryConfig = {
+  /** JobRunner concurrent analysis jobs */
+  analysisConcurrency: parseIntEnv('SCENE_ANALYSIS_CONCURRENCY', 3),
+
+  /** Max retries per job after initial failure */
+  jobMaxRetries: parseIntEnv('SCENE_JOB_MAX_RETRIES', 1),
+
+  /** Disk cache TTL for file-backed trace reports */
+  reportTtlMs: parseIntEnv('SCENE_REPORT_TTL_MS', 7 * 24 * 60 * 60 * 1000),
+
+  /** Disk store directory for SceneReport JSON (relative to backend cwd) */
+  reportDir: process.env.SCENE_REPORT_DIR || 'data/scene-reports',
+
+  /** Process-memory LRU size for external RPC trace reports where no content hash is available */
+  memoryCacheMaxSize: parseIntEnv('SCENE_REPORT_MEMORY_CACHE_MAX', 50),
+} as const;
+
+// =============================================================================
 // Frontend Configuration (for reference, actual values in frontend)
 // =============================================================================
 
@@ -341,6 +362,7 @@ export const config = {
   analysis: analysisConfig,
   context: contextConfig,
   featureFlags: featureFlagsConfig,
+  sceneStory: sceneStoryConfig,
   frontend: frontendConfig,
 } as const;
 

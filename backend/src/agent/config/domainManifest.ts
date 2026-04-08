@@ -43,11 +43,34 @@ export interface SceneReconstructionRouteRule {
   priority?: number;
 }
 
+/**
+ * Scene Deep-Dive Route — maps user-clicked scene events to drill-down skills.
+ *
+ * Intentionally kept separate from SceneReconstructionRouteRule: Stage2 batch
+ * routes match by scene category (coarse), deep-dive routes match by individual
+ * event type (fine). The two concepts deliberately do not share a data model.
+ */
+export interface SceneDeepDiveRoute {
+  /** Stable identifier for logs and debugging */
+  id: string;
+  /** Event types this route matches (e.g. cold_start/warm_start/hot_start) */
+  eventTypes: string[];
+  /** Skill to execute when user clicks an event of these types */
+  skillId: string;
+  /** User-facing description (Chinese) */
+  description: string;
+  /** How to map DisplayedScene fields into skill params */
+  paramMapping: Record<string, string>;
+  /** Fallback route used when no eventTypes match */
+  fallback?: boolean;
+}
+
 export interface DomainManifest {
   strategyExecutionPolicies: Record<string, StrategyExecutionPolicy>;
   aspectEvidenceMap: Record<string, string[]>;
   modeEvidenceMap: Partial<Record<AnalysisPlanModeLike, string[]>>;
   sceneReconstructionRoutes: SceneReconstructionRouteRule[];
+  sceneDeepDiveRoutes: SceneDeepDiveRoute[];
   baselineEvidence: string;
   fallbackEvidence: string[];
 }
@@ -124,6 +147,55 @@ export const DEFAULT_DOMAIN_MANIFEST: DomainManifest = {
       },
     },
   ],
+  sceneDeepDiveRoutes: [
+    {
+      id: 'startup_deep_dive',
+      eventTypes: ['cold_start', 'warm_start', 'hot_start'],
+      skillId: 'startup_analysis',
+      description: '启动性能分析',
+      paramMapping: {
+        start_ts: 'startTs',
+        end_ts: 'endTs',
+        package: 'processName',
+        startup_id: 'metadata.startupId',
+        startup_type: 'metadata.startupType',
+        ttid_ms: 'metadata.ttidMs',
+        ttfd_ms: 'metadata.ttfdMs',
+      },
+    },
+    {
+      id: 'scroll_deep_dive',
+      eventTypes: ['scroll', 'scroll_start', 'inertial_scroll'],
+      skillId: 'scrolling_analysis',
+      description: '滑动流畅性分析',
+      paramMapping: {
+        start_ts: 'startTs',
+        end_ts: 'endTs',
+        package: 'processName',
+      },
+    },
+    {
+      id: 'tap_deep_dive',
+      eventTypes: ['tap', 'long_press', 'screen_unlock'],
+      skillId: 'click_response_analysis',
+      description: '点击响应分析',
+      paramMapping: {
+        start_ts: 'startTs',
+        end_ts: 'endTs',
+        package: 'processName',
+      },
+    },
+    {
+      id: 'idle_deep_dive',
+      eventTypes: ['idle'],
+      skillId: 'device_state_snapshot',
+      description: '设备状态快照',
+      paramMapping: {
+        start_ts: 'startTs',
+        end_ts: 'endTs',
+      },
+    },
+  ],
   baselineEvidence: '关键指标基线（时间窗、进程、刷新率口径一致）',
   fallbackEvidence: [
     '帧时序与掉帧统计',
@@ -185,6 +257,39 @@ export function getSceneReconstructionRoutes(
     ? manifest.sceneReconstructionRoutes
     : [];
   return routes.length > 0 ? routes : DEFAULT_DOMAIN_MANIFEST.sceneReconstructionRoutes;
+}
+
+/**
+ * Get all scene deep-dive routes from manifest, with fallback to defaults.
+ */
+export function getSceneDeepDiveRoutes(
+  manifest: DomainManifest = DEFAULT_DOMAIN_MANIFEST
+): SceneDeepDiveRoute[] {
+  const routes = Array.isArray(manifest.sceneDeepDiveRoutes)
+    ? manifest.sceneDeepDiveRoutes
+    : [];
+  return routes.length > 0 ? routes : DEFAULT_DOMAIN_MANIFEST.sceneDeepDiveRoutes;
+}
+
+/**
+ * Look up a deep-dive route by scene/event type.
+ * Returns the first route whose eventTypes includes the given type,
+ * or the first fallback route if no match, or null.
+ */
+export function getSceneDeepDiveRoute(
+  eventType: string,
+  manifest: DomainManifest = DEFAULT_DOMAIN_MANIFEST
+): SceneDeepDiveRoute | null {
+  const normalized = String(eventType || '').trim().toLowerCase();
+  if (!normalized) return null;
+  const routes = getSceneDeepDiveRoutes(manifest);
+  for (const route of routes) {
+    if (route.eventTypes.some((t) => String(t).toLowerCase() === normalized)) {
+      return route;
+    }
+  }
+  const fallback = routes.find((r) => r.fallback);
+  return fallback ?? null;
 }
 
 export function matchesSceneReconstructionRoute(

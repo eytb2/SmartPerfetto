@@ -22,6 +22,7 @@ import { createSessionLogger, type SessionLogger } from '../services/sessionLogg
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import { SkillExecutor } from '../services/skillEngine/skillExecutor';
 import { skillRegistry, ensureSkillRegistryInitialized } from '../services/skillEngine/skillLoader';
+import { getSceneDeepDiveRoute } from '../agent/config/domainManifest';
 
 export interface SceneReconstructConversationStep {
   eventId: string;
@@ -105,7 +106,9 @@ export function registerSceneReconstructRoutes<TSession extends SceneReconstruct
       }
 
       const traceProcessorService = getTraceProcessorService();
-      const trace = traceProcessorService.getTrace(traceId);
+      // Fall back to disk restore so traces evicted from the in-memory registry
+      // (but still on disk) don't produce spurious 404s on this endpoint.
+      const trace = await traceProcessorService.getOrLoadTrace(traceId);
       if (!trace) {
         return res.status(404).json({
           success: false,
@@ -318,20 +321,9 @@ export function registerSceneReconstructRoutes<TSession extends SceneReconstruct
     res.json(response);
   });
 
-  // ── Deep-dive: execute a skill scoped to a specific event ──────────────
-  const EVENT_DEEP_DIVE_SKILLS: Record<string, { skillId: string; description: string }> = {
-    'cold_start': { skillId: 'startup_analysis', description: '启动性能分析' },
-    'warm_start': { skillId: 'startup_analysis', description: '启动性能分析' },
-    'hot_start': { skillId: 'startup_analysis', description: '启动性能分析' },
-    'scroll': { skillId: 'scrolling_analysis', description: '滑动流畅性分析' },
-    'scroll_start': { skillId: 'scrolling_analysis', description: '滑动流畅性分析' },
-    'inertial_scroll': { skillId: 'scrolling_analysis', description: '惯性滑动分析' },
-    'tap': { skillId: 'click_response_analysis', description: '点击响应分析' },
-    'long_press': { skillId: 'click_response_analysis', description: '点击响应分析' },
-    'screen_unlock': { skillId: 'click_response_analysis', description: '解锁响应分析' },
-    'idle': { skillId: 'device_state_snapshot', description: '设备状态快照' },
-  };
-
+  // Deep-dive: execute a skill scoped to a specific event.
+  // Route resolution lives in domainManifest.sceneDeepDiveRoutes — see
+  // getSceneDeepDiveRoute() for the lookup implementation.
   router.post('/scene-reconstruct/:analysisId/deep-dive', async (req, res) => {
     try {
       const { analysisId } = req.params;
@@ -342,11 +334,11 @@ export function registerSceneReconstructRoutes<TSession extends SceneReconstruct
         return res.status(404).json({ success: false, error: 'Session not found' });
       }
 
-      const skillConfig = EVENT_DEEP_DIVE_SKILLS[eventType];
-      if (!skillConfig) {
+      const route = getSceneDeepDiveRoute(eventType);
+      if (!route) {
         return res.status(400).json({
           success: false,
-          error: `No deep-dive skill for event type: ${eventType}`,
+          error: `No deep-dive route for event type: ${eventType}`,
         });
       }
 
@@ -355,19 +347,22 @@ export function registerSceneReconstructRoutes<TSession extends SceneReconstruct
       const skillExecutor = new SkillExecutor(traceProcessorService);
       skillExecutor.registerSkills(skillRegistry.getAllSkills());
 
+      // Params built from the flat request body for now; the manifest's
+      // paramMapping will start being exercised once the frontend sends
+      // full scene context instead of {startTs,endTs,appPackage}.
       const params: Record<string, any> = {
         start_ts: startTs,
         end_ts: endTs,
       };
       if (appPackage) params.package = appPackage;
 
-      const result = await skillExecutor.execute(skillConfig.skillId, session.traceId, params);
+      const result = await skillExecutor.execute(route.skillId, session.traceId, params);
 
       res.json({
         success: true,
         eventId,
-        skillId: skillConfig.skillId,
-        description: skillConfig.description,
+        skillId: route.skillId,
+        description: route.description,
         result: result.displayResults,
       });
     } catch (error: any) {

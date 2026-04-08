@@ -451,6 +451,17 @@ export const SSE_EVENT_TYPES = [
   'track_data',
   'worker_thought',
   'architecture_detected',
+  // Scene Story Pipeline events — 'scene_story_' prefix keeps these strictly
+  // distinct from the legacy 'scene_detected' event (singular vs plural trap).
+  'scene_story_detected',
+  'scene_story_queued',
+  'scene_story_started',
+  'scene_story_retrying',
+  'scene_story_completed',
+  'scene_story_failed',
+  'scene_story_cancelled',
+  'scene_story_dropped',
+  'scene_story_report_ready',
 ] as const;
 export type SSEEventType = typeof SSE_EVENT_TYPES[number];
 
