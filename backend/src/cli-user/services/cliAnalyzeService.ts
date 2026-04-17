@@ -31,6 +31,7 @@ import { createSessionLogger } from '../../services/sessionLogger';
 import { SessionPersistenceService } from '../../services/sessionPersistenceService';
 import { sessionContextManager } from '../../agent/context/enhancedSessionContext';
 import { getHTMLReportGenerator } from '../../services/htmlReportGenerator';
+import { buildAgentDrivenReportData } from '../../services/agentReportData';
 import type { StreamingUpdate } from '../../agent/types';
 import type { ModelRouter } from '../../agent';
 import type { AnalysisResult } from '../../agent/core/orchestratorTypes';
@@ -188,57 +189,30 @@ export class CliAnalyzeService {
   }
 
   /**
-   * Mirrors the report-building block in `agentRoutes.ts:runAgentDrivenAnalysis`
-   * (lines ~3892-4002) but with only the fields the CLI actually produces.
-   * The richer fields (agentDialogue, dataEnvelopes, conversationTimeline) are
-   * populated by the HTTP handler's own update listener — CLI leaves them empty,
-   * which the generator tolerates via optional properties.
+   * Build the HTML report for a completed turn. Report data is assembled by
+   * the shared `buildAgentDrivenReportData` builder — same code path the
+   * HTTP route uses — so CLI and web UI emit identical reports.
    */
   private buildReportHtml(
     session: AnalyzeManagedSession,
     result: AnalysisResult,
   ): { html?: string; error?: string } {
     try {
-      const traceInfo = getTraceProcessorService().getTrace(session.traceId);
-      const traceStartNs = traceInfo?.metadata?.startTime;
-      const timestamp = Date.now();
-
-      const reportData = {
-        traceId: session.traceId,
-        query: session.query,
-        traceStartNs:
-          traceStartNs !== undefined && traceStartNs !== null ? String(traceStartNs) : undefined,
+      const reportData = buildAgentDrivenReportData({
+        session,
         result: {
           sessionId: session.sessionId,
           success: result.success,
           findings: result.findings,
           hypotheses: result.hypotheses,
           conclusion: result.conclusion,
+          conclusionContract: result.conclusionContract,
           confidence: result.confidence,
           rounds: result.rounds,
           totalDurationMs: result.totalDurationMs,
         },
-        hypotheses: result.hypotheses,
-        dialogue: session.agentDialogue || [],
-        conversationTimeline: session.conversationSteps || [],
-        dataEnvelopes: session.dataEnvelopes || [],
-        agentResponses: session.agentResponses || [],
-        timestamp,
-        conversationTurns: session.runSequence || 1,
-        queryHistory: session.queryHistory || [
-          { turn: 1, query: session.query, timestamp: session.createdAt },
-        ],
-        conclusionHistory: session.conclusionHistory || [
-          {
-            turn: 1,
-            conclusion: result.conclusion,
-            confidence: result.confidence,
-            timestamp,
-          },
-        ],
-      };
-
-      const html = getHTMLReportGenerator().generateAgentDrivenHTML(reportData as any);
+      });
+      const html = getHTMLReportGenerator().generateAgentDrivenHTML(reportData);
       return { html };
     } catch (err) {
       return { error: (err as Error).message };

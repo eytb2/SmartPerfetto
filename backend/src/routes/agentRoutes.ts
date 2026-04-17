@@ -17,6 +17,7 @@ import {
   SessionLogger,
 } from '../services/sessionLogger';
 import { getHTMLReportGenerator } from '../services/htmlReportGenerator';
+import { buildAgentDrivenReportData } from '../services/agentReportData';
 import { reportStore, persistReport } from './reportRoutes';
 import { SessionPersistenceService } from '../services/sessionPersistenceService';
 import { authenticate } from '../middleware/auth';
@@ -3893,73 +3894,14 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
   let reportUrl: string | undefined;
   let reportError: string | undefined;
   try {
-    const traceInfo = getTraceProcessorService().getTrace(session.traceId);
-    const traceStartNs = traceInfo?.metadata?.startTime;
-
     const generator = getHTMLReportGenerator();
-    // P1-10: Aggregate findings from all turns (not just current turn).
-    // session.result only has current turn's findings, creating inconsistency
-    // where timeline shows all turns but findings only show the latest.
-    let cumulativeResult = resultForClient;
-    try {
-      const ctx = sessionContextManager.get(session.sessionId, session.traceId);
-      if (ctx) {
-        const allTurns = ctx.getAllTurns();
-        if (allTurns.length > 1) {
-          const allFindings = allTurns.flatMap(t => t.findings || []);
-          // Deduplicate by finding ID
-          const seen = new Set<string>();
-          const deduped = allFindings.filter(f => {
-            if (seen.has(f.id)) return false;
-            seen.add(f.id);
-            return true;
-          });
-          cumulativeResult = { ...resultForClient, findings: deduped };
-        }
-      }
-    } catch { /* fallback to current turn only */ }
-
-    // Guard: ensure cumulativeResult.conclusion is never empty in the report.
-    // If the SDK result.result was empty (rare: streaming tokens showed text but
-    // result message lacked it), fall back to latest conclusionHistory entry.
-    if (!cumulativeResult.conclusion || !cumulativeResult.conclusion.trim()) {
-      const lastCH = session.conclusionHistory?.length
-        ? session.conclusionHistory[session.conclusionHistory.length - 1]
-        : null;
-      if (lastCH?.conclusion) {
-        console.warn('[AgentRoutes] Report conclusion was empty — recovered from conclusionHistory');
-        cumulativeResult = { ...cumulativeResult, conclusion: lastCH.conclusion };
-      }
-    }
-
-    const reportData = {
-      traceId: session.traceId,
-      query: session.query,
-      traceStartNs: traceStartNs !== undefined && traceStartNs !== null ? String(traceStartNs) : undefined,
-      result: cumulativeResult,
-      hypotheses: session.hypotheses,
-      dialogue: session.agentDialogue,
-      conversationTimeline: session.conversationSteps,
-      dataEnvelopes: session.dataEnvelopes,
-      agentResponses: session.agentResponses,
-      timestamp: Date.now(),
-      // P1-11: Pass actual user conversation turn count (not SDK internal rounds)
-      conversationTurns: session.runSequence || 1,
-      // P0-R1/R2: Cross-turn query and conclusion history for complete reports
-      queryHistory: session.queryHistory || [],
-      conclusionHistory: session.conclusionHistory || [],
-      // Report data from snapshot (single source of truth) — no fallback chains needed.
-      // The snapshot was taken during persistence and stashed on the session.
-      analysisNotes: (session as any)._lastSnapshot?.analysisNotes
-        ?? (typeof session.orchestrator.getSessionNotes === 'function'
-          ? session.orchestrator.getSessionNotes(session.sessionId) : []),
-      analysisPlan: (session as any)._lastSnapshot?.analysisPlan
-        ?? (typeof session.orchestrator.getSessionPlan === 'function'
-          ? session.orchestrator.getSessionPlan(session.sessionId) : null),
-      uncertaintyFlags: (session as any)._lastSnapshot?.uncertaintyFlags
-        ?? (typeof session.orchestrator.getSessionUncertaintyFlags === 'function'
-          ? session.orchestrator.getSessionUncertaintyFlags(session.sessionId) : []),
-    };
+    // Report assembly (cumulative findings dedup, empty-conclusion fallback,
+    // snapshot-first analysisNotes/Plan/Flags) lives in the shared builder so
+    // the CLI path produces identical output.
+    const reportData = buildAgentDrivenReportData({
+      session,
+      result: resultForClient as any,
+    });
     console.log(`[AgentRoutes] Generating HTML report, data keys:`, {
       hasResult: !!result,
       conclusionLength: normalizedConclusion?.length || 0,
