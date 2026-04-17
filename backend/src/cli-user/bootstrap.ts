@@ -24,6 +24,10 @@ import { computePaths, ensureLayout, type CliPaths } from './io/paths';
 export interface BootstrapOptions {
   envFile?: string;
   sessionDir?: string;
+  /** When false, skip the ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL check so
+   *  purely-local commands (`list`, `show`, `report`, `rm`) stay usable
+   *  before the user has configured LLM credentials. Defaults to true. */
+  requireLlm?: boolean;
 }
 
 export interface BootstrapResult {
@@ -31,17 +35,26 @@ export interface BootstrapResult {
 }
 
 let memoizedResult: BootstrapResult | null = null;
+let llmCredentialsVerified = false;
 
 export function bootstrap(options: BootstrapOptions = {}): BootstrapResult {
-  if (memoizedResult) return memoizedResult;
+  const requireLlm = options.requireLlm !== false;
 
-  loadEnv(options.envFile);
-  assertLlmCredentials();
+  if (!memoizedResult) {
+    loadEnv(options.envFile);
+    const paths = computePaths(options.sessionDir);
+    ensureLayout(paths);
+    memoizedResult = { paths };
+  }
 
-  const paths = computePaths(options.sessionDir);
-  ensureLayout(paths);
+  // Credentials check is separate from the memoization guard: a process
+  // might first hit `bootstrap({requireLlm:false})` (list) and later an
+  // LLM-using path — the second call must still enforce the check.
+  if (requireLlm && !llmCredentialsVerified) {
+    assertLlmCredentials();
+    llmCredentialsVerified = true;
+  }
 
-  memoizedResult = { paths };
   return memoizedResult;
 }
 
@@ -60,7 +73,7 @@ function loadEnv(explicitFile?: string): void {
     if (!fs.existsSync(resolved)) {
       throw new Error(`--env-file not found: ${resolved}`);
     }
-    dotenv.config({ path: resolved });
+    dotenv.config({ path: resolved, quiet: true });
     return;
   }
 
@@ -68,11 +81,11 @@ function loadEnv(explicitFile?: string): void {
   // __dirname at runtime will be something like dist/cli-user or src/cli-user.
   // Walk up to find the first ancestor containing package.json with our name.
   const backendEnv = findBackendEnv();
-  if (backendEnv) dotenv.config({ path: backendEnv });
+  if (backendEnv) dotenv.config({ path: backendEnv, quiet: true });
 
   // Last chance: user-level override.
   const userEnv = path.join(process.env.HOME || '', '.smartperfetto', 'env');
-  if (fs.existsSync(userEnv)) dotenv.config({ path: userEnv });
+  if (fs.existsSync(userEnv)) dotenv.config({ path: userEnv, quiet: true });
 }
 
 function findBackendEnv(): string | null {

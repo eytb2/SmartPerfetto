@@ -16,6 +16,18 @@
 
 import { Command } from 'commander';
 import { runAnalyzeCommand } from './commands/analyze';
+import { runResumeCommand } from './commands/resume';
+import { runListCommand } from './commands/list';
+import { runShowCommand } from './commands/show';
+import { runReportCommand } from './commands/report';
+import { runRmCommand } from './commands/rm';
+
+interface GlobalOpts {
+  sessionDir?: string;
+  envFile?: string;
+  verbose?: boolean;
+  color?: boolean;
+}
 
 function main(): void {
   const program = new Command();
@@ -29,30 +41,104 @@ function main(): void {
     .option('--verbose', 'show verbose event stream', false)
     .option('--no-color', 'disable ANSI colors');
 
+  // Shared helper — commander stores --no-color as opts.color === false.
+  const globals = (): GlobalOpts => program.opts<GlobalOpts>();
+  const runAndExit = async (fn: () => Promise<number>) => {
+    process.exit(await fn());
+  };
+
   program
     .command('analyze <trace>')
     .description('run one-shot analysis against a trace file')
     .option('-q, --query <question>', 'analysis question', '分析这个 trace 的性能问题，找出根因')
     .action(async (trace: string, opts: { query: string }) => {
-      const globals = program.opts<{
-        sessionDir?: string;
-        envFile?: string;
-        verbose?: boolean;
-        color?: boolean;
-      }>();
-      const code = await runAnalyzeCommand({
+      const g = globals();
+      await runAndExit(() => runAnalyzeCommand({
         trace,
         query: opts.query,
-        envFile: globals.envFile,
-        sessionDir: globals.sessionDir,
-        verbose: Boolean(globals.verbose),
-        // commander turns --no-color into opts.color === false
-        noColor: globals.color === false,
-      });
-      process.exit(code);
+        envFile: g.envFile,
+        sessionDir: g.sessionDir,
+        verbose: Boolean(g.verbose),
+        noColor: g.color === false,
+      }));
     });
 
-  // If no sub-command is given, show help (REPL comes in PR3).
+  program
+    .command('resume <sessionId>')
+    .description('continue a prior session with a follow-up question')
+    .requiredOption('-q, --query <question>', 'follow-up question')
+    .action(async (sessionId: string, opts: { query: string }) => {
+      const g = globals();
+      await runAndExit(() => runResumeCommand({
+        sessionId,
+        query: opts.query,
+        envFile: g.envFile,
+        sessionDir: g.sessionDir,
+        verbose: Boolean(g.verbose),
+        noColor: g.color === false,
+      }));
+    });
+
+  program
+    .command('list')
+    .description('list stored sessions (most recent first)')
+    .option('--json', 'emit JSON instead of a table', false)
+    .option('--limit <n>', 'show at most N entries', (v) => parseInt(v, 10))
+    .option('--since <date>', 'only entries updated at or after this date (any Date.parse input)')
+    .action(async (opts: { json: boolean; limit?: number; since?: string }) => {
+      const g = globals();
+      await runAndExit(() => runListCommand({
+        json: opts.json,
+        limit: opts.limit,
+        since: opts.since,
+        envFile: g.envFile,
+        sessionDir: g.sessionDir,
+        noColor: g.color === false,
+      }));
+    });
+
+  program
+    .command('show <sessionId>')
+    .description('print a session\'s latest conclusion and report path')
+    .option('--open', 'also open the HTML report in the default browser', false)
+    .action(async (sessionId: string, opts: { open: boolean }) => {
+      const g = globals();
+      await runAndExit(() => runShowCommand({
+        sessionId,
+        open: opts.open,
+        envFile: g.envFile,
+        sessionDir: g.sessionDir,
+      }));
+    });
+
+  program
+    .command('report <sessionId>')
+    .description('print the HTML report path, optionally open it')
+    .option('--open', 'open the report in the default browser', false)
+    .action(async (sessionId: string, opts: { open: boolean }) => {
+      const g = globals();
+      await runAndExit(() => runReportCommand({
+        sessionId,
+        open: opts.open,
+        envFile: g.envFile,
+        sessionDir: g.sessionDir,
+      }));
+    });
+
+  program
+    .command('rm <sessionId>')
+    .description('delete a local session folder (confirmation required)')
+    .option('-y, --yes', 'skip confirmation prompt', false)
+    .action(async (sessionId: string, opts: { yes: boolean }) => {
+      const g = globals();
+      await runAndExit(() => runRmCommand({
+        sessionId,
+        yes: opts.yes,
+        envFile: g.envFile,
+        sessionDir: g.sessionDir,
+      }));
+    });
+
   program.action(() => {
     program.help();
   });

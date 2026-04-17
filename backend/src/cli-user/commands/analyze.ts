@@ -5,30 +5,21 @@
 /**
  * `smartperfetto analyze <trace>` — one-shot analysis.
  *
- * Responsibilities:
- *   1. Bootstrap CLI (env + paths)
- *   2. Delegate analysis to CliAnalyzeService
- *   3. Stream events through the terminal renderer
- *   4. Persist outputs into the session folder
- *   5. Update ~/.smartperfetto/index.json
- *
- * Intentionally no resume handling in PR1 — `--resume-id` is reserved
- * but ignored. PR2 implements the full resume path.
+ * Responsibilities are split between this file and helpers:
+ *   - Trace load + runTurn orchestration live here.
+ *   - The 8-step "end of turn" persistence (conclusion/report/config/
+ *     transcript/index + terminal render) lives in `turnPersistence.ts`
+ *     so `resume.ts` can share it exactly.
  */
 
 import * as path from 'path';
 import { bootstrap } from '../bootstrap';
 import { CliAnalyzeService } from '../services/cliAnalyzeService';
+import { commitTurnOutputs } from '../services/turnPersistence';
 import { createRenderer } from '../repl/renderer';
 import { sessionPaths, ensureSessionLayout } from '../io/paths';
-import {
-  writeConfig,
-  writeConclusion,
-  writeReportHtml,
-  writeTurnMarkdown,
-} from '../io/sessionStore';
 import { upsertSession } from '../io/indexJson';
-import { appendTranscriptTurn, appendStreamEvent } from '../io/transcriptWriter';
+import { appendStreamEvent } from '../io/transcriptWriter';
 import type { CliSessionConfig } from '../types';
 
 export interface AnalyzeCommandArgs {
@@ -82,22 +73,8 @@ export async function runAnalyzeCommand(args: AnalyzeCommandArgs): Promise<numbe
       ensureSessionLayout(sessionPaths(paths, sessionId));
     }
     const sp = sessionPaths(paths, sessionId);
+    const now = Date.now();
 
-    // Persist conclusion + per-turn markdown.
-    const conclusion = result.result.conclusion || '';
-    writeConclusion(sp, conclusion);
-    writeTurnMarkdown(sp, 1, formatTurnMarkdown(args.query, conclusion, result.result));
-
-    // HTML report — written directly to session dir (no /api/reports path).
-    let reportPathForUser: string;
-    if (result.reportHtml) {
-      writeReportHtml(sp, result.reportHtml);
-      reportPathForUser = sp.report;
-    } else {
-      reportPathForUser = `(report generation failed${result.reportError ? `: ${result.reportError}` : ''})`;
-    }
-
-    // Write session config — this is what `resume` will read (PR2).
     const config: CliSessionConfig = {
       sessionId,
       tracePath,
@@ -105,51 +82,35 @@ export async function runAnalyzeCommand(args: AnalyzeCommandArgs): Promise<numbe
       sdkSessionId: result.sdkSessionId,
       model: result.model,
       createdAt: startedAt,
-      lastTurnAt: Date.now(),
+      lastTurnAt: now,
       turnCount: 1,
     };
-    writeConfig(sp, config);
 
-    // Transcript + global index.
-    appendTranscriptTurn(sp.transcript, {
+    commitTurnOutputs({
+      paths,
+      sp,
+      renderer,
+      sessionId,
       turn: 1,
-      timestamp: Date.now(),
-      question: args.query,
-      conclusionMd: conclusion,
-      confidence: result.result.confidence,
-      rounds: result.result.rounds,
-      durationMs: result.result.totalDurationMs,
-      reportFile: result.reportHtml ? sp.report : undefined,
-      error: result.reportError,
-    });
-
-    upsertSession(paths, {
-      sessionId,
-      createdAt: startedAt,
-      lastTurnAt: Date.now(),
-      tracePath,
-      traceFilename: path.basename(tracePath),
-      firstQuery: args.query,
-      turnCount: 1,
-      status: result.result.success ? 'completed' : 'failed',
-    });
-
-    // Terminal summary.
-    renderer.printConclusion(conclusion, {
-      confidence: result.result.confidence,
-      rounds: result.result.rounds,
-      durationMs: result.result.totalDurationMs,
-    });
-    renderer.printCompletion({
-      reportPath: reportPathForUser,
-      sessionDir: sp.dir,
-      sessionId,
+      query: args.query,
+      result,
+      config,
+      turnMarkdown: formatTurnMarkdown(args.query, result.result.conclusion || '', result.result),
+      indexEntry: {
+        sessionId,
+        createdAt: startedAt,
+        lastTurnAt: now,
+        tracePath,
+        traceFilename: path.basename(tracePath),
+        firstQuery: args.query,
+        turnCount: 1,
+        status: result.result.success ? 'completed' : 'failed',
+      },
     });
 
     return 0;
   } catch (err) {
     renderer.printError((err as Error).message);
-    // Record a failed entry in the index if we got far enough to know sessionId.
     if (sessionId) {
       try {
         upsertSession(paths, {
@@ -162,7 +123,7 @@ export async function runAnalyzeCommand(args: AnalyzeCommandArgs): Promise<numbe
           turnCount: 1,
           status: 'failed',
         });
-      } catch { /* ignore — best-effort */ }
+      } catch { /* best-effort — don't mask the original error */ }
     }
     return 1;
   } finally {
@@ -170,7 +131,6 @@ export async function runAnalyzeCommand(args: AnalyzeCommandArgs): Promise<numbe
   }
 }
 
-/** Markdown snapshot for `turns/001.md`. Plain-text friendly. */
 function formatTurnMarkdown(
   query: string,
   conclusion: string,

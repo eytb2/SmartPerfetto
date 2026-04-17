@@ -99,6 +99,17 @@ export class CliAnalyzeService {
     return getTraceProcessorService().loadTraceFromFilePath(tracePath);
   }
 
+  /**
+   * Resume-only path: try to reload an existing trace by its original id,
+   * preserving identity so the persisted session's `traceId` still matches.
+   * Returns true on success, false if the trace file has been evicted from
+   * `uploads/traces/` (caller should then degrade to a fresh load).
+   */
+  async reloadTraceById(traceId: string): Promise<boolean> {
+    const info = await getTraceProcessorService().getOrLoadTrace(traceId);
+    return info !== undefined;
+  }
+
   async runTurn(input: RunTurnInput): Promise<RunTurnOutput> {
     // Resolve traceId: either passed in (we assume caller already loaded), or load now.
     let traceId = input.traceId;
