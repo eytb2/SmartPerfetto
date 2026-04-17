@@ -29,9 +29,9 @@ import {
 import { getTraceProcessorService } from '../../services/traceProcessorService';
 import { createSessionLogger } from '../../services/sessionLogger';
 import { SessionPersistenceService } from '../../services/sessionPersistenceService';
-import { sessionContextManager } from '../../agent/context/enhancedSessionContext';
 import { getHTMLReportGenerator } from '../../services/htmlReportGenerator';
 import { buildAgentDrivenReportData } from '../../services/agentReportData';
+import { persistAgentTurn } from '../../services/persistAgentSession';
 import type { StreamingUpdate } from '../../agent/types';
 import type { ModelRouter } from '../../agent';
 import type { AnalysisResult } from '../../agent/core/orchestratorTypes';
@@ -161,11 +161,16 @@ export class CliAnalyzeService {
     }
 
     // Persist to SQLite BEFORE building the report — the snapshot is stashed on
-    // the session as `_lastSnapshot` and read by the HTML generator for
-    // analysisNotes / analysisPlan / uncertaintyFlags. Without this step the
-    // next CLI process can't find the session in SQLite and `resume` silently
-    // starts a fresh SDK conversation instead of continuing the original one.
-    this.persistTurnToBackend(session, sessionId, traceId, input.query, result);
+    // the session as `_lastSnapshot` and read by the HTML generator. Routes
+    // through the same shared helper the HTTP layer uses, so any future schema
+    // change applies to both paths automatically.
+    persistAgentTurn({
+      session,
+      sessionId,
+      traceId,
+      query: input.query,
+      result: { conclusion: result.conclusion, totalDurationMs: result.totalDurationMs },
+    });
 
     // sdkSessionId is only populated on ClaudeRuntime (agentv3) — guarded call.
     const sdkSessionId =
@@ -217,104 +222,6 @@ export class CliAnalyzeService {
       return { html };
     } catch (err) {
       return { error: (err as Error).message };
-    }
-  }
-
-  /**
-   * Mirror of the persistence block in `agentRoutes.ts:runAgentDrivenAnalysis`
-   * (lines ~2281-2374) — single atomic snapshot + turn messages. The HTTP
-   * route handles it inline; CLI has to do the same write or `resume` from
-   * a subsequent process can't find the session in SQLite.
-   *
-   * Errors are caught and logged — persistence failure should never fail an
-   * otherwise-successful analysis.
-   */
-  private persistTurnToBackend(
-    session: AnalyzeManagedSession,
-    sessionId: string,
-    traceId: string,
-    query: string,
-    result: AnalysisResult,
-  ): void {
-    try {
-      const sessionContext = sessionContextManager.get(sessionId, traceId);
-
-      const snapshot = typeof session.orchestrator.takeSnapshot === 'function'
-        ? session.orchestrator.takeSnapshot(sessionId, traceId, {
-            conversationSteps: session.conversationSteps || [],
-            queryHistory: session.queryHistory || [],
-            conclusionHistory: session.conclusionHistory || [],
-            agentDialogue: session.agentDialogue || [],
-            agentResponses: session.agentResponses || [],
-            dataEnvelopes: session.dataEnvelopes || [],
-            hypotheses: session.hypotheses || [],
-            runSequence: session.runSequence || 0,
-            conversationOrdinal: session.conversationOrdinal || 0,
-          })
-        : null;
-
-      // Stash the snapshot on the session so buildReportHtml can read
-      // analysisNotes / analysisPlan / uncertaintyFlags from it — matches the
-      // HTTP layer's contract with getHTMLReportGenerator().
-      if (snapshot) (session as any)._lastSnapshot = snapshot;
-
-      if (snapshot && sessionContext) {
-        const focusStoreSnapshot = typeof session.orchestrator.getFocusStore === 'function'
-          ? session.orchestrator.getFocusStore().serialize()
-          : undefined;
-        const traceAgentState = sessionContext.getTraceAgentState() || undefined;
-
-        this.persistence.saveSessionStateSnapshot(sessionId, snapshot, {
-          sessionContext,
-          focusStoreSnapshot,
-          traceAgentState,
-        });
-      } else if (sessionContext) {
-        // Fallback when orchestrator doesn't expose takeSnapshot — agentv2 path.
-        // CLI always runs agentv3 today, but keep the branch so a future swap
-        // doesn't silently lose persistence.
-        if (!this.persistence.getSession(sessionId)) {
-          this.persistence.saveSession({
-            id: sessionId,
-            traceId,
-            traceName: traceId,
-            question: query,
-            messages: [],
-            createdAt: session.createdAt,
-            updatedAt: Date.now(),
-          });
-        }
-        this.persistence.saveSessionContext(sessionId, sessionContext);
-      }
-
-      // Turn messages live in a separate SQLite table and are always needed for
-      // the web UI's history view — persist regardless of which branch above ran.
-      if (sessionContext) {
-        try {
-          const turnIndex = session.runSequence || 1;
-          this.persistence.appendMessages(sessionId, [
-            {
-              id: `msg-${sessionId}-turn${turnIndex}-user`,
-              role: 'user',
-              content: query,
-              timestamp: Date.now() - (result.totalDurationMs || 0),
-            },
-            {
-              id: `msg-${sessionId}-turn${turnIndex}-assistant`,
-              role: 'assistant',
-              content: (result.conclusion || '').substring(0, 10000),
-              timestamp: Date.now(),
-            },
-          ]);
-        } catch {
-          // Non-fatal — the primary snapshot is already written.
-        }
-      }
-    } catch (err) {
-      console.warn(
-        `[CliAnalyzeService] Failed to persist session ${sessionId} to SQLite:`,
-        (err as Error).message,
-      );
     }
   }
 

@@ -18,6 +18,7 @@ import {
 } from '../services/sessionLogger';
 import { getHTMLReportGenerator } from '../services/htmlReportGenerator';
 import { buildAgentDrivenReportData } from '../services/agentReportData';
+import { persistAgentTurn } from '../services/persistAgentSession';
 import { reportStore, persistReport } from './reportRoutes';
 import { SessionPersistenceService } from '../services/sessionPersistenceService';
 import { authenticate } from '../middleware/auth';
@@ -2278,107 +2279,16 @@ async function runAgentDrivenAnalysis(
       runSequence: session.activeRun?.sequence,
     });
 
-    // Persist session state atomically — single snapshot replaces 7-phase cascade
-    try {
-      const persistenceService = SessionPersistenceService.getInstance();
-      const sessionContext = sessionContextManager.get(sessionId, traceId);
-
-      // Take unified snapshot: ClaudeRuntime Maps + session-level arrays
-      const snapshot = typeof session.orchestrator.takeSnapshot === 'function'
-        ? session.orchestrator.takeSnapshot(sessionId, traceId, {
-            conversationSteps: session.conversationSteps || [],
-            queryHistory: session.queryHistory || [],
-            conclusionHistory: session.conclusionHistory || [],
-            agentDialogue: session.agentDialogue || [],
-            agentResponses: session.agentResponses || [],
-            dataEnvelopes: session.dataEnvelopes || [],
-            hypotheses: session.hypotheses || [],
-            runSequence: session.runSequence || 0,
-            conversationOrdinal: session.conversationOrdinal || 0,
-          })
-        : null;
-
-      // Stash snapshot on session EARLY — before any persistence I/O that could throw.
-      // sendAgentDrivenResult uses _lastSnapshot for report data (notes/plan/flags).
-      if (snapshot) {
-        (session as any)._lastSnapshot = snapshot;
-      }
-
-      if (snapshot && sessionContext) {
-        // Gather optional extras for agentv2-compat fields
-        const focusStoreSnapshot = typeof session.orchestrator.getFocusStore === 'function'
-          ? session.orchestrator.getFocusStore().serialize()
-          : undefined;
-        const traceAgentState = sessionContext.getTraceAgentState() || undefined;
-
-        // Single atomic write — replaces 6+ sequential read-modify-write cycles
-        const saved = persistenceService.saveSessionStateSnapshot(
-          sessionId, snapshot,
-          { sessionContext, focusStoreSnapshot, traceAgentState },
-        );
-        if (saved) {
-          logger.info('AgentDrivenAnalysis', 'Session state snapshot persisted atomically', {
-            sessionId,
-            steps: snapshot.conversationSteps.length,
-            envelopes: snapshot.dataEnvelopes.length,
-            notes: snapshot.analysisNotes.length,
-            entityStoreStats: sessionContext.getEntityStore().getStats(),
-          });
-        }
-      } else if (sessionContext) {
-        // Fallback for agentv2: use legacy individual persistence methods
-        const existingSession = persistenceService.getSession(sessionId);
-        if (!existingSession) {
-          persistenceService.saveSession({
-            id: sessionId,
-            traceId,
-            traceName: traceId,
-            question: query,
-            messages: [],
-            createdAt: session.createdAt,
-            updatedAt: Date.now(),
-          });
-        }
-        persistenceService.saveSessionContext(sessionId, sessionContext);
-        if (typeof session.orchestrator.getCachedArchitecture === 'function') {
-          const cachedArch = session.orchestrator.getCachedArchitecture(traceId);
-          if (cachedArch) persistenceService.saveArchitectureSnapshot(sessionId, cachedArch);
-        }
-        if (typeof session.orchestrator.getFocusStore === 'function') {
-          persistenceService.saveFocusStore(sessionId, session.orchestrator.getFocusStore());
-        }
-        const traceAgentState = sessionContext.getTraceAgentState();
-        if (traceAgentState) persistenceService.saveTraceAgentState(sessionId, traceAgentState);
-        persistenceService.saveRuntimeArrays(sessionId, {
-          conversationSteps: session.conversationSteps || [],
-          dataEnvelopes: session.dataEnvelopes || [],
-          hypotheses: session.hypotheses || [],
-          queryHistory: session.queryHistory || [],
-          conclusionHistory: session.conclusionHistory || [],
-        });
-      }
-
-      // Persist turn messages to SQLite messages table (separate table, always needed)
-      if (sessionContext) {
-        try {
-          const turnIndex = session.runSequence || 1;
-          const userMsgId = `msg-${sessionId}-turn${turnIndex}-user`;
-          const assistantMsgId = `msg-${sessionId}-turn${turnIndex}-assistant`;
-          persistenceService.appendMessages(sessionId, [
-            { id: userMsgId, role: 'user', content: query, timestamp: Date.now() - (result.totalDurationMs || 0) },
-            { id: assistantMsgId, role: 'assistant', content: (result.conclusion || '').substring(0, 10000), timestamp: Date.now() },
-          ]);
-        } catch (msgErr: any) {
-          logger.warn('AgentDrivenAnalysis', 'Failed to persist turn messages', { error: msgErr.message });
-        }
-      }
-
-    } catch (persistError: any) {
-      // Don't fail the analysis if persistence fails - just log the error
-      logger.warn('AgentDrivenAnalysis', 'Failed to persist session state', {
-        error: persistError.message,
-      });
-    }
+    // Persist session state via shared helper — see services/persistAgentSession.ts.
+    // CLI's persistTurnToBackend routes through the same function.
+    persistAgentTurn({
+      session,
+      sessionId,
+      traceId,
+      query,
+      result: { conclusion: result.conclusion, totalDurationMs: result.totalDurationMs },
+      logger,
+    });
 
     // Send final result
     const clientCount = session.sseClients.length;
