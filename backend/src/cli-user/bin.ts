@@ -15,18 +15,24 @@
  */
 
 import { Command } from 'commander';
+import { bootstrap } from './bootstrap';
+import { createRenderer } from './repl/renderer';
+import { CliAnalyzeService } from './services/cliAnalyzeService';
+import { runRepl } from './repl';
 import { runAnalyzeCommand } from './commands/analyze';
 import { runResumeCommand } from './commands/resume';
 import { runListCommand } from './commands/list';
 import { runShowCommand } from './commands/show';
 import { runReportCommand } from './commands/report';
 import { runRmCommand } from './commands/rm';
+import { DEFAULT_ANALYSIS_QUERY } from './constants';
 
 interface GlobalOpts {
   sessionDir?: string;
   envFile?: string;
   verbose?: boolean;
   color?: boolean;
+  resume?: string;
 }
 
 function main(): void {
@@ -39,7 +45,8 @@ function main(): void {
     .option('--session-dir <path>', 'override session storage root (default: ~/.smartperfetto)')
     .option('--env-file <path>', 'path to .env file (default: backend/.env)')
     .option('--verbose', 'show verbose event stream', false)
-    .option('--no-color', 'disable ANSI colors');
+    .option('--no-color', 'disable ANSI colors')
+    .option('--resume <sessionId>', 'start the REPL with this session already loaded');
 
   // Shared helper — commander stores --no-color as opts.color === false.
   const globals = (): GlobalOpts => program.opts<GlobalOpts>();
@@ -50,7 +57,7 @@ function main(): void {
   program
     .command('analyze <trace>')
     .description('run one-shot analysis against a trace file')
-    .option('-q, --query <question>', 'analysis question', '分析这个 trace 的性能问题，找出根因')
+    .option('-q, --query <question>', 'analysis question', DEFAULT_ANALYSIS_QUERY)
     .action(async (trace: string, opts: { query: string }) => {
       const g = globals();
       await runAndExit(() => runAnalyzeCommand({
@@ -139,8 +146,23 @@ function main(): void {
       }));
     });
 
-  program.action(() => {
-    program.help();
+  // Default: no sub-command → enter REPL. This is the Claude-Code-style
+  // interactive path the user asked for; the subcommands above are for
+  // scripted / one-shot use.
+  program.action(async () => {
+    const g = globals();
+    const { paths } = bootstrap({ envFile: g.envFile, sessionDir: g.sessionDir });
+    const renderer = createRenderer({ verbose: Boolean(g.verbose), useColor: g.color !== false });
+    const service = new CliAnalyzeService();
+    try {
+      await runRepl({ paths, service, renderer }, g.resume);
+      process.exit(0);
+    } catch (err) {
+      console.error(`Fatal: ${(err as Error).message}`);
+      process.exit(1);
+    } finally {
+      await service.shutdown();
+    }
   });
 
   program.parseAsync(process.argv).catch((err: Error) => {
