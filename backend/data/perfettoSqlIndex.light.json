@@ -1,8 +1,57 @@
 {
   "version": "2.0",
-  "generatedAt": "2026-03-15T11:31:51.174316",
-  "source": "/Users/chris/Code/SmartPerfetto/SmartPerfetto/perfetto/src/trace_processor/perfetto_sql/stdlib",
+  "generatedAt": "2026-04-22T21:04:39.036212",
+  "source": "perfetto/src/trace_processor/perfetto_sql/stdlib",
   "templates": [
+    {
+      "id": "stdlib.android.android_aflags",
+      "name": "android_aflags",
+      "category": "android",
+      "type": "view",
+      "description": "Android aconfig flags (\"aflags\") are a configuration system used to manage feature rollout and behavior across the Android platform. For more details on aconfig, see: https://source.android.com/docs/setup/build/feature-flagging/declare-flag This view presents snapshots of the state of these flags as captured during the trace. Data is collected by the `android.aflags` data-source, which periodically polls the `aflags` tool on Android devices. Each row in this view represents the state of a single flag at a specific point in time (the `ts` column).",
+      "columns": [
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "package",
+          "type": "STRING"
+        },
+        {
+          "name": "name",
+          "type": "STRING"
+        },
+        {
+          "name": "flag_namespace",
+          "type": "STRING"
+        },
+        {
+          "name": "container",
+          "type": "STRING"
+        },
+        {
+          "name": "value",
+          "type": "STRING"
+        },
+        {
+          "name": "staged_value",
+          "type": "STRING"
+        },
+        {
+          "name": "permission",
+          "type": "STRING"
+        },
+        {
+          "name": "value_picked_from",
+          "type": "STRING"
+        },
+        {
+          "name": "storage_backend",
+          "type": "STRING"
+        }
+      ]
+    },
     {
       "id": "stdlib.android._extract_anr_type",
       "name": "_extract_anr_type",
@@ -2629,7 +2678,7 @@
       "name": "android_monitor_contention",
       "category": "android",
       "type": "table",
-      "description": "Contains parsed monitor contention slices.",
+      "description": "Contains parsed Java monitor contention slices, detailing the blocking and blocked threads, methods involved, and the duration of the contention.",
       "columns": [
         {
           "name": "pprof",
@@ -3295,7 +3344,7 @@
         },
         {
           "name": "ts_end",
-          "type": "LONG"
+          "type": "TIMESTAMP"
         },
         {
           "name": "dur",
@@ -3320,19 +3369,7 @@
       "columns": [
         {
           "name": "startup_id",
-          "type": "LONG"
-        },
-        {
-          "name": "ts",
-          "type": "TIMESTAMP"
-        },
-        {
-          "name": "dur",
-          "type": "DURATION"
-        },
-        {
-          "name": "upid",
-          "type": "JOINID(process.id)"
+          "type": "JOINID(android_startups.startup_id)"
         }
       ]
     },
@@ -3349,15 +3386,11 @@
         },
         {
           "name": "startup_ts_end",
-          "type": "LONG"
+          "type": "TIMESTAMP"
         },
         {
           "name": "startup_id",
-          "type": "LONG"
-        },
-        {
-          "name": "utid",
-          "type": "JOINID(thread.id)"
+          "type": "JOINID(android_startups.startup_id)"
         }
       ]
     },
@@ -3400,11 +3433,7 @@
       "params": [
         {
           "name": "startup_id",
-          "type": "LONG"
-        },
-        {
-          "name": "slice_name",
-          "type": "STRING"
+          "type": "JOINID(android_startups.startup_id)"
         }
       ]
     },
@@ -3456,11 +3485,7 @@
       "params": [
         {
           "name": "startup_id",
-          "type": "LONG"
-        },
-        {
-          "name": "threshold",
-          "type": "DOUBLE"
+          "type": "JOINID(android_startups.startup_id)"
         }
       ]
     },
@@ -3473,11 +3498,7 @@
       "params": [
         {
           "name": "startup_id",
-          "type": "LONG"
-        },
-        {
-          "name": "slice_name",
-          "type": "STRING"
+          "type": "JOINID(android_startups.startup_id)"
         }
       ]
     },
@@ -3490,11 +3511,7 @@
       "params": [
         {
           "name": "startup_id",
-          "type": "LONG"
-        },
-        {
-          "name": "slice_name",
-          "type": "STRING"
+          "type": "JOINID(android_startups.startup_id)"
         }
       ]
     },
@@ -9232,6 +9249,55 @@
       "description": "This table contains information on the actual timeline and additional analysis related to the performance of either a display frame or a surface frame."
     },
     {
+      "id": "stdlib.prelude.gpu",
+      "name": "gpu",
+      "category": "prelude",
+      "type": "view",
+      "description": "Contains information about the GPUs on the device this trace was taken on.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "ugpu",
+          "type": "ID"
+        },
+        {
+          "name": "gpu",
+          "type": "LONG"
+        },
+        {
+          "name": "name",
+          "type": "STRING"
+        },
+        {
+          "name": "vendor",
+          "type": "STRING"
+        },
+        {
+          "name": "model",
+          "type": "STRING"
+        },
+        {
+          "name": "architecture",
+          "type": "STRING"
+        },
+        {
+          "name": "uuid",
+          "type": "STRING"
+        },
+        {
+          "name": "pci_bdf",
+          "type": "STRING"
+        },
+        {
+          "name": "machine_id",
+          "type": "JOINID(machine.id)"
+        }
+      ]
+    },
+    {
       "id": "stdlib.prelude.heap_graph_class",
       "name": "heap_graph_class",
       "category": "prelude",
@@ -9278,6 +9344,23 @@
       ]
     },
     {
+      "id": "stdlib.prelude.heap_graph_object_data",
+      "name": "heap_graph_object_data",
+      "category": "prelude",
+      "type": "view",
+      "description": "HPROF-specific data for heap graph objects. Contains decoded string content and primitive array blob references. Only populated for HPROF (ART) heap dumps, not for proto heap graphs. Linked from heap_graph_object.object_data_id.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "field_set_id",
+          "type": "JOINID(heap_graph_primitive.field_set_id)"
+        }
+      ]
+    },
+    {
       "id": "stdlib.prelude.heap_graph_reference",
       "name": "heap_graph_reference",
       "category": "prelude",
@@ -9291,6 +9374,23 @@
         {
           "name": "reference_set_id",
           "type": "JOINID(heap_graph_object.reference_set_id)"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.heap_graph_primitive",
+      "name": "heap_graph_primitive",
+      "category": "prelude",
+      "type": "view",
+      "description": "Primitive field values for heap graph objects. This associates the object with given field_set_id with its primitive field values (for instances).",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "field_set_id",
+          "type": "JOINID(heap_graph_object_data.field_set_id)"
         }
       ]
     },
@@ -10967,6 +11067,13 @@
       ]
     },
     {
+      "id": "stdlib.sched._is_runnable_state",
+      "name": "_is_runnable_state",
+      "category": "sched",
+      "type": "macro",
+      "description": "Check whether a given scheduler event is for a task becoming runnable. Linux always has a Waking duration *and* Runnable before each Running duration. Fuchsia only has a Waking duration before the first Running duration, Runnable durations are used if the initial activation's timeslice expires or is interrupted."
+    },
+    {
       "id": "stdlib.sched._wakeup_userspace_edges",
       "name": "_wakeup_userspace_edges",
       "category": "sched",
@@ -12083,6 +12190,23 @@
       ]
     },
     {
+      "id": "stdlib.std._tree_propagate_down",
+      "name": "_tree_propagate_down",
+      "category": "std",
+      "type": "function",
+      "description": "Propagates column values from root toward leaves using BFS. For each spec, a new output column is created by copying the source column and then applying the aggregate operation downward through the tree. For each parent→child edge: output[child] = agg(output[parent], output[child]). Each spec is a string of the form 'AGG(source_col) AS output_col' where AGG is one of SUM, MIN, MAX, FIRST, LAST. Case-insensitive. Example usage: ``` SELECT * FROM _tree_to_table!( _tree_propagate_down( _tree_from_table!((SELECT * FROM calls), (fn, ones)), 'SUM(ones) AS depth' ), (fn, depth) ); ```",
+      "params": [
+        {
+          "name": "tree_ptr",
+          "type": "ANY"
+        },
+        {
+          "name": "specs",
+          "type": "ANY..."
+        }
+      ]
+    },
+    {
       "id": "stdlib.std._tree_from_table_col",
       "name": "_tree_from_table_col",
       "category": "std",
@@ -12803,6 +12927,10 @@
         },
         {
           "name": "gpu_mw",
+          "type": "DOUBLE"
+        },
+        {
+          "name": "tpu_mw",
           "type": "DOUBLE"
         }
       ],

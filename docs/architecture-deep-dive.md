@@ -89,29 +89,27 @@ Agent 的分析结果同时落地到 Perfetto UI 上：
 
 **运行截图：以 SmartPerfetto 前端以 Perfetto 插件的形式存在**
 
-![all.png](/Users/chris/Code/SmartPerfetto/SmartPerfetto/docs/images/image-20260330000546934.png)
+![all.png](./images/image-20260330000546934.png)
 
 **运行截图：滑动分析的时候详细分析每一个掉帧的地方， 点击最左边那个剪头可以展开**
 
-![image-20260330000715805](/Users/chris/Code/SmartPerfetto/SmartPerfetto/docs/images/jank.png)
+![jank detection](./images/jank.png)
 
 **运行截图：滑动分析结论**
 
-![image-20260330000947622](/Users/chris/Code/SmartPerfetto/SmartPerfetto/docs/desi.png)
+<!-- TODO(oss): missing image docs/desi.png — regenerate from production run -->
 
 **运行截图：滑动分析结论，代表帧分析**
 
-![image-20260330001146212](/Users/chris/Code/SmartPerfetto/SmartPerfetto/docs/jank1.png)
+![jank1](./jank1.png)
 
 **运行截图：滑动分析结论，代表帧分析**
 
-![image-20260330001228021](/Users/chris/Code/SmartPerfetto/SmartPerfetto/docs/jank2.png)
+![jank2](./jank2.png)
 
 **运行截图：每一轮分析都有单独的分析 report，内容与前端显示的一致（更详细一些）**
 
-![image-20260330001618627](/Users/chris/SynologyDrive/blog-cn-en/Blog/source/images/image-20260330001618627.png)
-
-![image-20260330001821679](/Users/chris/Code/SmartPerfetto/SmartPerfetto/docs/分析结论.png)
+<!-- TODO(oss): missing images docs/分析结论.png + external image from SynologyDrive — regenerate from production run -->
 
 
 

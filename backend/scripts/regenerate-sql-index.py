@@ -22,9 +22,12 @@ from pathlib import Path
 # Paths
 SCRIPT_DIR = Path(__file__).parent
 BACKEND_DIR = SCRIPT_DIR.parent
-PERFETTO_DIR = BACKEND_DIR.parent / "perfetto"
+REPO_ROOT = BACKEND_DIR.parent
+PERFETTO_DIR = REPO_ROOT / "perfetto"
 STDLIB_DIR = PERFETTO_DIR / "src" / "trace_processor" / "perfetto_sql" / "stdlib"
 OUTPUT_FILE = BACKEND_DIR / "data" / "perfettoSqlIndex.light.json"
+# Relative path stored in output — portable across machines, no /Users/<name> leak.
+STDLIB_REL = STDLIB_DIR.relative_to(REPO_ROOT).as_posix()
 
 # Also extract from the built-in views/tables
 BUILTIN_DIR = PERFETTO_DIR / "src" / "trace_processor" / "perfetto_sql" / "stdlib" / "prelude"
@@ -362,7 +365,7 @@ def main():
     output = {
         "version": "2.0",
         "generatedAt": datetime.now().isoformat(),
-        "source": str(STDLIB_DIR),
+        "source": STDLIB_REL,
         "templates": unique_templates,
         "scenarios": [],  # Preserved for compatibility
     }
