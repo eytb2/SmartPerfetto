@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
 import { createDefaultStopCriteria } from '../contracts/runtime';
 import { evaluateSoulGuard } from '../soul/soulGuard';
 import { SMART_PERFETTO_SOUL_PROFILE } from '../soul/soulProfile';

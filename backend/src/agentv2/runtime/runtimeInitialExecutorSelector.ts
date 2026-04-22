@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
 import { ModelRouter } from '../../agent/core/modelRouter';
 import type { ProgressEmitter, AgentRuntimeConfig, AnalysisServices } from '../../agent/core/orchestratorTypes';
 import type { AnalysisExecutor } from '../../agent/core/executors/analysisExecutor';

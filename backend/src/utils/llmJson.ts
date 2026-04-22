@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
 import { redactTextForLLM } from './llmPrivacy';
 
 export const LLM_JSON_PARSER_VERSION = '1.0.0';
