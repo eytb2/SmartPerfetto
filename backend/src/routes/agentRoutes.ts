@@ -77,6 +77,11 @@ import {
 import { SkillExecutor } from '../services/skillEngine/skillExecutor';
 import { skillRegistry, ensureSkillRegistryInitialized } from '../services/skillEngine/skillLoader';
 import type { ConversationTurn, Finding, Intent } from '../agent/types';
+import {
+  validateFeedbackInput,
+  enrichFeedbackEntry,
+  type SessionLookup as FeedbackSessionLookup,
+} from '../agentv3/selfImprove/feedbackEnricher';
 
 const router = express.Router();
 
@@ -1142,36 +1147,35 @@ router.delete('/:sessionId', (req, res) => {
   res.json({ success: true });
 });
 
+const FEEDBACK_DIR = path.join(process.cwd(), 'logs', 'feedback');
+const FEEDBACK_FILE = path.join(FEEDBACK_DIR, 'feedback.jsonl');
+
 /**
  * POST /api/agent/v1/:sessionId/feedback
  *
  * Submit user feedback on analysis quality (thumbs up/down + optional comment).
- * Stored as append-only JSONL in logs/feedback/ for later pattern analysis.
+ * Stored as append-only JSONL in logs/feedback/ with versioned schema
+ * (see backend/src/agentv3/selfImprove/feedbackEnricher.ts).
  */
 router.post('/:sessionId/feedback', async (req, res) => {
   const { sessionId } = req.params;
-  const { rating, comment, turnIndex } = req.body;
 
-  if (!rating || !['positive', 'negative'].includes(rating)) {
-    return res.status(400).json({ success: false, error: 'rating must be "positive" or "negative"' });
+  const validated = validateFeedbackInput(req.body);
+  if (!validated.ok) {
+    return res.status(400).json({ success: false, error: validated.error });
   }
 
+  const session = assistantAppService.getSession(sessionId);
+  const lookup: FeedbackSessionLookup | null = session
+    ? { traceId: session.traceId, referenceTraceId: session.referenceTraceId }
+    : null;
+
+  const entry = enrichFeedbackEntry(sessionId, validated.value, lookup);
+
   try {
-    const feedbackDir = path.join(process.cwd(), 'logs', 'feedback');
-    if (!fs.existsSync(feedbackDir)) fs.mkdirSync(feedbackDir, { recursive: true });
-
-    const entry = {
-      sessionId,
-      rating,
-      comment: typeof comment === 'string' ? comment.substring(0, 500) : undefined,
-      turnIndex: typeof turnIndex === 'number' ? turnIndex : undefined,
-      timestamp: new Date().toISOString(),
-    };
-
-    const feedbackFile = path.join(feedbackDir, 'feedback.jsonl');
-    fs.appendFileSync(feedbackFile, JSON.stringify(entry) + '\n');
-
-    res.json({ success: true });
+    fs.mkdirSync(FEEDBACK_DIR, { recursive: true });
+    fs.appendFileSync(FEEDBACK_FILE, JSON.stringify(entry) + '\n');
+    res.json({ success: true, schemaVersion: entry.schemaVersion });
   } catch (err) {
     console.error('[Feedback] Failed to save feedback:', (err as Error).message);
     res.status(500).json({ success: false, error: 'Failed to save feedback' });
