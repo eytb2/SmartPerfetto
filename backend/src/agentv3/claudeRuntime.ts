@@ -42,6 +42,7 @@ import {
   buildNegativePatternSection,
 } from './analysisPatternMemory';
 import { SkillNotesBudget } from './selfImprove/skillNotesInjector';
+import { runSnapshots } from './selfImprove/strategyFingerprint';
 import { verifyConclusion, generateCorrectionPrompt, isConclusionIncomplete } from './claudeVerifier';
 
 function parseQuickBudgetEnv(): number | undefined {
@@ -312,6 +313,9 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       const sessionContext = sessionContextManager.getOrCreate(sessionId, traceId);
       const previousTurns = sessionContext.getAllTurns?.() || [];
       const sceneType = classifyScene(query);
+      // Freeze the strategy version for the duration of this analyze() call so
+      // a hot-reload mid-flight can't split-brain the agent's reasoning.
+      runSnapshots.capture(sessionId, sceneType);
 
       const classifierInput: ComplexityClassifierInput = {
         query,
@@ -1198,6 +1202,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       };
     } finally {
       this.activeAnalyses.delete(sessionId);
+      runSnapshots.release(sessionId);
       // Notes persistence now handled by unified SessionStateSnapshot in the route layer.
       // No separate disk I/O needed here.
 

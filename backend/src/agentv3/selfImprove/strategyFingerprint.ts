@@ -1,0 +1,189 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
+/**
+ * Strategy version fingerprinting + per-run snapshot freezing.
+ *
+ * Two kinds of fingerprint cooperate so PR9b's supersede markers survive
+ * sloppy real-world edits:
+ *
+ *   1. `strategyContentHash` — sha256 of the entire strategy file. Cheap to
+ *      compute, but too coarse to use alone: a typo fix in an unrelated
+ *      paragraph would invalidate every supersede marker pinned to the file.
+ *   2. `patchFingerprint` — a hash over the normalized form of a single
+ *      phase_hints entry (id + sorted keywords + constraints + critical
+ *      tools). Drift detection on the patch fingerprint tells us whether the
+ *      *patched* hint is still in place even if the whole file changed.
+ *
+ * The §11.2 three-tier drift rule:
+ *   - file hash changed, patch fingerprint still present → stay `active`
+ *   - patch fingerprint changed → `drifted` (×0.5 injection weight)
+ *   - phase_hints entry deleted entirely → `reverted` (restore to ×1.0)
+ *
+ * The `RunSnapshotRegistry` ensures an in-flight analysis sees a frozen
+ * version of its scene's strategy + phase_hints — `invalidateStrategyCache()`
+ * must never half-update an analysis mid-flight.
+ *
+ * See docs/self-improving-design.md §11 (Strategy Version Fingerprint).
+ */
+
+import { createHash } from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
+import {
+  getStrategyContent,
+  getPhaseHints,
+  type PhaseHint,
+} from '../strategyLoader';
+
+const STRATEGIES_DIR = path.resolve(__dirname, '..', '..', '..', 'strategies');
+
+export interface StrategyVersionFingerprint {
+  strategyFile: string;
+  strategyContentHash: string;
+  /**
+   * Hash of the targeted phase_hints entry's normalized form. Empty string
+   * for fingerprints that don't pin a specific hint (e.g., scene-level
+   * fingerprints used during snapshot capture).
+   */
+  patchFingerprint: string;
+  /** Optional: id of the targeted phase_hints entry (for human auditing). */
+  phaseHintId?: string;
+  /** Commit on `main` where this version was last observed. */
+  gitCommit?: string;
+  appliedAt: number;
+}
+
+/**
+ * Frozen view of a scene's strategy + phase hints, captured at analyze()
+ * start and released on completion.
+ */
+export interface RunSnapshot {
+  sessionId: string;
+  sceneType: string;
+  strategyContent: string | undefined;
+  phaseHints: PhaseHint[];
+  fingerprint: StrategyVersionFingerprint;
+}
+
+export type DriftStatus =
+  | 'none'                 // hashes match exactly
+  | 'whole_file_only'      // file hash differs but patch fingerprint still present
+  | 'patch_changed'        // the targeted phase_hint differs in normalized form
+  | 'patch_deleted';       // the targeted phase_hint id is no longer present
+
+function strategyFilePath(scene: string): string {
+  return path.join(STRATEGIES_DIR, `${scene}.strategy.md`);
+}
+
+/**
+ * Stable sha256 of the strategy file content. Returns empty string if the
+ * file is missing — callers should treat that as "no fingerprint" rather
+ * than blow up the analysis path.
+ */
+export function computeStrategyContentHash(scene: string): string {
+  const file = strategyFilePath(scene);
+  if (!fs.existsSync(file)) return '';
+  const content = fs.readFileSync(file, 'utf-8');
+  return createHash('sha256').update(content).digest('hex');
+}
+
+/**
+ * Hash a phase_hints entry by its normalized canonical form. Sorted keys +
+ * lower-case strings + array sort keep the hash stable across cosmetic
+ * reordering of the same content.
+ */
+export function computePatchFingerprint(hint: PhaseHint): string {
+  const normalized = {
+    id: hint.id || '',
+    keywords: [...(hint.keywords || [])].map(s => s.trim().toLowerCase()).sort(),
+    constraints: (hint.constraints || '').trim(),
+    criticalTools: [...(hint.criticalTools || [])].map(s => s.trim().toLowerCase()).sort(),
+    critical: hint.critical === true,
+  };
+  return createHash('sha256').update(JSON.stringify(normalized)).digest('hex').substring(0, 16);
+}
+
+/**
+ * Compare a stored fingerprint against the current on-disk state and report
+ * which drift tier we're in. Pure function — does not mutate anything.
+ */
+export function detectDrift(input: {
+  fingerprint: StrategyVersionFingerprint;
+  currentHints: ReadonlyArray<PhaseHint>;
+  currentContentHash: string;
+}): DriftStatus {
+  if (
+    input.fingerprint.strategyContentHash === input.currentContentHash &&
+    input.fingerprint.patchFingerprint === '' // scene-level fingerprint
+  ) {
+    return 'none';
+  }
+  if (input.fingerprint.patchFingerprint === '') {
+    return input.fingerprint.strategyContentHash === input.currentContentHash ? 'none' : 'whole_file_only';
+  }
+  const pinnedId = input.fingerprint.phaseHintId;
+  const pinnedHint = pinnedId
+    ? input.currentHints.find(h => h.id === pinnedId)
+    : input.currentHints.find(h => computePatchFingerprint(h) === input.fingerprint.patchFingerprint);
+  if (!pinnedHint) return 'patch_deleted';
+  const currentPatchHash = computePatchFingerprint(pinnedHint);
+  if (currentPatchHash === input.fingerprint.patchFingerprint) {
+    return input.fingerprint.strategyContentHash === input.currentContentHash ? 'none' : 'whole_file_only';
+  }
+  return 'patch_changed';
+}
+
+/**
+ * Per-session snapshot store. Implemented as a class so a test can spin up
+ * a fresh instance instead of leaning on a module-level singleton.
+ *
+ * Production code should use the exported `runSnapshots` instance.
+ */
+export class RunSnapshotRegistry {
+  private snapshots = new Map<string, RunSnapshot>();
+
+  capture(sessionId: string, sceneType: string): RunSnapshot {
+    // Re-capturing for the same session is allowed (multi-turn) and simply
+    // refreshes the snapshot — the new values reflect any hot-reloads that
+    // happened between turns, which is the desired behaviour: the freeze
+    // boundary is the per-turn analyze() call.
+    const strategyContent = getStrategyContent(sceneType);
+    const phaseHints = getPhaseHints(sceneType);
+    const strategyContentHash = computeStrategyContentHash(sceneType);
+    const fingerprint: StrategyVersionFingerprint = {
+      strategyFile: `${sceneType}.strategy.md`,
+      strategyContentHash,
+      patchFingerprint: '', // scene-level snapshot pins nothing in particular
+      appliedAt: Date.now(),
+    };
+    const snapshot: RunSnapshot = {
+      sessionId,
+      sceneType,
+      strategyContent,
+      phaseHints,
+      fingerprint,
+    };
+    this.snapshots.set(sessionId, snapshot);
+    return snapshot;
+  }
+
+  release(sessionId: string): void {
+    this.snapshots.delete(sessionId);
+  }
+
+  get(sessionId: string): RunSnapshot | undefined {
+    return this.snapshots.get(sessionId);
+  }
+
+  /** Number of active snapshots — surfaced for the monitoring PR. */
+  size(): number {
+    return this.snapshots.size;
+  }
+}
+
+/** Process-wide snapshot store. Tests should construct their own instance. */
+export const runSnapshots = new RunSnapshotRegistry();
+
+export const __testing = { strategyFilePath, STRATEGIES_DIR };
