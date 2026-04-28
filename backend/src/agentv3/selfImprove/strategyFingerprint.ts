@@ -37,6 +37,7 @@ import {
   getStrategyFilePath,
   type PhaseHint,
 } from '../strategyLoader';
+import { computeHintFingerprint } from './hintFingerprint';
 
 const STRATEGIES_DIR = path.resolve(__dirname, '..', '..', '..', 'strategies');
 
@@ -99,19 +100,22 @@ export function computeStrategyContentHash(scene: string): string {
 }
 
 /**
- * Hash a phase_hints entry by its normalized canonical form. Sorted keys +
+ * Hash a phase_hints entry by its shared canonical form. Sorted keys +
  * lower-case strings + array sort keep the hash stable across cosmetic
  * reordering of the same content.
+ *
+ * Intentionally excludes `id` (it is derived from the fingerprint —
+ * including it would be circular) so that a freshly-rendered auto-patch
+ * by `phaseHintsRenderer` produces the *same* fingerprint that
+ * `detectDrift` computes off the on-disk hint after the patch lands.
  */
 export function computePatchFingerprint(hint: PhaseHint): string {
-  const normalized = {
-    id: hint.id || '',
-    keywords: [...(hint.keywords || [])].map(s => s.trim().toLowerCase()).sort(),
-    constraints: (hint.constraints || '').trim(),
-    criticalTools: [...(hint.criticalTools || [])].map(s => s.trim().toLowerCase()).sort(),
+  return computeHintFingerprint({
+    keywords: hint.keywords || [],
+    constraints: hint.constraints || '',
+    criticalTools: hint.criticalTools || [],
     critical: hint.critical === true,
-  };
-  return createHash('sha256').update(JSON.stringify(normalized)).digest('hex').substring(0, 16);
+  });
 }
 
 /**

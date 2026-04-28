@@ -23,13 +23,13 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
-import { createHash } from 'crypto';
 import {
   FAILURE_CATEGORIES,
   isKnownCategory,
   type FailureCategory,
 } from './failureTaxonomy';
 import { scanContent, formatThreats } from './contentScanner';
+import { computeHintFingerprint } from './hintFingerprint';
 
 const TEMPLATES_DIR = path.resolve(__dirname, '..', '..', '..', 'strategies', 'phase_hint_templates');
 
@@ -179,15 +179,16 @@ export function renderPhaseHint(
 }
 
 function computePatchFingerprint(proposal: PhaseHintProposal): string {
-  // Hash the canonical input so render-equivalent proposals produce the
-  // same fingerprint regardless of cosmetic reordering.
-  const canonical = JSON.stringify({
-    cat: proposal.failureCategoryEnum,
-    kw: [...proposal.candidateKeywords].map(s => s.trim().toLowerCase()).sort(),
-    cn: proposal.candidateConstraints.trim(),
-    tools: [...proposal.candidateCriticalTools].map(s => s.trim().toLowerCase()).sort(),
+  // Phase 0.1 of v2.1 — share canonical form with `strategyFingerprint` so
+  // a freshly-rendered auto-patch's fingerprint matches what `detectDrift`
+  // computes off the on-disk hint. The renderer always emits
+  // `critical: false`, so the canonical input fixes that here.
+  return computeHintFingerprint({
+    keywords: proposal.candidateKeywords,
+    constraints: proposal.candidateConstraints,
+    criticalTools: proposal.candidateCriticalTools,
+    critical: false,
   });
-  return createHash('sha256').update(canonical).digest('hex').substring(0, 16);
 }
 
 function normalizeStringArray(input: unknown, maxLen: number, maxItemChars: number): string[] | 'invalid' {

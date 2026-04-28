@@ -40,8 +40,12 @@ describe('computePatchFingerprint', () => {
     expect(computePatchFingerprint(changed)).not.toBe(computePatchFingerprint(baseHint));
   });
 
-  it('differentiates entries when only the id changes', () => {
-    expect(computePatchFingerprint({ ...baseHint, id: 'phase_3_1' })).not.toBe(
+  it('treats id changes as identity-preserving (id is derived from the fingerprint, not part of it)', () => {
+    // Phase 0.1 of v2.1: the renderer derives the auto-hint id from this
+    // fingerprint, so including the id would be circular and would also
+    // make a freshly-landed auto-patch's stored fingerprint mismatch the
+    // drift-detection hash for the same hint.
+    expect(computePatchFingerprint({ ...baseHint, id: 'phase_3_1' })).toBe(
       computePatchFingerprint(baseHint),
     );
   });
