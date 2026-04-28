@@ -118,25 +118,25 @@ ANTHROPIC_BASE_URL=http://localhost:3000
 ANTHROPIC_API_KEY=sk-proxy-xxx
 
 # Set model names (must match what the proxy expects)
-CLAUDE_MODEL=glm-4-plus
-CLAUDE_LIGHT_MODEL=glm-4-flash
+CLAUDE_MODEL=glm-5.1
+CLAUDE_LIGHT_MODEL=glm-4.7-flash
 ```
 
-### Supported Providers
+### Provider Configuration Presets
 
-| Provider | Main Model | Light Model | Proxy Backend URL |
-|----------|-----------|-------------|-------------------|
-| **GLM (智谱AI)** | `glm-4-plus` | `glm-4-flash` | `https://open.bigmodel.cn/api/paas/v4` |
-| **DeepSeek** | `deepseek-chat` | `deepseek-chat` | `https://api.deepseek.com/v1` |
-| **Qwen (通义千问)** | `qwen-max` | `qwen-turbo` | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
-| **Kimi (月之暗面)** | `moonshot-v1-128k` | `moonshot-v1-8k` | `https://api.moonshot.cn/v1` |
-| **Doubao (豆包)** | `ep-xxx` (endpoint ID) | `ep-xxx` | `https://ark.cn-beijing.volces.com/api/v3` |
-| **Minimax** | `abab6.5s-chat` | `abab5.5-chat` | `https://api.minimax.chat/v1` |
-| **Baichuan (百川)** | `Baichuan4` | `Baichuan3-Turbo` | `https://api.baichuan-ai.com/v1` |
-| **Hunyuan (腾讯混元)** | `hunyuan-pro` | `hunyuan-lite` | `https://api.hunyuan.cloud.tencent.com/v1` |
-| **OpenAI** | `gpt-4o` | `gpt-4o-mini` | `https://api.openai.com/v1` |
-| **Google Gemini** | `gemini-2.5-pro` | `gemini-2.0-flash` | `https://generativelanguage.googleapis.com/v1beta/openai` |
-| **Ollama (local)** | `qwen2.5:72b` | `qwen2.5:7b` | `http://localhost:11434/v1` |
+These are current configuration examples, not a built-in compatibility guarantee. SmartPerfetto requires reliable Anthropic Messages translation, streaming, and tool-use support; verify the exact model IDs in your provider console or `models.list` API before adding them to your proxy. Last checked: 2026-04-28.
+
+| Provider | Main Model | Light Model | Proxy Backend URL | Notes |
+|----------|-----------|-------------|-------------------|-------|
+| **GLM / Z.ai (智谱AI)** | `glm-5.1` | `glm-4.7-flash` | `https://open.bigmodel.cn/api/paas/v4` | Current agent/coding-oriented line. |
+| **DeepSeek** | `deepseek-v4-pro` | `deepseek-v4-flash` | `https://api.deepseek.com` | Avoid old `deepseek-chat` / `deepseek-reasoner` aliases. |
+| **Qwen (通义千问)** | `qwen3-max` | `qwen3.5-flash` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Use `qwen3-coder-plus` for coding-heavy proxy setups. |
+| **Kimi (月之暗面)** | `kimi-k2.6` | `kimi-k2.5` | `https://api.moonshot.cn/v1` | Prefer K2.6/K2.5 over legacy `moonshot-v1-*` for agent tasks. |
+| **Doubao (豆包)** | `ep-xxx` or `doubao-seed-2.0-code` | `ep-xxx` or `doubao-seed-code` | `https://ark.cn-beijing.volces.com/api/v3` | Ark deployments often use endpoint IDs. |
+| **MiniMax** | `MiniMax-M2.7` | `MiniMax-M2.5` | `https://api.minimaxi.com/v1` | Replaces legacy `abab*` examples. |
+| **OpenAI** | `gpt-5.5` | `gpt-5.4-mini` | `https://api.openai.com/v1` | GPT-4o works but is no longer the recommended default. |
+| **Google Gemini** | `gemini-3-pro-preview` | `gemini-3-flash-preview` | `https://generativelanguage.googleapis.com/v1beta/openai` | Preview IDs; use `gemini-2.5-pro` / `gemini-2.5-flash` if you need stable IDs. |
+| **Ollama (local)** | `qwen3:30b` | `qwen3:30b` | `http://localhost:11434/v1` | Smoke-test tool calling locally before using it for full analysis. |
 
 See [`backend/.env.example`](backend/.env.example) for complete configuration examples with console URLs and notes.
 
@@ -145,7 +145,7 @@ See [`backend/.env.example`](backend/.env.example) for complete configuration ex
 - **`CLAUDE_LIGHT_MODEL`** is used for auxiliary single-turn calls (query classification, conclusion verification, scene summarization). If your proxy only maps one model, set it to the same value as `CLAUDE_MODEL`.
 - **Sub-agents** (`CLAUDE_ENABLE_SUB_AGENTS`) are disabled by default for all users (research preview in the Claude Agent SDK). When enabled, the SDK internally resolves model shorthands like `'sonnet'` → `'claude-sonnet-4-6'` and makes separate API calls — these go through your proxy. Whether it works depends on your proxy's Anthropic format translation fidelity. If you want to try it, set `CLAUDE_ENABLE_SUB_AGENTS=true` and ensure your proxy maps Anthropic model names correctly.
 - **Extended thinking** (`CLAUDE_EFFORT`) is a Claude-specific feature. Non-Claude providers will ignore it.
-- **Function calling quality** varies by provider. Models with strong function calling (GLM-4, DeepSeek V3, Qwen-Max, GPT-4o) work best with SmartPerfetto's 20-tool MCP server.
+- **Provider quality varies**. Models with reliable tool calling and long-context agent behavior (GLM-5.1/4.7, DeepSeek V4, Qwen3, Kimi K2.6, GPT-5.x, Gemini 3) work best with SmartPerfetto's 20-tool MCP server.
 
 ## Architecture
 

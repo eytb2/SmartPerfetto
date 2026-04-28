@@ -113,25 +113,25 @@ ANTHROPIC_BASE_URL=http://localhost:3000
 ANTHROPIC_API_KEY=sk-proxy-xxx
 
 # 设置模型名（需与代理中配置的一致）
-CLAUDE_MODEL=glm-4-plus
-CLAUDE_LIGHT_MODEL=glm-4-flash
+CLAUDE_MODEL=glm-5.1
+CLAUDE_LIGHT_MODEL=glm-4.7-flash
 ```
 
-### 支持的厂商
+### 厂商配置预设
 
-| 厂商 | 主力模型 | 轻量模型 | 代理后端 URL |
-|------|---------|---------|-------------|
-| **智谱 GLM** | `glm-4-plus` | `glm-4-flash` | `https://open.bigmodel.cn/api/paas/v4` |
-| **DeepSeek** | `deepseek-chat` | `deepseek-chat` | `https://api.deepseek.com/v1` |
-| **通义千问 Qwen** | `qwen-max` | `qwen-turbo` | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
-| **月之暗面 Kimi** | `moonshot-v1-128k` | `moonshot-v1-8k` | `https://api.moonshot.cn/v1` |
-| **豆包 Doubao** | `ep-xxx`（接入点 ID） | `ep-xxx` | `https://ark.cn-beijing.volces.com/api/v3` |
-| **Minimax** | `abab6.5s-chat` | `abab5.5-chat` | `https://api.minimax.chat/v1` |
-| **百川 Baichuan** | `Baichuan4` | `Baichuan3-Turbo` | `https://api.baichuan-ai.com/v1` |
-| **腾讯混元** | `hunyuan-pro` | `hunyuan-lite` | `https://api.hunyuan.cloud.tencent.com/v1` |
-| **OpenAI** | `gpt-4o` | `gpt-4o-mini` | `https://api.openai.com/v1` |
-| **Google Gemini** | `gemini-2.5-pro` | `gemini-2.0-flash` | `https://generativelanguage.googleapis.com/v1beta/openai` |
-| **Ollama（本地）** | `qwen2.5:72b` | `qwen2.5:7b` | `http://localhost:11434/v1` |
+下面是当前配置示例，不是内置兼容性承诺。SmartPerfetto 需要代理可靠支持 Anthropic Messages 转换、流式输出和 tool-use；复制到代理前，请以厂商控制台或 `models.list` API 返回的模型 ID 为准。最后核对日期：2026-04-28。
+
+| 厂商 | 主力模型 | 轻量模型 | 代理后端 URL | 说明 |
+|------|---------|---------|-------------|------|
+| **智谱 GLM / Z.ai** | `glm-5.1` | `glm-4.7-flash` | `https://open.bigmodel.cn/api/paas/v4` | 当前更适合 Agent/Coding 的模型线。 |
+| **DeepSeek** | `deepseek-v4-pro` | `deepseek-v4-flash` | `https://api.deepseek.com` | 避免继续推荐旧的 `deepseek-chat` / `deepseek-reasoner` 别名。 |
+| **通义千问 Qwen** | `qwen3-max` | `qwen3.5-flash` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 代码场景也可评估 `qwen3-coder-plus`。 |
+| **月之暗面 Kimi** | `kimi-k2.6` | `kimi-k2.5` | `https://api.moonshot.cn/v1` | Agent 任务优先用 K2.6/K2.5，不再把 `moonshot-v1-*` 作为推荐默认。 |
+| **豆包 Doubao** | `ep-xxx` 或 `doubao-seed-2.0-code` | `ep-xxx` 或 `doubao-seed-code` | `https://ark.cn-beijing.volces.com/api/v3` | 方舟生产部署常用接入点 ID。 |
+| **MiniMax** | `MiniMax-M2.7` | `MiniMax-M2.5` | `https://api.minimaxi.com/v1` | 替换旧的 `abab*` 示例。 |
+| **OpenAI** | `gpt-5.5` | `gpt-5.4-mini` | `https://api.openai.com/v1` | GPT-4o 仍可用，但不应继续作为推荐默认。 |
+| **Google Gemini** | `gemini-3-pro-preview` | `gemini-3-flash-preview` | `https://generativelanguage.googleapis.com/v1beta/openai` | 这是 preview 模型；生产稳定 ID 可用 `gemini-2.5-pro` / `gemini-2.5-flash`。 |
+| **Ollama（本地）** | `qwen3:30b` | `qwen3:30b` | `http://localhost:11434/v1` | 用于完整分析前，先本地 smoke-test tool calling。 |
 
 完整配置示例（含各厂商控制台 URL 和特殊说明）见 [`backend/.env.example`](backend/.env.example)。
 
@@ -140,7 +140,7 @@ CLAUDE_LIGHT_MODEL=glm-4-flash
 - **`CLAUDE_LIGHT_MODEL`** 用于辅助的单轮调用（查询分类、结论验证、场景摘要）。如果代理只映射了一个模型，设为与 `CLAUDE_MODEL` 相同即可。
 - **Sub-agent**（`CLAUDE_ENABLE_SUB_AGENTS`）默认对所有用户关闭（Claude Agent SDK 中仍处于 research preview 阶段）。开启后，SDK 内部会将模型缩写（如 `'sonnet'` → `'claude-sonnet-4-6'`）解析为完整模型名并发起独立 API 调用 — 这些调用同样经过你的代理。能否正常工作取决于代理的 Anthropic 格式转换保真度。如果想尝试，设置 `CLAUDE_ENABLE_SUB_AGENTS=true` 并确保代理正确映射了 Anthropic 模型名。
 - **Extended Thinking**（`CLAUDE_EFFORT`）是 Claude 专有特性，非 Claude 厂商会忽略此参数。
-- **Function Calling 质量**因厂商而异。Function Calling 能力较强的模型（GLM-4、DeepSeek V3、Qwen-Max、GPT-4o）与 SmartPerfetto 的 20 工具 MCP Server 配合效果最佳。
+- **厂商质量差异很大**。工具调用和长上下文 Agent 行为稳定的模型（GLM-5.1/4.7、DeepSeek V4、Qwen3、Kimi K2.6、GPT-5.x、Gemini 3）与 SmartPerfetto 的 20 工具 MCP Server 配合效果最佳。
 
 ## 架构
 
