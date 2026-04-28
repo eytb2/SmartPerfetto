@@ -46,14 +46,33 @@ The project is open source and in active development. The UI, backend runtime, a
 
 ## Quick Start
 
+### Clone with Submodules
+
+SmartPerfetto vendors the Perfetto UI fork as the `perfetto/` Git submodule.
+You do not need to clone the Perfetto repository separately, but the submodule
+must be initialized.
+
+For a new checkout:
+
+```bash
+git clone --recurse-submodules https://github.com/Gracker/SmartPerfetto.git
+cd SmartPerfetto
+```
+
+If you already cloned the repository without submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
+Do not use GitHub's "Download ZIP" for development or local runs. ZIP archives
+do not include the `perfetto/` submodule content.
+
 ### Docker
 
 Use Docker when you want to run SmartPerfetto without setting up local build tools.
 
 ```bash
-git clone --recursive https://github.com/Gracker/SmartPerfetto.git
-cd SmartPerfetto
-
 cp backend/.env.example backend/.env
 # Edit backend/.env and set ANTHROPIC_API_KEY,
 # or configure ANTHROPIC_BASE_URL for an API proxy.
@@ -77,9 +96,6 @@ Prerequisites:
 - An LLM API key or an Anthropic-compatible proxy
 
 ```bash
-git clone --recursive https://github.com/Gracker/SmartPerfetto.git
-cd SmartPerfetto
-
 cp backend/.env.example backend/.env
 # Edit backend/.env and set ANTHROPIC_API_KEY,
 # or configure ANTHROPIC_BASE_URL for an API proxy.
