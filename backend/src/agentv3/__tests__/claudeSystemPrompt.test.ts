@@ -49,7 +49,7 @@ jest.mock('../focusAppDetector', () => ({
   formatDurationNs: jest.fn((ns: number) => `${(ns / 1e6).toFixed(1)}ms`),
 }));
 
-import { buildSystemPrompt } from '../claudeSystemPrompt';
+import { buildSystemPrompt, buildSystemPromptParts } from '../claudeSystemPrompt';
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -394,6 +394,89 @@ describe('buildSystemPrompt', () => {
       // fails and the offender must justify itself or move the value into a
       // volatile context object.
       expect(prompt).not.toMatch(/\b1[6-9]\d{11}\b/);
+    });
+  });
+
+  /**
+   * Phase 1.2 of v2.1 — verify the structured-segments API. Cache stability
+   * tests above used anchor strings to slice prefix/suffix. The parts API
+   * exposes the segmentation directly so future cache_breakpoint logic
+   * (when SDK adds support) can route through it.
+   */
+  describe('buildSystemPromptParts (Phase 1.2 structured API)', () => {
+    it('full output is byte-equal to buildSystemPrompt', () => {
+      const ctx = makeContext({
+        sceneType: 'scrolling',
+        architecture: { type: 'Standard', confidence: 0.9 } as any,
+        packageName: 'com.example',
+      });
+      const wrapper = buildSystemPrompt(ctx);
+      const parts = buildSystemPromptParts(ctx);
+      expect(parts.fullPrompt).toBe(wrapper);
+    });
+
+    it('every segment carries a non-empty label and a valid tier', () => {
+      const parts = buildSystemPromptParts(makeContext({ sceneType: 'scrolling' }));
+      expect(parts.segments.length).toBeGreaterThan(0);
+      for (const seg of parts.segments) {
+        expect(seg.label.length).toBeGreaterThan(0);
+        expect([1, 2, 3, 4]).toContain(seg.tier);
+        expect(seg.content.length).toBeGreaterThan(0);
+      }
+    });
+
+    it('segments are emitted in tier order (1 → 4 monotonic)', () => {
+      const parts = buildSystemPromptParts(makeContext({
+        sceneType: 'scrolling',
+        architecture: { type: 'Standard', confidence: 0.9 } as any,
+        selectionContext: { kind: 'area', startNs: 0, endNs: 1 } as any,
+        previousFindings: [{ severity: 'critical', title: 't', description: 'd' } as any],
+      }));
+      let lastTier = 1;
+      for (const seg of parts.segments) {
+        expect(seg.tier).toBeGreaterThanOrEqual(lastTier);
+        lastTier = seg.tier;
+      }
+    });
+
+    it('stablePrefix excludes Tier 4 sections and volatileSuffix only contains them', () => {
+      const parts = buildSystemPromptParts(makeContext({
+        sceneType: 'scrolling',
+        architecture: { type: 'Standard', confidence: 0.9 } as any,
+        selectionContext: { kind: 'area', startNs: 0, endNs: 1 } as any,
+      }));
+      const tier4Labels = parts.segments.filter(s => s.tier === 4).map(s => s.label);
+      expect(tier4Labels).toContain('selection_context');
+      // Tier 4 sections must not appear in the stable prefix.
+      for (const seg of parts.segments.filter(s => s.tier === 4)) {
+        expect(parts.stablePrefix).not.toContain(seg.content);
+        expect(parts.volatileSuffix).toContain(seg.content);
+      }
+    });
+
+    it('always includes a Tier 1 role segment', () => {
+      const parts = buildSystemPromptParts(makeContext());
+      const role = parts.segments.find(s => s.label === 'role');
+      expect(role).toBeDefined();
+      expect(role!.tier).toBe(1);
+    });
+
+    it('drops a known low-priority label first when the budget is tight', () => {
+      const parts = buildSystemPromptParts(makeContext({
+        sceneType: 'scrolling',
+        knowledgeBaseContext: 'X'.repeat(20_000),
+        sqlErrorFixPairs: [{ errorSql: 'a', errorMessage: 'b', fixedSql: 'c' }],
+      }), /* maxTokens */ 2_000);
+      // knowledge_base is the first label in the drop order, so it must be
+      // among the dropped labels when the budget is small.
+      expect(parts.droppedLabels).toContain('knowledge_base');
+    });
+
+    it('returns a non-empty droppedLabels array only when over budget', () => {
+      const parts = buildSystemPromptParts(makeContext({ sceneType: 'scrolling' }));
+      // Default fixture is comfortably under MAX_PROMPT_TOKENS (4500), so
+      // nothing should be dropped.
+      expect(parts.droppedLabels).toEqual([]);
     });
   });
 });

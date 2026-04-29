@@ -267,63 +267,98 @@ function buildCompletenessSection(completeness: TraceCompleteness): string {
   return lines.join('\n');
 }
 
-export function buildSystemPrompt(context: ClaudeAnalysisContext, maxTokens?: number): string {
+/**
+ * Tier classification for cache-aware prompt assembly:
+ *   1 — STATIC: never changes within process lifetime (role, output format)
+ *   2 — PER-TRACE: stable for the lifetime of one trace (architecture,
+ *       focus apps, completeness, knowledge base reference)
+ *   3 — PER-QUERY: stable while the same scene is analysed (methodology,
+ *       sub-agent guidance)
+ *   4 — PER-INTERACTION: dynamic, changes every query (selection,
+ *       comparison, conversation context, history, plan history)
+ */
+export type PromptTier = 1 | 2 | 3 | 4;
+
+export interface PromptSegment {
+  tier: PromptTier;
+  /** Stable identifier for tests + logging (e.g. "role", "architecture"). */
+  label: string;
+  content: string;
+  /** Whether the section may be dropped under token pressure. */
+  droppable: boolean;
+}
+
+export interface SystemPromptParts {
+  /** Joined Tier 1+2+3 — the cache-friendly prefix. */
+  stablePrefix: string;
+  /** Joined Tier 4 — varies every query. */
+  volatileSuffix: string;
+  /** Final string (`stablePrefix + '\n\n' + volatileSuffix` when both non-empty). */
+  fullPrompt: string;
+  /** Section-level breakdown after budget enforcement. */
+  segments: PromptSegment[];
+  /** Labels of sections dropped to fit the token budget. */
+  droppedLabels: string[];
+}
+
+/**
+ * Build the assembled prompt + structured segment metadata.
+ * `buildSystemPrompt()` is now a thin wrapper around this.
+ */
+export function buildSystemPromptParts(
+  context: ClaudeAnalysisContext,
+  maxTokens?: number,
+): SystemPromptParts {
   const effectiveMaxTokens = maxTokens ?? MAX_PROMPT_TOKENS;
-  const sections: string[] = [];
+  const segments: PromptSegment[] = [];
 
-  // ── Section ordering rationale ───────────────────────────────────────────
-  // Anthropic API auto-caches system prompts >1024 tokens via prefix matching.
-  // Sections are ordered STATIC → PER-TRACE → PER-QUERY → DYNAMIC so that
-  // the stable prefix is as long as possible across multi-turn conversations:
-  //   Same trace + same scene: ~4000 tokens cached (~80% savings)
-  //   Same trace + different scene: ~800 tokens cached (~18% savings)
-  //   Different trace: ~400 tokens cached (~8% savings)
-  // ─────────────────────────────────────────────────────────────────────────
+  const push = (tier: PromptTier, label: string, content: string, droppable = false): void => {
+    segments.push({ tier, label, content, droppable });
+  };
 
-  // ── Tier 1: STATIC (never changes within process lifetime) ──
-
+  // ── Tier 1: STATIC ───────────────────────────────────────────────────────
   const roleContent = loadPromptTemplate('prompt-role');
-  sections.push(roleContent ?? '# 角色\n\n你是 SmartPerfetto 的 Android 性能分析专家。');
+  push(1, 'role', roleContent ?? '# 角色\n\n你是 SmartPerfetto 的 Android 性能分析专家。');
 
   const outputFormat = loadPromptTemplate('prompt-output-format');
-  if (outputFormat) sections.push(outputFormat);
+  if (outputFormat) push(1, 'output_format', outputFormat);
 
-  // ── Tier 2: PER-TRACE STABLE (changes between traces, stable within a trace) ──
-
+  // ── Tier 2: PER-TRACE STABLE ─────────────────────────────────────────────
   if (context.architecture) {
-    sections.push(buildArchitectureSection(context.architecture, context.packageName, true));
+    push(2, 'architecture', buildArchitectureSection(context.architecture, context.packageName, true));
   } else if (context.packageName) {
-    sections.push(`## 当前 Trace 信息\n\n- **包名**: ${context.packageName}\n- **架构**: 未检测（建议先调用 detect_architecture）`);
+    push(2, 'architecture', `## 当前 Trace 信息\n\n- **包名**: ${context.packageName}\n- **架构**: 未检测（建议先调用 detect_architecture）`);
   }
 
   if (context.focusApps && context.focusApps.length > 0) {
-    sections.push(buildFocusAppSection(context.focusApps, context.focusMethod));
+    push(2, 'focus_apps', buildFocusAppSection(context.focusApps, context.focusMethod));
   }
 
-  // Trace data completeness (stable per trace — important for analysis scoping)
   if (context.traceCompleteness) {
     const completenessSection = buildCompletenessSection(context.traceCompleteness);
-    if (completenessSection) sections.push(completenessSection);
+    if (completenessSection) push(2, 'trace_completeness', completenessSection, true);
   }
 
   if (context.knowledgeBaseContext) {
-    sections.push(`## Perfetto SQL 知识库参考
-
-${context.knowledgeBaseContext}
-> 以上是根据用户问题从官方 Perfetto SQL stdlib 索引中匹配到的相关表/视图/函数。写 execute_sql 查询时可参考这些定义。`);
+    push(
+      2,
+      'knowledge_base',
+      `## Perfetto SQL 知识库参考\n\n${context.knowledgeBaseContext}\n> 以上是根据用户问题从官方 Perfetto SQL stdlib 索引中匹配到的相关表/视图/函数。写 execute_sql 查询时可参考这些定义。`,
+      true,
+    );
   }
 
-  // ── Tier 3: PER-QUERY (changes when scene/query changes) ──
-
-  // Scene-specific strategy injection (progressive disclosure)
+  // ── Tier 3: PER-QUERY ────────────────────────────────────────────────────
   const sceneStrategy = buildSceneStrategySection(context.sceneType);
-
   const methodologyTemplate = loadPromptTemplate('prompt-methodology');
-  sections.push(methodologyTemplate
-    ? renderTemplate(methodologyTemplate, { sceneStrategy })
-    : `## 分析方法论\n\n${sceneStrategy}`);
+  push(
+    3,
+    'methodology',
+    methodologyTemplate
+      ? renderTemplate(methodologyTemplate, { sceneStrategy })
+      : `## 分析方法论\n\n${sceneStrategy}`,
+  );
 
-  // Sub-agent collaboration guidance (only when sub-agents are enabled)
   if (context.availableAgents && context.availableAgents.length > 0) {
     const hasSystemExpert = context.availableAgents.includes('system-expert');
     const isScrolling = context.sceneType === 'scrolling';
@@ -340,40 +375,24 @@ ${context.knowledgeBaseContext}
 - 这样可以节省 2-3 轮往返，同时让结论更有系统上下文支撑`;
     }
 
-    sections.push(`## 子代理协作
-
-可用子代理：${context.availableAgents.map(a => `\`${a}\``).join('、')}
-
-### 何时委托 vs 直接调用
-- **委托**：需要从 ≥2 个不同域并行收集证据时（如帧分析 + CPU/内存系统上下文）
-- **直接调用**：单域查询（1-2 个工具调用即可完成）直接自己调用，不委托
-- **绝不委托**的情况：只需 1 个 invoke_skill 或 1 条 SQL；已经持有该域数据；ANR 场景（2-skill pipeline）
-
-### 委托规则
-1. **子代理只收集证据**，最终诊断和结论由你做出
-2. **委托时必须告知**：时间范围（start_ts/end_ts）、目标包名（process_name）、具体收集目标
-3. **不要重复收集**：你已调用的 Skill，不再委托子代理调用
-4. **子代理返回空或失败**：忽略该证据，基于已有数据继续分析，不要卡住
-${parallelGuidance}`);
+    push(
+      3,
+      'sub_agents',
+      `## 子代理协作\n\n可用子代理：${context.availableAgents.map(a => `\`${a}\``).join('、')}\n\n### 何时委托 vs 直接调用\n- **委托**：需要从 ≥2 个不同域并行收集证据时（如帧分析 + CPU/内存系统上下文）\n- **直接调用**：单域查询（1-2 个工具调用即可完成）直接自己调用，不委托\n- **绝不委托**的情况：只需 1 个 invoke_skill 或 1 条 SQL；已经持有该域数据；ANR 场景（2-skill pipeline）\n\n### 委托规则\n1. **子代理只收集证据**，最终诊断和结论由你做出\n2. **委托时必须告知**：时间范围（start_ts/end_ts）、目标包名（process_name）、具体收集目标\n3. **不要重复收集**：你已调用的 Skill，不再委托子代理调用\n4. **子代理返回空或失败**：忽略该证据，基于已有数据继续分析，不要卡住\n${parallelGuidance}`,
+      true,
+    );
   }
 
-  // ── Tier 4: PER-INTERACTION DYNAMIC (changes every query) ──
-
-  // User selection context — scopes analysis to a specific time range or slice.
-  // Intentionally NOT in droppableSections: selection is user's explicit intent and must never be dropped.
+  // ── Tier 4: PER-INTERACTION DYNAMIC ──────────────────────────────────────
+  // User selection — never droppable; user's explicit intent.
   if (context.selectionContext) {
-    sections.push(buildSelectionContextSection(context.selectionContext));
+    push(4, 'selection_context', buildSelectionContextSection(context.selectionContext));
   }
 
-  // Comparison mode context — orthogonal to scene type, injected when referenceTraceId is present
   if (context.comparison) {
-    sections.push(buildComparisonContextSection(context.comparison, context.packageName));
-
-    // Load comparison methodology template (additive to scene strategy)
+    push(4, 'comparison_context', buildComparisonContextSection(context.comparison, context.packageName));
     const compMethodology = loadPromptTemplate('comparison-methodology');
-    if (compMethodology) {
-      sections.push(compMethodology);
-    }
+    if (compMethodology) push(4, 'comparison_methodology', compMethodology);
   }
 
   const hasConversationContext = (context.previousFindings && context.previousFindings.length > 0)
@@ -388,8 +407,6 @@ ${parallelGuidance}`);
       const sectionLabels: Record<string, string> = {
         hypothesis: '假设', finding: '发现', observation: '观察', next_step: '下一步',
       };
-      // P1-3: Limit injected notes to 10 (sorted by priority) to cap token usage at ~650 tokens.
-      // Full 20 notes would consume ~1300 tokens, crowding the 4500-token budget.
       const sortedNotes = [...context.analysisNotes]
         .sort((a, b) => (a.priority === 'high' ? 0 : 1) - (b.priority === 'high' ? 0 : 1))
         .slice(0, 10);
@@ -397,10 +414,7 @@ ${parallelGuidance}`);
         .map(n => `- [${sectionLabels[n.section] || n.section}] ${n.priority === 'high' ? '⚠️ ' : ''}${n.content}`)
         .join('\n');
       const omitted = context.analysisNotes.length - sortedNotes.length;
-      contextParts.push(`### 分析笔记${omitted > 0 ? ` (显示 ${sortedNotes.length}/${context.analysisNotes.length})` : ''}
-${noteLines}
-
-以上是你之前记录的分析笔记。利用这些笔记继续分析，避免重复工作。`);
+      contextParts.push(`### 分析笔记${omitted > 0 ? ` (显示 ${sortedNotes.length}/${context.analysisNotes.length})` : ''}\n${noteLines}\n\n以上是你之前记录的分析笔记。利用这些笔记继续分析，避免重复工作。`);
     }
 
     if (context.previousFindings && context.previousFindings.length > 0) {
@@ -408,49 +422,35 @@ ${noteLines}
         .slice(0, 10)
         .map(f => `- [${f.severity.toUpperCase()}] ${f.title}: ${f.description.substring(0, 100)}`)
         .join('\n');
-      contextParts.push(`### 之前的分析发现
-${findingSummary}
-
-用户的新问题可能引用上面的发现。在之前结果的基础上继续深入分析，避免重复已知结论。`);
+      contextParts.push(`### 之前的分析发现\n${findingSummary}\n\n用户的新问题可能引用上面的发现。在之前结果的基础上继续深入分析，避免重复已知结论。`);
     }
 
     if (context.entityContext) {
-      contextParts.push(`### 已知实体（可用于 drill-down 引用）
-${context.entityContext}`);
+      contextParts.push(`### 已知实体（可用于 drill-down 引用）\n${context.entityContext}`);
     }
 
     if (context.conversationSummary) {
-      contextParts.push(`### 对话摘要
-${context.conversationSummary}`);
+      contextParts.push(`### 对话摘要\n${context.conversationSummary}`);
     }
 
-    sections.push(contextParts.join('\n\n'));
+    push(4, 'conversation_context', contextParts.join('\n\n'));
   }
-
-  // Skill catalog removed from system prompt — Claude can use `list_skills` tool on demand.
-  // This saves ~2000 tokens for general queries. Scene-specific strategies already name
-  // the relevant skills directly.
 
   if (context.sqlErrorFixPairs && context.sqlErrorFixPairs.length > 0) {
-    // Whole section is droppable under token pressure (see L477), so the cap
-    // can be generous in normal operation.
     const pairLines = context.sqlErrorFixPairs.slice(0, 10).map((p, i) =>
-      `${i + 1}. ERROR: \`${p.errorMessage.substring(0, 100)}\`\n   BAD: \`${p.errorSql.substring(0, 150)}\`\n   FIX: \`${p.fixedSql.substring(0, 150)}\``
+      `${i + 1}. ERROR: \`${p.errorMessage.substring(0, 100)}\`\n   BAD: \`${p.errorSql.substring(0, 150)}\`\n   FIX: \`${p.fixedSql.substring(0, 150)}\``,
     ).join('\n');
-    sections.push(`## SQL 踩坑记录（避免重复犯错）\n\n${pairLines}`);
+    push(4, 'sql_error_pairs', `## SQL 踩坑记录（避免重复犯错）\n\n${pairLines}`, true);
   }
 
-  // P2-2: Cross-session analysis pattern memory
   if (context.patternContext) {
-    sections.push(context.patternContext);
+    push(4, 'pattern_context', context.patternContext, true);
   }
 
-  // P1: Cross-session negative pattern memory (what failed before)
   if (context.negativePatternContext) {
-    sections.push(context.negativePatternContext);
+    push(4, 'negative_pattern_context', context.negativePatternContext, true);
   }
 
-  // P1-B1: Recent plan history for deeper cross-turn context (up to 3 plans)
   const allPlans: Array<{ plan: typeof context.previousPlan; label: string }> = [];
   if (context.planHistory) {
     context.planHistory.forEach((p, i) => allPlans.push({ plan: p, label: `第 ${i + 1} 轮` }));
@@ -467,38 +467,37 @@ ${context.conversationSummary}`);
       }).join('\n');
       return `### ${label}分析计划\n${phasesSummary}\n  成功标准: ${plan!.successCriteria}`;
     }).join('\n\n');
-    sections.push(`## 历史分析计划
-
-以下是近几轮对话的分析计划，供参考以避免重复分析：
-
-${plansSummary}
-
-> 你可以在新计划中引用之前的发现，或对未完成的阶段进行补充分析。也可以使用 \`recall_patterns\` 查询跨会话的历史分析经验。`);
+    push(
+      4,
+      'plan_history',
+      `## 历史分析计划\n\n以下是近几轮对话的分析计划，供参考以避免重复分析：\n\n${plansSummary}\n\n> 你可以在新计划中引用之前的发现，或对未完成的阶段进行补充分析。也可以使用 \`recall_patterns\` 查询跨会话的历史分析经验。`,
+      true,
+    );
   }
 
-  // P1-2: Enforce token budget by progressively dropping low-priority sections.
-  // Drop order: knowledge base (Claude can use lookup_sql_schema) → SQL error pairs →
-  // sub-agent guidance → conversation summary subsection
-  let prompt = sections.join('\n\n');
+  // ── Budget enforcement: drop low-priority sections by label ──────────────
+  const droppedLabels: string[] = [];
+  // Drop priority order — lowest value first.
+  const dropOrder: string[] = [
+    'knowledge_base',
+    'trace_completeness',
+    'pattern_context',
+    'negative_pattern_context',
+    'sql_error_pairs',
+    'sub_agents',
+    'plan_history',
+  ];
+  let prompt = segments.map(s => s.content).join('\n\n');
   let tokens = estimateTokens(prompt);
 
   if (tokens > effectiveMaxTokens) {
-    // Drop full sections by their opening text marker (lowest value first)
-    const droppableSections = [
-      '## Perfetto SQL 知识库参考',  // Claude can use lookup_sql_schema tool instead
-      '## Trace 数据完整度',          // Helpful guidance but agent can still detect gaps at runtime
-      '## 历史分析经验',              // Pattern memory — helpful but not critical
-      '## 历史踩坑记录',              // Negative memory — important but droppable under pressure
-      '## SQL 踩坑记录',              // Nice-to-have, not critical
-      '## 子代理协作',                 // Only useful when sub-agents enabled
-      '## 历史分析计划',              // P2-3: Plan history is supplementary context, droppable under pressure
-    ];
-    for (const marker of droppableSections) {
+    for (const label of dropOrder) {
       if (tokens <= effectiveMaxTokens) break;
-      const idx = sections.findIndex(s => s.startsWith(marker));
+      const idx = segments.findIndex(s => s.label === label);
       if (idx >= 0) {
-        sections.splice(idx, 1);
-        prompt = sections.join('\n\n');
+        segments.splice(idx, 1);
+        droppedLabels.push(label);
+        prompt = segments.map(s => s.content).join('\n\n');
         tokens = estimateTokens(prompt);
       }
     }
@@ -507,7 +506,25 @@ ${plansSummary}
     }
   }
 
-  return prompt;
+  const stablePrefix = segments.filter(s => s.tier <= 3).map(s => s.content).join('\n\n');
+  const volatileSuffix = segments.filter(s => s.tier === 4).map(s => s.content).join('\n\n');
+
+  return {
+    stablePrefix,
+    volatileSuffix,
+    fullPrompt: prompt,
+    segments,
+    droppedLabels,
+  };
+}
+
+/**
+ * Build the assembled system prompt string. Thin wrapper around
+ * {@link buildSystemPromptParts} that returns just the joined prompt —
+ * 100% byte-compatible with the pre-Phase-1.2 implementation.
+ */
+export function buildSystemPrompt(context: ClaudeAnalysisContext, maxTokens?: number): string {
+  return buildSystemPromptParts(context, maxTokens).fullPrompt;
 }
 
 /**
