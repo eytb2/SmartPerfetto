@@ -31,6 +31,7 @@ import type { AnalysisNote, AnalysisPlanV3, ClaudeAnalysisContext, ComplexityCla
 import { phaseMatchesCall } from './types';
 import { ArtifactStore } from './artifactStore';
 import { summarizeToolCallInput } from './toolCallSummary';
+import { buildRecoveryNote } from './recoveryNoteBuilder';
 import type { SessionStateSnapshot, SessionFieldsForSnapshot } from './sessionStateSnapshot';
 import { AgentMetricsCollector, persistSessionMetrics } from './agentMetrics';
 import {
@@ -825,69 +826,26 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         console.warn(`[ClaudeRuntime] Session ${sessionId}: analysis completed after SDK auto-compact. Findings count: ${mergedFindings.length}`);
         // P1-C1: Write a structured compact recovery note so the next turn's system prompt
         // carries plan progress + findings + entity context that may have been lost.
-        // Sections are added in priority order with a budget cap — no mid-section truncation.
+        // Phase 3-2: also preserves the last N raw tool calls as structured digests
+        // so the post-compact agent knows what it was just doing.
         const sessionNotes = this.sessionNotes.get(sessionId);
         if (sessionNotes) {
-          const MAX_NOTE_CHARS = 800;
-          const sections: string[] = [];
-          let usedChars = 0;
-
-          const tryAdd = (section: string): boolean => {
-            if (usedChars + section.length + 1 > MAX_NOTE_CHARS) return false;
-            sections.push(section);
-            usedChars += section.length + 1;
-            return true;
-          };
-
-          tryAdd('[上下文压缩恢复] SDK 自动压缩已触发。');
-
-          // Section 1 (highest priority): Plan progress
-          const plan = ctx.analysisPlan.current;
-          if (plan) {
-            const planLines = plan.phases.map(p => {
-              const icon = p.status === 'completed' ? '✓' : p.status === 'skipped' ? '⊘' : p.status === 'in_progress' ? '→' : '○';
-              const summary = p.summary ? ` — ${p.summary.substring(0, 60)}` : '';
-              return `${icon} ${p.id}: ${p.name}${summary}`;
-            });
-            tryAdd(`分析进度:\n${planLines.join('\n')}`);
-
-            // Section 2: Next phase info
-            const nextPhase = plan.phases.find(p => p.status === 'pending' || p.status === 'in_progress');
-            if (nextPhase) {
-              const tools = nextPhase.expectedTools.length > 0 ? ` (工具: ${nextPhase.expectedTools.join(', ')})` : '';
-              tryAdd(`当前/下一阶段: ${nextPhase.name} — ${nextPhase.goal}${tools}`);
-            }
-          }
-
-          // Section 3: Key findings (only confident ones)
-          const confidentFindings = mergedFindings.filter(f => (f.confidence ?? 0.5) >= 0.5);
-          if (confidentFindings.length > 0) {
-            const summary = confidentFindings.slice(0, 5)
-              .map(f => `- [${f.severity}] ${f.title}`)
-              .join('\n');
-            tryAdd(`关键发现:\n${summary}`);
-          } else if (mergedFindings.length > 0) {
-            const summary = mergedFindings.slice(0, 3)
-              .map(f => `- [${f.severity}] ${f.title}`)
-              .join('\n');
-            tryAdd(`关键发现:\n${summary}`);
-          }
-
-          // Section 4 (lowest priority): Entity context
-          const entitySnapshot = this.buildEntityContext(ctx.entityStore);
-          if (entitySnapshot && entitySnapshot.length < 200) {
-            tryAdd(`已知实体:\n${entitySnapshot}`);
-          }
+          const note = buildRecoveryNote({
+            plan: ctx.analysisPlan.current ?? undefined,
+            findings: mergedFindings,
+            recentToolCalls: ctx.analysisPlan.current?.toolCallLog ?? [],
+            entitySnapshot: this.buildEntityContext(ctx.entityStore),
+          });
 
           sessionNotes.push({
             section: 'next_step',
-            content: sections.join('\n'),
+            content: note.text,
             priority: 'high',
             timestamp: Date.now(),
           });
           if (sessionNotes.length > 20) sessionNotes.shift();
 
-          console.log(`[ClaudeRuntime] Compact recovery note: ${sections.length} sections, ${usedChars} chars`);
+          console.log(`[ClaudeRuntime] Compact recovery note: ${note.sectionsIncluded.length} sections, ${note.usedChars} chars (${note.sectionsIncluded.join('/')})`);
         }
       }
 
