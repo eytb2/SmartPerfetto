@@ -32,6 +32,7 @@ import { phaseMatchesCall } from './types';
 import { ArtifactStore } from './artifactStore';
 import { summarizeToolCallInput } from './toolCallSummary';
 import { buildRecoveryNote } from './recoveryNoteBuilder';
+import { evaluateThreshold as evaluateContextThreshold } from './contextTokenMeter';
 import type { SessionStateSnapshot, SessionFieldsForSnapshot } from './sessionStateSnapshot';
 import { AgentMetricsCollector, persistSessionMetrics } from './agentMetrics';
 import {
@@ -493,10 +494,48 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       let turnCounter = 0;
       let firstTokenReceived = false;
 
+      // Phase 3-3 of v2.1 (monitor-only): track when the running conversation
+      // crosses the pre-rot threshold so prod can quantify how often we *would*
+      // have benefited from an interrupt+resume cycle. The actual interrupt+
+      // resume orchestration is intentionally not wired yet — see
+      // `docs/v2.1-phase-3-active-compact-design.md`. Disable by setting
+      // `CLAUDE_PRECOMPACT_WARN_ENABLED=false`.
+      let preCompactWarned = false;
+      const preCompactWarnEnabled = process.env.CLAUDE_PRECOMPACT_WARN_ENABLED !== 'false';
+
+      function checkContextPressure(): void {
+        if (!preCompactWarnEnabled || preCompactWarned) return;
+        const cumulativeUncached = turnMetricsList.reduce((acc, t) => acc + (t.inputTokens ?? 0), 0);
+        const cumulativeCacheCreation = turnMetricsList.reduce((acc, t) => acc + (t.cacheCreationTokens ?? 0), 0);
+        const cumulativePayloadBytes = turnMetricsList.reduce((acc, t) => acc + t.toolResultPayloadBytes, 0);
+        const decision = evaluateContextThreshold({
+          uncachedInputTokens: cumulativeUncached,
+          cacheCreationInputTokens: cumulativeCacheCreation,
+          recentToolPayloadBytes: cumulativePayloadBytes,
+        });
+        if (decision.shouldPrecompact) {
+          preCompactWarned = true;
+          console.warn(
+            `[ClaudeRuntime] Session ${sessionId}: pre-rot threshold crossed ` +
+            `(pressure=${decision.pressureTokens} / ${decision.thresholdTokens} tokens, ratio=${decision.pressureRatio.toFixed(2)}). ` +
+            `Phase 3-3 will eventually interrupt+resume here; for now we only log.`,
+          );
+          this.emitUpdate({
+            type: 'progress',
+            content: {
+              phase: 'analyzing',
+              message: `⚠️ 接近上下文上限（已用 ${(decision.pressureRatio * 100).toFixed(0)}%），后续轮次可能因压缩丢失细节`,
+            },
+            timestamp: Date.now(),
+          });
+        }
+      }
+
       function finalizeTurnMetrics(): void {
         if (currentTurnMetrics) {
           currentTurnMetrics.durationMs = Date.now() - currentTurnMetrics.startMs;
           turnMetricsList.push(currentTurnMetrics);
+          checkContextPressure();
         }
       }
 
