@@ -11,8 +11,10 @@ on:
       - "start.sh"
       - "scripts/**"
       - "backend/**"
+      - "frontend/**"
       - "Dockerfile"
       - ".dockerignore"
+      - "docker-compose*.yml"
       - "scripts/trace-processor-pin.env"
       - "test-traces/**"
       - ".github/dependabot.yml"
@@ -28,8 +30,10 @@ on:
       - "start.sh"
       - "scripts/**"
       - "backend/**"
+      - "frontend/**"
       - "Dockerfile"
       - ".dockerignore"
+      - "docker-compose*.yml"
       - "scripts/trace-processor-pin.env"
       - "test-traces/**"
       - ".github/dependabot.yml"
@@ -40,9 +44,7 @@ permissions:
 
 # Perfetto version + per-platform SHA256 are pinned in
 # scripts/trace-processor-pin.env (single source of truth shared with
-# scripts/start-dev.sh and Dockerfile). The "Load trace_processor pin"
-# step below loads that file into $GITHUB_ENV so subsequent steps can
-# reference $PERFETTO_VERSION / $PERFETTO_LUCI_URL_BASE / $PERFETTO_SHELL_SHA256_LINUX_AMD64.
+# scripts/start-dev.sh, Dockerfile, and backend/scripts/ensure-trace-processor.cjs).
 
 jobs:
   quality:
@@ -55,7 +57,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: "package-lock.json"
 
@@ -70,7 +72,7 @@ jobs:
 
   gate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: backend
@@ -81,30 +83,15 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: "backend/package-lock.json"
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Validate skills
-        run: npm run validate:skills
-
-      - name: Validate strategies
-        run: npm run validate:strategies
-
-      - name: Typecheck backend
-        run: npx tsc --noEmit
-
-      - name: Build backend
-        run: npm run build
-
-      - name: Check CLI package contents
-        run: node scripts/check-cli-pack.cjs
-
-      - name: Run core tests
-        run: npm run test:core
+      - name: Run PR verification gate
+        run: npm run verify:pr
 
   docker-smoke:
     runs-on: ubuntu-24.04
@@ -113,53 +100,5 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build Docker backend stage
-        run: docker build --target backend-builder -t smartperfetto-backend-builder-smoke .
-
-  scene-trace-regression:
-    if: github.event_name == 'workflow_dispatch'
-    needs: gate
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: backend
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: "backend/package-lock.json"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Load trace_processor pin
-        working-directory: .
-        # Filter to KEY=VALUE lines only — $GITHUB_ENV rejects shell-style
-        # comments (#) and tolerates blank lines but treating both uniformly
-        # is safer than relying on undefined parser behavior.
-        run: grep -E '^[A-Z_][A-Z0-9_]*=' scripts/trace-processor-pin.env >> "$GITHUB_ENV"
-
-      - name: Download + verify trace_processor_shell
-        working-directory: .
-        run: |
-          set -euo pipefail
-          curl -fL -o trace_processor_shell \
-            "${PERFETTO_LUCI_URL_BASE}/${PERFETTO_VERSION}/linux-amd64/trace_processor_shell"
-          echo "${PERFETTO_SHELL_SHA256_LINUX_AMD64}  trace_processor_shell" | sha256sum -c -
-          chmod +x trace_processor_shell
-          echo "trace_processor_shell downloaded + verified ($(du -h trace_processor_shell | cut -f1))"
-          ./trace_processor_shell --version
-
-      - name: Run scene trace regression (manual)
-        env:
-          TRACE_PROCESSOR_PATH: ${{ github.workspace }}/trace_processor_shell
-          TP_PORT_MIN: 9800
-          TP_PORT_MAX: 9899
-          TP_QUERY_TIMEOUT_MS: 10000
-        run: timeout 8m npm run test:scene-trace-regression
+      - name: Build Docker runtime image
+        run: docker build -t smartperfetto-runtime-smoke .

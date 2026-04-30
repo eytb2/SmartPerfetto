@@ -4,7 +4,7 @@
 
 [![License: AGPL-3.0-or-later](https://img.shields.io/github/license/Gracker/SmartPerfetto)](LICENSE)
 [![Backend Regression Gate](https://github.com/Gracker/SmartPerfetto/actions/workflows/backend-agent-regression-gate.yml/badge.svg)](https://github.com/Gracker/SmartPerfetto/actions/workflows/backend-agent-regression-gate.yml)
-[![Node.js >=20](https://img.shields.io/badge/Node.js-%3E%3D20-brightgreen)](package.json)
+[![Node.js 24 LTS](https://img.shields.io/badge/Node.js-24%20LTS-brightgreen)](package.json)
 [![TypeScript strict](https://img.shields.io/badge/TypeScript-strict-3178c6)](backend/tsconfig.json)
 [![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ed)](docker-compose.yml)
 [![Perfetto UI fork](https://img.shields.io/badge/Perfetto-UI%20fork-4285f4)](https://perfetto.dev/)
@@ -15,6 +15,38 @@
 SmartPerfetto adds an AI analysis layer on top of Perfetto traces. Load a trace, ask a natural-language question, and get an evidence-backed answer with SQL results, skill outputs, root-cause reasoning, and optimization suggestions.
 
 The project is open source and in active development. The UI, backend runtime, and skill system are usable today, but public APIs and internal contracts may still change.
+
+## Configure Your AI Provider First
+
+SmartPerfetto uses the Claude Agent SDK. If you run it locally on a machine where Claude Code already works, the SDK can reuse Claude Code's local auth/config and you do not need to put an API key in `.env`. This covers both Claude Code subscription login and Claude Code setups that already point to a third-party model through a base URL plus API key.
+
+For everyone else, the file location depends on how you run SmartPerfetto:
+
+| Run mode | Recommended credential path | Notes |
+|----------|-----------------------------|-------|
+| Local source checkout with working Claude Code | No `.env` required | If `claude` can already code in this terminal, run `./start.sh` |
+| Local source checkout with API key/proxy | `backend/.env` | Create with `cp backend/.env.example backend/.env` |
+| Docker Hub image | `.env` in the repository root | Create with `cp backend/.env.example .env`; Docker does not see your host Claude Code login |
+| Source Docker build | `backend/.env` | Used by `docker-compose.yml` |
+
+The AI Assistant settings panel in the Perfetto UI has a `Backend API Key` field. That field is only for `SMARTPERFETTO_API_KEY`, which protects the SmartPerfetto backend. It is not a place to enter Anthropic, OpenAI, DeepSeek, Kimi, MiMo, Qwen, GLM, Ollama, or other model-provider keys.
+
+For direct Anthropic API access, set:
+
+```env
+ANTHROPIC_API_KEY=sk-ant-your-key
+```
+
+For OpenAI, Gemini, DeepSeek, Kimi, MiMo, Qwen, GLM, Ollama, or other third-party providers, expose an Anthropic-compatible endpoint through one-api/new-api/LiteLLM or your own gateway, then set:
+
+```env
+ANTHROPIC_BASE_URL=http://localhost:3000
+ANTHROPIC_API_KEY=sk-proxy-or-provider-token
+CLAUDE_MODEL=your-main-model
+CLAUDE_LIGHT_MODEL=your-light-model
+```
+
+After editing env files, start or restart the backend. For Docker, run `docker compose -f docker-compose.hub.yml up -d` or `docker compose -f docker-compose.hub.yml restart`. For local source runs, use `./start.sh`, or `./scripts/restart-backend.sh` if the backend is already running. For explicit SmartPerfetto env/proxy credentials, verify the active provider with [http://localhost:3000/health](http://localhost:3000/health). For the local Claude Code path, verify by running a normal `claude` request in the same terminal; the first AI analysis call will use the SDK's Claude Code auth/config path.
 
 ## Perfetto Resources
 
@@ -36,7 +68,7 @@ The project is open source and in active development. The UI, backend runtime, a
 | Area | Technology |
 |------|------------|
 | Frontend | Forked Perfetto UI with the `com.smartperfetto.AIAssistant` plugin |
-| Backend | Node.js 20+, TypeScript strict mode, Express |
+| Backend | Node.js 24 LTS, TypeScript strict mode, Express |
 | Agent runtime | Claude Agent SDK, MCP tools, scene strategies, verifier, SSE streaming |
 | Trace engine | Perfetto `trace_processor_shell` over HTTP RPC |
 | Analysis logic | YAML skills under `backend/skills/` plus Markdown strategies under `backend/strategies/` |
@@ -48,7 +80,9 @@ The project is open source and in active development. The UI, backend runtime, a
 
 ### Docker (Recommended)
 
-Use this path if you only want to run SmartPerfetto. You need Docker Desktop/Engine and an LLM API key; you do not need Node.js, a C++ toolchain, or the `perfetto/` submodule. The Docker Hub image is published nightly from `main` and includes the backend, the pre-built Perfetto UI, and the pinned `trace_processor_shell`.
+Use this path if you only want to run SmartPerfetto. You need Docker Desktop/Engine and LLM provider credentials in `.env`; you do not need Node.js, a C++ toolchain, or the `perfetto/` submodule. The Docker Hub image is published nightly from `main` and includes the backend, the pre-built Perfetto UI, and the pinned `trace_processor_shell`.
+
+The container starts without a local `.env` file for health/UI smoke checks, but AI analysis needs `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` plus `ANTHROPIC_API_KEY`.
 
 Windows users should use Docker Desktop with the WSL2 backend. The published image is a Linux container image and runs through Docker Desktop; no separate Windows build is required.
 
@@ -74,11 +108,16 @@ Uploads and logs are stored in Docker volumes, so they survive container restart
 
 ### Local Script
 
-Use this path if you prefer running from a source checkout on macOS or Linux. Prerequisites: **Node.js 20+**, `curl`, `lsof`, `pkill`, and an LLM API key. For Windows source development, use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install), not native Windows shell.
+Use this path if you prefer running from a source checkout on macOS or Linux. Prerequisites: **Node.js 24 LTS**, `curl`, `lsof`, `pkill`, and either Claude Code login or LLM provider credentials. For Windows source development, use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install), not native Windows shell.
 
 ```bash
 git clone https://github.com/Gracker/SmartPerfetto.git
 cd SmartPerfetto
+
+# Option A: if Claude Code already works in this terminal, no .env is required.
+claude
+
+# Option B: explicit API key or Anthropic-compatible proxy.
 cp backend/.env.example backend/.env
 # Edit backend/.env — set ANTHROPIC_API_KEY (direct) or
 # ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY (API proxy)
@@ -128,9 +167,9 @@ git add frontend/
 git commit -m "chore(frontend): update prebuilt"
 ```
 
-## Configure an LLM
+## Advanced Provider Options
 
-Minimum direct Anthropic setup:
+The quick setup above covers where credentials live. Local users whose Claude Code already works can usually skip SmartPerfetto env files entirely, even when Claude Code itself is backed by a third-party provider. Direct Anthropic API usage requires only:
 
 ```bash
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
@@ -147,9 +186,11 @@ CLAUDE_LIGHT_MODEL=your-light-model
 
 Known proxy options include [one-api](https://github.com/songquanpeng/one-api), [new-api](https://github.com/Calcium-Ion/new-api), and [LiteLLM](https://github.com/BerriAI/litellm). The selected model must support streaming and tool/function calling reliably. This is also the recommended path for providers like Xiaomi MiMo when your account exposes an OpenAI-compatible endpoint: connect the provider in the proxy, then point `ANTHROPIC_BASE_URL` at the proxy's Anthropic-compatible endpoint and set `CLAUDE_MODEL` to the mapped MiMo model ID. If your MiMo gateway already exposes an Anthropic-compatible Messages endpoint directly, you can point `ANTHROPIC_BASE_URL` there without an extra proxy. See [backend/.env.example](backend/.env.example) for provider examples and tuning options.
 
-> Note: provider switchers such as CC Switch, Codex CLI, Gemini CLI, and OpenCode manage their own CLI configuration files and login state. SmartPerfetto does not automatically read those CLI credentials. The web and CLI analysis paths currently use the Claude Agent SDK runtime; use `ANTHROPIC_BASE_URL` when connecting third-party providers such as MiMo, DeepSeek, OpenAI, Kimi, or MiniMax.
+> Note: Claude Code's own local auth/config is the native auth path for the Claude Agent SDK, whether it uses an Anthropic subscription or a Claude Code-configured third-party endpoint. Separate tools such as Codex CLI, Gemini CLI, and OpenCode manage their own configuration files and login state; SmartPerfetto does not automatically read those credentials. Use `ANTHROPIC_BASE_URL` only when the provider is not already available through Claude Code and you want SmartPerfetto to own the proxy config explicitly.
 
-If your Claude Code subscription quota is unavailable, or if you want to evaluate a third-party model, prefer the proxy path:
+The frontend settings dialog only stores the backend URL and optional `SMARTPERFETTO_API_KEY` for SmartPerfetto backend auth. LLM provider credentials must come from Claude Code local auth/config or from the backend/Docker env file above.
+
+If the local Claude Code path is unavailable, its quota is exhausted, or you want SmartPerfetto to use a different provider than Claude Code, use the explicit proxy path:
 
 ```bash
 ANTHROPIC_BASE_URL=http://localhost:3000
@@ -195,7 +236,7 @@ SmartPerfetto works best with Android 12+ traces that include FrameTimeline data
 SmartPerfetto also ships a terminal CLI for trace analysis without opening the browser UI. It uses the same agentv3 runtime as the web experience and writes local sessions, transcripts, and reports under `~/.smartperfetto/`.
 
 ```bash
-# Requires Node.js 20+
+# Requires Node.js 24 LTS
 npm install -g @gracker/smartperfetto
 
 # Analyze a trace, then continue the conversation or open the report.
@@ -262,6 +303,10 @@ Common commands:
 ./scripts/start-dev.sh
 ./scripts/restart-backend.sh
 
+# Before opening a PR: runs quality, build/type checks, skill/strategy
+# validation, core tests, and the 6 canonical trace regression.
+npm run verify:pr
+
 cd backend
 npm run build
 npm run cli:build-run -- --help
@@ -273,10 +318,11 @@ npm run test:core
 
 Required checks:
 
+- Before opening a PR: `npm run verify:pr` from the repository root
 - Any code change: `cd backend && npm run test:scene-trace-regression`
 - Skill YAML change: `npm run validate:skills` plus scene regression
 - Strategy/template Markdown change: `npm run validate:strategies` plus scene regression
-- Type/build fix: `cd backend && npx tsc --noEmit`
+- Type/build fix: `cd backend && npm run typecheck`
 
 Do not hardcode prompt content in TypeScript. Put scene logic in `backend/strategies/*.strategy.md` or reusable `*.template.md` files.
 

@@ -4,7 +4,7 @@ Thanks for your interest in contributing! This guide covers development setup, t
 
 ## Prerequisites
 
-- **Node.js** 18+ (`node -v`)
+- **Node.js** 24 LTS (`node -v`)
 - **Python 3** (required by Perfetto's build tools)
 - **C++ toolchain** (for `better-sqlite3` native module)
   - macOS: `xcode-select --install`
@@ -58,12 +58,25 @@ perfetto/                 # Forked Perfetto UI (submodule)
 
 ## Testing (Mandatory)
 
-Every code change must pass the regression suite before submitting a PR:
+Every code change must pass the PR gate before submitting a PR:
+
+```bash
+# From the repository root. Requires root and backend dependencies installed:
+#   npm ci
+#   cd backend && npm ci
+npm run verify:pr
+```
+
+`verify:pr` runs root quality checks, backend skill/strategy validation, typecheck,
+build, CLI package checks, core tests, and the 6 canonical trace regression. It
+also downloads the pinned `trace_processor_shell` automatically when needed.
+
+Useful targeted commands while iterating:
 
 ```bash
 cd backend
 
-# Mandatory — run after EVERY change
+# Mandatory for code changes; also included in npm run verify:pr
 npm run test:scene-trace-regression
 
 # Validate skill YAML syntax and contracts
@@ -72,7 +85,8 @@ npm run validate:skills
 # Validate strategy markdown frontmatter
 npm run validate:strategies
 
-# Full test suite (~8 min)
+# Extended diagnostic suite. This includes legacy evals that require extra trace
+# fixtures, so it is not the default PR gate.
 npm test
 ```
 
@@ -140,9 +154,8 @@ npm run test:scene-trace-regression
 
 ### PR Checklist
 
-- [ ] `npm run test:scene-trace-regression` passes (all 6 traces)
-- [ ] `npm run validate:skills` passes (if skills changed)
-- [ ] `npm run validate:strategies` passes (if strategies changed)
+- [ ] `npm run verify:pr` passes from the repository root
+- [ ] Extra targeted tests for the changed area are listed in the PR test plan
 - [ ] No hardcoded prompt content in TypeScript — use `.strategy.md` / `.template.md`
 - [ ] No new secrets or API keys in committed files
 

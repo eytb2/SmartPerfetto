@@ -1,6 +1,17 @@
 # 测试与验证
 
-SmartPerfetto 的默认完成标准是 trace 回归通过。任何代码改动后运行：
+SmartPerfetto 的默认团队协作标准是：提 PR 前跑同一个入口，CI 也跑同一个入口。
+
+```bash
+# 仓库根目录。首次运行前先安装 root 和 backend 依赖：
+# npm ci
+# cd backend && npm ci
+npm run verify:pr
+```
+
+`verify:pr` 会执行 root 质量检查、backend Skill/Strategy 校验、类型检查、构建、CLI package 检查、核心单测，以及 6 条 canonical trace 回归。它会在缺少 `trace_processor_shell` 时自动下载固定版本的预编译产物。
+
+日常开发时，任何代码改动后至少运行 trace 回归：
 
 ```bash
 cd backend
@@ -12,19 +23,21 @@ npm run test:scene-trace-regression
 | 场景 | 命令 |
 |---|---|
 | TypeScript build | `cd backend && npm run build` |
-| 类型检查 | `cd backend && npx tsc --noEmit` |
+| 类型检查 | `cd backend && npm run typecheck` |
 | 核心单测 | `cd backend && npm run test:core` |
 | 场景 trace 回归 | `cd backend && npm run test:scene-trace-regression` |
 | Skill 校验 | `cd backend && npm run validate:skills` |
 | Strategy 校验 | `cd backend && npm run validate:strategies` |
 | 默认 gate | `cd backend && npm run test:gate` |
+| PR 前完整入口 | `npm run verify:pr` |
 
 ## 改动类型与必须验证
 
 | 改动 | 必跑 |
 |---|---|
+| 提 PR 前 | `npm run verify:pr` |
 | TypeScript 代码 | `npm run test:scene-trace-regression` |
-| Build/type 修复 | `npx tsc --noEmit` + 回归 |
+| Build/type 修复 | `npm run typecheck` + 回归 |
 | Skill YAML | `npm run validate:skills` + 回归 |
 | Strategy/template Markdown | `npm run validate:strategies` + 回归 |
 | 前端生成类型相关 | `npm run generate:frontend-types` + 相关前端测试 |
@@ -101,3 +114,7 @@ E2E 完成后检查：
 ## 文档-only 改动
 
 普通说明文档不一定需要跑完整回归，但如果文档被运行时读取，或改动同时触碰 `.ts`、`.yaml`、`backend/strategies/*.md`，按上表执行。
+
+## 全量 Jest 的定位
+
+`cd backend && npm test` / `npm run test:full` 是扩展诊断入口，不是当前默认 PR gate。它会包含一些历史 skill-eval 用例，这些用例依赖未随仓库发布的旧 trace fixture（例如 `app_aosp_scrolling_heavy_jank.pftrace`、`app_aosp_scrolling_light.pftrace`、`app_start_heavy.pftrace`）。恢复这些 fixture 或把用例迁移到现有 6 条 canonical trace 后，才能把全量 Jest 提升为强制门禁。

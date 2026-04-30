@@ -1,6 +1,10 @@
 # 配置指南
 
-SmartPerfetto 的后端配置位于 `backend/.env`。推荐从模板开始：
+SmartPerfetto 本地源码运行时可以直接使用 Claude Code 的本地认证/配置；如果这个终端里的 `claude` 已经能正常写代码，可以不创建 `.env`。这既包括 Claude Code 官方订阅，也包括 Claude Code 已经配置好的第三方 base URL + API key。需要显式配置 API key、代理或 Docker 运行时，再使用 env 文件。
+
+Perfetto UI 的 AI Assistant 设置面板只配置 SmartPerfetto 后端连接。其中 `Backend API Key` 对应 `SMARTPERFETTO_API_KEY` 后端鉴权，不是第三方大模型 provider key。模型 provider 凭证来自 Claude Code 本地配置，或来自下面的后端/Docker env 文件。
+
+本地源码运行的后端配置位于 `backend/.env`。推荐从模板开始：
 
 ```bash
 cp backend/.env.example backend/.env
@@ -8,7 +12,7 @@ cp backend/.env.example backend/.env
 
 ## LLM 配置
 
-SmartPerfetto 当前主运行时是 agentv3，基于 Claude Agent SDK 编排 MCP 工具、Skill 和策略。默认配置是 Anthropic 直连：
+SmartPerfetto 当前主运行时是 agentv3，基于 Claude Agent SDK 编排 MCP 工具、Skill 和策略。本机 Claude Code 已经可用时，可以依赖 Claude Code 的本地认证/配置；如果要显式直连 Anthropic API，则配置：
 
 ```bash
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
@@ -27,7 +31,7 @@ CLAUDE_LIGHT_MODEL=your-light-model
 
 ### 运行时与 Provider 诊断
 
-SmartPerfetto 当前不会自动读取 CC Switch、Codex CLI、Gemini CLI 或 OpenCode 的登录态。那些工具管理的是各自 CLI 的配置文件；SmartPerfetto 的 Web/CLI 分析路径默认仍由 Claude Agent SDK 驱动。
+Claude Code 自己的本地认证/配置是 Claude Agent SDK 的原生认证路径，不管它背后是 Anthropic 订阅还是 Claude Code 里配置好的第三方 endpoint。SmartPerfetto 不会自动读取 Codex CLI、Gemini CLI 或 OpenCode 的登录态；那些工具管理的是各自 CLI 的配置文件。
 
 接入 MiMo、DeepSeek、OpenAI、Kimi、MiniMax 等第三方模型时，请让代理层暴露 Anthropic Messages 兼容接口，然后配置：
 
@@ -38,7 +42,7 @@ CLAUDE_MODEL=your-provider-main-model
 CLAUDE_LIGHT_MODEL=your-provider-light-model
 ```
 
-修改 `.env` 后需要重启后端。可通过健康检查确认当前配置：
+修改 `.env` 后需要重启后端。显式 env/proxy 凭证可通过健康检查确认当前配置：
 
 ```bash
 curl http://localhost:3000/health
@@ -51,7 +55,7 @@ curl http://localhost:3000/health
 | `anthropic_direct` | 使用 `ANTHROPIC_API_KEY` 直连 Anthropic |
 | `anthropic_compatible_proxy` | 使用 `ANTHROPIC_BASE_URL` 接入兼容代理 |
 | `aws_bedrock` | 使用 AWS Bedrock |
-| `unconfigured` | 尚未配置可用凭证 |
+| `unconfigured` | 没有显式 env 凭证；如果本机 `claude` 已经能正常请求，SDK 仍可在分析时走 Claude Code 本地 auth/config 路径 |
 
 ## 分析预算与超时
 

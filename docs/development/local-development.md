@@ -2,11 +2,11 @@
 
 ## 环境要求
 
-- Node.js 20+
+- Node.js 24 LTS
 - Python 3
 - Git submodule
 - `curl`, `lsof`, `pkill`
-- 一个 Anthropic API key，或 Anthropic 兼容代理
+- 可用的 Claude Code 本地配置、Anthropic API key，或 Anthropic 兼容代理
 - 可选 C++ 工具链：只有 `--build-from-source` 编译 trace processor 时需要
 
 ## 启动开发服务

@@ -1,7 +1,7 @@
 # ============================
 # Stage 1: Build backend
 # ============================
-FROM node:25-bookworm AS backend-builder
+FROM node:24-bookworm AS backend-builder
 
 WORKDIR /app/backend
 COPY backend/package*.json ./
@@ -15,32 +15,7 @@ RUN npm run build
 RUN npm prune --production
 
 # ============================
-# Stage 2: Build Perfetto UI (with AI Assistant plugin)
-# ============================
-FROM node:25-bookworm AS frontend-builder
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-venv \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app/perfetto
-COPY perfetto/ ./
-
-# Fake a git repository so install-build-deps's git clean doesn't fail
-RUN git init
-
-# Install UI deps using Perfetto's bundled pnpm
-RUN tools/install-build-deps --ui
-
-# Build frontend
-RUN tools/node ui/build.js
-
-# Remove source maps and intermediate typescript files to reduce final image size by ~100MB
-RUN find out/ui/ui -name "*.map" -delete && rm -rf out/ui/ui/tsc
-
-# ============================
-# Stage 3: Download trace_processor_shell
+# Stage 2: Download trace_processor_shell
 # ============================
 # Pinned to PERFETTO_VERSION + per-platform SHA256 from
 # scripts/trace-processor-pin.env (single source of truth across
@@ -72,7 +47,7 @@ RUN . /tmp/pin.env && \
 # ============================
 # Stage 3: Runtime
 # ============================
-FROM node:25-bookworm-slim
+FROM node:24-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -95,8 +70,9 @@ COPY --from=backend-builder /app/backend/data/perfettoStdlibSymbols.json ./backe
 COPY backend/skills ./backend/skills
 COPY backend/strategies ./backend/strategies
 
-# Copy frontend build output
-COPY --from=frontend-builder /app/perfetto/out/ui/ui ./perfetto/out/ui/ui
+# Copy pre-built Perfetto UI shipped in the repository.
+# Refresh this directory with scripts/update-frontend.sh before publishing UI changes.
+COPY frontend ./perfetto/out/ui/ui
 
 # Create required directories and fix ownership for non-root user
 RUN mkdir -p backend/uploads backend/logs/sessions backend/data && \

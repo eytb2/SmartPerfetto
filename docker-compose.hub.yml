@@ -9,7 +9,8 @@ services:
       - NODE_ENV=production
       - FRONTEND_URL=http://localhost:10000
     env_file:
-      - .env
+      - path: .env
+        required: false
     volumes:
       - uploads:/app/backend/uploads
       - logs:/app/backend/logs

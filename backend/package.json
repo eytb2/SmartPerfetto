@@ -24,7 +24,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=24.0.0"
   },
   "scripts": {
     "dev": "tsx watch --clear-screen=false src/index.ts",
@@ -37,6 +37,7 @@
     "cli:pack-check": "npm run build && node scripts/check-cli-pack.cjs",
     "stdlib:generate-symbol-index": "node scripts/generate-stdlib-symbol-index.cjs",
     "prepack": "npm run build",
+    "typecheck": "tsc --noEmit",
     "test": "jest",
     "test:core": "jest --runInBand --forceExit src/agent/communication/__tests__/agentMessageBus.test.ts src/agent/core/executors/__tests__/strategyExecutor.test.ts src/agent/core/executors/__tests__/hypothesisExecutor.test.ts src/agent/context/__tests__/enhancedSessionContext.test.ts src/tests/adbTools.test.ts src/services/__tests__/sessionLogger.test.ts src/services/__tests__/traceAnalysisSkillConfig.test.ts src/agent/agents/domain/__tests__/registry.test.ts src/agentv3/__tests__/sqlIncludeInjector.test.ts",
     "test:watch": "jest --watch",
@@ -51,6 +52,8 @@
     "test:gate": "npm run test:core && npm run test:scene-trace-regression",
     "test:full": "jest --runInBand --forceExit",
     "test:all": "npm run test:gate",
+    "trace-processor:ensure": "node scripts/ensure-trace-processor.cjs",
+    "verify:pr": "npm run validate:skills && npm run validate:strategies && npm run typecheck && npm run build && node scripts/check-cli-pack.cjs && npm run test:core && npm run trace-processor:ensure && npm run test:scene-trace-regression",
     "skill:validate": "tsx src/cli/index.ts validate",
     "validate:skills": "tsx src/cli/index.ts validate --contracts --all",
     "validate:strategies": "tsx src/cli/index.ts validate --strategies",

@@ -262,7 +262,7 @@ refactor 也把这个名单扩大了）：
 正式用户安装：
 
 ```bash
-# 需要 Node.js 20+
+# 需要 Node.js 24 LTS
 npm install -g @gracker/smartperfetto
 smp --help
 smp -f trace.pftrace -p "分析启动性能"

@@ -12,6 +12,7 @@ AI-driven Perfetto analysis platform for Android performance data.
 Tech: TypeScript strict, follow existing patterns
 Dev:  tsx watch (backend) + build.js --watch (frontend) — auto-rebuild on save
 Test: cd backend && npm run test:scene-trace-regression  ← MANDATORY after every change
+PR Gate: npm run verify:pr  ← run before opening PR
 Start: ./scripts/start-dev.sh (first-time) | ./scripts/restart-backend.sh (.env/npm changes only)
 Build: cd backend && npm run build
 ```
@@ -33,14 +34,15 @@ Every task must satisfy these before completion:
 | Any code change | `cd backend && npm run test:scene-trace-regression` passes (6 canonical traces) |
 | Skill YAML change | `npm run validate:skills` passes + regression passes |
 | Strategy/template .md change | `npm run validate:strategies` passes + regression passes |
-| Build/type error | `npx tsc --noEmit` passes in backend/ |
+| Build/type error | `npm run typecheck` passes in backend/ |
+| Before PR | `npm run verify:pr` passes from repo root |
 | Pre-commit | Run `/simplify` on changed code |
 
 ## Health Stack
 
 Tools used by `/health` for the code quality dashboard:
 
-- typecheck: `cd backend && npx tsc --noEmit`
+- typecheck: `cd backend && npm run typecheck`
 - test: `cd backend && npm run test:core`
 - lint: `npm run lint`
 - deadcode: `npm run deadcode`

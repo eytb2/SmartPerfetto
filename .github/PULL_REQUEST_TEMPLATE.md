@@ -39,11 +39,8 @@
 
 <!-- All code changes must satisfy these. Check after running. -->
 
-- [ ] `cd backend && npx tsc --noEmit` → 0 errors
-- [ ] `cd backend && npm run test:scene-trace-regression` → all 6 canonical traces pass
-- [ ] `cd backend && npm run test:core` → green (if tests were added / modified)
-- [ ] `cd backend && npm run validate:skills` → passes (for YAML skill changes)
-- [ ] `cd backend && npm run validate:strategies` → passes (for strategy changes)
+- [ ] `npm run verify:pr` from repo root → green
+- [ ] I included any extra targeted test command needed for this change in the test plan below
 - [ ] New `.ts` / `.yaml` / `.sh` / `.strategy.md` files carry SPDX AGPL v3 header
 
 ## Test Plan

@@ -4,51 +4,54 @@
 
 ## 1. 克隆仓库
 
-SmartPerfetto 使用 `perfetto/` submodule 承载 fork 后的 Perfetto UI。
+普通使用不需要初始化 `perfetto/` submodule。仓库已经包含预构建 Perfetto UI。
 
 ```bash
-git clone --recurse-submodules https://github.com/Gracker/SmartPerfetto.git
+git clone https://github.com/Gracker/SmartPerfetto.git
 cd SmartPerfetto
 ```
 
-如果已经普通 clone：
+只有修改 AI Assistant 前端插件代码时，才需要初始化 submodule 并使用开发脚本。
+
+## 2. 准备模型配置
+
+本地源码运行时，如果这个终端里的 Claude Code 已经能正常写代码，可以不配置 API key；这也包括 Claude Code 自己已经接入第三方模型的情况：
 
 ```bash
-git submodule update --init --recursive
+claude
 ```
 
-不要使用 GitHub 的 Download ZIP 做本地开发，因为 ZIP 不包含 submodule。
-
-## 2. 准备配置
+显式 API key/proxy 场景再创建 env 文件：
 
 ```bash
 cp backend/.env.example backend/.env
+# 编辑 backend/.env：
+# ANTHROPIC_API_KEY=your_anthropic_api_key_here
 ```
 
-最小配置是：
+也可以通过 `ANTHROPIC_BASE_URL` 接入 one-api、new-api、LiteLLM 等 Anthropic 兼容代理。Docker Hub 镜像使用仓库根目录 `.env`：
 
 ```bash
-ANTHROPIC_API_KEY=your_anthropic_api_key_here
+cp backend/.env.example .env
 ```
-
-也可以通过 `ANTHROPIC_BASE_URL` 接入 one-api、new-api、LiteLLM 等 Anthropic 兼容代理。
 
 ## 3. Docker 运行
 
 适合只想试用，不想配置本机开发工具链的场景。
 
 ```bash
-docker compose up --build
+docker compose -f docker-compose.hub.yml pull
+docker compose -f docker-compose.hub.yml up -d
 ```
 
 打开 [http://localhost:10000](http://localhost:10000)，加载 `.pftrace` 或 `.perfetto-trace` 文件，然后打开 AI Assistant 面板。
 
 ## 4. 本地开发运行
 
-适合调试、改代码或提交 PR。
+适合本地使用、调试后端、改策略/Skill 或提交 PR。
 
 ```bash
-./scripts/start-dev.sh
+./start.sh
 ```
 
 首次启动会安装依赖，并下载 version-pinned 的 `trace_processor_shell` 预编译产物。服务地址：
@@ -59,7 +62,7 @@ docker compose up --build
 | Backend API | `http://localhost:3000` |
 | Backend health | `http://localhost:3000/health` |
 
-后端 `tsx watch` 和前端 `build.js --watch` 会在保存文件后自动重编译。改 `.ts`、`.yaml`、`.md` 后通常只需要刷新浏览器。
+后端会自动启动，前端使用仓库内的预构建 UI。只有修改 AI Assistant 前端插件时，才需要 `git submodule update --init --recursive` 后运行 `./scripts/start-dev.sh`。
 
 ## 5. 第一次分析
 

@@ -16,9 +16,6 @@ env:
 jobs:
   quality-gate:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -26,27 +23,32 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
-          cache-dependency-path: "backend/package-lock.json"
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
 
-      - name: Install dependencies
+      - name: Install root dependencies
         run: npm ci
 
-      - name: Validate skills
-        run: npm run validate:skills
+      - name: Install backend dependencies
+        run: cd backend && npm ci
 
-      - name: Validate strategies
-        run: npm run validate:strategies
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
 
-      - name: Typecheck backend
-        run: npx tsc --noEmit
+      - name: Run root quality checks
+        run: npm run quality
 
-      - name: Build backend
-        run: npm run build
+      - name: Run PR verification gate
+        run: cd backend && npm run verify:pr
 
-      - name: Run core tests
-        run: npm run test:core
+      - name: Build Docker runtime image
+        run: docker build -t smartperfetto-runtime-smoke .
+
+      - name: Build Docker Hub compose config
+        run: docker compose -f docker-compose.hub.yml config >/tmp/smartperfetto-compose.yml
 
   build:
     needs: quality-gate
@@ -58,8 +60,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
