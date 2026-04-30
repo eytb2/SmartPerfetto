@@ -18,7 +18,7 @@ export const officialTemplates: OfficialProviderTemplate[] = [
   {
     type: 'bedrock',
     displayName: 'AWS Bedrock',
-    requiredFields: ['connection.awsRegion'],
+    requiredFields: [],
     defaultModels: { primary: 'claude-sonnet-4-6', light: 'claude-haiku-4-5' },
     availableModels: [
       { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', tier: 'primary' },

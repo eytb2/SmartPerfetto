@@ -23,7 +23,7 @@ function maskConnection(conn: ProviderConfig['connection']): ProviderConfig['con
   const masked = { ...conn };
   for (const field of SENSITIVE_FIELDS) {
     const val = masked[field];
-    if (val) (masked as any)[field] = maskValue(val);
+    if (typeof val === 'string' && val) (masked as any)[field] = maskValue(val);
   }
   return masked;
 }
@@ -130,6 +130,13 @@ export class ProviderService {
     this.store.set({ ...target, isActive: true, updatedAt: new Date().toISOString() });
   }
 
+  deactivateAll(): void {
+    const current = this.store.getActive();
+    if (current) {
+      this.store.set({ ...current, isActive: false, updatedAt: new Date().toISOString() });
+    }
+  }
+
   getEffectiveEnv(): Record<string, string> | null {
     const active = this.store.getActive();
     if (!active) return null;
@@ -152,9 +159,12 @@ export class ProviderService {
         break;
 
       case 'bedrock':
-        env.CLAUDE_CODE_USE_BEDROCK = '1';
+        if (provider.connection.useBedrock !== false) {
+          env.CLAUDE_CODE_USE_BEDROCK = '1';
+        }
         if (provider.connection.awsRegion) env.AWS_REGION = provider.connection.awsRegion;
         if (provider.connection.baseUrl) env.ANTHROPIC_BEDROCK_BASE_URL = provider.connection.baseUrl;
+        if (provider.connection.apiKey) env.ANTHROPIC_API_KEY = provider.connection.apiKey;
         if (provider.connection.awsBearerToken) env.AWS_BEARER_TOKEN_BEDROCK = provider.connection.awsBearerToken;
         if (provider.connection.awsAccessKeyId) env.AWS_ACCESS_KEY_ID = provider.connection.awsAccessKeyId;
         if (provider.connection.awsSecretAccessKey) env.AWS_SECRET_ACCESS_KEY = provider.connection.awsSecretAccessKey;

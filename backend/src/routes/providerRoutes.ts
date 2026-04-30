@@ -4,6 +4,7 @@
 import express from 'express';
 import { getProviderService, officialTemplates } from '../services/providerManager';
 import type { ProviderCreateInput, ProviderUpdateInput } from '../services/providerManager';
+import { testProviderConnection } from '../services/providerManager/connectionTester';
 import { authenticate } from '../middleware/auth';
 
 const router = express.Router();
@@ -71,6 +72,12 @@ router.delete('/:id', (req, res) => {
   }
 });
 
+router.post('/deactivate', (_req, res) => {
+  const svc = getProviderService();
+  svc.deactivateAll();
+  res.json({ success: true });
+});
+
 router.post('/:id/activate', (req, res) => {
   try {
     const svc = getProviderService();
@@ -87,17 +94,8 @@ router.post('/:id/test', async (req, res) => {
   const provider = svc.getRaw(req.params.id);
   if (!provider) return res.status(404).json({ success: false, error: 'Provider not found' });
 
-  const start = Date.now();
-  try {
-    const env = svc.getEnvForProvider(provider.id);
-    if (!env) throw new Error('Failed to resolve env vars');
-
-    const latencyMs = Date.now() - start;
-    res.json({ success: true, result: { success: true, latencyMs, modelVerified: false } });
-  } catch (err: any) {
-    const latencyMs = Date.now() - start;
-    res.json({ success: true, result: { success: false, latencyMs, error: err.message } });
-  }
+  const result = await testProviderConnection(provider);
+  res.json({ success: true, result });
 });
 
 function maskEnvKeys(env: Record<string, string>): Record<string, string> {

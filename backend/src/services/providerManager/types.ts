@@ -11,6 +11,7 @@ export interface ProviderConnection {
   baseUrl?: string;
   apiKey?: string;
   // Bedrock
+  useBedrock?: boolean;
   awsBearerToken?: string;
   awsAccessKeyId?: string;
   awsSecretAccessKey?: string;
