@@ -223,6 +223,56 @@ export interface TraceSummaryV2Contract extends SparkProvenance {
 }
 
 // =============================================================================
+// Plan 03 — SmartPerfetto PerfettoSQL Package (Spark #3, #36)
+// =============================================================================
+
+/** Kind of SmartPerfetto-owned PerfettoSQL symbol. */
+export type SmartPerfettoSqlSymbolKind =
+  | 'function'
+  | 'view'
+  | 'table'
+  | 'macro'
+  | 'index';
+
+/** Single symbol exported by the `smartperfetto.*` SQL package. */
+export interface SmartPerfettoSqlSymbol {
+  /** Fully qualified name, e.g. `smartperfetto.scrolling.jank_frames`. */
+  name: string;
+  kind: SmartPerfettoSqlSymbolKind;
+  /** Module file containing the definition (relative to package root). */
+  module: string;
+  /** Brief description for docs/agent prompt injection. */
+  summary?: string;
+  /** Function/macro signatures, table column lists. */
+  signature?: string;
+  /** stdlib modules this symbol depends on. */
+  dependencies?: string[];
+  /** Whether the symbol is considered stable for external consumers. */
+  stability: 'experimental' | 'stable' | 'deprecated';
+}
+
+/**
+ * SmartPerfettoSqlPackageContract (Plan 03)
+ *
+ * Output of `loadSmartPerfettoSqlPackage(...)`. Powers:
+ *  - `--add-sql-package smartperfetto` boot path on `trace_processor_shell`.
+ *  - sqlKnowledgeBase enrichment so the agent can recall canonical symbols.
+ *  - validate:strategies catalog so prompt templates can quote symbol names
+ *    without drifting from the actual SQL implementation.
+ */
+export interface SmartPerfettoSqlPackageContract extends SparkProvenance {
+  /** Package version (semver). */
+  packageVersion: string;
+  /** Symbols exported by the package. */
+  symbols: SmartPerfettoSqlSymbol[];
+  /** Symbols intentionally omitted (e.g., legacy aliases). */
+  removed?: SmartPerfettoSqlSymbol[];
+  /** Boot command snippet used to register the package, for docs/MCP. */
+  bootSnippet?: string;
+  coverage: SparkCoverageEntry[];
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 

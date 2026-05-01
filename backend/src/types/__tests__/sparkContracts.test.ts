@@ -8,6 +8,7 @@ import {
   makeSparkProvenance,
   type StdlibSkillCoverageContract,
   type TraceSummaryV2Contract,
+  type SmartPerfettoSqlPackageContract,
 } from '../sparkContracts';
 
 describe('sparkContracts — shared provenance', () => {
@@ -139,5 +140,38 @@ describe('Plan 02 — TraceSummaryV2Contract', () => {
     };
     expect(isUnsupported(contract)).toBe(true);
     expect(contract.metrics).toHaveLength(0);
+  });
+});
+
+describe('Plan 03 — SmartPerfettoSqlPackageContract', () => {
+  it('lists exported symbols with stability and dependency provenance', () => {
+    const contract: SmartPerfettoSqlPackageContract = {
+      ...makeSparkProvenance({source: 'smartperfetto-sql-package'}),
+      packageVersion: '0.1.0',
+      symbols: [
+        {
+          name: 'smartperfetto.scrolling.jank_frames',
+          kind: 'view',
+          module: 'scrolling/jank_frames.sql',
+          dependencies: ['android.frames.timeline'],
+          stability: 'experimental',
+        },
+        {
+          name: 'smartperfetto.binder.victim_to_server',
+          kind: 'function',
+          module: 'binder/victim_to_server.sql',
+          dependencies: ['android.binder'],
+          stability: 'experimental',
+        },
+      ],
+      bootSnippet: 'INCLUDE PERFETTO MODULE smartperfetto.*;',
+      coverage: [
+        {sparkId: 3, planId: '03', status: 'scaffolded'},
+        {sparkId: 36, planId: '03', status: 'scaffolded'},
+      ],
+    };
+    expect(contract.symbols).toHaveLength(2);
+    expect(contract.symbols[0].dependencies).toContain('android.frames.timeline');
+    expect(contract.bootSnippet).toMatch(/INCLUDE PERFETTO MODULE/);
   });
 });
