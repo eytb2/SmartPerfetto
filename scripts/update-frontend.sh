@@ -34,7 +34,9 @@ echo "Found compiled frontend: $VERSION"
 STALE_DIRS=$(find "$FRONTEND_DIR" -maxdepth 1 -type d -name 'v*' ! -name "$VERSION" 2>/dev/null || true)
 if [ -n "$STALE_DIRS" ]; then
   echo "⚠️  Stale version directories found (no longer referenced by index.html):"
-  echo "$STALE_DIRS" | sed 's|^|     |'
+  while IFS= read -r stale_dir; do
+    printf '     %s\n' "$stale_dir"
+  done <<< "$STALE_DIRS"
   echo "   Remove them with: git rm -r <dir>"
   echo ""
 fi
