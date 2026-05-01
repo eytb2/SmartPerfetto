@@ -601,6 +601,68 @@ export interface JankDecisionTreeContract extends SparkProvenance {
 }
 
 // =============================================================================
+// Plan 11 — Thread State 与 Scheduler Context Priors (Spark #6, #17)
+// =============================================================================
+
+/** Per-thread runtime state breakdown over a window. */
+export interface ThreadStateBreakdown {
+  utid: number;
+  /** Owning process pid (-1 if unknown). */
+  pid: number;
+  threadName: string;
+  range: NsTimeRange;
+  /** Aggregated durations by `thread_state.state` (Running, R, S, D, …). */
+  durByStateNs: Record<string, number>;
+  /** Total wakeup count in the window. */
+  wakeupCount?: number;
+  /** Sched runnable->Running latency p95 (ns). */
+  runnableLatencyP95Ns?: number;
+}
+
+/** Wakeup edge in the wakeup graph (Spark #17). */
+export interface SchedulerWakeupEdge {
+  fromUtid: number;
+  toUtid: number;
+  fromThread?: string;
+  toThread?: string;
+  /** Wakeup ns timestamp. */
+  ts: number;
+  /** Latency until target thread runs (ns). */
+  latencyNs?: number;
+  /** Wakeup reason if available (irq, futex_wake, binder, …). */
+  reason?: string;
+}
+
+/** Critical task chain entry (Spark #17). */
+export interface CriticalTaskChainEntry {
+  utid: number;
+  threadName: string;
+  /** ns range during which this thread was on the critical path. */
+  range: NsTimeRange;
+  /** Why this segment is on the critical path. */
+  reason: string;
+}
+
+/**
+ * ThreadSchedContextContract (Plan 11)
+ *
+ * Mandatory prior used by jank/ANR/startup decision trees. Without this
+ * contract, downstream Skills must treat their conclusions as low-confidence
+ * (Spark #6 — thread_state / sched.with_context as ground truth gate).
+ */
+export interface ThreadSchedContextContract extends SparkProvenance {
+  /** Window the priors describe. */
+  range: NsTimeRange;
+  /** Per-thread breakdowns (typically focused on UI / RenderThread). */
+  threadStates: ThreadStateBreakdown[];
+  /** Wakeup graph edges intersecting the window. */
+  wakeupEdges?: SchedulerWakeupEdge[];
+  /** Ordered critical task chain (Spark #17 report-friendly view). */
+  criticalChain?: CriticalTaskChainEntry[];
+  coverage: SparkCoverageEntry[];
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 

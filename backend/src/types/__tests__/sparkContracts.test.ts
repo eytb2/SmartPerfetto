@@ -14,6 +14,7 @@ import {
   type AnonymizationContract,
   type TraceConfigGeneratorContract,
   type JankDecisionTreeContract,
+  type ThreadSchedContextContract,
 } from '../sparkContracts';
 
 describe('sparkContracts — shared provenance', () => {
@@ -434,5 +435,49 @@ describe('Plan 10 — JankDecisionTreeContract', () => {
     };
     expect(isUnsupported(contract)).toBe(true);
     expect(contract.unclassifiedFrames).toHaveLength(1);
+  });
+});
+
+describe('Plan 11 — ThreadSchedContextContract', () => {
+  it('captures thread state breakdown plus wakeup edges and critical chain', () => {
+    const contract: ThreadSchedContextContract = {
+      ...makeSparkProvenance({source: 'thread-sched-context'}),
+      range: {startNs: 0, endNs: 100_000_000},
+      threadStates: [
+        {
+          utid: 12,
+          pid: 1234,
+          threadName: 'main',
+          range: {startNs: 0, endNs: 100_000_000},
+          durByStateNs: {Running: 60_000_000, R: 5_000_000, S: 35_000_000},
+          wakeupCount: 24,
+          runnableLatencyP95Ns: 1_200_000,
+        },
+      ],
+      wakeupEdges: [
+        {
+          fromUtid: 5,
+          toUtid: 12,
+          ts: 1_000_000,
+          latencyNs: 350_000,
+          reason: 'binder',
+        },
+      ],
+      criticalChain: [
+        {
+          utid: 12,
+          threadName: 'main',
+          range: {startNs: 0, endNs: 50_000_000},
+          reason: 'on critical path during inflate()',
+        },
+      ],
+      coverage: [
+        {sparkId: 6, planId: '11', status: 'scaffolded'},
+        {sparkId: 17, planId: '11', status: 'scaffolded'},
+      ],
+    };
+    expect(contract.threadStates[0].durByStateNs.Running).toBe(60_000_000);
+    expect(contract.wakeupEdges?.[0].reason).toBe('binder');
+    expect(contract.criticalChain?.[0].threadName).toBe('main');
   });
 });
