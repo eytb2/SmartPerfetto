@@ -453,6 +453,84 @@ export interface AnonymizationContract extends SparkProvenance {
 }
 
 // =============================================================================
+// Plan 07 — AI Trace Config Generator 与 Self-description Metadata
+//          (Spark #53, #197, #201)
+// =============================================================================
+
+/** Common Perfetto data sources the generator can emit. */
+export type PerfettoDataSourceId =
+  | 'linux.ftrace'
+  | 'linux.process_stats'
+  | 'linux.sys_stats'
+  | 'android.surfaceflinger.frame'
+  | 'android.frametimeline'
+  | 'android.binder'
+  | 'android.input'
+  | 'android.power'
+  | 'android.gpu.memory'
+  | 'android.network_packets'
+  | 'android.log'
+  | string; // allow forward-compat
+
+/** Single trace config fragment. */
+export interface PerfettoConfigFragment {
+  /** Logical id of the data source. */
+  dataSource: PerfettoDataSourceId;
+  /** Human-readable rationale for inclusion. */
+  reason: string;
+  /** Optional knob set as `key: value` strings. */
+  options?: Record<string, string>;
+}
+
+/** Custom slice / protobuf injection definition (Spark #53). */
+export interface CustomSliceSpec {
+  /** Stable slice name surfaced on the timeline. */
+  name: string;
+  /** Track this slice belongs to (process or async track id). */
+  trackHint?: string;
+  /** Schema fields the slice carries (mirrors atrace `args=`). */
+  fields?: ArtifactColumnSpec[];
+  /** Owning module / SDK that emits the slice. */
+  emittedBy?: string;
+}
+
+/** Trace self-description metadata (Spark #201). */
+export interface TraceSelfDescription extends SparkProvenance {
+  /** App package the trace was captured against. */
+  packageName?: string;
+  /** Build id / git sha. */
+  buildId?: string;
+  /** CUJ scenario name (`cold_start`, `scroll_feed`, …). */
+  cuj?: string;
+  /** Device fingerprint (model + Android version + SoC). */
+  device?: string;
+  /** Hint describing how to interpret the trace ("startup", "anr", "scroll"). */
+  intent?: string;
+  /** Custom slices/markers expected to be present. */
+  expectedCustomSlices?: CustomSliceSpec[];
+}
+
+/**
+ * TraceConfigGeneratorContract (Plan 07)
+ *
+ * Output of `generateTraceConfig({intent})`. Surfaces:
+ *  - Recommended data sources (#197 — AI generated trace config).
+ *  - Custom slice schema (#53 — business-side instrumentation contract).
+ *  - Self-description metadata embedded in the trace artifact (#201).
+ */
+export interface TraceConfigGeneratorContract extends SparkProvenance {
+  /** Suggested config fragments. */
+  fragments: PerfettoConfigFragment[];
+  /** Custom slice / protobuf injection schema. */
+  customSlices?: CustomSliceSpec[];
+  /** Embedded self-description metadata for the captured trace. */
+  selfDescription?: TraceSelfDescription;
+  /** Compact rationale for the overall config. */
+  rationale?: string;
+  coverage: SparkCoverageEntry[];
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 

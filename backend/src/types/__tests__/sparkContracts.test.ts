@@ -12,6 +12,7 @@ import {
   type ArtifactSchemaContract,
   type TimelineBinningContract,
   type AnonymizationContract,
+  type TraceConfigGeneratorContract,
 } from '../sparkContracts';
 
 describe('sparkContracts — shared provenance', () => {
@@ -310,5 +311,51 @@ describe('Plan 06 — AnonymizationContract', () => {
     };
     expect(contract.streamProgress?.done).toBe(false);
     expect(contract.pendingDomains).toContain('path');
+  });
+});
+
+describe('Plan 07 — TraceConfigGeneratorContract', () => {
+  it('emits config fragments with rationale and self-description', () => {
+    const contract: TraceConfigGeneratorContract = {
+      ...makeSparkProvenance({source: 'trace-config-generator'}),
+      fragments: [
+        {
+          dataSource: 'linux.ftrace',
+          reason: 'scheduler events for jank',
+          options: {sched_switch: 'true'},
+        },
+        {
+          dataSource: 'android.frametimeline',
+          reason: 'frame jank ground truth',
+        },
+      ],
+      customSlices: [
+        {
+          name: 'AppEvent.firstFrame',
+          trackHint: 'main_thread',
+          emittedBy: 'analytics-sdk',
+          fields: [
+            {name: 'frame_id', type: 'number'},
+            {name: 'duration_ms', type: 'duration', unit: 'ms'},
+          ],
+        },
+      ],
+      selfDescription: {
+        ...makeSparkProvenance({source: 'self-description'}),
+        packageName: 'com.example.app',
+        cuj: 'scroll_feed',
+        device: 'Pixel 8 Pro / Android 15',
+        intent: 'scrolling',
+      },
+      rationale: 'Targeted scroll-jank capture with FrameTimeline + sched.',
+      coverage: [
+        {sparkId: 53, planId: '07', status: 'scaffolded'},
+        {sparkId: 197, planId: '07', status: 'scaffolded'},
+        {sparkId: 201, planId: '07', status: 'scaffolded'},
+      ],
+    };
+    expect(contract.fragments).toHaveLength(2);
+    expect(contract.customSlices?.[0].fields?.[1].unit).toBe('ms');
+    expect(contract.selfDescription?.cuj).toBe('scroll_feed');
   });
 });
