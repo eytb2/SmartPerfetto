@@ -16,6 +16,7 @@ import {
   type JankDecisionTreeContract,
   type ThreadSchedContextContract,
   type BinderRootCauseChainContract,
+  type CpuThermalPmuContract,
 } from '../sparkContracts';
 
 describe('sparkContracts — shared provenance', () => {
@@ -554,5 +555,40 @@ describe('Plan 12 — BinderRootCauseChainContract', () => {
     };
     expect(contract.truncated).toBe(true);
     expect(contract.rootCause).toBeUndefined();
+  });
+});
+
+describe('Plan 13 — CpuThermalPmuContract', () => {
+  it('joins frequency residency, thermal decision, and PMU attribution', () => {
+    const contract: CpuThermalPmuContract = {
+      ...makeSparkProvenance({source: 'cpu-thermal-pmu'}),
+      range: {startNs: 0, endNs: 1_000_000_000},
+      cpuFreqResidency: [
+        {cpu: 0, freqHz: 600_000_000, durNs: 200_000_000, fraction: 0.2},
+        {cpu: 0, freqHz: 1_800_000_000, durNs: 800_000_000, fraction: 0.8},
+      ],
+      thermalSamples: [
+        {zone: 'cpu0', ts: 100_000, tempMc: 75_000, throttleStage: 1},
+      ],
+      thermalDecision: 'soft_throttle',
+      pmuAttribution: [
+        {counter: 'cycles', value: 1.2e10, derived: {ipc: 0.85}},
+      ],
+      smoothVsJankComparison: {
+        smoothFraction: 0.95,
+        jankFraction: 0.6,
+        delta: 0.35,
+      },
+      coverage: [
+        {sparkId: 8, planId: '13', status: 'scaffolded'},
+        {sparkId: 9, planId: '13', status: 'scaffolded'},
+        {sparkId: 10, planId: '13', status: 'scaffolded'},
+        {sparkId: 35, planId: '13', status: 'scaffolded'},
+      ],
+    };
+    expect(contract.cpuFreqResidency?.[1].fraction).toBe(0.8);
+    expect(contract.thermalDecision).toBe('soft_throttle');
+    expect(contract.pmuAttribution?.[0].derived?.ipc).toBe(0.85);
+    expect(contract.smoothVsJankComparison?.delta).toBeCloseTo(0.35);
   });
 });

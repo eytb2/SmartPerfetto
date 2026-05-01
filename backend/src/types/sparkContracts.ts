@@ -705,6 +705,78 @@ export interface BinderRootCauseChainContract extends SparkProvenance {
 }
 
 // =============================================================================
+// Plan 13 — CPU Frequency, Thermal, PMU Attribution
+//          (Spark #8, #9, #10, #35)
+// =============================================================================
+
+/** CPU frequency residency entry — fraction of time at a given freq band. */
+export interface CpuFreqResidency {
+  cpu: number;
+  freqHz: number;
+  /** Time at this frequency in nanoseconds. */
+  durNs: number;
+  /** Fraction of the analysis window (0-1). */
+  fraction: number;
+}
+
+/** Thermal counter sample (per zone). */
+export interface ThermalSample {
+  zone: string;
+  ts: number;
+  /** Temperature in millidegrees Celsius. */
+  tempMc: number;
+  /** Throttling state if known (0 = none, 1+ = throttling tier). */
+  throttleStage?: number;
+}
+
+/** PMU / simpleperf-derived counter attribution row. */
+export interface PmuAttributionRow {
+  /** Counter id (`cycles`, `instructions`, `cache-misses`, …). */
+  counter: string;
+  utid?: number;
+  process?: string;
+  thread?: string;
+  /** Aggregated counter value across the window. */
+  value: number;
+  /** Optional derived metric (`ipc`, `miss_rate`). */
+  derived?: Record<string, number>;
+}
+
+/** Thermal throttling decision (Spark #35). */
+export type ThermalDecision =
+  | 'cool'
+  | 'soft_throttle'
+  | 'hard_throttle'
+  | 'shutdown_imminent'
+  | 'unknown';
+
+/**
+ * CpuThermalPmuContract (Plan 13)
+ *
+ * Combined attribution for CPU frequency / thermal / PMU. Skills can request
+ * any subset; missing facets must surface as `unsupportedReason` rather than
+ * being silently zero-filled.
+ */
+export interface CpuThermalPmuContract extends SparkProvenance {
+  /** Window covered by the analysis. */
+  range: NsTimeRange;
+  /** Per-CPU frequency residency. */
+  cpuFreqResidency?: CpuFreqResidency[];
+  /** Thermal samples + decision. */
+  thermalSamples?: ThermalSample[];
+  thermalDecision?: ThermalDecision;
+  /** PMU attribution rows. */
+  pmuAttribution?: PmuAttributionRow[];
+  /** Smooth vs jank window comparison hint (Spark #8). */
+  smoothVsJankComparison?: {
+    smoothFraction: number;
+    jankFraction: number;
+    delta: number;
+  };
+  coverage: SparkCoverageEntry[];
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 
