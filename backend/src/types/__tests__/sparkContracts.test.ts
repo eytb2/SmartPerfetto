@@ -17,6 +17,7 @@ import {
   type ThreadSchedContextContract,
   type BinderRootCauseChainContract,
   type CpuThermalPmuContract,
+  type MemoryRootCauseContract,
 } from '../sparkContracts';
 
 describe('sparkContracts — shared provenance', () => {
@@ -590,5 +591,73 @@ describe('Plan 13 — CpuThermalPmuContract', () => {
     expect(contract.thermalDecision).toBe('soft_throttle');
     expect(contract.pmuAttribution?.[0].derived?.ipc).toBe(0.85);
     expect(contract.smoothVsJankComparison?.delta).toBeCloseTo(0.35);
+  });
+});
+
+describe('Plan 14 — MemoryRootCauseContract', () => {
+  it('combines RSS, LMK, DMABUF and external artifacts', () => {
+    const contract: MemoryRootCauseContract = {
+      ...makeSparkProvenance({source: 'memory-root-cause'}),
+      range: {startNs: 0, endNs: 60_000_000_000},
+      processSnapshots: [
+        {
+          pid: 1234,
+          process: 'com.example.app',
+          ts: 1_000_000,
+          rssBytes: 800_000_000,
+          swapBytes: 100_000_000,
+          oomScoreAdj: 100,
+          mmEvent: {majorFaults: 200},
+        },
+      ],
+      lmkEvents: [
+        {
+          ts: 30_000_000_000,
+          pid: 5678,
+          process: 'com.example.background',
+          oomScoreAdj: 600,
+          reason: 'visible_app_critical',
+          freedBytes: 250_000_000,
+        },
+      ],
+      dmaAllocations: [
+        {
+          ts: 45_000_000_000,
+          bufferBytes: 50_000_000,
+          allocator: 'dmabuf',
+          process: 'composer',
+          refcount: 2,
+        },
+      ],
+      externalArtifacts: [
+        {
+          kind: 'leak_canary',
+          artifactId: 'art-leak-1',
+          summary: 'Activity leak in MainActivity',
+          retainedBytes: 80_000_000,
+        },
+      ],
+      baselineDiff: {
+        baselineId: 'app/cold_start',
+        deltaBytes: 120_000_000,
+        topContributors: [
+          {key: 'graphics_buffer', deltaBytes: 60_000_000},
+          {key: 'java_heap', deltaBytes: 40_000_000},
+        ],
+      },
+      coverage: [
+        {sparkId: 11, planId: '14', status: 'scaffolded'},
+        {sparkId: 12, planId: '14', status: 'scaffolded'},
+        {sparkId: 13, planId: '14', status: 'scaffolded'},
+        {sparkId: 34, planId: '14', status: 'scaffolded'},
+        {sparkId: 51, planId: '14', status: 'scaffolded'},
+        {sparkId: 70, planId: '14', status: 'scaffolded'},
+        {sparkId: 109, planId: '14', status: 'scaffolded'},
+        {sparkId: 112, planId: '14', status: 'scaffolded'},
+      ],
+    };
+    expect(contract.lmkEvents?.[0].reason).toBe('visible_app_critical');
+    expect(contract.externalArtifacts?.[0].retainedBytes).toBe(80_000_000);
+    expect(contract.baselineDiff?.topContributors).toHaveLength(2);
   });
 });

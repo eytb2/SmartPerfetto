@@ -777,6 +777,81 @@ export interface CpuThermalPmuContract extends SparkProvenance {
 }
 
 // =============================================================================
+// Plan 14 — Memory, LMK, DMA/DMABUF Root-cause Graph
+//          (Spark #11, #12, #13, #34, #51, #70, #109, #112)
+// =============================================================================
+
+/** Per-process memory snapshot row. */
+export interface ProcessMemorySnapshot {
+  pid: number;
+  process?: string;
+  ts: number;
+  rssBytes?: number;
+  swapBytes?: number;
+  anonRssBytes?: number;
+  /** mm_event derived metrics (page faults, OOM score). */
+  mmEvent?: Record<string, number>;
+  oomScoreAdj?: number;
+}
+
+/** Low-memory-killer event. */
+export interface LmkKillEvent {
+  ts: number;
+  pid: number;
+  process?: string;
+  oomScoreAdj?: number;
+  reason?: string;
+  /** Bytes freed by the kill. */
+  freedBytes?: number;
+}
+
+/** DMA / dmabuf / ion allocation snapshot. */
+export interface DmaBufAllocation {
+  ts: number;
+  bufferBytes: number;
+  allocator: 'dmabuf' | 'ion' | 'gpu' | string;
+  process?: string;
+  /** Refcount when known. */
+  refcount?: number;
+}
+
+/** External memory artifact (LeakCanary, KOOM, hprof, …). */
+export interface MemoryExternalArtifact {
+  /** Source kind. */
+  kind: 'leak_canary' | 'koom' | 'hprof' | 'baseline' | 'manual' | string;
+  /** Pointer to raw artifact in store. */
+  artifactId?: string;
+  /** Brief summary. */
+  summary?: string;
+  /** Retained-size in bytes when known. */
+  retainedBytes?: number;
+  evidence?: SparkEvidenceRef;
+}
+
+/**
+ * MemoryRootCauseContract (Plan 14)
+ *
+ * Combines RSS/Swap/MM event timelines, LMK kill events, DMA/DMABUF pressure,
+ * and pointers to external memory artifacts (LeakCanary / KOOM / hprof) so the
+ * memory analysis Skill can render a unified root-cause graph.
+ */
+export interface MemoryRootCauseContract extends SparkProvenance {
+  range: NsTimeRange;
+  processSnapshots?: ProcessMemorySnapshot[];
+  lmkEvents?: LmkKillEvent[];
+  dmaAllocations?: DmaBufAllocation[];
+  externalArtifacts?: MemoryExternalArtifact[];
+  /** Baseline diff hint (Spark #34). */
+  baselineDiff?: {
+    baselineId: string;
+    deltaBytes: number;
+    /** Top contributors as `{key, deltaBytes}`. */
+    topContributors?: Array<{key: string; deltaBytes: number}>;
+  };
+  coverage: SparkCoverageEntry[];
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 
