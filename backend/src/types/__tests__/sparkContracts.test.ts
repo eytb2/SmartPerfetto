@@ -40,6 +40,10 @@ import {
   type BaselineDiffArtifact,
   type RegressionGateResult,
   type BaselineStoreContract,
+  type ProjectMemoryStatus,
+  type ProjectMemoryEntry,
+  type FeedbackPipelineEntry,
+  type MemoryRagSelfImprovementContract,
 } from '../sparkContracts';
 
 describe('sparkContracts — shared provenance', () => {
@@ -1298,5 +1302,108 @@ describe('Plan 50 — BaselineStoreContract', () => {
     };
     expect(contract.matrix?.[0].baselineIds).toHaveLength(2);
     expect(contract.coverage).toHaveLength(7);
+  });
+});
+
+describe('Plan 44 — MemoryRagSelfImprovementContract', () => {
+  it('ProjectMemoryStatus mirrors agentv3 PatternStatus 5-state machine', () => {
+    const statuses: ProjectMemoryStatus[] = [
+      'provisional',
+      'confirmed',
+      'rejected',
+      'disputed',
+      'disputed_late',
+    ];
+    expect(statuses).toHaveLength(5);
+    // Sanity: the literal 'auto_inferred' is NOT a valid status.
+    expect(statuses).not.toContain(
+      'auto_inferred' as unknown as ProjectMemoryStatus,
+    );
+  });
+
+  it('project entry can omit promotionPolicy when created directly', () => {
+    const entry: ProjectMemoryEntry = {
+      entryId: 'sha256:project001',
+      scope: 'project',
+      projectKey: 'com.example.feed/pixel-9-android-15',
+      tags: ['scrolling', 'binder'],
+      insight:
+        'binder.RingBuffer contention spikes when feed loads new ads pod',
+      confidence: 0.78,
+      status: 'provisional',
+      createdAt: 1714600000000,
+    };
+    expect(entry.scope).toBe('project');
+    expect(entry.promotionPolicy).toBeUndefined();
+  });
+
+  it('world entry carries promotionPolicy for audit', () => {
+    const entry: ProjectMemoryEntry = {
+      entryId: 'sha256:world001',
+      scope: 'world',
+      tags: ['lmk', 'memory'],
+      insight: 'LMK kills foreground when adj_score=0 right after onResume',
+      confidence: 0.91,
+      status: 'confirmed',
+      promotionLevel: 2,
+      promotionPolicy: {
+        fromScope: 'project',
+        toScope: 'world',
+        trigger: 'reviewer_approval',
+        reviewer: 'chris',
+        promotedAt: 1714600000000,
+      },
+      createdAt: 1714600000000,
+    };
+    expect(entry.promotionPolicy?.trigger).toBe('reviewer_approval');
+    expect(entry.promotionPolicy?.reviewer).toBe('chris');
+  });
+
+  it('FeedbackPipelineEntry uses CaseRef to break #44 ↔ #54 schema cycle', () => {
+    const entry: FeedbackPipelineEntry = {
+      entryId: 'sha256:fb001',
+      feedbackId: 'feedback-2026-04-30-001',
+      stage: 'case_draft',
+      case: {
+        caseId: 'case-draft-2026-04-30-001',
+        status: 'draft',
+        citationReason: 'Generated from feedback on heavy-mixed scrolling',
+      },
+      updatedAt: 1714600000000,
+    };
+    expect(entry.case?.caseId).toBe('case-draft-2026-04-30-001');
+    expect(entry.case?.status).toBe('draft');
+  });
+
+  it('MemoryRagSelfImprovementContract bundles entries + pipeline + retrievals', () => {
+    const contract: MemoryRagSelfImprovementContract = {
+      ...makeSparkProvenance({source: 'plan-44-test'}),
+      entries: [
+        {
+          entryId: 'sha256:p1',
+          scope: 'project',
+          tags: ['anr'],
+          insight: 'ANR fires when broadcast queue stalls',
+          confidence: 0.65,
+          status: 'provisional',
+          createdAt: 1714600000000,
+        },
+      ],
+      pipeline: [
+        {
+          entryId: 'sha256:fb1',
+          feedbackId: 'fb-001',
+          stage: 'feedback',
+          updatedAt: 1714600000000,
+        },
+      ],
+      coverage: [
+        {sparkId: 94, planId: '44', status: 'scaffolded'},
+        {sparkId: 95, planId: '44', status: 'scaffolded'},
+      ],
+    };
+    expect(contract.entries).toHaveLength(1);
+    expect(contract.pipeline[0].stage).toBe('feedback');
+    expect(contract.coverage).toHaveLength(2);
   });
 });
