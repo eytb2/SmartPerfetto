@@ -33,13 +33,31 @@ interface CoverageOptions {
   uncovered?: boolean;
 }
 
+/**
+ * Run the analyzer with stdout redirected to stderr while it runs, so the
+ * stdlib + skill loaders' `[StdlibScanner]`/`[SkillLoader]` status lines
+ * don't pollute machine-parseable JSON output. Codex review caught that
+ * the JSON path was unparseable for scripts because of these logs.
+ */
+async function analyzeQuietly(): ReturnType<typeof analyzeStdlibSkillCoverage> {
+  const originalLog = console.log;
+  console.log = (...args: unknown[]) => console.error(...args);
+  try {
+    return await analyzeStdlibSkillCoverage();
+  } finally {
+    console.log = originalLog;
+  }
+}
+
 export const coverageCommand = new Command('coverage')
   .description('Stdlib catalog × Skill prerequisite coverage report (Spark Plan 01)')
   .option('--json', 'Emit the full StdlibSkillCoverageContract as JSON')
   .option('--snapshot', 'Persist current stdlib module list for future watcher diff')
   .option('--uncovered', 'Print only the uncovered stdlib modules list')
   .action(async (options: CoverageOptions) => {
-    const contract = await analyzeStdlibSkillCoverage();
+    const contract = options.json
+      ? await analyzeQuietly()
+      : await analyzeStdlibSkillCoverage();
 
     if (options.snapshot) {
       persistStdlibSnapshot();

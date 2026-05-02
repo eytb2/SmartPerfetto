@@ -125,8 +125,11 @@ export function encodeCounterRle(
   options: EncodeCounterRleOptions,
 ): TimelineBinningContract {
   const {trackId, range} = options;
+  // Half-open window [startNs, endNs) matching binTimelineSamples.
+  // Codex review caught that an inclusive endNs caused the boundary
+  // sample to appear in both adjacent windows when callers chained them.
   const samples = options.samples
-    .filter(s => s.ts >= range.startNs && s.ts <= range.endNs)
+    .filter(s => s.ts >= range.startNs && s.ts < range.endNs)
     .slice()
     .sort((a, b) => a.ts - b.ts);
 

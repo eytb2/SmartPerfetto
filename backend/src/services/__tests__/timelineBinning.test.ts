@@ -60,6 +60,22 @@ describe('binTimelineSamples', () => {
 });
 
 describe('encodeCounterRle', () => {
+  it('drops samples at the exclusive end boundary (Codex regression)', () => {
+    const contract = encodeCounterRle({
+      trackId: 'half_open',
+      samples: [
+        {ts: 0, value: 50},
+        {ts: 100, value: 80},
+        {ts: 200, value: 90}, // exactly endNs — must be excluded
+      ],
+      range: {startNs: 0, endNs: 200},
+    });
+    if (contract.rle) {
+      // Final segment value must be 80 (the last in-range sample), not 90.
+      expect(contract.rle[contract.rle.length - 1].value).toBe(80);
+    }
+  });
+
   it('collapses adjacent equal-value samples and records deltas', () => {
     const samples = [
       {ts: 0, value: 50},
