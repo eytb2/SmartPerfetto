@@ -28,14 +28,24 @@ export interface IoNetworkWakeupOptions {
   wakeupEdges?: SchedulerWakeupEdge[];
 }
 
+/**
+ * "Has data" check that rejects both undefined and []. Codex review caught
+ * that `!options.facet` is false for empty arrays, so an empty result set
+ * was being marked as supported coverage rather than missing evidence.
+ */
+function hasRows<T>(rows: T[] | undefined): rows is T[] {
+  return Array.isArray(rows) && rows.length > 0;
+}
+
 export function buildIoNetworkWakeup(
   options: IoNetworkWakeupOptions,
 ): IoNetworkWakeupContract {
-  const allEmpty =
-    !options.ioEvents
-    && !options.networkAttribution
-    && !options.wakelockBaseline
-    && !options.wakeupEdges;
+  const hasIo = hasRows(options.ioEvents);
+  const hasNet = hasRows(options.networkAttribution);
+  const hasWakelock = hasRows(options.wakelockBaseline);
+  const hasWakeup = hasRows(options.wakeupEdges);
+
+  const allEmpty = !hasIo && !hasNet && !hasWakelock && !hasWakeup;
 
   return {
     ...makeSparkProvenance({
@@ -43,15 +53,15 @@ export function buildIoNetworkWakeup(
       ...(allEmpty ? {unsupportedReason: 'no IO / network / wakeup facets supplied'} : {}),
     }),
     range: options.range,
-    ...(options.ioEvents ? {ioEvents: options.ioEvents} : {}),
-    ...(options.networkAttribution ? {networkAttribution: options.networkAttribution} : {}),
-    ...(options.wakelockBaseline ? {wakelockBaseline: options.wakelockBaseline} : {}),
-    ...(options.wakeupEdges ? {wakeupEdges: options.wakeupEdges} : {}),
+    ...(hasIo ? {ioEvents: options.ioEvents} : {}),
+    ...(hasNet ? {networkAttribution: options.networkAttribution} : {}),
+    ...(hasWakelock ? {wakelockBaseline: options.wakelockBaseline} : {}),
+    ...(hasWakeup ? {wakeupEdges: options.wakeupEdges} : {}),
     coverage: [
-      {sparkId: 15, planId: '15', status: options.ioEvents ? 'implemented' : 'scaffolded'},
-      {sparkId: 18, planId: '15', status: options.wakelockBaseline ? 'implemented' : 'scaffolded'},
-      {sparkId: 20, planId: '15', status: options.wakeupEdges ? 'implemented' : 'scaffolded'},
-      {sparkId: 56, planId: '15', status: options.networkAttribution ? 'implemented' : 'scaffolded'},
+      {sparkId: 15, planId: '15', status: hasIo ? 'implemented' : 'scaffolded'},
+      {sparkId: 18, planId: '15', status: hasWakelock ? 'implemented' : 'scaffolded'},
+      {sparkId: 20, planId: '15', status: hasWakeup ? 'implemented' : 'scaffolded'},
+      {sparkId: 56, planId: '15', status: hasNet ? 'implemented' : 'scaffolded'},
     ],
   };
 }

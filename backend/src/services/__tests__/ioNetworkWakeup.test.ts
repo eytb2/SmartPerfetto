@@ -30,6 +30,26 @@ describe('buildIoNetworkWakeup', () => {
     const c = buildIoNetworkWakeup({range: {startNs: 0, endNs: 1}});
     expect(isUnsupported(c)).toBe(true);
   });
+
+  it('treats empty arrays as missing data, not as supported coverage (Codex regression)', () => {
+    const c = buildIoNetworkWakeup({
+      range: {startNs: 0, endNs: 1},
+      ioEvents: [],
+      networkAttribution: [],
+      wakelockBaseline: [],
+      wakeupEdges: [],
+    });
+    expect(isUnsupported(c)).toBe(true);
+    // Empty facets must NOT show up on the contract — would mislead AI consumers.
+    expect(c.ioEvents).toBeUndefined();
+    expect(c.networkAttribution).toBeUndefined();
+    expect(c.wakelockBaseline).toBeUndefined();
+    expect(c.wakeupEdges).toBeUndefined();
+    // All coverage entries should remain scaffolded, not implemented.
+    for (const entry of c.coverage) {
+      expect(entry.status).toBe('scaffolded');
+    }
+  });
 });
 
 describe('aggregateNetworkByEndpoint', () => {

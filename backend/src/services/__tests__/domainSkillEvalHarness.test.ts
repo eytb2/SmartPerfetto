@@ -55,6 +55,30 @@ describe('evaluateAssertion', () => {
       evaluateAssertion({a: 100}, {path: '$.a', expected: '>=200'}).ok,
     ).toBe(false);
   });
+
+  it('honors absolute tolerance on numeric comparisons (Codex regression)', () => {
+    // Without tolerance, 101 vs 100 string-compares and fails.
+    expect(
+      evaluateAssertion({a: 101}, {path: '$.a', expected: '100'}).ok,
+    ).toBe(false);
+    // With tolerance >= 1, treat as absolute tolerance.
+    expect(
+      evaluateAssertion({a: 101}, {path: '$.a', expected: '100', tolerance: 2}).ok,
+    ).toBe(true);
+    expect(
+      evaluateAssertion({a: 110}, {path: '$.a', expected: '100', tolerance: 2}).ok,
+    ).toBe(false);
+  });
+
+  it('treats tolerance < 1 as a fraction of expected value', () => {
+    // 5% tolerance on 100 → ±5
+    expect(
+      evaluateAssertion({a: 104}, {path: '$.a', expected: '100', tolerance: 0.05}).ok,
+    ).toBe(true);
+    expect(
+      evaluateAssertion({a: 110}, {path: '$.a', expected: '100', tolerance: 0.05}).ok,
+    ).toBe(false);
+  });
 });
 
 describe('runDomainSkillEvalHarness', () => {

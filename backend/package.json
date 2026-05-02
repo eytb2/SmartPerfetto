@@ -16,6 +16,7 @@
     "data/perfettoStdlibSymbols.json",
     "skills/**/*",
     "strategies/**/*",
+    "sql/smartperfetto/**/*",
     ".env.example",
     "LICENSE",
     "package.json"

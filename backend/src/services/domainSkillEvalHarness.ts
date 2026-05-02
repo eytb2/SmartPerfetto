@@ -82,6 +82,24 @@ export function evaluateAssertion(
   const op = opMatch?.[1];
   const expectedValue = (opMatch?.[2] ?? expected).trim();
 
+  // When tolerance is set, use numeric absolute-diff comparison regardless
+  // of operator (Codex review caught this — string equality previously
+  // ignored tolerance entirely, so 101 vs 100 ±2 wrongly failed).
+  if (typeof assertion.tolerance === 'number' && Number.isFinite(assertion.tolerance)) {
+    const actualNum = Number(value);
+    const expectedNum = Number(expectedValue);
+    if (Number.isFinite(actualNum) && Number.isFinite(expectedNum)) {
+      // Tolerance is interpreted as absolute when >= 1 and as a fraction
+      // (relative to expectedNum) when < 1, matching how callers naturally
+      // express it in YAML strategies.
+      const tol = assertion.tolerance >= 1
+        ? assertion.tolerance
+        : Math.abs(expectedNum) * assertion.tolerance;
+      return {ok: Math.abs(actualNum - expectedNum) <= tol, actual};
+    }
+    // Fall through to operator/equality checks if either value is non-numeric.
+  }
+
   // Equality on strings.
   if (!op || op === '=') {
     return {ok: actual === expectedValue, actual};
