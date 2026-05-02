@@ -5,7 +5,8 @@
   "main": "dist/index.js",
   "bin": {
     "smp": "./dist/cli-user/bin.js",
-    "smartperfetto": "./dist/cli-user/bin.js"
+    "smartperfetto": "./dist/cli-user/bin.js",
+    "smartperfetto-mcp": "./dist/bin/smartperfetto-mcp.js"
   },
   "files": [
     "dist/**/*",
