@@ -11,6 +11,10 @@ describe('rendering_pipeline_detection generator', () => {
 
     expect(skill.name).toBe('rendering_pipeline_detection');
     expect(skill.type).toBe('composite');
+    expect(skill.prerequisites?.modules).toEqual([
+      'slices.with_context',
+      'android.frames.timeline',
+    ]);
 
     const determineStep = skill.steps?.find((s) => s.id === 'determine_pipeline') as any;
     expect(determineStep).toBeTruthy();
@@ -36,6 +40,10 @@ describe('rendering_pipeline_detection generator', () => {
     expect(activeStep.sql).toContain('DrawFrame');
     expect(activeStep.sql).toContain('eglSwapBuffers');
     expect(activeStep.sql).toContain('vkQueuePresentKHR');
+
+    const layerSignalsStep = skill.steps?.find((s) => s.id === 'layer_signals') as any;
+    expect(layerSignalsStep).toBeTruthy();
+    expect(layerSignalsStep.sql).toContain('android_frames_layers');
 
     const pipelineBundleStep = skill.steps?.find((s) => s.id === 'pipeline_bundle') as any;
     expect(pipelineBundleStep).toBeTruthy();

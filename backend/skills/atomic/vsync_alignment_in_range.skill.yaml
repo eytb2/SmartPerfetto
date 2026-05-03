@@ -25,6 +25,11 @@ meta:
     Camera/Video/Game(Swappy) 不严格对齐 vsync-app（各自有独立节奏）。
     未来按 pipeline_id 切换"对齐预期"判定（vsync-app 严格 vs Camera HAL 节奏 vs Swappy frame pacing）。
 
+prerequisites:
+  required_tables:
+    - counter
+    - counter_track
+
 inputs:
   - name: start_ts
     type: timestamp

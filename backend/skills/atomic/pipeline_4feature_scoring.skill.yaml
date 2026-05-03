@@ -31,8 +31,13 @@ meta:
 
 prerequisites:
   required_tables:
+    - slice
+    - thread_track
     - thread
     - process
+  modules:
+    - slices.with_context
+    - android.frames.timeline
 
 inputs:
   - name: package
@@ -62,22 +67,19 @@ steps:
     sql: |
       WITH
       dominant_process AS (
-        SELECT p.upid, p.name as process_name
-        FROM slice s
-        JOIN thread_track tt ON s.track_id = tt.id
-        JOIN thread t ON tt.utid = t.utid
-        JOIN process p ON t.upid = p.upid
-        WHERE p.name IS NOT NULL
-          AND p.name NOT LIKE 'com.android.systemui%'
-          AND p.name NOT LIKE 'system_server%'
-          AND s.name IS NOT NULL
+        SELECT upid, process_name
+        FROM thread_slice
+        WHERE process_name IS NOT NULL
+          AND process_name NOT LIKE 'com.android.systemui%'
+          AND process_name NOT LIKE 'system_server%'
+          AND name IS NOT NULL
           AND (
-            (t.name = 'RenderThread' AND s.name GLOB 'DrawFrame*')
-            OR (s.name GLOB '*Choreographer#doFrame*')
-            OR (s.name GLOB '*eglSwapBuffers*')
-            OR (s.name GLOB '*vkQueuePresentKHR*')
+            (thread_name = 'RenderThread' AND name GLOB 'DrawFrame*')
+            OR (name GLOB '*Choreographer#doFrame*')
+            OR (name GLOB '*eglSwapBuffers*')
+            OR (name GLOB '*vkQueuePresentKHR*')
           )
-        GROUP BY p.upid
+        GROUP BY upid
         HAVING COUNT(*) > 5
         ORDER BY COUNT(*) DESC
         LIMIT 1
@@ -148,14 +150,11 @@ steps:
             WHEN '${package}' <> '' THEN '${package}'
             ELSE (
               SELECT CASE
-                       WHEN instr(p.name, ':') > 0 THEN substr(p.name, 1, instr(p.name, ':') - 1)
-                       ELSE p.name
+                       WHEN instr(p.process_name, ':') > 0 THEN substr(p.process_name, 1, instr(p.process_name, ':') - 1)
+                       ELSE p.process_name
                      END
-              FROM slice s
-              JOIN thread_track tt ON s.track_id = tt.id
-              JOIN thread t ON tt.utid = t.utid
-              JOIN process p ON t.upid = p.upid
-              WHERE t.name = 'RenderThread' AND s.name GLOB 'DrawFrame*'
+              FROM thread_slice p
+              WHERE p.thread_name = 'RenderThread' AND p.name GLOB 'DrawFrame*'
               GROUP BY p.upid
               ORDER BY COUNT(*) DESC
               LIMIT 1
@@ -164,7 +163,7 @@ steps:
       ),
       app_layers AS (
         SELECT DISTINCT layer_name
-        FROM actual_frame_timeline_slice
+        FROM android_frames_layers
         WHERE layer_name IS NOT NULL
           AND layer_name GLOB '*' || (SELECT pkg FROM dominant_pkg) || '*'
       )

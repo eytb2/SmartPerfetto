@@ -60,13 +60,16 @@ meta:
 
 prerequisites:
   required_tables:
+    - slice
+    - thread_track
     - thread
     - process
   optional_tables:
-    - slice
-    - thread_track
     - counter
     - counter_track
+  modules:
+    - slices.with_context
+    - android.frames.timeline
 
 inputs:
   - name: package

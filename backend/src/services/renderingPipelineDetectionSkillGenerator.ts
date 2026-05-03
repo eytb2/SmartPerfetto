@@ -804,7 +804,7 @@ function buildLayerSignalsSql(): string {
       app_layers AS (
         -- FrameTimeline 提供 layer_name 维度（Android 12+）
         SELECT DISTINCT layer_name
-        FROM actual_frame_timeline_slice
+        FROM android_frames_layers
         WHERE layer_name IS NOT NULL
           AND (
             ('\${package}' <> '' AND layer_name GLOB '*' || '\${package}' || '*')
@@ -1057,8 +1057,9 @@ export async function generateRenderingPipelineDetectionSkill(): Promise<SkillDe
       tags: ['rendering', 'pipeline', 'detection', 'teaching', 'yaml'],
     },
     prerequisites: {
-      required_tables: ['thread', 'process'],
-      optional_tables: ['slice', 'thread_track', 'counter', 'counter_track'],
+      required_tables: ['slice', 'thread_track', 'thread', 'process'],
+      optional_tables: ['counter', 'counter_track'],
+      modules: ['slices.with_context', 'android.frames.timeline'],
     },
     inputs: [
       {

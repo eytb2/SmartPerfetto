@@ -23,6 +23,11 @@ meta:
 prerequisites:
   required_tables:
     - slice
+    - thread_track
+    - thread
+    - process
+  modules:
+    - slices.with_context
 
 inputs:
   - name: package
@@ -76,7 +81,7 @@ steps:
     sql: |
       SELECT
         s.name as slice_name,
-        p.name as process_name,
+        s.process_name as process_name,
         COUNT(*) as count,
         ROUND(SUM(s.dur) / 1e6, 2) as total_dur_ms,
         ROUND(AVG(s.dur) / 1e6, 2) as avg_dur_ms,
@@ -87,15 +92,12 @@ steps:
           WHEN COUNT(*) > 100 THEN '需优化'
           ELSE '正常'
         END as rating
-      FROM slice s
-      JOIN thread_track tt ON s.track_id = tt.id
-      JOIN thread t ON tt.utid = t.utid
-      JOIN process p ON t.upid = p.upid
-      WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+      FROM thread_slice s
+      WHERE (s.process_name GLOB '${package}*' OR '${package}' = '')
         AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
         AND (${end_ts} IS NULL OR s.ts + s.dur <= ${end_ts})
         AND (s.name GLOB 'Recompos*' OR s.name GLOB 'Compose:*' OR s.name GLOB '*CompositionLocal*')
-      GROUP BY s.name, p.name
+      GROUP BY s.name, s.process_name
       ORDER BY SUM(s.dur) DESC
     save_as: recomposition_overview
 
@@ -139,8 +141,8 @@ steps:
       SELECT
         printf('%d', s.ts) as ts,
         s.name as slice_name,
-        p.name as process_name,
-        t.name as thread_name,
+        s.process_name,
+        s.thread_name,
         ROUND(s.dur / 1e6, 2) as dur_ms,
         printf('%d', s.dur) as dur_ns,
         CASE
@@ -148,11 +150,8 @@ steps:
           WHEN s.dur / 1e6 > 16 THEN 'warning'
           ELSE 'notice'
         END as severity
-      FROM slice s
-      JOIN thread_track tt ON s.track_id = tt.id
-      JOIN thread t ON tt.utid = t.utid
-      JOIN process p ON t.upid = p.upid
-      WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+      FROM thread_slice s
+      WHERE (s.process_name GLOB '${package}*' OR '${package}' = '')
         AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
         AND (${end_ts} IS NULL OR s.ts + s.dur <= ${end_ts})
         AND (s.name GLOB 'Recompos*' OR s.name GLOB 'Compose:*' OR s.name GLOB '*CompositionLocal*')
@@ -195,13 +194,10 @@ steps:
           s.ts,
           s.dur,
           s.name,
-          p.name as process_name,
-          p.upid
-        FROM slice s
-        JOIN thread_track tt ON s.track_id = tt.id
-        JOIN thread t ON tt.utid = t.utid
-        JOIN process p ON t.upid = p.upid
-        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          s.process_name,
+          s.upid
+        FROM thread_slice s
+        WHERE (s.process_name GLOB '${package}*' OR '${package}' = '')
           AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
           AND (${end_ts} IS NULL OR s.ts + s.dur <= ${end_ts})
           AND (s.name GLOB 'Recompos*' OR s.name GLOB 'Compose:*' OR s.name GLOB '*CompositionLocal*')
