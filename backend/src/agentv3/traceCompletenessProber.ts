@@ -185,6 +185,28 @@ const CAPABILITY_REGISTRY: CapabilityDef[] = [
     primaryTable: 'android_anrs',
     priority: 'optional',
   },
+
+  // ── Wattson power-modeling prerequisites (added 2026-05 per docs/skills-audit-2026-05.md M2.0) ──
+  // Wattson stdlib (wattson.cpu.estimates / wattson.gpu / wattson.tasks.attribution) requires
+  // power-rails counters AND CPU freq+idle counters in the captured trace. Most production
+  // traces don't enable them, so all wattson skills must check this capability before producing
+  // numeric results — if missing, return recording_recommendation instead of empty tables.
+  {
+    id: 'power_rails',
+    displayName: '功耗 Rails 估算（Wattson 前置）',
+    // _wattson_power_rails / power_rail_* counters; we probe the canonical `_wattson_cpu_states` derived view
+    // populated only when power_rails + cpu_freq + cpu_idle data sources are all enabled at capture.
+    primaryTable: '_wattson_cpu_states',
+    priority: 'optional',
+  },
+  {
+    id: 'cpu_freq_idle',
+    displayName: 'CPU 频率/Idle 状态（Wattson 前置）',
+    // android.dvfs already covers freq; this entry probes idle-state residency separately
+    // because some captures enable freq tracking without idle (incomplete for wattson).
+    primaryTable: 'cpu_idle_state',
+    priority: 'optional',
+  },
 ];
 
 /**

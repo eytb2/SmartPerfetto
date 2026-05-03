@@ -36,6 +36,7 @@ prerequisites:
     - slice
   modules:
     - android.binder
+    - android.frames.timeline
 
 triggers:
   keywords:

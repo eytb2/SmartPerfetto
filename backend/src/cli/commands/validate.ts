@@ -6,6 +6,13 @@
  * Validate Command
  *
  * Validates skill YAML files for syntax and semantic correctness.
+ *
+ * Tier/stdlib lint rules (added 2026-05 per docs/skills-audit-2026-05.md §7):
+ *   1. skill-tier-must-match-declared        — tier: S/A/B 与实际指标一致
+ *   2. skill-stdlib-detected-vs-declared     — SQL 用到的 stdlib 表 ⊂ prerequisites.modules
+ *   3. skill-include-budget-soft-cap         — prerequisites.modules.length ≤ 8 (warning)
+ *   4. skill-step-id-uniqueness              — 已有实现 (line ~188)
+ *   5. skill-vendor-override-runtime-conformant — additional_steps ≥ 1 + signatures ≥ 1 (errors)
  */
 
 import { Command } from 'commander';
@@ -14,6 +21,7 @@ import path from 'path';
 import yaml from 'js-yaml';
 import { SkillDefinition } from '../../services/skillEngine/types';
 import { validateSkillConditions } from '../../services/skillEngine/skillValidator';
+import { getPerfettoStdlibSymbolIndex } from '../../services/perfettoStdlibScanner';
 
 // ANSI color codes (fallback for chalk ESM issues)
 const colors = {
@@ -55,8 +63,120 @@ const SKILLS_DIR = path.join(__dirname, '../../../skills');
 const STRATEGIES_DIR = path.join(__dirname, '../../../strategies');
 
 /**
- * Validate a skill definition
+ * Tier + stdlib lint rules (rules 1, 2, 3 from docs/skills-audit-2026-05.md §7).
+ * Returns errors/warnings to merge into the file's overall result.
+ *
+ * Rule 1 — skill-tier-must-match-declared:
+ *   When `tier: S | A | B` is present, enforce structural conformance.
+ *   When absent, emit a single migration warning (do not break existing 121 skills).
+ *
+ * Rule 2 — skill-stdlib-detected-vs-declared:
+ *   Scan SQL for stdlib table refs (e.g. `android_startups`); ensure the owning
+ *   module appears in `prerequisites.modules`. Built-in tables (slice/thread/
+ *   process etc.) and tables defined inline (CREATE TABLE / WITH X AS) are
+ *   ignored.
+ *
+ * Rule 3 — skill-include-budget-soft-cap:
+ *   `prerequisites.modules.length > 8` emits a warning so PR review can
+ *   audit whether load-time cost is justified.
  */
+function validateTierAndStdlib(skill: SkillDefinition): { errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  const declaredTier = (skill as any).tier as 'S' | 'A' | 'B' | undefined;
+  const prereqModules: string[] = Array.isArray((skill as any).prerequisites?.modules)
+    ? (skill as any).prerequisites.modules.filter((m: unknown) => typeof m === 'string')
+    : [];
+  const stepCount = Array.isArray(skill.steps) ? skill.steps.length : 0;
+  const skillType = String((skill as any).type ?? 'atomic');
+
+  // ---- Rule 1: tier-must-match-declared ----
+  if (declaredTier !== undefined) {
+    if (!['S', 'A', 'B'].includes(declaredTier)) {
+      errors.push(`tier: invalid value '${declaredTier}', must be 'S' | 'A' | 'B'`);
+    } else if (declaredTier === 'S') {
+      // S: type must be composite (or deep), prerequisites.modules >= 2, steps >= 5
+      if (skillType !== 'composite' && skillType !== 'deep') {
+        errors.push(`tier=S requires type='composite' or 'deep' (got type='${skillType}')`);
+      }
+      if (prereqModules.length < 2) {
+        errors.push(`tier=S requires prerequisites.modules.length >= 2 (found ${prereqModules.length})`);
+      }
+      if (stepCount < 5) {
+        errors.push(`tier=S requires steps.length >= 5 (found ${stepCount})`);
+      }
+    } else if (declaredTier === 'A') {
+      // A: atomic with substantial logic, prerequisites.modules >= 1
+      if (prereqModules.length < 1) {
+        errors.push(`tier=A requires prerequisites.modules.length >= 1 (found 0)`);
+      }
+    } else if (declaredTier === 'B') {
+      // B: atomic single-purpose, prerequisites.modules >= 1
+      if (prereqModules.length < 1) {
+        errors.push(`tier=B requires prerequisites.modules.length >= 1 (found 0)`);
+      }
+    }
+  } else {
+    // Migration warning only — existing skills can keep working until M1 sweep adds tier.
+    warnings.push(`tier: field missing — please declare 'tier: S|A|B' (see docs/skills-audit-2026-05.md §6)`);
+  }
+
+  // ---- Rule 3: include-budget-soft-cap ----
+  if (prereqModules.length > 8) {
+    warnings.push(`prerequisites.modules.length=${prereqModules.length} exceeds soft cap of 8 (lint rule 3)`);
+  }
+
+  // ---- Rule 2: stdlib-detected-vs-declared ----
+  // Reuses the same lazily-cached symbol index as sqlIncludeInjector / claudeMcpServer
+  // so validate sees identical stdlib coverage at runtime. Keys/values are pre-lowercased.
+  const idx = getPerfettoStdlibSymbolIndex();
+  if (idx.tableToModule.size > 0) {
+    const allSql: string[] = [];
+    if (typeof (skill as any).sql === 'string') allSql.push((skill as any).sql);
+    if (Array.isArray(skill.steps)) {
+      for (const step of skill.steps) {
+        if (typeof (step as any).sql === 'string') allSql.push((step as any).sql);
+      }
+    }
+
+    if (allSql.length > 0) {
+      // Tables defined locally (CREATE TABLE/VIEW, WITH X AS, comma-chain Y AS) shadow stdlib names.
+      const localTables = new Set<string>();
+      for (const sql of allSql) {
+        const createMatches = sql.matchAll(/(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:PERFETTO\s+)?(?:VIEW|TABLE)\s+(?:IF\s+NOT\s+EXISTS\s+)?)([\w.]+)/gi);
+        for (const m of createMatches) localTables.add(m[1].toLowerCase());
+        const withMatches = sql.matchAll(/\bWITH\s+([\w]+)\s+AS\b/gi);
+        for (const m of withMatches) localTables.add(m[1].toLowerCase());
+        const withChainMatches = sql.matchAll(/,\s*([\w]+)\s+AS\s*\(/gi);
+        for (const m of withChainMatches) localTables.add(m[1].toLowerCase());
+      }
+
+      const declaredModules = new Set(prereqModules);
+      const reported = new Set<string>();
+      for (const sql of allSql) {
+        for (const m of sql.matchAll(/\b(?:FROM|JOIN)\s+([\w.]+)/gi)) {
+          const table = m[1].toLowerCase();
+          if (localTables.has(table) || idx.builtins.has(table)) continue;
+          const owningModule = idx.tableToModule.get(table);
+          if (!owningModule || reported.has(table)) continue;
+          // A declared module covers its descendants — `android.startup` covers `android.startup.startups`.
+          const declaredCovers = [...declaredModules].some(d => owningModule === d || owningModule.startsWith(d + '.'));
+          if (!declaredCovers) {
+            errors.push(
+              `SQL uses stdlib table '${table}' (owning module '${owningModule}') but ` +
+              `prerequisites.modules does not declare it (lint rule 2)`
+            );
+            reported.add(table);
+          }
+        }
+      }
+    }
+  }
+
+  return { errors, warnings };
+}
+
 function validateSkillDefinition(skill: SkillDefinition, filePath: string): ValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -282,6 +402,11 @@ function validateSkillDefinition(skill: SkillDefinition, filePath: string): Vali
   // Validate diagnostic rules (in diagnostic steps, not skill-level)
   // V2 diagnostics are defined within DiagnosticStep, not at skill level
 
+  // Tier + stdlib lint rules (1, 2, 3) — see docs/skills-audit-2026-05.md §7
+  const tierStdlib = validateTierAndStdlib(skill);
+  errors.push(...tierStdlib.errors);
+  warnings.push(...tierStdlib.warnings);
+
   return {
     file: filePath,
     valid: errors.length === 0,
@@ -309,26 +434,31 @@ function validateVendorOverrideDefinition(override: VendorOverrideDefinition, fi
     if (!override.meta.vendor) warnings.push('Missing field: meta.vendor');
   }
 
+  // Lint rule 5 — skill-vendor-override-runtime-conformant
+  // Per docs/skills-audit-2026-05.md §5: claudeMcpServer.ts:708 silently skips
+  // overrides whose `additional_steps.length === 0`, so empty overrides are
+  // dead diff. detectVendor() also requires at least one signature pattern to
+  // ever match. These are now errors (was warnings).
   const signatures = override.vendor_detection?.signatures;
-  if (signatures !== undefined) {
-    if (!Array.isArray(signatures)) {
-      errors.push('vendor_detection.signatures must be an array');
-    } else {
-      const validConfidences = new Set(['high', 'medium', 'low']);
-      signatures.forEach((sig, index) => {
-        if (!sig?.pattern || typeof sig.pattern !== 'string') {
-          errors.push(`vendor_detection.signatures[${index}]: Missing required field: pattern`);
-        }
-        if (sig?.confidence && !validConfidences.has(sig.confidence)) {
-          warnings.push(
-            `vendor_detection.signatures[${index}]: Unknown confidence '${sig.confidence}' ` +
-            `(valid: ${[...validConfidences].join(', ')})`
-          );
-        }
-      });
-    }
+  if (signatures === undefined) {
+    errors.push('vendor_detection.signatures: required (lint rule 5 — overrides without signatures never match at runtime)');
+  } else if (!Array.isArray(signatures)) {
+    errors.push('vendor_detection.signatures must be an array');
+  } else if (signatures.length === 0) {
+    errors.push('vendor_detection.signatures: must contain >= 1 pattern (lint rule 5)');
   } else {
-    warnings.push('Missing field: vendor_detection.signatures');
+    const validConfidences = new Set(['high', 'medium', 'low']);
+    signatures.forEach((sig, index) => {
+      if (!sig?.pattern || typeof sig.pattern !== 'string') {
+        errors.push(`vendor_detection.signatures[${index}]: Missing required field: pattern`);
+      }
+      if (sig?.confidence && !validConfidences.has(sig.confidence)) {
+        warnings.push(
+          `vendor_detection.signatures[${index}]: Unknown confidence '${sig.confidence}' ` +
+          `(valid: ${[...validConfidences].join(', ')})`
+        );
+      }
+    });
   }
 
   const hasAdditionalSteps = Array.isArray(override.additional_steps) && override.additional_steps.length > 0;
@@ -336,7 +466,10 @@ function validateVendorOverrideDefinition(override: VendorOverrideDefinition, fi
   const hasOverrideParams = !!override.override_params && Object.keys(override.override_params).length > 0;
 
   if (!hasAdditionalSteps && !hasThresholdOverrides && !hasOverrideParams) {
-    warnings.push('Override defines no additional_steps, thresholds_override, or override_params');
+    errors.push(
+      'Vendor override has no runtime effect — declare at least one of: ' +
+      'additional_steps (>=1, with id/name/sql), thresholds_override, or override_params (lint rule 5)'
+    );
   }
 
   if (override.additional_steps !== undefined) {
@@ -362,8 +495,12 @@ function validateVendorOverrideDefinition(override: VendorOverrideDefinition, fi
           defined.add(step.id);
         }
 
+        // Lint rule 5: each additional_step must carry id, name, AND sql
         if (!step.name) {
-          warnings.push(`${stepPath}: Missing field: name`);
+          errors.push(`${stepPath}: Missing required field: name (lint rule 5)`);
+        }
+        if (step.sql === undefined) {
+          errors.push(`${stepPath}: Missing required field: sql (lint rule 5)`);
         }
 
         if (step.save_as) {

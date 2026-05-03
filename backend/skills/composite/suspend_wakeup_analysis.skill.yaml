@@ -42,6 +42,7 @@ prerequisites:
     - sched_slice
   modules:
     - android.suspend
+    - android.wakeups
 
 triggers:
   keywords:

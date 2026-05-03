@@ -1,0 +1,92 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# S 级 Atomic-Composite Skill 模板（"atomic 目录但 type=composite" 模式）
+# =============================================================================
+# 适用：放在 atomic/ 目录但实质是多阶段分析的 skill（startup_slow_reasons 模式）。
+# 这是 SmartPerfetto 的特殊约定：当 skill 主题"逻辑上属于某个 atomic 主题"
+# （如 "startup 的慢原因检测"）但实现上需要多步骤时使用。
+#
+# 与 composite_S_template.skill.yaml 的区别：放在 atomic/ 目录，但 type=composite
+# 的语义不变。validate:skills lint rule 1 会按 type 而非 dir 判定 tier。
+#
+# 参考实现: backend/skills/atomic/startup_slow_reasons.skill.yaml (619 行)
+
+name: {{SKILL_ID}}
+version: "1.0"
+type: composite                        # 关键：dir=atomic 但 type=composite
+category: {{DOMAIN}}
+tier: S
+
+meta:
+  display_name: "{{显示名}}"
+  description: "{{一句话说明}}"
+  icon: "{{material-icon}}"
+  tags: [{{tag1}}, {{tag2}}]
+
+prerequisites:
+  modules:
+    - {{stdlib_module_1}}
+    - {{stdlib_module_2}}
+
+inputs: []
+
+# S 级最少 5 步骤，但 atomic-composite 模式可以在单 skill 里组织 多个 detection 子查询
+steps:
+  - id: {{primary_query}}
+    type: atomic
+    name: "{{主查询}}"
+    display:
+      level: key                       # L1 + 关键指标
+      layer: duration
+      title: "{{标题}}"
+      columns:
+        - name: id
+          label: "ID"
+          type: number
+        - name: dur_ms
+          label: "耗时(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+    sql: |
+      SELECT
+        startup_id AS id,
+        dur / 1e6 AS dur_ms
+      FROM {{stdlib_table_1}}
+
+  - id: {{detection_query}}
+    type: atomic
+    name: "{{多原因检测}}"
+    description: "{{在单条 SQL 中检测 N 种已知原因，UNION ALL 模式}}"
+    display:
+      level: list
+      layer: number
+      title: "{{已知原因检测结果}}"
+      columns:
+        - name: reason_code
+          label: "原因代码"
+          type: string
+        - name: reason_label
+          label: "原因说明"
+          type: string
+        - name: hit_count
+          label: "命中"
+          type: number
+        - name: severity
+          label: "严重度"
+          type: string
+    sql: |
+      -- "20+ 原因检测" 模式：每个原因一个 SELECT，全部 UNION ALL
+      WITH r1 AS (SELECT 'R1' AS code, '{{原因 1 说明}}' AS label, COUNT(*) AS cnt FROM ...),
+           r2 AS (SELECT 'R2' AS code, '{{原因 2 说明}}' AS label, COUNT(*) AS cnt FROM ...)
+      SELECT code AS reason_code, label AS reason_label, cnt AS hit_count,
+             CASE WHEN cnt >= 5 THEN 'critical' WHEN cnt >= 1 THEN 'warning' ELSE 'info' END AS severity
+      FROM r1 WHERE cnt > 0
+      UNION ALL
+      SELECT code, label, cnt,
+             CASE WHEN cnt >= 5 THEN 'critical' WHEN cnt >= 1 THEN 'warning' ELSE 'info' END
+      FROM r2 WHERE cnt > 0
+      ORDER BY hit_count DESC

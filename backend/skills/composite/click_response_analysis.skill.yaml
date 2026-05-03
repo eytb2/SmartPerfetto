@@ -49,6 +49,7 @@ prerequisites:
   modules:
     - android.input
     - android.binder
+    - android.frames.timeline
 
 inputs:
   - name: package

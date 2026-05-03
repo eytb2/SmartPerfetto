@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# B 级 Atomic Skill 模板（数据提供者）
+# =============================================================================
+# 适用：单事实查询，atomic 数据提供器。
+# 例如 startup_binder_in_range / cpu_freq_timeline 等。
+# 不强行膨胀步骤数，但**强制 ≥1 stdlib 模块**（B 级不允许裸 SQL 偷懒）。
+#
+# 参考: backend/skills/atomic/binder_in_range.skill.yaml (85 行)
+
+name: {{SKILL_ID}}
+version: "1.0"
+type: atomic
+category: {{DOMAIN}}
+tier: B
+
+meta:
+  display_name: "{{显示名}}"
+  description: "{{一句话说明 — 单事实数据提供}}"
+  icon: "{{material-icon}}"
+  tags: [{{tag1}}]
+
+# B 级必须 ≥1 stdlib（lint rule 1 校验）
+prerequisites:
+  modules:
+    - {{stdlib_module}}
+
+inputs: []
+
+# B 级通常单步骤
+steps:
+  - id: fetch
+    type: atomic
+    name: "{{获取 X 数据}}"
+    display:
+      level: list
+      layer: duration | number
+      title: "{{标题}}"
+      columns:                         # B 级强制 columns 完整定义
+        - name: ts
+          label: "时间"
+          type: timestamp
+        - name: name
+          label: "名称"
+          type: string
+        - name: dur_ms
+          label: "耗时(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+    sql: |
+      SELECT
+        ts,
+        name,
+        dur / 1e6 AS dur_ms
+      FROM {{stdlib_table}}
+      WHERE {{condition}}
+      ORDER BY ts ASC

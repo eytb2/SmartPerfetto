@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# Vendor Override 模板（OEM 平台特化）
+# =============================================================================
+# 放置位置: backend/skills/vendors/{oem}/{scene}.override.yaml
+#   {oem} ∈ {pixel, qualcomm, mtk, samsung, honor, oppo, vivo, xiaomi}
+#   {scene} 与某个已注册 base skill 的 id 对应（通常是 composite/<scene>_analysis）
+#
+# 运行时合同（详见 docs/skills-audit-2026-05.md §5）:
+# - SkillRegistry.loadVendorOverrides() 加载文件 → 按 extends 索引
+# - claudeRuntime.detectVendor() 探测 trace 的 vendor → 缓存到 vendorCache
+# - claudeMcpServer.ts:702-717 在 invoke_skill 响应里挂 vendorOverrideHint
+# - **空 additional_steps 在 line 708 被守卫静默跳过 → 不要加空文件！**
+#
+# Lint rule 5 (skill-vendor-override-runtime-conformant) 强制要求:
+# 1. additional_steps.length ≥ 1
+# 2. 每个 additional_step 必须有 id, name, sql
+# 3. extends 必须指向已注册 skill_id
+# 4. vendor_detection.signatures.length ≥ 1
+#
+# 参考实现: backend/skills/vendors/mtk/startup.override.yaml
+
+extends: {{base_skill_id}}             # 必须是已注册的 skill_id
+                                       # e.g. composite/startup_analysis、composite/cpu_analysis
+version: "1.0"
+
+meta:
+  display_name: "{{OEM 平台 + 分析名}}"  # e.g. "MTK 平台启动分析"
+  description: "{{描述}}"
+  vendor: {{OEM_LOWER}}                 # pixel / qualcomm / mtk / ... 必须 lowercase
+  platform: "{{Platform Name}}"         # MediaTek / Qualcomm / Google Tensor / ...
+
+# Vendor 识别规则 — claudeRuntime.detectVendor() 用这些 patterns 匹配 trace metadata
+# 规则 5 强制 ≥1 条
+vendor_detection:
+  signatures:
+    - pattern: "{{*OEM_KEYWORD*}}"     # GLOB pattern
+      confidence: high                  # high / medium / low
+    - pattern: "{{*ALT_KEYWORD*}}"
+      confidence: medium
+
+# 额外的 OEM 特化分析步骤 — 当 vendor 探测命中时，作为 hint ID 推给 Claude
+# **必须 ≥1 步骤**，每步必须有 id + name + sql
+additional_steps:
+  - id: {{oem_specific_step_1}}
+    name: "{{OEM 特定事件}}"
+    description: "{{说明}}"
+    for_each: {{parent_iterator}}      # 可选：若 base skill 有 iterator
+    sql: |
+      -- OEM 平台专属信号查询
+      SELECT
+        s.name AS event,
+        s.dur / 1e6 AS dur_ms
+      FROM slice s
+      WHERE s.name GLOB '{{*OEM_PATTERN*}}'
+        {{#if parent_iterator}}
+        AND s.ts >= (SELECT ts FROM {{parent_table}} WHERE id = ${item.id})
+        AND s.ts <= (SELECT ts + dur FROM {{parent_table}} WHERE id = ${item.id})
+        {{/if}}
+      ORDER BY s.dur DESC
+
+  - id: {{oem_specific_step_2}}
+    name: "{{OEM 性能服务}}"
+    sql: |
+      -- 第二步示例：可继续添加更多 OEM 特化步骤
+      SELECT s.name AS perf_event, s.dur / 1e6 AS dur_ms
+      FROM slice s
+      WHERE s.name GLOB '{{*PERF_PATTERN*}}'
+      ORDER BY s.dur DESC

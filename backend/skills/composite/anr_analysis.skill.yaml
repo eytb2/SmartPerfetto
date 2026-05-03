@@ -49,6 +49,7 @@ prerequisites:
   modules:
     - android.anrs
     - android.binder
+    - android.memory.lmk
 
 inputs:
   - name: process_name

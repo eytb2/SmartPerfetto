@@ -1,0 +1,198 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# S 级 Composite Skill 模板（旗舰分析）
+# =============================================================================
+# 基于 backend/skills/composite/cpu_analysis.skill.yaml 反推。
+# 适用：跨多 stdlib 模块的多阶段分析 skill，对标 docs/skills-audit-2026-05.md
+# Section 6 "S 级规范"。
+#
+# 复制时:
+# 1. 替换所有 {{...}} 占位符
+# 2. 删除本注释块及示例 step 中的 {{...}} 注释
+# 3. 放到 backend/skills/composite/<your_skill_id>.skill.yaml
+# 4. 跑 npm run validate:skills 验证
+# 5. 至少加一条 trace fixture 测试到 tests/skill-eval/
+
+name: {{SKILL_ID}}                    # snake_case，全 registry 内唯一
+version: "1.0"                        # MAJOR.MINOR
+type: composite                        # S 级必须 composite
+category: {{DOMAIN}}                  # e.g. app_lifecycle / rendering / power
+tier: S                               # 新增字段，validate:skills lint rule 1 强制
+
+meta:
+  display_name: "{{显示名}}"
+  description: "{{一句话说明 skill 用途}}"
+  icon: "{{material-icon-name}}"      # 见 https://fonts.google.com/icons
+  tags: [{{tag1}}, {{tag2}}, {{tag3}}]
+
+# S 级强制 ≥2 stdlib 模块（lint rule 2 校验 SQL detected ⊂ declared）
+prerequisites:
+  modules:
+    - {{stdlib_module_1}}             # e.g. android.startup.startups
+    - {{stdlib_module_2}}             # e.g. android.frames.timeline
+
+# 显式声明（即使为空）—— 防 schema validator 误报
+inputs: []
+
+# S 级必须 ≥5 步骤，至少覆盖 L1（overview）+ L2（list）两层
+steps:
+  # ===========================================================================
+  # Step 1 (L1 — overview): 关键指标聚合
+  # ===========================================================================
+  - id: {{step_1_id}}_overview
+    type: atomic
+    name: "{{步骤 1 中文名 — overview}}"
+    display:
+      level: overview                  # L1
+      layer: number | percent | duration
+      title: "{{标题}}"
+      columns:
+        - name: {{col1}}
+          label: "{{列标签}}"
+          type: number                  # number | string | duration | timestamp | percentage | bytes
+          format: compact               # 可选格式提示
+        - name: {{col2}}
+          label: "{{列标签 2}}"
+          type: duration
+          format: duration_ms
+          unit: ms
+    sql: |
+      -- 概览查询：聚合关键指标
+      SELECT
+        COUNT(*) AS {{col1}},
+        SUM(dur) / 1e6 AS {{col2}}
+      FROM {{stdlib_table_1}}
+      WHERE {{condition}}
+
+  # ===========================================================================
+  # Step 2 (L2 — list): 详情列表，作为 expandableData 的父行
+  # ===========================================================================
+  - id: {{step_2_id}}_list
+    type: atomic
+    name: "{{步骤 2 中文名 — list}}"
+    display:
+      level: list                      # L2
+      layer: duration
+      title: "{{标题}}"
+      columns:
+        - name: id
+          label: "ID"
+          type: number
+        - name: ts
+          label: "起始时间"
+          type: timestamp
+        - name: dur_ms
+          label: "持续(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+    sql: |
+      SELECT
+        s.startup_id AS id,
+        s.ts,
+        s.dur / 1e6 AS dur_ms
+      FROM {{stdlib_table_1}} s
+      ORDER BY s.dur DESC
+      LIMIT 50
+
+  # ===========================================================================
+  # Step 3 (L3 — detail iterator): 对每个 list 父行展开 detail
+  # 这一步是 expandableData 在运行时被 skillExecutor.ts:1543 自动合成的来源。
+  # 没有 for_each 子步骤 → 前端展开会空。
+  # ===========================================================================
+  - id: {{step_3_id}}_per_item
+    type: iterator
+    for_each: {{step_2_id}}_list      # 引用 step 2 的 id
+    name: "{{每行详情}}"
+    display:
+      level: detail                    # L3
+      layer: duration
+      title: "{{标题 — ${item.id}}}"
+      columns:
+        - name: phase
+          label: "阶段"
+          type: string
+        - name: dur_ms
+          label: "耗时(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+    sql: |
+      -- 注意 ${item.id} / ${item.ts} 等参数化引用
+      SELECT
+        phase,
+        dur / 1e6 AS dur_ms
+      FROM {{stdlib_table_2}}
+      WHERE startup_id = ${item.id}
+
+  # ===========================================================================
+  # Step 4 (L1 — diagnosis summary): 诊断总结
+  # ===========================================================================
+  - id: {{step_4_id}}_diagnosis
+    type: atomic
+    name: "{{诊断摘要}}"
+    display:
+      level: summary                   # L1 + diagnosis
+      layer: percent
+      title: "{{诊断结论}}"
+      columns:
+        - name: severity
+          label: "严重度"
+          type: string
+        - name: reason
+          label: "原因"
+          type: string
+        - name: count
+          label: "命中数"
+          type: number
+    sql: |
+      -- 阈值驱动诊断（参考 cpu_analysis.skill.yaml）
+      WITH issues AS (
+        SELECT 'reason_x' AS reason, COUNT(*) AS count
+        FROM {{stdlib_table_1}}
+        WHERE {{threshold_condition}}
+      )
+      SELECT
+        CASE
+          WHEN count > 10 THEN 'critical'
+          WHEN count > 3  THEN 'warning'
+          ELSE 'info'
+        END AS severity,
+        reason,
+        count
+      FROM issues
+
+  # ===========================================================================
+  # Step 5 (L4 — deep / optional): 深度根因
+  # ===========================================================================
+  - id: {{step_5_id}}_deep
+    type: atomic
+    name: "{{深度根因 — 可选}}"
+    display:
+      level: deep                      # L4
+      layer: duration
+      title: "{{标题}}"
+      columns:
+        - name: root_cause
+          label: "根因"
+          type: string
+        - name: evidence
+          label: "证据"
+          type: string
+    sql: |
+      -- 多层 JOIN 的根因分析
+      SELECT
+        '{{root_cause_label}}' AS root_cause,
+        '{{evidence_template}}' AS evidence
+      FROM {{stdlib_table_1}} a
+      JOIN {{stdlib_table_2}} b ON a.id = b.id
+      WHERE {{deep_condition}}
+
+# 可选: 后处理 / 综合块（jank_frame_detail / scene_reconstruction 用了大块）
+# synthesis:
+#   - id: aggregate_all
+#     type: aggregation
+#     ...
