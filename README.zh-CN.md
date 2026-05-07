@@ -146,10 +146,21 @@ cp backend/.env.example backend/.env
 
 ### 运行脚本
 
+第一次从源码启动、刚拉完新代码，或者 AI 面板需要通过后端 HTTP RPC 重新打开 trace 时，使用 `./scripts/start-dev.sh` 启动完整开发栈。不要只跑 `cd backend && npm run dev`：它只能启动 Express 后端，不会启动/校验 Perfetto UI watch 路径，也覆盖不到 AI 分析依赖的 trace-processor 和前端联动。
+
+Linux 本地运行时，如果分析失败并报 `Claude Code native binary not found at .../node_modules/@anthropic-ai/claude-agent-sdk-.../claude`，说明 backend 依赖安装时没有装上当前平台对应的 Claude Agent SDK optional native 包。清掉 backend 依赖并启用 optional dependencies 重装，然后通过项目脚本重启：
+
+```bash
+rm -rf backend/node_modules
+cd backend && npm ci --include=optional
+cd ..
+./scripts/start-dev.sh
+```
+
 | 脚本 | 使用场景 |
 |------|---------|
 | `./start.sh` | ✅ **默认推荐** — 日常使用、修改后端/策略/Skill |
-| `./scripts/start-dev.sh` | 修改 AI 插件 UI（`ai_panel.ts`、`styles.scss` 等）时使用，需要 `perfetto/` submodule |
+| `./scripts/start-dev.sh` | 第一次源码开发启动、刚拉完新代码、完整前后端联调，或修改 AI 插件 UI（`ai_panel.ts`、`styles.scss` 等）时使用，需要 `perfetto/` submodule |
 
 ### 源码构建 Docker 镜像
 

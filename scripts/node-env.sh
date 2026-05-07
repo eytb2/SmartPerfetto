@@ -146,6 +146,42 @@ smartperfetto_verify_backend_native_modules() {
   (
     cd "$project_root/backend" || exit 1
     node -e "const Database = require('better-sqlite3'); const db = new Database(':memory:'); db.close();"
+    node <<'NODE'
+const fs = require('fs');
+const path = require('path');
+
+function detectClaudeAgentSdkPackageKey() {
+  if (process.platform === 'linux') {
+    const report = typeof process.report?.getReport === 'function'
+      ? process.report.getReport()
+      : undefined;
+    const glibc = report?.header?.glibcVersionRuntime;
+    return `linux-${process.arch}${glibc ? '' : '-musl'}`;
+  }
+  return `${process.platform}-${process.arch}`;
+}
+
+const sdkMain = require.resolve('@anthropic-ai/claude-agent-sdk');
+const nodeModules = path.resolve(path.dirname(sdkMain), '..', '..');
+const packageName = `@anthropic-ai/claude-agent-sdk-${detectClaudeAgentSdkPackageKey()}`;
+const binaryName = process.platform === 'win32' ? 'claude.exe' : 'claude';
+const binaryPath = path.join(nodeModules, ...packageName.split('/'), binaryName);
+
+if (!fs.existsSync(binaryPath)) {
+  console.error(`Missing Claude Agent SDK native binary: ${binaryPath}`);
+  console.error('Reinstall backend dependencies with optional dependencies enabled: npm ci --include=optional');
+  process.exit(1);
+}
+
+if (process.platform !== 'win32') {
+  try {
+    fs.accessSync(binaryPath, fs.constants.X_OK);
+  } catch {
+    console.error(`Claude Agent SDK native binary is not executable: ${binaryPath}`);
+    process.exit(1);
+  }
+}
+NODE
   )
 }
 
@@ -154,9 +190,9 @@ smartperfetto_install_backend_deps() {
   (
     cd "$project_root/backend" || exit 1
     if [ -f package-lock.json ]; then
-      npm ci
+      npm ci --include=optional
     else
-      npm install
+      npm install --include=optional
     fi
   )
   smartperfetto_write_backend_marker "$project_root"

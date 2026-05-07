@@ -146,10 +146,21 @@ The repo ships with a pre-built Perfetto UI in `frontend/`, so the local script 
 
 ### Runtime Scripts
 
+For a first-time source checkout, after pulling fresh code, or when the AI panel must reopen traces through backend HTTP RPC, start the full dev stack with `./scripts/start-dev.sh`. Do not only run `cd backend && npm run dev`: that starts Express, but it does not bring up the Perfetto UI watch path or validate the trace-processor/frontend pieces needed by AI analysis.
+
+On Linux, if analysis fails with `Claude Code native binary not found at .../node_modules/@anthropic-ai/claude-agent-sdk-.../claude`, the backend dependencies were installed without the Claude Agent SDK optional native package for this platform. Reinstall backend dependencies with optional dependencies enabled, then restart through the project script:
+
+```bash
+rm -rf backend/node_modules
+cd backend && npm ci --include=optional
+cd ..
+./scripts/start-dev.sh
+```
+
 | Script | Use when |
 |--------|----------|
 | `./start.sh` | ✅ Default — regular use, backend changes, strategy/skill edits |
-| `./scripts/start-dev.sh` | Only when modifying the AI plugin UI (`ai_panel.ts`, `styles.scss` etc.) — requires `perfetto/` submodule |
+| `./scripts/start-dev.sh` | First-time source dev setup, freshly pulled code, full frontend/backend debugging, or AI plugin UI edits (`ai_panel.ts`, `styles.scss` etc.) — requires `perfetto/` submodule |
 
 ### Source Docker Build
 
