@@ -22,7 +22,7 @@ jobs:
           fetch-depth: 0
 
       - name: Sync Upstream
-        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.1
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.3
         with:
           target_sync_branch: main
           # REQUIRED 'target_repo_token' exactly like this!
