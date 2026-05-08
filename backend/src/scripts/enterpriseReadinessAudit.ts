@@ -218,13 +218,73 @@ function auditAcceptanceEvidence(markdown: string, filePath: string): ReadinessC
   );
 }
 
+function markdownTableValue(markdown: string, label: string): string | null {
+  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = markdown.match(new RegExp(`^\\|\\s*${escapedLabel}\\s*\\|\\s*([^|]+?)\\s*\\|`, 'm'));
+  return match?.[1]?.trim() ?? null;
+}
+
+function parseMarkdownNumber(value: string | null): number | null {
+  if (!value || value.toLowerCase() === 'n/a') return null;
+  const parsed = Number.parseFloat(value.replace(/,/g, ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isPresentMarkdownMetric(value: string | null): boolean {
+  return value !== null && value.trim().length > 0 && value.trim().toLowerCase() !== 'n/a';
+}
+
+function missingLoadReportMetricEvidence(markdown: string): string[] {
+  const missing: string[] = [];
+  const observedUsers = parseMarkdownNumber(markdownTableValue(markdown, 'Observed online users'));
+  const targetRunning = parseMarkdownNumber(markdownTableValue(markdown, 'Target running runs'));
+  const targetPending = parseMarkdownNumber(markdownTableValue(markdown, 'Target pending runs'));
+  const startedRuns = parseMarkdownNumber(markdownTableValue(markdown, 'Started analysis runs'));
+  const startFailures = parseMarkdownNumber(markdownTableValue(markdown, 'Start failures'));
+  const missingIds = parseMarkdownNumber(markdownTableValue(markdown, 'Started runs missing ids'));
+  const maxRunning = parseMarkdownNumber(markdownTableValue(markdown, 'Max running runs observed'));
+  const maxPending = parseMarkdownNumber(markdownTableValue(markdown, 'Max queued/pending runs observed'));
+  const runningSamples = parseMarkdownNumber(markdownTableValue(markdown, 'Running-in-range samples'));
+  const pendingSamples = parseMarkdownNumber(markdownTableValue(markdown, 'Queued/pending samples'));
+  const maxQueueLength = parseMarkdownNumber(markdownTableValue(markdown, 'Max queue length'));
+  const llmCallDelta = parseMarkdownNumber(markdownTableValue(markdown, 'LLM call delta'));
+
+  if (observedUsers === null || observedUsers < 50) missing.push('observed online users < 50');
+  if (targetRunning === null || targetRunning < 5 || targetRunning > 15) missing.push('target running runs not in 5-15 range');
+  if (targetPending === null || targetPending < 1) missing.push('target pending runs missing');
+  if (startedRuns === null || targetRunning === null || targetPending === null || startedRuns < targetRunning + targetPending) {
+    missing.push('started analysis runs < requested target');
+  }
+  if (startFailures !== 0) missing.push('start failures not zero');
+  if (missingIds !== 0) missing.push('started runs missing ids not zero');
+  if (maxRunning === null || maxRunning < 5 || maxRunning > 15) missing.push('max running runs not in 5-15 range');
+  if (runningSamples === null || runningSamples < 2) missing.push('running runs stable samples < 2');
+  if (maxPending === null || maxPending < 1) missing.push('queued/pending runs not observed');
+  if (pendingSamples === null || pendingSamples < 2) missing.push('queued/pending stable samples < 2');
+  if (!isPresentMarkdownMetric(markdownTableValue(markdown, 'Overall p50'))) missing.push('missing overall p50');
+  if (!isPresentMarkdownMetric(markdownTableValue(markdown, 'Overall p95'))) missing.push('missing overall p95');
+  if (!isPresentMarkdownMetric(markdownTableValue(markdown, 'Error rate'))) missing.push('missing error rate');
+  if (maxQueueLength === null) missing.push('missing max queue length');
+  if (
+    !isPresentMarkdownMetric(markdownTableValue(markdown, 'Max worker RSS'))
+    && !isPresentMarkdownMetric(markdownTableValue(markdown, 'Max lease RSS'))
+  ) {
+    missing.push('missing worker/lease RSS');
+  }
+  if (!isPresentMarkdownMetric(markdownTableValue(markdown, 'LLM cost delta'))) missing.push('missing LLM cost delta');
+  if (llmCallDelta === null || llmCallDelta <= 0) missing.push('LLM call delta <= 0');
+
+  return missing;
+}
+
 function auditLoadReport(markdown: string, filePath: string): ReadinessCheck {
   const lower = markdown.toLowerCase();
   const hasPendingStatus = lower.includes('status: pending');
   const hasAcceptancePass = markdown.includes('Acceptance status: passed');
   const hasPreflightMarker = lower.includes('preflight');
+  const missingMetrics = missingLoadReportMetricEvidence(markdown);
 
-  if (hasPendingStatus || !hasAcceptancePass || hasPreflightMarker) {
+  if (hasPendingStatus || !hasAcceptancePass || hasPreflightMarker || missingMetrics.length > 0) {
     return blocked(
       'load-test-report-final',
       `${path.basename(filePath)} is not a final passing load-test report.`,
@@ -232,6 +292,7 @@ function auditLoadReport(markdown: string, filePath: string): ReadinessCheck {
         hasPendingStatus ? 'contains Status: pending' : 'does not contain Status: pending',
         hasAcceptancePass ? 'contains passing acceptance marker' : 'missing passing acceptance marker',
         hasPreflightMarker ? 'contains preflight marker' : 'does not contain preflight marker',
+        ...missingMetrics,
       ],
     );
   }

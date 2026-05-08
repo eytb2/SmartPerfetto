@@ -39,6 +39,54 @@ function completeReadme(): string {
   ].join('\n');
 }
 
+function finalLoadReport(): string {
+  return [
+    '# Enterprise Acceptance Load Test Report',
+    '',
+    'Acceptance status: passed',
+    '',
+    '## Configuration',
+    '',
+    '| Metric | Value |',
+    '| --- | ---: |',
+    '| Online users | 50 |',
+    '| Observed online users | 50 |',
+    '| Target running runs | 10 |',
+    '| Target pending runs | 5 |',
+    '| Max error rate | 1.00% |',
+    '| Duration | 300000ms |',
+    '| Trace count | 1 |',
+    '',
+    '## Summary',
+    '',
+    '| Metric | Value |',
+    '| --- | ---: |',
+    '| Total HTTP requests | 500 |',
+    '| Failed HTTP requests | 0 |',
+    '| Error rate | 0.00% |',
+    '| Overall p50 | 42ms |',
+    '| Overall p95 | 120ms |',
+    '| Started analysis runs | 15 |',
+    '| Start failures | 0 |',
+    '| Started runs missing ids | 0 |',
+    '| Max running runs observed | 10 |',
+    '| Max queued/pending runs observed | 5 |',
+    '| Running-in-range samples | 3 |',
+    '| Queued/pending samples | 3 |',
+    '| Max queue length | 5 |',
+    '| Pre-run runtime baseline | yes |',
+    '| Max worker RSS | 256.0 MiB |',
+    '| Max lease RSS | 128.0 MiB |',
+    '| Initial LLM cost | 0.75 |',
+    '| Final LLM cost | 1.23 |',
+    '| LLM cost delta | 0.48 |',
+    '| Initial LLM calls | 3 |',
+    '| Final LLM calls | 4 |',
+    '| LLM call delta | 1 |',
+    '',
+  ].join('\n');
+}
+
 describe('enterprise readiness audit', () => {
   it('parses artifact paths and require-ready mode', () => {
     const cwd = '/tmp/smartperfetto/backend';
@@ -107,7 +155,7 @@ describe('enterprise readiness audit', () => {
     try {
       const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
       const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
-      const loadTestReportPath = await writeFixture(tmpDir, 'load.md', 'Acceptance status: passed\n');
+      const loadTestReportPath = await writeFixture(tmpDir, 'load.md', finalLoadReport());
       const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', 'Coverage status: complete\n');
       const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
 
@@ -123,6 +171,39 @@ describe('enterprise readiness audit', () => {
       expect(report.ready).toBe(true);
       expect(report.checks.every(check => check.status === 'passed')).toBe(true);
       expect(determineEnterpriseReadinessAuditExitCode(report, { requireReady: true })).toBe(0);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('requires final load report metrics, not just a passing marker', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
+    try {
+      const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
+      const loadTestReportPath = await writeFixture(tmpDir, 'load.md', 'Acceptance status: passed\n');
+      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', 'Coverage status: complete\n');
+      const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
+
+      const report = buildEnterpriseReadinessAuditReport({
+        readmePath,
+        acceptanceEvidencePath,
+        loadTestReportPath,
+        rssBenchmarkPath,
+        releaseNotesPath,
+        requireReady: true,
+      });
+
+      expect(report.ready).toBe(false);
+      expect(report.checks.find(check => check.id === 'load-test-report-final')).toMatchObject({
+        status: 'blocked',
+        evidence: expect.arrayContaining([
+          'observed online users < 50',
+          'missing overall p50',
+          'missing worker/lease RSS',
+          'LLM call delta <= 0',
+        ]),
+      });
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }
@@ -172,7 +253,7 @@ describe('enterprise readiness audit', () => {
     try {
       const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
       const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
-      const loadTestReportPath = await writeFixture(tmpDir, 'load.md', 'Acceptance status: passed\n');
+      const loadTestReportPath = await writeFixture(tmpDir, 'load.md', finalLoadReport());
       const rssBenchmarkPath = await writeFixture(
         tmpDir,
         'rss.md',
@@ -212,7 +293,7 @@ describe('enterprise readiness audit', () => {
     try {
       const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme().replace('- [x] D10 scenario\n', ''));
       const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
-      const loadTestReportPath = await writeFixture(tmpDir, 'load.md', 'Acceptance status: passed\n');
+      const loadTestReportPath = await writeFixture(tmpDir, 'load.md', finalLoadReport());
       const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', 'Coverage status: complete\n');
       const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
 
