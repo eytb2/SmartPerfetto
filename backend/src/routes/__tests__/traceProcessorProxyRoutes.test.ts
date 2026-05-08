@@ -42,6 +42,7 @@ let upstreamServer: Server;
 let upstreamSockets: Set<NetSocket>;
 let upstreamPort: number;
 let lease: TraceProcessorLeaseRecord;
+let queryRawMock: jest.MockedFunction<(traceId: string, body: Buffer, options?: any) => Promise<Buffer>>;
 
 function restoreEnvValue(key: string, value: string | undefined): void {
   if (value === undefined) {
@@ -174,6 +175,7 @@ beforeEach(async () => {
 
   seedEnterpriseGraph();
   lease = createReadyLease();
+  queryRawMock = jest.fn(async (_traceId: string, body: Buffer) => body);
   setTraceProcessorServiceForTests({
     getOrLoadTrace: jest.fn(async () => ({
       id: 'trace-a',
@@ -191,6 +193,7 @@ beforeEach(async () => {
       port: upstreamPort,
       processor: {status: 'ready'},
     })),
+    queryRaw: queryRawMock,
   } as any);
 });
 
@@ -233,6 +236,11 @@ describe('trace processor lease proxy routes', () => {
     );
     expect(queryRes.status).toBe(200);
     expect(Buffer.from(queryRes.body)).toEqual(queryBody);
+    expect(queryRawMock).toHaveBeenCalledWith(
+      'trace-a',
+      queryBody,
+      { priority: 'p0' },
+    );
   });
 
   it('hides leases from other workspaces', async () => {

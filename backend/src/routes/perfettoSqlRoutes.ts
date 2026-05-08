@@ -18,6 +18,7 @@ import { PerfettoSqlSkill } from '../services/perfettoSqlSkill';
 import { PerfettoSkillType } from '../types/perfettoSql';
 import type { PerfettoSqlRequest } from '../types/perfettoSql';
 import { SkillAnalysisAdapter, createSkillAnalysisAdapter } from '../services/skillEngine/skillAnalysisAdapter';
+import { normalizeTraceProcessorQueryPriority } from '../services/traceProcessorSqlWorker';
 
 const router = express.Router();
 
@@ -559,7 +560,7 @@ router.get('/skills', (_req, res) => {
  */
 router.post('/sql', async (req, res) => {
   try {
-    const { traceId, sql } = req.body;
+    const { traceId, sql, priority: priorityInput } = req.body;
 
     if (!traceId) {
       return res.status(400).json({
@@ -584,7 +585,11 @@ router.post('/sql', async (req, res) => {
       });
     }
 
-    const result = await traceProcessorService.query(traceId, sql);
+    const priority = normalizeTraceProcessorQueryPriority(
+      req.get('x-smartperfetto-query-priority') || priorityInput,
+      'p0',
+    );
+    const result = await traceProcessorService.query(traceId, sql, { priority });
 
     if (result.error) {
       return res.status(400).json({

@@ -1,4 +1,11 @@
-import { decodeQueryResult, decodeVarint, encodeVarint } from '../traceProcessorProtobuf';
+import {
+  decodeQueryArgsSql,
+  decodeQueryResult,
+  decodeVarint,
+  encodeQueryArgs,
+  encodeQueryResult,
+  encodeVarint,
+} from '../traceProcessorProtobuf';
 
 describe('traceProcessorProtobuf', () => {
   describe('varint encoding and decoding', () => {
@@ -39,6 +46,24 @@ describe('traceProcessorProtobuf', () => {
 
       expect(result.columnNames).toEqual(['x']);
       expect(result.rows).toEqual([[-1]]);
+    });
+
+    it('round-trips locally encoded query results', () => {
+      const encoded = encodeQueryResult({
+        columnNames: ['i', 'f', 's', 'n', 'b'],
+        rows: [[-1, 1.5, 'text', null, Buffer.from([1, 2, 3])]],
+      });
+
+      const result = decodeQueryResult(encoded);
+
+      expect(result.columnNames).toEqual(['i', 'f', 's', 'n', 'b']);
+      expect(result.rows).toEqual([[-1, 1.5, 'text', null, Buffer.from([1, 2, 3])]]);
+    });
+  });
+
+  describe('query args decoding', () => {
+    it('decodes the sql_query field', () => {
+      expect(decodeQueryArgsSql(encodeQueryArgs('SELECT 42'))).toBe('SELECT 42');
     });
   });
 });

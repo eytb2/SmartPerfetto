@@ -16,7 +16,7 @@ import {
 
 function okResult(rows: unknown[][] = []): QueryResult {
   return {
-    columns: [],
+    columns: rows[0]?.map((_, index) => `c${index}`) ?? [],
     rows,
     durationMs: 1,
   };

@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { WorkingTraceProcessor, TraceProcessorFactory } from './workingTraceProcessor';
+import type { TraceProcessorQueryOptions } from './traceProcessorSqlWorker';
 
 export interface TraceInfo {
   id: string;
@@ -39,7 +40,8 @@ export interface TraceProcessor {
   status: 'initializing' | 'ready' | 'busy' | 'error';
   /** Number of in-flight queries. Used by factory to avoid evicting busy processors. */
   activeQueries: number;
-  query(sql: string): Promise<QueryResult>;
+  query(sql: string, options?: TraceProcessorQueryOptions): Promise<QueryResult>;
+  queryRaw(body: Buffer, options?: TraceProcessorQueryOptions): Promise<Buffer>;
   destroy(): void;
 }
 
@@ -255,7 +257,7 @@ export class TraceProcessorService extends EventEmitter {
    * by re-creating the processor from the on-disk trace file.
    * Concurrent callers share the same recovery promise to avoid thundering herd.
    */
-  public async query(traceId: string, sql: string): Promise<QueryResult> {
+  private async processorForQuery(traceId: string): Promise<TraceProcessor> {
     let processor = this.processors.get(traceId);
     if (!processor) {
       throw new Error(`No processor for trace ${traceId}`);
@@ -294,7 +296,25 @@ export class TraceProcessorService extends EventEmitter {
       }
     }
 
-    return await processor.query(sql);
+    return processor;
+  }
+
+  public async query(
+    traceId: string,
+    sql: string,
+    options: TraceProcessorQueryOptions = {},
+  ): Promise<QueryResult> {
+    const processor = await this.processorForQuery(traceId);
+    return await processor.query(sql, options);
+  }
+
+  public async queryRaw(
+    traceId: string,
+    body: Buffer,
+    options: TraceProcessorQueryOptions = {},
+  ): Promise<Buffer> {
+    const processor = await this.processorForQuery(traceId);
+    return await processor.queryRaw(body, options);
   }
 
   /**

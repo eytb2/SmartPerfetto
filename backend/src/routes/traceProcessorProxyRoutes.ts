@@ -23,6 +23,7 @@ import {
   type TraceProcessorLeaseRecord,
   type TraceProcessorLeaseState,
 } from '../services/traceProcessorLeaseStore';
+import { normalizeTraceProcessorQueryPriority } from '../services/traceProcessorSqlWorker';
 import { hasRbacPermission, sendForbidden } from '../services/rbac';
 import { EnterpriseSsoService } from '../services/enterpriseSsoService';
 import { EnterpriseApiKeyService } from '../services/enterpriseApiKeyService';
@@ -319,6 +320,29 @@ async function forwardHttpRpc(req: Request, res: Response, upstreamPath: '/statu
   res.status(upstream.status).send(responseBody);
 }
 
+async function forwardQueryRpc(req: Request, res: Response): Promise<void> {
+  const leaseId = sanitizeContextId(req.params.leaseId);
+  if (!leaseId) {
+    res.status(400).json({ success: false, error: 'leaseId is required' });
+    return;
+  }
+
+  const target = await resolveProxyTarget(req, leaseId);
+  const body = requestBody(req);
+  if (!body) {
+    res.status(400).json({ success: false, error: 'query protobuf body is required' });
+    return;
+  }
+
+  const priority = normalizeTraceProcessorQueryPriority(
+    req.get('x-smartperfetto-query-priority') || req.query.priority,
+    'p0',
+  );
+  const responseBody = await getTraceProcessorService().queryRaw(target.lease.traceId, body, { priority });
+  res.setHeader('content-type', 'application/x-protobuf');
+  res.status(200).send(responseBody);
+}
+
 function sendProxyError(res: Response, error: unknown): void {
   if (error instanceof TraceProcessorProxyError) {
     if (error.statusCode === 403) {
@@ -423,7 +447,7 @@ router.post('/:leaseId/status', express.raw({ type: '*/*', limit: serverConfig.b
 
 router.post('/:leaseId/query', express.raw({ type: '*/*', limit: serverConfig.bodyLimit }), async (req, res) => {
   try {
-    await forwardHttpRpc(req, res, '/query');
+    await forwardQueryRpc(req, res);
   } catch (error) {
     sendProxyError(res, error);
   }

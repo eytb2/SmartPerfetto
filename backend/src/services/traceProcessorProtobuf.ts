@@ -82,6 +82,56 @@ export function encodeStringField(fieldNum: number, str: string): Buffer {
   ]);
 }
 
+function encodeBytesField(fieldNum: number, bytes: Buffer): Buffer {
+  const tag = (fieldNum << 3) | 2; // wire type 2 = length-delimited
+  return Buffer.concat([
+    Buffer.from([tag]),
+    encodeVarint(bytes.length),
+    bytes,
+  ]);
+}
+
+function encodeVarintField(fieldNum: number, value: number): Buffer {
+  const tag = (fieldNum << 3) | 0; // wire type 0 = varint
+  return Buffer.concat([
+    Buffer.from([tag]),
+    encodeVarint(value),
+  ]);
+}
+
+function encodePackedVarintField(fieldNum: number, values: number[]): Buffer {
+  const packed = Buffer.concat(values.map(encodeVarint));
+  return encodeBytesField(fieldNum, packed);
+}
+
+function encodeSignedInt64Varint(value: number): Buffer {
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`Invalid int64 varint value: ${value}`);
+  }
+
+  let raw = BigInt(value);
+  if (raw < 0n) raw += 1n << 64n;
+
+  const result: number[] = [];
+  while (raw > 127n) {
+    result.push(Number((raw & 0x7fn) | 0x80n));
+    raw >>= 7n;
+  }
+  result.push(Number(raw));
+  return Buffer.from(result);
+}
+
+function encodePackedSignedInt64Field(fieldNum: number, values: number[]): Buffer {
+  const packed = Buffer.concat(values.map(encodeSignedInt64Varint));
+  return encodeBytesField(fieldNum, packed);
+}
+
+function encodePackedDoubleField(fieldNum: number, values: number[]): Buffer {
+  const packed = Buffer.alloc(values.length * 8);
+  values.forEach((value, index) => packed.writeDoubleLE(value, index * 8));
+  return encodeBytesField(fieldNum, packed);
+}
+
 /**
  * Encode QueryArgs protobuf message
  */
@@ -90,6 +140,30 @@ export function encodeQueryArgs(sql: string): Buffer {
   //   optional string sql_query = 1;
   //   optional string tag = 3;
   return encodeStringField(1, sql);
+}
+
+export function decodeQueryArgsSql(buf: Buffer): string {
+  let offset = 0;
+
+  while (offset < buf.length) {
+    const tag = buf[offset++];
+    const fieldNum = tag >> 3;
+    const wireType = tag & 0x07;
+
+    if (wireType === 2) {
+      const [len, bytesRead] = decodeVarint(buf, offset);
+      offset += bytesRead;
+      assertLengthDelimitedRange(buf, offset, len);
+      if (fieldNum === 1) {
+        return buf.slice(offset, offset + len).toString('utf8');
+      }
+      offset += len;
+    } else {
+      offset = skipUnknownField(buf, offset, wireType);
+    }
+  }
+
+  return '';
 }
 
 /**
@@ -113,6 +187,63 @@ export interface ParsedQueryResult {
   error?: string;
   statementCount?: number;
   lastStatementSql?: string;
+}
+
+export interface EncodableQueryResult {
+  columnNames: string[];
+  rows: any[][];
+  error?: string;
+}
+
+function encodeCellsBatch(rows: any[][]): Buffer {
+  const cells: CellType[] = [];
+  const varintCells: number[] = [];
+  const float64Cells: number[] = [];
+  const stringCells: string[] = [];
+  const blobCells: Buffer[] = [];
+
+  for (const row of rows) {
+    for (const value of row) {
+      if (value === null || value === undefined) {
+        cells.push(CellType.CELL_NULL);
+      } else if (Buffer.isBuffer(value)) {
+        cells.push(CellType.CELL_BLOB);
+        blobCells.push(value);
+      } else if (value instanceof Uint8Array) {
+        cells.push(CellType.CELL_BLOB);
+        blobCells.push(Buffer.from(value));
+      } else if (typeof value === 'number' && Number.isSafeInteger(value)) {
+        cells.push(CellType.CELL_VARINT);
+        varintCells.push(value);
+      } else if (typeof value === 'number' && Number.isFinite(value)) {
+        cells.push(CellType.CELL_FLOAT64);
+        float64Cells.push(value);
+      } else if (typeof value === 'boolean') {
+        cells.push(CellType.CELL_VARINT);
+        varintCells.push(value ? 1 : 0);
+      } else {
+        cells.push(CellType.CELL_STRING);
+        stringCells.push(String(value));
+      }
+    }
+  }
+
+  const fields: Buffer[] = [
+    encodePackedVarintField(1, cells),
+  ];
+  if (varintCells.length > 0) fields.push(encodePackedSignedInt64Field(2, varintCells));
+  if (float64Cells.length > 0) fields.push(encodePackedDoubleField(3, float64Cells));
+  for (const blob of blobCells) fields.push(encodeBytesField(4, blob));
+  if (stringCells.length > 0) fields.push(encodeBytesField(5, Buffer.from(`${stringCells.join('\0')}\0`, 'utf8')));
+  fields.push(encodeVarintField(6, 1));
+  return Buffer.concat(fields);
+}
+
+export function encodeQueryResult(result: EncodableQueryResult): Buffer {
+  const fields: Buffer[] = result.columnNames.map(column => encodeStringField(1, column));
+  if (result.error) fields.push(encodeStringField(2, result.error));
+  if (result.rows.length > 0) fields.push(encodeBytesField(3, encodeCellsBatch(result.rows)));
+  return Buffer.concat(fields);
 }
 
 /**

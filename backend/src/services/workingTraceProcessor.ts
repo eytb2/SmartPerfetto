@@ -9,12 +9,21 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { encodeQueryArgs, decodeQueryResult } from './traceProcessorProtobuf';
+import {
+  decodeQueryArgsSql,
+  decodeQueryResult,
+  encodeQueryArgs,
+  encodeQueryResult,
+} from './traceProcessorProtobuf';
 import { getPortPool } from './portPool';
 import { traceProcessorConfig } from '../config';
 import logger from '../utils/logger';
 import { getPerfettoStdlibModules, groupModulesByNamespace } from './perfettoStdlibScanner';
 import { readProcessRssBytes } from './processRss';
+import {
+  TraceProcessorSqlWorker,
+  type TraceProcessorQueryOptions,
+} from './traceProcessorSqlWorker';
 
 const IS_TEST_ENV = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
 
@@ -160,7 +169,8 @@ export interface TraceProcessor {
   status: 'initializing' | 'ready' | 'busy' | 'error';
   activeQueries: number;
   getRuntimeStats(): TraceProcessorRuntimeStats;
-  query(sql: string): Promise<QueryResult>;
+  query(sql: string, options?: TraceProcessorQueryOptions): Promise<QueryResult>;
+  queryRaw(body: Buffer, options?: TraceProcessorQueryOptions): Promise<Buffer>;
   destroy(): void;
 }
 
@@ -175,6 +185,13 @@ export interface TraceProcessorRuntimeStats {
   rssBytes: number | null;
   rssSampleSource: 'procfs' | 'ps' | 'unavailable' | 'external';
   rssSampleError?: string;
+  sqlWorker?: {
+    running: boolean;
+    queuedP0: number;
+    queuedP1: number;
+    queuedP2: number;
+    usesWorkerThread: boolean;
+  };
 }
 
 /**
@@ -202,7 +219,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
   private isDestroyed = false;
   private serverReady = false;
   private _activeQueries = 0;
-  private queryQueue: Promise<void> = Promise.resolve();
+  private readonly sqlWorker: TraceProcessorSqlWorker;
   private _criticalModulesLoaded = false;
   private _criticalModulesLoadPromise: Promise<void> | null = null;
   private _criticalModulesLoadFailures = 0;
@@ -227,6 +244,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
       rssBytes: rssSample?.rssBytes ?? null,
       rssSampleSource: rssSample?.source ?? 'unavailable',
       ...(rssSample?.error ? { rssSampleError: rssSample.error } : {}),
+      sqlWorker: this.sqlWorker.getStats(),
     };
   }
 
@@ -238,6 +256,11 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
 
     // Allocate port from pool
     this._httpPort = getPortPool().allocate(traceId);
+    this.sqlWorker = new TraceProcessorSqlWorker({
+      processorId: this.id,
+      traceId: this.traceId,
+      port: this._httpPort,
+    });
   }
 
   async initialize(): Promise<void> {
@@ -265,7 +288,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
 
       // Verify server is working with a test query
       console.log(`[TraceProcessor] Verifying server with test query...`);
-      const testResult = await this.executeHttpQuery('SELECT 1 as test');
+      const testResult = await this.executeHttpQuery('SELECT 1 as test', { priority: 'p1' });
 
       if (testResult.error) {
         throw new Error(`Server verification failed: ${testResult.error}`);
@@ -408,7 +431,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
     });
   }
 
-  async query(sql: string): Promise<QueryResult> {
+  async query(sql: string, options: TraceProcessorQueryOptions = {}): Promise<QueryResult> {
     if (this.status !== 'ready') {
       throw new Error(`Trace processor not ready (status: ${this.status})`);
     }
@@ -431,19 +454,30 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
     }
 
     logger.debug('TraceProcessor', `Executing HTTP query: ${sql.substring(0, 100)}...`);
-    return this.enqueueHttpQuery(sql);
+    return this.enqueueHttpQuery(sql, options);
   }
 
-  private async enqueueHttpQuery(sql: string): Promise<QueryResult> {
-    this._activeQueries++;
-    const run = this.queryQueue.then(() => this.executeHttpQuery(sql));
-    this.queryQueue = run.then(
-      () => undefined,
-      () => undefined,
-    );
+  async queryRaw(body: Buffer, options: TraceProcessorQueryOptions = {}): Promise<Buffer> {
+    if (this.status !== 'ready') {
+      throw new Error(`Trace processor not ready (status: ${this.status})`);
+    }
 
+    if (!this.serverReady) {
+      throw new Error('HTTP server not ready');
+    }
+
+    this._activeQueries++;
     try {
-      return await run;
+      return await this.sqlWorker.enqueueRaw(body, options);
+    } finally {
+      this._activeQueries--;
+    }
+  }
+
+  private async enqueueHttpQuery(sql: string, options: TraceProcessorQueryOptions): Promise<QueryResult> {
+    this._activeQueries++;
+    try {
+      return await this.executeHttpQuery(sql, options);
     } finally {
       this._activeQueries--;
     }
@@ -462,7 +496,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
     try {
       for (const m of CRITICAL_STDLIB_MODULES) {
         if (this.isDestroyed) break;
-        const result = await this.enqueueHttpQuery(`INCLUDE PERFETTO MODULE ${m};`);
+        const result = await this.enqueueHttpQuery(`INCLUDE PERFETTO MODULE ${m};`, { priority: 'p1' });
         if (result.error) {
           failed++;
           if (!result.error.includes('not found') && !result.error.includes('no such')) {
@@ -491,122 +525,25 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
   /**
    * Execute SQL query via HTTP
    */
-  private executeHttpQuery(sql: string): Promise<QueryResult> {
-    const startTime = Date.now();
-
-    return new Promise((resolve) => {
-      let settled = false;
-      let req: http.ClientRequest | null = null;
-      let wallClockTimer: NodeJS.Timeout | undefined;
-
-      const finish = (result: QueryResult): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(wallClockTimer);
-        resolve(result);
-      };
-
-      // `http.request({ timeout })` is socket-idle based. Some trace_processor
-      // hangs keep the HTTP request open, so enforce an absolute wall-clock cap.
-      wallClockTimer = setTimeout(() => {
-        logger.warn(
-          'TraceProcessor',
-          `Query exceeded ${traceProcessorConfig.queryTimeoutMs}ms; aborting request for processor ${this.id}`,
-        );
-        req?.destroy();
-        finish({
-          columns: [],
-          rows: [],
-          durationMs: Date.now() - startTime,
-          error: 'Query timeout',
-        });
-      }, traceProcessorConfig.queryTimeoutMs);
-
-      if (IS_TEST_ENV && typeof (wallClockTimer as any).unref === 'function') {
-        (wallClockTimer as any).unref();
-      }
-
-      // Encode QueryArgs protobuf
-      const requestBody = encodeQueryArgs(sql);
-
-      const options = {
-        hostname: 'localhost',
-        port: this.httpPort,
-        path: '/query',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-protobuf',
-          'Content-Length': requestBody.length,
-        },
-        timeout: traceProcessorConfig.queryTimeoutMs,
-      };
-
-      req = http.request(options, (res) => {
-        const chunks: Buffer[] = [];
-
-        res.on('data', (chunk) => chunks.push(chunk));
-
-        res.on('end', () => {
-          if (settled) return;
-          const responseBuffer = Buffer.concat(chunks);
-          const durationMs = Date.now() - startTime;
-
-          try {
-            // Decode QueryResult protobuf
-            const parsed = decodeQueryResult(responseBuffer);
-
-            if (parsed.error) {
-              logger.warn('TraceProcessor', `Query error: ${parsed.error}`);
-              finish({
-                columns: parsed.columnNames,
-                rows: parsed.rows,
-                durationMs,
-                error: parsed.error,
-              });
-            } else {
-              logger.debug('TraceProcessor', `Query returned ${parsed.rows.length} rows in ${durationMs}ms`);
-              finish({
-                columns: parsed.columnNames,
-                rows: parsed.rows,
-                durationMs,
-              });
-            }
-          } catch (parseError: any) {
-            console.error(`[TraceProcessor] Failed to parse response:`, parseError.message);
-            finish({
-              columns: [],
-              rows: [],
-              durationMs,
-              error: `Failed to parse response: ${parseError.message}`,
-            });
-          }
-        });
-      });
-
-      req.on('error', (error) => {
-        if (settled) return;
-        console.error(`[TraceProcessor] HTTP request failed:`, error.message);
-        finish({
-          columns: [],
-          rows: [],
-          durationMs: Date.now() - startTime,
-          error: `HTTP request failed: ${error.message}`,
-        });
-      });
-
-      req.on('timeout', () => {
-        req.destroy();
-        finish({
-          columns: [],
-          rows: [],
-          durationMs: Date.now() - startTime,
-          error: 'Query timeout',
-        });
-      });
-
-      req.write(requestBody);
-      req.end();
+  private async executeHttpQuery(
+    sql: string,
+    options: TraceProcessorQueryOptions = {},
+  ): Promise<QueryResult> {
+    const result = await this.sqlWorker.query(sql, {
+      ...options,
+      timeoutMs: options.timeoutMs ?? traceProcessorConfig.queryTimeoutMs,
     });
+    if (result.error === 'Query timeout') {
+      logger.warn(
+        'TraceProcessor',
+        `Query exceeded ${traceProcessorConfig.queryTimeoutMs}ms; aborting request for processor ${this.id}`,
+      );
+    } else if (result.error) {
+      logger.warn('TraceProcessor', `Query error: ${result.error}`);
+    } else {
+      logger.debug('TraceProcessor', `Query returned ${result.rows.length} rows in ${result.durationMs}ms`);
+    }
+    return result;
   }
 
   private async preloadModules(
@@ -641,7 +578,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
     for (const moduleName of modules) {
       let result: { status: 'fulfilled' | 'rejected'; value?: string; reason?: Error };
       try {
-        const queryResult = await this.executeHttpQuery(`INCLUDE PERFETTO MODULE ${moduleName};`);
+        const queryResult = await this.executeHttpQuery(`INCLUDE PERFETTO MODULE ${moduleName};`, { priority: 'p2' });
         if (queryResult.error) {
           result = { status: 'rejected', reason: new Error(queryResult.error) };
         } else {
@@ -697,6 +634,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
     this.isDestroyed = true;
     this.serverReady = false;
     this.status = 'error';
+    this.sqlWorker.destroy();
 
     if (this.process) {
       try {
@@ -934,7 +872,7 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
 
   private _httpPort: number;
   private _activeQueries = 0;
-  private queryQueue: Promise<void> = Promise.resolve();
+  private readonly sqlWorker: TraceProcessorSqlWorker;
   private _criticalModulesLoaded = false;
   private _criticalModulesLoadPromise: Promise<void> | null = null;
   private _criticalModulesLoadFailures = 0;
@@ -961,6 +899,7 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
       httpPort: this.httpPort,
       rssBytes: null,
       rssSampleSource: 'external',
+      sqlWorker: this.sqlWorker.getStats(),
     };
   }
 
@@ -969,10 +908,27 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
     this.id = `external-${port}`;
     this.traceId = traceId;
     this._httpPort = port;
+    this.sqlWorker = new TraceProcessorSqlWorker({
+      processorId: this.id,
+      traceId: this.traceId,
+      port: this._httpPort,
+      forceInline: IS_TEST_ENV,
+      rawExecutor: IS_TEST_ENV
+        ? async (request) => {
+          const sql = decodeQueryArgsSql(request.body);
+          const result = await this._execRaw(sql);
+          return encodeQueryResult({
+            columnNames: result.columns,
+            rows: result.rows,
+            ...(result.error ? { error: result.error } : {}),
+          });
+        }
+        : undefined,
+    });
     console.log(`[ExternalRpcProcessor] Created for trace ${traceId} on port ${port}`);
   }
 
-  async query(sql: string): Promise<QueryResult> {
+  async query(sql: string, options: TraceProcessorQueryOptions = {}): Promise<QueryResult> {
     // Sequential stdlib loading on first query (same pattern as WorkingTraceProcessor).
     if (!this._criticalModulesLoaded
         && this._criticalModulesLoadFailures < ExternalRpcProcessor.MAX_STDLIB_LOAD_RETRIES
@@ -983,7 +939,16 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
       await this._criticalModulesLoadPromise;
     }
 
-    return this.enqueueRawQuery(sql);
+    return this.enqueueRawQuery(sql, options);
+  }
+
+  async queryRaw(body: Buffer, options: TraceProcessorQueryOptions = {}): Promise<Buffer> {
+    this._activeQueries++;
+    try {
+      return await this.sqlWorker.enqueueRaw(body, options);
+    } finally {
+      this._activeQueries--;
+    }
   }
 
   /**
@@ -997,7 +962,7 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
     let failed = 0;
     try {
       for (const m of CRITICAL_STDLIB_MODULES) {
-        const result = await this.enqueueRawQuery(`INCLUDE PERFETTO MODULE ${m};`);
+        const result = await this.enqueueRawQuery(`INCLUDE PERFETTO MODULE ${m};`, { priority: 'p1' });
         if (result.error) {
           failed++;
           if (!result.error.includes('not found') && !result.error.includes('no such')) {
@@ -1019,16 +984,16 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
     }
   }
 
-  private async enqueueRawQuery(sql: string): Promise<QueryResult> {
+  private async enqueueRawQuery(
+    sql: string,
+    options: TraceProcessorQueryOptions = {},
+  ): Promise<QueryResult> {
     this._activeQueries++;
-    const run = this.queryQueue.then(() => this._execRaw(sql));
-    this.queryQueue = run.then(
-      () => undefined,
-      () => undefined,
-    );
-
     try {
-      return await run;
+      return await this.sqlWorker.query(sql, {
+        ...options,
+        timeoutMs: options.timeoutMs ?? traceProcessorConfig.queryTimeoutMs,
+      });
     } finally {
       this._activeQueries--;
     }
@@ -1097,6 +1062,7 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
     // External RPC processor doesn't own the process, so nothing to clean up
     console.log(`[ExternalRpcProcessor] Destroyed (trace ${this.traceId})`);
     this.status = 'error';
+    this.sqlWorker.destroy();
     this.emit('destroyed');
   }
 }
