@@ -20,7 +20,7 @@ import { TraceProcessorLeaseStore } from '../services/traceProcessorLeaseStore';
 import { ownerFieldsFromContext } from '../services/resourceOwnership';
 import type { RequestContext } from '../middleware/auth';
 
-type ScenarioName = 'D1' | 'D2' | 'D4' | 'D5' | 'D6' | 'D7';
+type ScenarioName = 'D1' | 'D2' | 'D4' | 'D5' | 'D6' | 'D7' | 'D8';
 
 interface VerifyOptions {
   tracePath?: string;
@@ -914,6 +914,274 @@ async function scenarioD7(
   };
 }
 
+async function scenarioD8(
+  db: Database.Database,
+  tracePath: string,
+  userAWindow1: WindowContext,
+): Promise<ScenarioReport> {
+  const upload = await simulateUpload(db, userAWindow1, tracePath, 'd8-provider-snapshot-resume.pftrace');
+  const now = Date.now();
+  const providerId = `provider-d8-${crypto.randomUUID()}`;
+  const originalSnapshotId = `provider-snapshot-d8-original-${crypto.randomUUID()}`;
+  const changedSnapshotId = `provider-snapshot-d8-changed-${crypto.randomUUID()}`;
+  const originalConfig = {
+    baseUrl: 'https://llm.example.test/v1',
+    models: {
+      primary: 'd8-primary-v1',
+      light: 'd8-light-v1',
+    },
+    timeouts: {
+      fullPerTurnMs: 120_000,
+      quickPerTurnMs: 30_000,
+    },
+    secretRef: 'secret://provider-d8',
+  };
+  const changedConfig = {
+    ...originalConfig,
+    baseUrl: 'https://llm.example.test/v2',
+    models: {
+      primary: 'd8-primary-v2',
+      light: 'd8-light-v2',
+    },
+  };
+  const hashInput = (config: unknown, secretVersion: string) => JSON.stringify({
+    providerId,
+    runtimeKind: 'openai-agents-sdk',
+    config,
+    secretVersion,
+  });
+  const originalHash = crypto.createHash('sha256').update(hashInput(originalConfig, 'secret-v1')).digest('hex');
+  const changedHash = crypto.createHash('sha256').update(hashInput(changedConfig, 'secret-v2')).digest('hex');
+
+  db.prepare(`
+    INSERT INTO provider_snapshots
+      (id, tenant_id, provider_id, snapshot_hash, runtime_kind, resolved_config_json, secret_version, created_at)
+    VALUES (?, ?, ?, ?, 'openai-agents-sdk', ?, ?, ?)
+  `).run(
+    originalSnapshotId,
+    userAWindow1.context.tenantId,
+    providerId,
+    originalHash,
+    JSON.stringify(originalConfig),
+    'secret-v1',
+    now,
+  );
+  db.prepare(`
+    INSERT INTO provider_snapshots
+      (id, tenant_id, provider_id, snapshot_hash, runtime_kind, resolved_config_json, secret_version, created_at)
+    VALUES (?, ?, ?, ?, 'openai-agents-sdk', ?, ?, ?)
+  `).run(
+    changedSnapshotId,
+    userAWindow1.context.tenantId,
+    providerId,
+    changedHash,
+    JSON.stringify(changedConfig),
+    'secret-v2',
+    now + 1,
+  );
+
+  const sessionId = `session-${crypto.randomUUID()}`;
+  const originalRunId = `run-${crypto.randomUUID()}`;
+  const followUpRunId = `run-${crypto.randomUUID()}`;
+  const oldSdkSessionId = 'sdk-response-d8-old';
+  const freshSdkSessionId = 'sdk-response-d8-fresh';
+
+  db.prepare(`
+    INSERT INTO analysis_sessions
+      (id, tenant_id, workspace_id, trace_id, created_by, provider_snapshot_id, title, visibility, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'private', 'completed', ?, ?)
+  `).run(
+    sessionId,
+    userAWindow1.context.tenantId,
+    userAWindow1.context.workspaceId,
+    upload.traceId,
+    userAWindow1.context.userId,
+    originalSnapshotId,
+    `${userAWindow1.label} D8 provider snapshot`,
+    now,
+    now,
+  );
+  db.prepare(`
+    INSERT INTO analysis_runs
+      (id, tenant_id, workspace_id, session_id, mode, status, question, started_at, completed_at)
+    VALUES (?, ?, ?, ?, 'full', 'completed', ?, ?, ?)
+  `).run(
+    originalRunId,
+    userAWindow1.context.tenantId,
+    userAWindow1.context.workspaceId,
+    sessionId,
+    'first turn before provider config changed',
+    now,
+    now + 10,
+  );
+  db.prepare(`
+    INSERT INTO runtime_snapshots
+      (id, tenant_id, workspace_id, session_id, run_id, runtime_type, snapshot_json, created_at)
+    VALUES (?, ?, ?, ?, ?, 'openai-agents-sdk', ?, ?)
+  `).run(
+    `runtime-snapshot-d8-original-${crypto.randomUUID()}`,
+    userAWindow1.context.tenantId,
+    userAWindow1.context.workspaceId,
+    sessionId,
+    originalRunId,
+    JSON.stringify({
+      agentRuntimeKind: 'openai-agents-sdk',
+      agentRuntimeProviderId: providerId,
+      agentRuntimeProviderSnapshotHash: originalHash,
+      sdkSessionId: oldSdkSessionId,
+      openAILastResponseId: oldSdkSessionId,
+      runSequence: 1,
+    }),
+    now + 20,
+  );
+
+  const pinnedSnapshot = db.prepare<unknown[], {
+    id: string;
+    provider_id: string;
+    snapshot_hash: string;
+    runtime_kind: string;
+    resolved_config_json: string;
+    secret_version: string;
+  }>(`
+    SELECT ps.id, ps.provider_id, ps.snapshot_hash, ps.runtime_kind, ps.resolved_config_json, ps.secret_version
+    FROM analysis_sessions s
+    JOIN provider_snapshots ps ON ps.id = s.provider_snapshot_id
+    WHERE s.tenant_id = ? AND s.workspace_id = ? AND s.id = ?
+  `).get(userAWindow1.context.tenantId, userAWindow1.context.workspaceId, sessionId);
+  const latestProviderSnapshot = db.prepare<unknown[], {
+    id: string;
+    snapshot_hash: string;
+    resolved_config_json: string;
+    secret_version: string;
+  }>(`
+    SELECT id, snapshot_hash, resolved_config_json, secret_version
+    FROM provider_snapshots
+    WHERE tenant_id = ? AND provider_id = ?
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(userAWindow1.context.tenantId, providerId);
+  const originalRuntimeRow = db.prepare<unknown[], { snapshot_json: string }>(`
+    SELECT snapshot_json
+    FROM runtime_snapshots
+    WHERE tenant_id = ? AND workspace_id = ? AND session_id = ? AND run_id = ?
+  `).get(
+    userAWindow1.context.tenantId,
+    userAWindow1.context.workspaceId,
+    sessionId,
+    originalRunId,
+  );
+  const originalRuntimeSnapshot = JSON.parse(originalRuntimeRow?.snapshot_json ?? '{}') as {
+    agentRuntimeProviderId?: string;
+    agentRuntimeProviderSnapshotHash?: string;
+    sdkSessionId?: string;
+    openAILastResponseId?: string;
+  };
+  const providerSnapshotChanged = Boolean(
+    originalRuntimeSnapshot.agentRuntimeProviderSnapshotHash
+    && latestProviderSnapshot?.snapshot_hash
+    && originalRuntimeSnapshot.agentRuntimeProviderSnapshotHash !== latestProviderSnapshot.snapshot_hash,
+  );
+  const sdkSessionReusable = Boolean(
+    !providerSnapshotChanged
+    && originalRuntimeSnapshot.sdkSessionId
+    && originalRuntimeSnapshot.agentRuntimeProviderId === providerId,
+  );
+
+  db.prepare(`
+    INSERT INTO analysis_runs
+      (id, tenant_id, workspace_id, session_id, mode, status, question, started_at, completed_at)
+    VALUES (?, ?, ?, ?, 'followup', 'completed', ?, ?, ?)
+  `).run(
+    followUpRunId,
+    userAWindow1.context.tenantId,
+    userAWindow1.context.workspaceId,
+    sessionId,
+    'follow-up turn after provider config changed',
+    now + 30,
+    now + 40,
+  );
+  db.prepare(`
+    INSERT INTO runtime_snapshots
+      (id, tenant_id, workspace_id, session_id, run_id, runtime_type, snapshot_json, created_at)
+    VALUES (?, ?, ?, ?, ?, 'openai-agents-sdk', ?, ?)
+  `).run(
+    `runtime-snapshot-d8-followup-${crypto.randomUUID()}`,
+    userAWindow1.context.tenantId,
+    userAWindow1.context.workspaceId,
+    sessionId,
+    followUpRunId,
+    JSON.stringify({
+      agentRuntimeKind: 'openai-agents-sdk',
+      agentRuntimeProviderId: providerId,
+      agentRuntimeProviderSnapshotHash: changedHash,
+      sdkSessionId: freshSdkSessionId,
+      openAILastResponseId: freshSdkSessionId,
+      previousProviderSnapshotHash: originalHash,
+      providerSnapshotChangeReason: 'provider_snapshot_hash_mismatch',
+      runSequence: 2,
+    }),
+    now + 50,
+  );
+  const followUpRuntimeRow = db.prepare<unknown[], { snapshot_json: string }>(`
+    SELECT snapshot_json
+    FROM runtime_snapshots
+    WHERE tenant_id = ? AND workspace_id = ? AND session_id = ? AND run_id = ?
+  `).get(
+    userAWindow1.context.tenantId,
+    userAWindow1.context.workspaceId,
+    sessionId,
+    followUpRunId,
+  );
+  const followUpRuntimeSnapshot = JSON.parse(followUpRuntimeRow?.snapshot_json ?? '{}') as {
+    agentRuntimeProviderSnapshotHash?: string;
+    sdkSessionId?: string;
+    openAILastResponseId?: string;
+    previousProviderSnapshotHash?: string;
+  };
+  const pinnedConfigJson = pinnedSnapshot?.resolved_config_json ?? '';
+  const latestConfigJson = latestProviderSnapshot?.resolved_config_json ?? '';
+
+  const checks = {
+    sessionStoresOriginalProviderSnapshot: pinnedSnapshot?.id === originalSnapshotId
+      && pinnedSnapshot.provider_id === providerId
+      && pinnedSnapshot.snapshot_hash === originalHash,
+    latestProviderConfigUsesDifferentHash: latestProviderSnapshot?.id === changedSnapshotId
+      && latestProviderSnapshot.snapshot_hash === changedHash
+      && latestProviderSnapshot.snapshot_hash !== pinnedSnapshot?.snapshot_hash,
+    resumeDetectsProviderSnapshotHashMismatch: providerSnapshotChanged,
+    oldSdkSessionIsNotReusableAfterMismatch: !sdkSessionReusable
+      && originalRuntimeSnapshot.sdkSessionId === oldSdkSessionId,
+    followUpRuntimeUsesFreshSdkSession: followUpRuntimeSnapshot.agentRuntimeProviderSnapshotHash === changedHash
+      && followUpRuntimeSnapshot.previousProviderSnapshotHash === originalHash
+      && followUpRuntimeSnapshot.sdkSessionId === freshSdkSessionId
+      && followUpRuntimeSnapshot.openAILastResponseId === freshSdkSessionId
+      && followUpRuntimeSnapshot.sdkSessionId !== originalRuntimeSnapshot.sdkSessionId,
+    providerSnapshotsDoNotPersistPlaintextSecret: !pinnedConfigJson.includes('sk-')
+      && !latestConfigJson.includes('sk-')
+      && pinnedSnapshot?.secret_version === 'secret-v1'
+      && latestProviderSnapshot?.secret_version === 'secret-v2',
+  };
+
+  return {
+    checks,
+    details: {
+      traceId: upload.traceId,
+      sessionId,
+      originalRunId,
+      followUpRunId,
+      providerId,
+      originalSnapshotId,
+      changedSnapshotId,
+      originalHash,
+      changedHash,
+      oldSdkSessionId,
+      freshSdkSessionId,
+      providerSnapshotChanged,
+      sdkSessionReusable,
+    },
+  };
+}
+
 function allChecksPassed(report: EnterpriseWindowRegressionReport): boolean {
   return Object.values(report.scenarios).every(scenario =>
     Object.values(scenario.checks).every(Boolean),
@@ -979,6 +1247,7 @@ export async function runEnterpriseWindowRegression(
       D5: await scenarioD5(db, tracePath, windows.userAWindow1),
       D6: await scenarioD6(db, tracePath, windows.userAWindow1, windows.userCWindow1),
       D7: await scenarioD7(db, tracePath, windows.userAWindow1),
+      D8: await scenarioD8(db, tracePath, windows.userAWindow1),
     };
     const report: EnterpriseWindowRegressionReport = {
       timestamp: new Date().toISOString(),
@@ -990,6 +1259,7 @@ export async function runEnterpriseWindowRegression(
         D5: scenarioPassed(scenarios.D5),
         D6: scenarioPassed(scenarios.D6),
         D7: scenarioPassed(scenarios.D7),
+        D8: scenarioPassed(scenarios.D8),
       },
       uploadRoot,
       tracePath,
@@ -1001,7 +1271,8 @@ export async function runEnterpriseWindowRegression(
         'D5 covers TraceProcessorLease holder grace and pageshow-style reacquire semantics after offline heartbeat expiry; frontend stale-lease reload signaling is covered by HttpRpcEngine unit tests.',
         'D6 covers the persisted AgentEvent replay contract after a conclusion cursor; the live stream route path is covered by agentRoutesRbac tests.',
         'D7 covers running run, active lease, report_generation holder, and draining rejection invariants; actual route blocking is covered by enterpriseTraceMetadataRoutes tests.',
-        'Production backend proxy and queue behavior remain future §0.7 D1/D2/D4/D5/D6/D7 final-acceptance work against a live browser and trace_processor_shell.',
+        'D8 covers the DB ProviderSnapshot pin/hash-mismatch invariant in the enterprise window regression; AgentAnalyzeSessionService tests cover actual in-memory and persisted SDK session non-reuse.',
+        'Production backend proxy and queue behavior remain future §0.7 D1/D2/D4/D5/D6/D7/D8 final-acceptance work against a live browser and trace_processor_shell.',
       ],
     };
     report.passed = allChecksPassed(report);
