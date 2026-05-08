@@ -5,8 +5,12 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
 import path from 'path';
+import { createWriteStream } from 'fs';
 import fs from 'fs/promises';
 import net from 'net';
+import os from 'os';
+import { Readable, Transform } from 'stream';
+import { pipeline } from 'stream/promises';
 import { v4 as uuidv4 } from 'uuid';
 import { attachRequestContext, requireRequestContext, type RequestContext } from '../middleware/auth';
 import { getTraceProcessorService } from '../services/traceProcessorService';
@@ -33,8 +37,33 @@ import {
 } from '../services/rbac';
 
 const router = Router();
-const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
+const DEFAULT_UPLOAD_BYTES = 500 * 1024 * 1024;
+const STREAMED_UPLOAD_BYTES_CAP = 1024 * 1024 * 1024;
+export const TRACE_UPLOAD_MAX_BYTES_ENV = 'SMARTPERFETTO_TRACE_UPLOAD_MAX_BYTES';
 const URL_UPLOAD_TIMEOUT_MS = 300000;
+const TEMP_UPLOAD_SUFFIX = '.uploading';
+
+class TraceUploadTooLargeError extends Error {
+  constructor(readonly maxBytes: number) {
+    super(`Trace file too large. Maximum allowed size is ${maxBytes} bytes`);
+    this.name = 'TraceUploadTooLargeError';
+  }
+}
+
+function parsePositiveInteger(value: string | undefined): number | null {
+  if (!value) return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+export function resolveTraceUploadLimitBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const configured = parsePositiveInteger(env[TRACE_UPLOAD_MAX_BYTES_ENV]);
+  if (configured) {
+    return Math.min(configured, STREAMED_UPLOAD_BYTES_CAP);
+  }
+  const ramBudget = Math.floor(os.totalmem() * 0.1);
+  return Math.max(DEFAULT_UPLOAD_BYTES, Math.min(STREAMED_UPLOAD_BYTES_CAP, ramBudget));
+}
 
 function requireTracePermission(permission: 'trace:read' | 'trace:write', details: string) {
   return (req: Request, res: Response, next: NextFunction): void => {
@@ -115,6 +144,66 @@ function isBlockedTraceUrl(url: URL): boolean {
   return false;
 }
 
+function tempUploadFilename(): string {
+  return `${uuidv4()}${TEMP_UPLOAD_SUFFIX}`;
+}
+
+async function cleanupFile(filePath: string | undefined): Promise<void> {
+  if (!filePath) return;
+  try {
+    await fs.unlink(filePath);
+  } catch {
+    // Best-effort cleanup only.
+  }
+}
+
+async function renameTraceAtomically(tempPath: string, finalPath: string): Promise<void> {
+  await fs.rename(tempPath, finalPath);
+}
+
+function createUploadSizeLimitStream(maxBytes: number): { stream: Transform; getBytesWritten: () => number } {
+  let bytesWritten = 0;
+  const stream = new Transform({
+    transform(chunk, _encoding, callback) {
+      const bytes = Buffer.isBuffer(chunk)
+        ? chunk.length
+        : chunk instanceof Uint8Array
+          ? chunk.byteLength
+          : Buffer.byteLength(String(chunk));
+      bytesWritten += bytes;
+      if (bytesWritten > maxBytes) {
+        callback(new TraceUploadTooLargeError(maxBytes));
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+
+  return {
+    stream,
+    getBytesWritten: () => bytesWritten,
+  };
+}
+
+async function streamResponseBodyToTempFile(response: globalThis.Response, tempPath: string): Promise<number> {
+  if (!response.body) {
+    throw new Error('Trace URL response body is empty');
+  }
+
+  const limiter = createUploadSizeLimitStream(resolveTraceUploadLimitBytes());
+  try {
+    await pipeline(
+      Readable.fromWeb(response.body as any),
+      limiter.stream,
+      createWriteStream(tempPath, { flags: 'wx' }),
+    );
+    return limiter.getBytesWritten();
+  } catch (error) {
+    await cleanupFile(tempPath);
+    throw error;
+  }
+}
+
 // GET /api/traces/health - Health check for auto-upload feature
 // This endpoint allows the frontend to quickly check if the backend is available
 router.get('/health', (req, res) => {
@@ -130,18 +219,27 @@ router.use(attachRequestContext);
 // Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, process.env.UPLOAD_DIR || './uploads');
+    let tracesDir: string;
+    try {
+      tracesDir = getWritableTraceDirForContext(requireRequestContext(req));
+    } catch (error) {
+      cb(error as Error, process.env.UPLOAD_DIR || './uploads');
+      return;
+    }
+
+    fs.mkdir(tracesDir, { recursive: true })
+      .then(() => cb(null, tracesDir))
+      .catch((error) => cb(error, tracesDir));
   },
   filename: (req, file, cb) => {
-    // Keep the original filename
-    cb(null, file.originalname);
+    cb(null, tempUploadFilename());
   },
 });
 
 const upload = multer({
   storage,
   limits: {
-    fileSize: MAX_UPLOAD_BYTES, // 500MB
+    fileSize: resolveTraceUploadLimitBytes(),
   },
 });
 
@@ -161,16 +259,13 @@ router.post(
 
       const file = req.file;
 
-      // Store trace info (in a real app, this would go to a database)
-      const tracesDir = getWritableTraceDirForContext(context);
-      await fs.mkdir(tracesDir, { recursive: true });
-
       // Generate trace ID upfront for consistency
       const traceId = uuidv4();
 
       // Move file to traces directory with proper name
+      const tracesDir = path.dirname(file.path);
       const finalPath = path.join(tracesDir, `${traceId}.trace`);
-      await fs.rename(file.path, finalPath);
+      await renameTraceAtomically(file.path, finalPath);
 
       console.log(`File uploaded successfully: ${file.originalname} -> ${traceId}`);
 
@@ -192,6 +287,7 @@ router.post(
       });
 
     } catch (error: any) {
+      await cleanupFile(req.file?.path);
       console.error('Upload error:', error);
       res.status(500).json({
         error: 'Upload failed',
@@ -243,18 +339,11 @@ router.post('/upload-url', async (req, res) => {
     }
 
     const contentLength = response.headers.get('content-length');
-    if (contentLength && Number.parseInt(contentLength, 10) > MAX_UPLOAD_BYTES) {
+    const uploadLimitBytes = resolveTraceUploadLimitBytes();
+    if (contentLength && Number.parseInt(contentLength, 10) > uploadLimitBytes) {
       return res.status(413).json({
         error: 'Trace file too large',
-        details: `Remote trace exceeds ${MAX_UPLOAD_BYTES} bytes`
-      });
-    }
-
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.byteLength > MAX_UPLOAD_BYTES) {
-      return res.status(413).json({
-        error: 'Trace file too large',
-        details: `Remote trace exceeds ${MAX_UPLOAD_BYTES} bytes`
+        details: `Remote trace exceeds ${uploadLimitBytes} bytes`
       });
     }
 
@@ -262,19 +351,27 @@ router.post('/upload-url', async (req, res) => {
     await fs.mkdir(tracesDir, { recursive: true });
 
     const traceId = uuidv4();
+    const tempPath = path.join(tracesDir, tempUploadFilename());
     const finalPath = path.join(tracesDir, `${traceId}.trace`);
-    await fs.writeFile(finalPath, buffer);
+    let size = 0;
+    try {
+      size = await streamResponseBodyToTempFile(response, tempPath);
+      await renameTraceAtomically(tempPath, finalPath);
+    } catch (streamError) {
+      await cleanupFile(tempPath);
+      throw streamError;
+    }
 
     console.log(`URL trace fetched successfully: ${rawUrl} -> ${traceId}`);
 
-    const traceInfo = await finalizeTraceUpload(traceId, filename, buffer.byteLength, finalPath, context);
+    const traceInfo = await finalizeTraceUpload(traceId, filename, size, finalPath, context);
 
     res.json({
       success: true,
       trace: {
         id: traceId,
         filename,
-        size: buffer.byteLength,
+        size,
         uploadedAt: traceInfo?.uploadTime || new Date().toISOString(),
         status: traceInfo?.status || 'ready',
         port: traceInfo?.port,
@@ -283,6 +380,12 @@ router.post('/upload-url', async (req, res) => {
     });
 
   } catch (error: any) {
+    if (error instanceof TraceUploadTooLargeError) {
+      return res.status(413).json({
+        error: 'Trace file too large',
+        details: `Remote trace exceeds ${error.maxBytes} bytes`,
+      });
+    }
     console.error('URL upload error:', error);
     res.status(500).json({
       error: 'URL upload failed',

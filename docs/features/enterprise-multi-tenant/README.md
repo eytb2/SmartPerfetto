@@ -58,7 +58,7 @@
   - [x] 4.1.4 LRU 跳过 ExternalRpcProcessor 或改为 lease/ref-count 判定
   - [x] 4.1.5 pending trace localStorage key 加 `windowId`，必要时迁 sessionStorage
   - [x] 4.1.6 AI session cache 加 mtime/CAS 或改为后端权威 session list
-- [ ] 4.2 上传链路 stream 化（§11.1）：URL 上传不再 `arrayBuffer()` 全量进内存；本地上传与 RAM/磁盘策略联动；temp file 用 traceId/uuid + 原子 rename
+- [x] 4.2 上传链路 stream 化（§11.1）：URL 上传不再 `arrayBuffer()` 全量进内存；本地上传与 RAM/磁盘策略联动；temp file 用 traceId/uuid + 原子 rename
 - [ ] 4.3 RSS benchmark：scroll/startup/ANR/memory/heapprofd/vendor 大 trace × 100MB/500MB/1GB，记录启动 RSS、load peak、query headroom
 - [ ] 4.4 `TraceProcessorLease` 4 类 holder（frontend_http_rpc / agent_run / report_generation / manual_register）+ 状态机（§11.4）+ 分级 TTL
 - [ ] 4.5 Backend proxy `/api/tp/:leaseId/{status,websocket,query}`（§11.3）
@@ -486,6 +486,11 @@ audit_events(id, tenant_id, actor_user_id, action, resource_type, resource_id, m
    - URL 上传不能 `arrayBuffer()` 全量进内存。
    - 本地上传从固定 500MB 上限改为与机器 RAM budget 和磁盘策略相关。
    - 大 trace 必须先流式落盘，再交给 trace_processor。
+   - 当前实现：`/api/traces/upload-url` 通过 `Readable.fromWeb(...)` + `pipeline`
+     流式写入同目录 uuid `.uploading` 临时文件，超过
+     `SMARTPERFETTO_TRACE_UPLOAD_MAX_BYTES` / RAM 派生上限时直接 413。
+     本地 multipart 上传也写入 scoped trace 目录下的 uuid 临时文件，再原子
+     rename 为 `{traceId}.trace`，避免同名 trace 的临时文件互相覆盖。
 2. RSS benchmark。
    - admission control 可以先用 `trace_file_size × 系数` 粗估。
    - 实际资源占用必须以启动后 child RSS、load peak、query headroom 修正。

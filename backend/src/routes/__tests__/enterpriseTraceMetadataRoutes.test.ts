@@ -107,6 +107,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  jest.restoreAllMocks();
   setTraceProcessorServiceForTests(null);
   restoreEnvValue(ENTERPRISE_FEATURE_FLAG_ENV, originalEnv.enterprise);
   restoreEnvValue('SMARTPERFETTO_SSO_TRUSTED_HEADERS', originalEnv.trustedHeaders);
@@ -134,6 +135,8 @@ describe('enterprise trace metadata routes', () => {
     const expectedTracePath = path.join(dataDir, 'tenant-a', 'workspace-a', 'traces', `${traceId}.trace`);
     await expect(fs.access(expectedTracePath)).resolves.toBeUndefined();
     await expect(fs.access(path.join(uploadDir, 'traces', `${traceId}.json`))).rejects.toThrow();
+    const traceDirFiles = await fs.readdir(path.dirname(expectedTracePath));
+    expect(traceDirFiles).toEqual([`${traceId}.trace`]);
 
     expect(fakeTraceProcessorService.initializeUploadWithId).toHaveBeenCalledWith(
       traceId,
@@ -165,6 +168,47 @@ describe('enterprise trace metadata routes', () => {
       'workspace-b',
     );
     expect(otherWorkspaceRes.status).toBe(404);
+  });
+
+  it('streams URL uploads into scoped trace storage without buffering the response body', async () => {
+    const app = makeApp();
+    const traceBytes = 'url-trace-content';
+    const response = new Response(traceBytes, {
+      status: 200,
+      headers: {
+        'content-length': String(Buffer.byteLength(traceBytes)),
+      },
+    });
+    const arrayBufferSpy = jest.spyOn(response, 'arrayBuffer').mockImplementation(async () => {
+      throw new Error('arrayBuffer should not be used for URL trace uploads');
+    });
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue(response);
+
+    const uploadRes = await ssoHeaders(
+      request(app)
+        .post('/api/traces/upload-url')
+        .send({ url: 'https://example.test/traces/url-stream.trace' }),
+    );
+
+    expect(uploadRes.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://example.test/traces/url-stream.trace',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(arrayBufferSpy).not.toHaveBeenCalled();
+
+    const traceId = uploadRes.body.trace.id as string;
+    const expectedTracePath = path.join(dataDir, 'tenant-a', 'workspace-a', 'traces', `${traceId}.trace`);
+    await expect(fs.readFile(expectedTracePath, 'utf-8')).resolves.toBe(traceBytes);
+    const traceDirFiles = await fs.readdir(path.dirname(expectedTracePath));
+    expect(traceDirFiles).toEqual([`${traceId}.trace`]);
+
+    expect(fakeTraceProcessorService.initializeUploadWithId).toHaveBeenCalledWith(
+      traceId,
+      'url-stream.trace',
+      Buffer.byteLength(traceBytes),
+      expectedTracePath,
+    );
   });
 
   it('deletes enterprise trace files and trace_assets metadata through the scoped owner path', async () => {
