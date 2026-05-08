@@ -287,6 +287,13 @@ describe('enterprise trace metadata routes', () => {
     expect(listRes.status).toBe(200);
     expect(listRes.body.traces.map((trace: any) => trace.id)).toEqual([traceId]);
 
+    const ownTraceRes = await ssoHeaders(request(app).get(`/api/traces/${traceId}`));
+    expect(ownTraceRes.status).toBe(200);
+    expect(readAuditActions()).toEqual(expect.arrayContaining([
+      'trace.uploaded',
+      'trace.read',
+    ]));
+
     const otherWorkspaceRes = await ssoHeaders(
       request(app).get(`/api/traces/${traceId}`),
       'workspace-b',
@@ -792,5 +799,9 @@ describe('enterprise trace metadata routes', () => {
     expect(fakeTraceProcessorService.deleteTrace).toHaveBeenCalledWith(traceId);
     await expect(fs.access(row!.local_path)).rejects.toThrow();
     expect(readTraceAsset(traceId)).toBeNull();
+    expect(readAuditActions()).toEqual(expect.arrayContaining([
+      'trace.uploaded',
+      'trace.deleted',
+    ]));
   });
 });

@@ -9,6 +9,7 @@ import os from 'os';
 import path from 'path';
 import request from 'supertest';
 import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../config';
+import { listEnterpriseAuditEvents } from '../../services/enterpriseAuditService';
 import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../../services/enterpriseDb';
 import { ENTERPRISE_DATA_DIR_ENV } from '../../services/traceMetadataStore';
 import reportRoutes, { persistReport, reportStore } from '../reportRoutes';
@@ -70,6 +71,15 @@ function readReportArtifact(reportId: string): ReportArtifactRow | null {
       FROM report_artifacts
       WHERE id = ?
     `).get(reportId) || null;
+  } finally {
+    db.close();
+  }
+}
+
+function readAuditActions(): string[] {
+  const db = openEnterpriseDb(dbPath);
+  try {
+    return listEnterpriseAuditEvents(db).map(event => event.action);
   } finally {
     db.close();
   }
@@ -145,6 +155,14 @@ describe('enterprise report routes', () => {
     expect(getRes.status).toBe(200);
     expect(getRes.text).toContain('enterprise report');
 
+    const exportRes = await ssoHeaders(request(app).get(`/api/reports/${reportId}/export`));
+    expect(exportRes.status).toBe(200);
+    expect(exportRes.text).toContain('enterprise report');
+    expect(readAuditActions()).toEqual(expect.arrayContaining([
+      'report.read',
+      'report.exported',
+    ]));
+
     const otherWorkspaceRes = await ssoHeaders(
       request(app).get(`/api/reports/${reportId}`),
       'workspace-b',
@@ -178,5 +196,6 @@ describe('enterprise report routes', () => {
     expect(readReportArtifact(reportId)).toBeNull();
     await expect(fs.access(row!.local_path)).rejects.toThrow();
     await expect(fs.access(path.dirname(row!.local_path))).rejects.toThrow();
+    expect(readAuditActions()).toContain('report.deleted');
   });
 });

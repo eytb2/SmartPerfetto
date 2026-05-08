@@ -18,7 +18,10 @@ import { getTraceProcessorService } from '../services/traceProcessorService';
 import { getPortPool } from '../services/portPool';
 import { TraceProcessorFactory, type TraceProcessorRuntimeStats } from '../services/workingTraceProcessor';
 import { openEnterpriseDb } from '../services/enterpriseDb';
-import { recordEnterpriseAuditEvent } from '../services/enterpriseAuditService';
+import {
+  recordEnterpriseAuditEvent,
+  recordEnterpriseAuditEventForContext,
+} from '../services/enterpriseAuditService';
 import {
   getTraceProcessorLeaseStore,
   type TraceProcessorLeaseRecord,
@@ -216,6 +219,20 @@ function recordTraceDeleteAudit(
   } finally {
     db.close();
   }
+}
+
+function recordTraceAudit(
+  context: RequestContext,
+  action: 'trace.uploaded' | 'trace.read' | 'trace.deleted',
+  traceId: string,
+  metadata: Record<string, unknown>,
+): void {
+  recordEnterpriseAuditEventForContext(context, {
+    action,
+    resourceType: 'trace',
+    resourceId: traceId,
+    metadata,
+  });
 }
 
 function summarizeLeaseBlockers(leases: TraceProcessorLeaseRecord[]): Array<{
@@ -472,6 +489,7 @@ async function finalizeTraceUpload(
   size: number,
   finalPath: string,
   context: RequestContext,
+  uploadSource: 'local' | 'url',
 ): Promise<FinalizedTraceUploadInfo | undefined> {
   const tps = getTraceProcessorService();
 
@@ -491,6 +509,11 @@ async function finalizeTraceUpload(
   };
   await writeTraceMetadata(metadata);
   console.log(`[TraceProcessor] Created metadata for trace: ${traceId}`);
+  recordTraceAudit(context, 'trace.uploaded', traceId, {
+    filename,
+    size,
+    uploadSource,
+  });
 
   if (tps) {
     try {
@@ -662,7 +685,7 @@ router.post(
       console.log(`File uploaded successfully: ${file.originalname} -> ${traceId}`);
 
       // Get trace status and processor port from service
-      const traceInfo = await finalizeTraceUpload(traceId, file.originalname, file.size, finalPath, context);
+      const traceInfo = await finalizeTraceUpload(traceId, file.originalname, file.size, finalPath, context, 'local');
 
       res.json({
         success: true,
@@ -761,7 +784,7 @@ router.post('/upload-url', async (req, res) => {
 
     console.log(`URL trace fetched successfully: ${rawUrl} -> ${traceId}`);
 
-    const traceInfo = await finalizeTraceUpload(traceId, filename, size, finalPath, context);
+    const traceInfo = await finalizeTraceUpload(traceId, filename, size, finalPath, context, 'url');
 
     res.json({
       success: true,
@@ -1059,6 +1082,11 @@ router.get('/:id', async (req, res) => {
 
     const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
     const lease = traceInfo?.port ? acquireFrontendTraceLease(context, id, sessionId) : null;
+    recordTraceAudit(context, 'trace.read', id, {
+      filename: metadata.filename,
+      size: metadata.size,
+      hasProcessor: Boolean(traceInfo?.processor),
+    });
 
     res.json({
       success: true,
@@ -1135,6 +1163,10 @@ router.delete('/:id', async (req, res) => {
 
     await deleteTraceMetadata(id);
     console.log(`[Traces] Metadata deleted for ${id}`);
+    recordTraceAudit(context, 'trace.deleted', id, {
+      filename: metadata.filename,
+      size: metadata.size,
+    });
 
     console.log(`[Traces] Trace ${id} fully deleted`);
     res.json({ success: true, message: 'Trace deleted successfully' });

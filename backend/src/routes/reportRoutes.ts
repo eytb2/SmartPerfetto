@@ -14,8 +14,9 @@ import crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import type Database from 'better-sqlite3';
-import { attachRequestContext, requireRequestContext } from '../middleware/auth';
+import { attachRequestContext, requireRequestContext, type RequestContext } from '../middleware/auth';
 import { openEnterpriseDb } from '../services/enterpriseDb';
+import { recordEnterpriseAuditEventForContext } from '../services/enterpriseAuditService';
 import {
   enterpriseDbReadAuthorityEnabled,
   enterpriseDbWritesEnabled,
@@ -70,6 +71,25 @@ interface ReportArtifactRow {
   created_by: string | null;
   created_at: number;
   expires_at: number | null;
+}
+
+function recordReportAudit(
+  context: RequestContext,
+  action: 'report.read' | 'report.exported' | 'report.deleted',
+  reportId: string,
+  report: PersistedReport,
+): void {
+  recordEnterpriseAuditEventForContext(context, {
+    action,
+    resourceType: 'report',
+    resourceId: reportId,
+    metadata: {
+      sessionId: report.sessionId,
+      runId: report.runId,
+      traceId: report.traceId,
+      visibility: report.visibility,
+    },
+  });
 }
 
 const SAFE_REPORT_ID_RE = /^[a-zA-Z0-9._:-]+$/;
@@ -507,6 +527,7 @@ reportCleanupInterval.unref?.();
 router.get('/:reportId/export', (req, res) => {
   try {
     const { reportId } = req.params;
+    const context = requireRequestContext(req);
 
     const report = getReportForContext(reportId, req);
     if (!report) {
@@ -522,6 +543,7 @@ router.get('/:reportId/export', (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
+    recordReportAudit(context, 'report.exported', reportId, report);
     res.send(upgradeLegacyReportHtml(report.html));
   } catch (error: any) {
     console.error('[ReportRoutes] Export report error:', error);
@@ -540,6 +562,7 @@ router.get('/:reportId/export', (req, res) => {
 router.get('/:reportId', (req, res) => {
   try {
     const { reportId } = req.params;
+    const context = requireRequestContext(req);
 
     // Try memory cache first, then disk
     let report = getReportForContext(reportId, req);
@@ -572,6 +595,7 @@ router.get('/:reportId', (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
+    recordReportAudit(context, 'report.read', reportId, report);
     res.send(upgradeLegacyReportHtml(report.html));
   } catch (error: any) {
     console.error('[ReportRoutes] Get report error:', error);
@@ -605,6 +629,9 @@ router.delete('/:reportId', (req, res) => {
     const deletedFromCache = reportStore.delete(reportId);
     const deletedFromPersistence = deletePersistedReport(reportId);
     const deleted = deletedFromCache || deletedFromPersistence;
+    if (deleted) {
+      recordReportAudit(context, 'report.deleted', reportId, report);
+    }
 
     res.json({
       success: deleted,

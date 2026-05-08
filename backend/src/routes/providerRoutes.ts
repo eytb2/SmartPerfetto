@@ -5,7 +5,8 @@ import express from 'express';
 import { getProviderService, officialTemplates } from '../services/providerManager';
 import type { AgentRuntimeKind, ProviderCreateInput, ProviderScope, ProviderUpdateInput } from '../services/providerManager';
 import { testProviderConnection } from '../services/providerManager/connectionTester';
-import { authenticate, requireRequestContext } from '../middleware/auth';
+import { authenticate, requireRequestContext, type RequestContext } from '../middleware/auth';
+import { recordEnterpriseAuditEventForContext } from '../services/enterpriseAuditService';
 
 const router = express.Router();
 
@@ -18,6 +19,29 @@ function providerScopeForRequest(req: express.Request): ProviderScope {
     workspaceId: context.workspaceId,
     userId: context.userId,
   };
+}
+
+function recordProviderAudit(
+  context: RequestContext,
+  action:
+    | 'provider.read'
+    | 'provider.created'
+    | 'provider.updated'
+    | 'provider.deleted'
+    | 'provider.activated'
+    | 'provider.deactivated'
+    | 'provider.runtime_switched'
+    | 'provider.secret_rotated'
+    | 'provider.connection_tested',
+  providerId: string | undefined,
+  metadata: Record<string, unknown> = {},
+): void {
+  recordEnterpriseAuditEventForContext(context, {
+    action,
+    resourceType: 'provider',
+    resourceId: providerId,
+    metadata,
+  });
 }
 
 router.get('/', (req, res) => {
@@ -43,8 +67,13 @@ router.get('/effective', (req, res) => {
 
 router.get('/:id', (req, res) => {
   const svc = getProviderService();
+  const context = requireRequestContext(req);
   const provider = svc.get(req.params.id, providerScopeForRequest(req));
   if (!provider) return res.status(404).json({ success: false, error: 'Provider not found' });
+  recordProviderAudit(context, 'provider.read', provider.id, {
+    type: provider.type,
+    active: provider.isActive,
+  });
   res.json({ success: true, provider });
 });
 
@@ -52,8 +81,14 @@ router.post('/', (req, res) => {
   try {
     const svc = getProviderService();
     const input: ProviderCreateInput = req.body;
+    const context = requireRequestContext(req);
     const scope = providerScopeForRequest(req);
     const provider = svc.create(input, scope);
+    recordProviderAudit(context, 'provider.created', provider.id, {
+      type: provider.type,
+      category: provider.category,
+      runtime: provider.connection.agentRuntime,
+    });
     res.status(201).json({ success: true, provider: svc.get(provider.id, scope) });
   } catch (err: any) {
     res.status(400).json({ success: false, error: err.message });
@@ -64,8 +99,13 @@ router.patch('/:id', (req, res) => {
   try {
     const svc = getProviderService();
     const input: ProviderUpdateInput = req.body;
+    const context = requireRequestContext(req);
     const scope = providerScopeForRequest(req);
-    svc.update(req.params.id, input, scope);
+    const updated = svc.update(req.params.id, input, scope);
+    recordProviderAudit(context, 'provider.updated', updated.id, {
+      type: updated.type,
+      changedFields: Object.keys(input),
+    });
     res.json({ success: true, provider: svc.get(req.params.id, scope) });
   } catch (err: any) {
     const status = err.message.includes('not found') ? 404 : 400;
@@ -76,7 +116,13 @@ router.patch('/:id', (req, res) => {
 router.delete('/:id', (req, res) => {
   try {
     const svc = getProviderService();
-    svc.delete(req.params.id, providerScopeForRequest(req));
+    const context = requireRequestContext(req);
+    const scope = providerScopeForRequest(req);
+    const existing = svc.get(req.params.id, scope);
+    svc.delete(req.params.id, scope);
+    recordProviderAudit(context, 'provider.deleted', req.params.id, {
+      type: existing?.type,
+    });
     res.json({ success: true });
   } catch (err: any) {
     const status = err.message.includes('not found') ? 404 : 400;
@@ -86,14 +132,26 @@ router.delete('/:id', (req, res) => {
 
 router.post('/deactivate', (req, res) => {
   const svc = getProviderService();
-  svc.deactivateAll(providerScopeForRequest(req));
+  const context = requireRequestContext(req);
+  const scope = providerScopeForRequest(req);
+  const active = svc.list(scope).find(provider => provider.isActive);
+  svc.deactivateAll(scope);
+  recordProviderAudit(context, 'provider.deactivated', active?.id, {
+    type: active?.type,
+  });
   res.json({ success: true });
 });
 
 router.post('/:id/activate', (req, res) => {
   try {
     const svc = getProviderService();
-    svc.activate(req.params.id, providerScopeForRequest(req));
+    const context = requireRequestContext(req);
+    const scope = providerScopeForRequest(req);
+    svc.activate(req.params.id, scope);
+    const provider = svc.get(req.params.id, scope);
+    recordProviderAudit(context, 'provider.activated', req.params.id, {
+      type: provider?.type,
+    });
     res.json({ success: true });
   } catch (err: any) {
     const status = err.message.includes('not found') ? 404 : 400;
@@ -108,8 +166,13 @@ router.post('/:id/runtime', (req, res) => {
     if (runtime !== 'claude-agent-sdk' && runtime !== 'openai-agents-sdk') {
       return res.status(400).json({ success: false, error: 'Invalid agentRuntime' });
     }
+    const context = requireRequestContext(req);
     const scope = providerScopeForRequest(req);
-    svc.switchAgentRuntime(req.params.id, runtime, scope);
+    const provider = svc.switchAgentRuntime(req.params.id, runtime, scope);
+    recordProviderAudit(context, 'provider.runtime_switched', req.params.id, {
+      type: provider.type,
+      runtime,
+    });
     res.json({ success: true, provider: svc.get(req.params.id, scope) });
   } catch (err: any) {
     const status = err.message.includes('not found') ? 404 : 400;
@@ -120,8 +183,14 @@ router.post('/:id/runtime', (req, res) => {
 router.post('/:id/rotate-secret', (req, res) => {
   try {
     const svc = getProviderService();
+    const context = requireRequestContext(req);
     const scope = providerScopeForRequest(req);
     const secretVersion = svc.rotateSecret(req.params.id, scope);
+    const provider = svc.get(req.params.id, scope);
+    recordProviderAudit(context, 'provider.secret_rotated', req.params.id, {
+      type: provider?.type,
+      secretVersion,
+    });
     res.json({ success: true, secretVersion, provider: svc.get(req.params.id, scope) });
   } catch (err: any) {
     const status = err.message.includes('not found') ? 404 : 400;
@@ -131,10 +200,15 @@ router.post('/:id/rotate-secret', (req, res) => {
 
 router.post('/:id/test', async (req, res) => {
   const svc = getProviderService();
+  const context = requireRequestContext(req);
   const provider = svc.getRaw(req.params.id, providerScopeForRequest(req));
   if (!provider) return res.status(404).json({ success: false, error: 'Provider not found' });
 
   const result = await testProviderConnection(provider);
+  recordProviderAudit(context, 'provider.connection_tested', req.params.id, {
+    type: provider.type,
+    success: result.success,
+  });
   res.json({ success: true, result });
 });
 

@@ -1,11 +1,28 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import { jest } from '@jest/globals';
 import request from 'supertest';
 import express from 'express';
 import { promises as fsp } from 'fs';
 import os from 'os';
 import path from 'path';
+import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../../config';
+import { listEnterpriseAuditEvents } from '../../enterpriseAuditService';
+import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../../enterpriseDb';
+import {
+  SECRET_STORE_ALLOW_LOCAL_MASTER_KEY_ENV,
+  SECRET_STORE_DIR_ENV,
+} from '../localSecretStore';
 import { resetProviderService } from '../index';
+
+const originalEnv = {
+  enterprise: process.env[ENTERPRISE_FEATURE_FLAG_ENV],
+  trustedHeaders: process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS,
+  enterpriseDbPath: process.env[ENTERPRISE_DB_PATH_ENV],
+  secretStoreDir: process.env[SECRET_STORE_DIR_ENV],
+  allowLocalMasterKey: process.env[SECRET_STORE_ALLOW_LOCAL_MASTER_KEY_ENV],
+  apiKey: process.env.SMARTPERFETTO_API_KEY,
+};
 
 describe('Provider Routes', () => {
   let app: express.Express;
@@ -25,9 +42,42 @@ describe('Provider Routes', () => {
 
   afterEach(async () => {
     delete process.env.PROVIDER_DATA_DIR_OVERRIDE;
+    restoreEnvValue(ENTERPRISE_FEATURE_FLAG_ENV, originalEnv.enterprise);
+    restoreEnvValue('SMARTPERFETTO_SSO_TRUSTED_HEADERS', originalEnv.trustedHeaders);
+    restoreEnvValue(ENTERPRISE_DB_PATH_ENV, originalEnv.enterpriseDbPath);
+    restoreEnvValue(SECRET_STORE_DIR_ENV, originalEnv.secretStoreDir);
+    restoreEnvValue(SECRET_STORE_ALLOW_LOCAL_MASTER_KEY_ENV, originalEnv.allowLocalMasterKey);
+    restoreEnvValue('SMARTPERFETTO_API_KEY', originalEnv.apiKey);
     resetProviderService();
     await fsp.rm(dir, { recursive: true, force: true });
   });
+
+  function restoreEnvValue(key: string, value: string | undefined): void {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+
+  function ssoHeaders(req: request.Test): request.Test {
+    return req
+      .set('X-SmartPerfetto-SSO-User-Id', 'provider-admin')
+      .set('X-SmartPerfetto-SSO-Email', 'provider-admin@example.test')
+      .set('X-SmartPerfetto-SSO-Tenant-Id', 'tenant-a')
+      .set('X-SmartPerfetto-SSO-Workspace-Id', 'workspace-a')
+      .set('X-SmartPerfetto-SSO-Roles', 'workspace_admin')
+      .set('X-SmartPerfetto-SSO-Scopes', 'provider:write,audit:read');
+  }
+
+  function readEnterpriseAuditActions(dbPath: string): string[] {
+    const db = openEnterpriseDb(dbPath);
+    try {
+      return listEnterpriseAuditEvents(db).map(event => event.action);
+    } finally {
+      db.close();
+    }
+  }
 
   it('GET /api/v1/providers returns empty list initially', async () => {
     const res = await request(app).get('/api/v1/providers');
@@ -121,5 +171,66 @@ describe('Provider Routes', () => {
 
     expect(runtimeRes.status).toBe(400);
     expect(runtimeRes.body.error).toMatch(/does not support openai-agents-sdk/);
+  });
+
+  it('records enterprise audit events for provider management actions', async () => {
+    const dbPath = path.join(dir, 'enterprise.sqlite');
+    process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+    process.env[ENTERPRISE_DB_PATH_ENV] = dbPath;
+    process.env[SECRET_STORE_DIR_ENV] = path.join(dir, 'secrets');
+    process.env[SECRET_STORE_ALLOW_LOCAL_MASTER_KEY_ENV] = 'true';
+    delete process.env.SMARTPERFETTO_API_KEY;
+    resetProviderService();
+
+    const createRes = await ssoHeaders(request(app).post('/api/v1/providers')).send({
+      name: 'Audited DeepSeek',
+      category: 'official',
+      type: 'deepseek',
+      models: { primary: 'deepseek-v4-pro', light: 'deepseek-v4-flash' },
+      connection: {
+        apiKey: 'sk-deepseek-audit',
+        agentRuntime: 'claude-agent-sdk',
+        claudeBaseUrl: 'https://api.deepseek.com/anthropic',
+        openaiBaseUrl: 'https://api.deepseek.com/v1',
+      },
+    });
+    expect(createRes.status).toBe(201);
+    const id = createRes.body.provider.id;
+
+    expect(await ssoHeaders(request(app).get(`/api/v1/providers/${id}`))).toHaveProperty('status', 200);
+    expect(await ssoHeaders(request(app).patch(`/api/v1/providers/${id}`)).send({
+      name: 'Audited DeepSeek Updated',
+    })).toHaveProperty('status', 200);
+    expect(await ssoHeaders(request(app).post(`/api/v1/providers/${id}/activate`))).toHaveProperty('status', 200);
+    expect(await ssoHeaders(request(app).post(`/api/v1/providers/${id}/runtime`)).send({
+      agentRuntime: 'openai-agents-sdk',
+    })).toHaveProperty('status', 200);
+    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ data: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    try {
+      expect(await ssoHeaders(request(app).post(`/api/v1/providers/${id}/test`))).toHaveProperty('status', 200);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+    expect(await ssoHeaders(request(app).post(`/api/v1/providers/${id}/rotate-secret`))).toHaveProperty('status', 200);
+    expect(await ssoHeaders(request(app).post('/api/v1/providers/deactivate'))).toHaveProperty('status', 200);
+    expect(await ssoHeaders(request(app).delete(`/api/v1/providers/${id}`))).toHaveProperty('status', 200);
+
+    expect(readEnterpriseAuditActions(dbPath)).toEqual(expect.arrayContaining([
+      'provider.created',
+      'provider.read',
+      'provider.updated',
+      'provider.activated',
+      'provider.runtime_switched',
+      'provider.connection_tested',
+      'provider.secret_rotated',
+      'provider.deactivated',
+      'provider.deleted',
+    ]));
   });
 });

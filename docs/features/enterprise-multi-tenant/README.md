@@ -76,7 +76,7 @@
 
 ### 0.5 主线 D：控制面与合规（§18）
 - [ ] 5.1 tenant / workspace / member / provider / quota 管理 UI 与后端 API
-- [ ] 5.2 `audit_events` 表 + 关键操作埋点（trace / report / provider / memory / cleanup / delete / promote）
+- [x] 5.2 `audit_events` 表 + 关键操作埋点（trace / report / provider / memory / cleanup / delete / promote）
 - [ ] 5.3 配额 / 预算 / retention policy（§16.1，含 quota_exceeded 终态）
 - [ ] 5.4 Tenant export bundle（§16.2，含 SHA256 + tenant identity proof）
 - [ ] 5.5 Tenant tombstone + 7 天硬删窗口 + async purge + audit proof（§16.3）

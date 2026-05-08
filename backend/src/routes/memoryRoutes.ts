@@ -32,6 +32,7 @@ import {Router, type Router as ExpressRouter} from 'express';
 
 import {authenticate, requireRequestContext} from '../middleware/auth';
 import {ProjectMemory} from '../agentv3/projectMemory';
+import {recordEnterpriseAuditEventForContext} from '../services/enterpriseAuditService';
 import {knowledgeScopeFromRequestContext} from '../services/scopedKnowledgeStore';
 import type {MemoryPromotionPolicy} from '../types/sparkContracts';
 
@@ -114,6 +115,17 @@ export function createMemoryRoutes(memory?: ProjectMemory): ExpressRouter {
     try {
       m.promoteEntry(entryId, policy, storageScope);
       const entry = m.getProjectMemoryEntry(entryId, storageScope);
+      recordEnterpriseAuditEventForContext(requireRequestContext(req), {
+        action: 'memory.promoted',
+        resourceType: 'memory',
+        resourceId: entryId,
+        metadata: {
+          fromScope: policy.fromScope,
+          toScope: policy.toScope,
+          trigger: policy.trigger,
+          reviewer: policy.reviewer,
+        },
+      });
       return res.status(200).json({success: true, entry});
     } catch (err) {
       return res.status(400).json({
@@ -133,6 +145,11 @@ export function createMemoryRoutes(memory?: ProjectMemory): ExpressRouter {
         error: `Entry '${req.params.entryId}' not found`,
       });
     }
+    recordEnterpriseAuditEventForContext(requireRequestContext(req), {
+      action: 'memory.deleted',
+      resourceType: 'memory',
+      resourceId: req.params.entryId,
+    });
     res.json({success: true});
   });
 

@@ -10,12 +10,25 @@ import {describe, it, expect, beforeEach, afterEach} from '@jest/globals';
 import express from 'express';
 import request from 'supertest';
 
+import {ENTERPRISE_FEATURE_FLAG_ENV} from '../../config';
 import {createMemoryRoutes} from '../memoryRoutes';
 import {ProjectMemory} from '../../agentv3/projectMemory';
+import {listEnterpriseAuditEvents} from '../../services/enterpriseAuditService';
+import {
+  ENTERPRISE_DB_PATH_ENV,
+  openEnterpriseDb,
+} from '../../services/enterpriseDb';
 import {
   type MemoryPromotionPolicy,
   type ProjectMemoryEntry,
 } from '../../types/sparkContracts';
+
+const originalEnv = {
+  enterprise: process.env[ENTERPRISE_FEATURE_FLAG_ENV],
+  trustedHeaders: process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS,
+  enterpriseDbPath: process.env[ENTERPRISE_DB_PATH_ENV],
+  apiKey: process.env.SMARTPERFETTO_API_KEY,
+};
 
 let tmpDir: string;
 let memory: ProjectMemory;
@@ -30,10 +43,41 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  restoreEnvValue(ENTERPRISE_FEATURE_FLAG_ENV, originalEnv.enterprise);
+  restoreEnvValue('SMARTPERFETTO_SSO_TRUSTED_HEADERS', originalEnv.trustedHeaders);
+  restoreEnvValue(ENTERPRISE_DB_PATH_ENV, originalEnv.enterpriseDbPath);
+  restoreEnvValue('SMARTPERFETTO_API_KEY', originalEnv.apiKey);
   if (fs.existsSync(tmpDir)) {
     fs.rmSync(tmpDir, {recursive: true, force: true});
   }
 });
+
+function restoreEnvValue(key: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+}
+
+function ssoHeaders(req: request.Test): request.Test {
+  return req
+    .set('X-SmartPerfetto-SSO-User-Id', 'memory-admin')
+    .set('X-SmartPerfetto-SSO-Email', 'memory-admin@example.test')
+    .set('X-SmartPerfetto-SSO-Tenant-Id', 'tenant-a')
+    .set('X-SmartPerfetto-SSO-Workspace-Id', 'workspace-a')
+    .set('X-SmartPerfetto-SSO-Roles', 'workspace_admin')
+    .set('X-SmartPerfetto-SSO-Scopes', 'audit:read');
+}
+
+function readEnterpriseAuditActions(dbPath: string): string[] {
+  const db = openEnterpriseDb(dbPath);
+  try {
+    return listEnterpriseAuditEvents(db).map(event => event.action);
+  } finally {
+    db.close();
+  }
+}
 
 function makeEntry(
   overrides: Partial<ProjectMemoryEntry> = {},
@@ -147,6 +191,34 @@ describe('POST /api/memory/promote', () => {
     expect(res.status).toBe(200);
     expect(res.body.entry.scope).toBe('world');
     expect(res.body.entry.promotionPolicy.trigger).toBe('reviewer_approval');
+  });
+
+  it('records enterprise audit events for promotion and deletion', async () => {
+    const dbPath = path.join(tmpDir, 'enterprise.sqlite');
+    process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+    process.env[ENTERPRISE_DB_PATH_ENV] = dbPath;
+    delete process.env.SMARTPERFETTO_API_KEY;
+
+    memory.saveProjectMemoryEntry(makeEntry({entryId: 'a', scope: 'project'}), {
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'memory-admin',
+    });
+    const promoteRes = await ssoHeaders(
+      request(app)
+        .post('/api/memory/promote')
+        .send({entryId: 'a', policy: REVIEWER_POLICY}),
+    );
+    expect(promoteRes.status).toBe(200);
+
+    const deleteRes = await ssoHeaders(request(app).delete('/api/memory/a'));
+    expect(deleteRes.status).toBe(200);
+
+    expect(readEnterpriseAuditActions(dbPath)).toEqual(expect.arrayContaining([
+      'memory.promoted',
+      'memory.deleted',
+    ]));
   });
 
   it('400 on missing body fields', async () => {
