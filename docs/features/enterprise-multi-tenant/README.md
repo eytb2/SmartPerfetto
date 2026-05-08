@@ -92,7 +92,7 @@
 - [x] 5.9 安全审计：ID 枚举、跨 tenant、无权限 provider/report/memory 访问
 
 ### 0.6 测试矩阵补全（§20，与主线绑定）
-- [ ] 6.1 Unit：RequestContext / RBAC / owner guard / provider resolution / ProviderSnapshot hash
+- [x] 6.1 Unit：RequestContext / RBAC / owner guard / provider resolution / ProviderSnapshot hash
 - [ ] 6.2 Integration：trace upload/list/delete/download；agent analyze/resume/respond/stream；report read/delete
 - [ ] 6.3 Concurrency：多用户同时 upload / analyze / query / cancel / cleanup
 - [x] 6.4 Dual-window e2e：D1-D10 每个场景至少 1 个自动化用例（详见 §0.7）
@@ -143,6 +143,7 @@
 - [x] `docs/features/enterprise-multi-tenant/security-audit.md`（§0.5.9 安全审计证据）
 - [x] `docs/features/enterprise-multi-tenant/runtime-dashboard.md`（§0.5.8 管理员运行时 dashboard API 契约与验证）
 - [x] `docs/features/enterprise-multi-tenant/admin-control-plane.md`（§0.5.1 tenant/workspace/member/provider/quota 管理面契约与验证）
+- [x] `docs/features/enterprise-multi-tenant/unit-coverage-matrix.md`（§0.6.1 Unit 覆盖证据与 test:core 固定入口）
 
 ### 0.10 PR / 提交收尾（每次 PR 都要走）
 - [ ] 每个主线 / 子主线一个独立 PR；不跨主线串改动
