@@ -71,6 +71,10 @@ import {
   evaluateAnalysisRunQuota,
   type EnterpriseQuotaDecision,
 } from '../services/enterpriseQuotaPolicyService';
+import {
+  evaluateTenantMutationPolicy,
+  sendTenantMutationDeniedPayload,
+} from '../services/enterpriseTenantLifecycleService';
 import { estimateTraceProcessorRssBytes } from '../services/traceProcessorRamBudget';
 import { TraceProcessorFactory } from '../services/workingTraceProcessor';
 import { registerAgentLogsRoutes } from './agentLogsRoutes';
@@ -1044,6 +1048,12 @@ async function handleAnalyzeRequest(
     const requestedSessionId = requestedSessionIdOverride || bodyRequestedSessionId;
     if (!hasRbacPermission(requestContext, 'agent:run')) {
       sendForbidden(res, 'Starting analysis requires agent:run permission');
+      return;
+    }
+
+    const tenantDecision = evaluateTenantMutationPolicy(requestContext);
+    if (!tenantDecision.allowed) {
+      res.status(tenantDecision.httpStatus).json(sendTenantMutationDeniedPayload(tenantDecision));
       return;
     }
 

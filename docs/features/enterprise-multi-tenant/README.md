@@ -79,7 +79,7 @@
 - [x] 5.2 `audit_events` 表 + 关键操作埋点（trace / report / provider / memory / cleanup / delete / promote）
 - [x] 5.3 配额 / 预算 / retention policy（§16.1，含 quota_exceeded 终态）
 - [x] 5.4 Tenant export bundle（§16.2，含 SHA256 + tenant identity proof）
-- [ ] 5.5 Tenant tombstone + 7 天硬删窗口 + async purge + audit proof（§16.3）
+- [x] 5.5 Tenant tombstone + 7 天硬删窗口 + async purge + audit proof（§16.3）
 - [ ] 5.6 Custom skill v1 处置（§14.3）：禁用 write endpoint 或修 loader 闭环
 - [ ] 5.7 Legacy AI route 处置（§14.4 表）
   - [ ] 5.7.1 `/api/agent/v1/llm` DeepSeek proxy
@@ -1002,6 +1002,14 @@ request delete
 ```
 
 删除完成后输出删除证明：操作者、时间、资源数量、数据指纹 hash。
+
+当前实现：
+
+- `POST /api/tenant/tombstone` 要求 `org_admin` 或 `tenant:delete` scope，并要求 `confirmTenantId` 显式匹配。
+- tombstone 会写入 `tenant_tombstones`，将 organization 状态置为 `tombstoned`，并写入 `tenant.tombstoned` audit event。
+- trace upload 与 agent analyze 在 tenant tombstone 后返回 `TENANT_TOMBSTONED`，拒绝新 upload / run。
+- `POST /api/tenant/purge` 在 7 天窗口后创建 async purge job；`GET /api/tenant/purge/:jobId` 查询结果。
+- purge 会在无 active run / lease 时删除 tenant data 目录和 tenant-scoped DB 行，保留 tombstone、organization purged 状态与 audit proof，写入 proof hash。
 
 ## 17. 迁移策略
 

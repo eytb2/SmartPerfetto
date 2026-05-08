@@ -38,6 +38,10 @@ import {
   type EnterpriseQuotaDecision,
 } from '../services/enterpriseQuotaPolicyService';
 import {
+  evaluateTenantMutationPolicy,
+  sendTenantMutationDeniedPayload,
+} from '../services/enterpriseTenantLifecycleService';
+import {
   buildTraceOwnerMetadata,
   deleteTraceMetadata,
   getTraceFilePath,
@@ -690,6 +694,11 @@ router.post(
       }
 
       const file = req.file;
+      const tenantDecision = evaluateTenantMutationPolicy(context);
+      if (!tenantDecision.allowed) {
+        await cleanupFile(file.path);
+        return res.status(tenantDecision.httpStatus).json(sendTenantMutationDeniedPayload(tenantDecision));
+      }
       const quotaDecision = evaluateTraceUploadQuota(context, file.size);
       if (!quotaDecision.allowed) {
         await cleanupFile(file.path);
@@ -745,6 +754,10 @@ router.post('/upload-url', async (req, res) => {
     const context = requireRequestContext(req);
     if (!hasRbacPermission(context, 'trace:write')) {
       return sendForbidden(res, 'Uploading traces requires trace:write permission');
+    }
+    const tenantDecision = evaluateTenantMutationPolicy(context);
+    if (!tenantDecision.allowed) {
+      return res.status(tenantDecision.httpStatus).json(sendTenantMutationDeniedPayload(tenantDecision));
     }
     const rawUrl = typeof req.body?.url === 'string' ? req.body.url : '';
     if (!rawUrl) {

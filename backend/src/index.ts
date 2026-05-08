@@ -37,6 +37,7 @@ import caseRoutes from './routes/caseRoutes';
 import ragAdminRoutes from './routes/ragAdminRoutes';
 import enterpriseAuthRoutes from './routes/enterpriseAuthRoutes';
 import enterpriseApiKeyRoutes from './routes/enterpriseApiKeyRoutes';
+import enterpriseTenantRoutes from './routes/enterpriseTenantRoutes';
 import traceProcessorProxyRoutes, { handleTraceProcessorProxyUpgrade } from './routes/traceProcessorProxyRoutes';
 import {authenticate} from './middleware/auth';
 import {
@@ -161,6 +162,7 @@ app.get('/debug', (req, res) => {
 app.use('/api/sql', sqlRoutes);
 app.use('/api/auth', enterpriseAuthRoutes);
 app.use('/api/auth', enterpriseApiKeyRoutes);
+app.use('/api/tenant', enterpriseTenantRoutes);
 app.use(
   '/api/workspaces/:workspaceId/traces',
   ...workspaceRouteContextMiddleware,

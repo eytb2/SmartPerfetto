@@ -9,7 +9,7 @@ import os from 'os';
 import path from 'path';
 import request from 'supertest';
 import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../config';
-import { ENTERPRISE_DB_PATH_ENV } from '../../services/enterpriseDb';
+import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../../services/enterpriseDb';
 import { ENTERPRISE_DATA_DIR_ENV, writeTraceMetadata } from '../../services/traceMetadataStore';
 import {
   persistSerializedAgentEvent,
@@ -97,6 +97,49 @@ describe('agent route RBAC', () => {
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('Forbidden');
     expect(res.body.details).toContain('agent:run');
+  });
+
+  it('rejects analyze requests after tenant tombstone before trace access is evaluated', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-agent-tombstone-'));
+    try {
+      delete process.env.SMARTPERFETTO_API_KEY;
+      process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+      process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+      process.env[ENTERPRISE_DB_PATH_ENV] = path.join(tmpDir, 'enterprise.sqlite');
+      process.env[ENTERPRISE_DATA_DIR_ENV] = path.join(tmpDir, 'data');
+
+      const db = openEnterpriseDb();
+      const now = Date.now();
+      try {
+        db.prepare(`
+          INSERT INTO organizations (id, name, status, plan, created_at, updated_at)
+          VALUES ('tenant-a', 'Tenant A', 'tombstoned', 'enterprise', ?, ?)
+        `).run(now, now);
+        db.prepare(`
+          INSERT INTO tenant_tombstones
+            (tenant_id, requested_by, requested_at, purge_after, status, proof_hash)
+          VALUES
+            ('tenant-a', NULL, ?, ?, 'tombstoned', NULL)
+        `).run(now, now + 7 * 24 * 60 * 60 * 1000);
+      } finally {
+        db.close();
+      }
+      const traceService = { getOrLoadTrace: jest.fn() };
+      setTraceProcessorServiceForTests(traceService as any);
+
+      const res = await analystHeaders(request(makeApp()).post('/api/agent/v1/analyze'))
+        .send({ traceId: 'trace-a', query: 'analyze this trace' });
+
+      expect(res.status).toBe(423);
+      expect(res.body).toEqual(expect.objectContaining({
+        success: false,
+        code: 'TENANT_TOMBSTONED',
+        status: 'tombstoned',
+      }));
+      expect(traceService.getOrLoadTrace).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('rejects analyze when the scoped trace processor lease is draining', async () => {
