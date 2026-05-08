@@ -48,6 +48,20 @@ interface MarkdownSection {
   startLine: number;
 }
 
+const REQUIRED_ACCEPTANCE_EVIDENCE_ITEMS = [
+  '50 online users + 5-15 running runs + stable pending queue',
+  'Users cannot guess traceId / sessionId / runId / reportId for cross-resource access',
+  'A delete/cleanup does not affect B running run / active lease',
+  'Provider isolation: A personal provider does not affect B; workspace default changes only affect new sessions',
+  'Provider config changes do not resume the wrong SDK session',
+  'SSE fetch-stream reconnects with Last-Event-ID',
+  'Two windows open two traces without pending trace / AI session / SSE / lease cross-talk',
+  'One slow SQL does not directly kill a frontend-owned lease',
+  'Memory / SQL learning / case / baseline default to tenant/workspace isolation',
+  'Tenant export / tombstone / async purge / audit proof all work',
+  'Load-test report includes p50/p95, error rate, worker RSS, queue length, and LLM cost',
+];
+
 function printUsage(): void {
   console.log('Usage: npx tsx src/scripts/enterpriseReadinessAudit.ts [options]');
   console.log('');
@@ -207,19 +221,41 @@ function auditAcceptanceEvidence(markdown: string, filePath: string): ReadinessC
   const openRows = markdown
     .split(/\r?\n/)
     .filter(line => /^\| .+ \| Open \|/.test(line));
-  if (openRows.length > 0) {
+  const matrixRows = markdownTableRows(markdown).filter(row =>
+    row['README §0.8 item'] !== undefined
+    && row.Status !== undefined
+    && row.Evidence !== undefined
+  );
+  const itemTexts = matrixRows.map(row => row['README §0.8 item']);
+  const missingItems = REQUIRED_ACCEPTANCE_EVIDENCE_ITEMS.filter(required =>
+    !itemTexts.some(item => normalizeAcceptanceEvidenceText(item).includes(normalizeAcceptanceEvidenceText(required)))
+  );
+
+  if (openRows.length > 0 || missingItems.length > 0) {
     return blocked(
       'acceptance-evidence-open-rows',
-      `${path.basename(filePath)} still has ${openRows.length} Open acceptance row(s).`,
-      openRows,
+      `${path.basename(filePath)} is missing or still has Open §19 acceptance row(s).`,
+      [
+        `found=${matrixRows.length}`,
+        ...openRows,
+        ...missingItems.map(item => `missing acceptance evidence item: ${item}`),
+      ],
     );
   }
 
   return passed(
     'acceptance-evidence-open-rows',
-    `${path.basename(filePath)} has no Open acceptance rows.`,
-    [path.basename(filePath)],
+    `${path.basename(filePath)} has all 11 §19 acceptance rows and no Open rows.`,
+    itemTexts,
   );
+}
+
+function normalizeAcceptanceEvidenceText(value: string): string {
+  return value
+    .replace(/`/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
 function markdownTableValue(markdown: string, label: string): string | null {

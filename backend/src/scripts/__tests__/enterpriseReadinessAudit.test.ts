@@ -87,6 +87,25 @@ function finalLoadReport(): string {
   ].join('\n');
 }
 
+function finalAcceptanceEvidence(): string {
+  return [
+    '| README §0.8 item | Status | Evidence |',
+    '| --- | --- | --- |',
+    '| 50 online users + 5-15 running runs + stable pending queue | Covered | measured load report |',
+    '| Users cannot guess `traceId` / `sessionId` / `runId` / `reportId` for cross-resource access | Covered | route tests |',
+    '| A delete/cleanup does not affect B running run / active lease | Covered | cleanup tests |',
+    '| Provider isolation: A personal provider does not affect B; workspace default changes only affect new sessions | Covered | provider tests |',
+    '| Provider config changes do not resume the wrong SDK session | Covered | snapshot tests |',
+    '| SSE fetch-stream reconnects with `Last-Event-ID` | Covered | SSE replay tests |',
+    '| Two windows open two traces without pending trace / AI session / SSE / lease cross-talk | Covered | D1-D10 tests |',
+    '| One slow SQL does not directly kill a frontend-owned lease | Covered | runtime tests |',
+    '| Memory / SQL learning / case / baseline default to tenant/workspace isolation | Covered | scope tests |',
+    '| Tenant export / tombstone / async purge / audit proof all work | Covered | tenant tests |',
+    '| Load-test report includes p50/p95, error rate, worker RSS, queue length, and LLM cost | Covered | measured load report |',
+    '',
+  ].join('\n');
+}
+
 function finalRssBenchmark(): string {
   const scenes = ['scroll', 'startup', 'anr', 'memory', 'heapprofd', 'vendor'];
   const sizeBuckets = ['100MB', '500MB', '1GB'];
@@ -189,7 +208,7 @@ describe('enterprise readiness audit', () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
     try {
       const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
-      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', finalAcceptanceEvidence());
       const loadTestReportPath = await writeFixture(tmpDir, 'load.md', finalLoadReport());
       const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', finalRssBenchmark());
       const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
@@ -215,7 +234,7 @@ describe('enterprise readiness audit', () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
     try {
       const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
-      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', finalAcceptanceEvidence());
       const loadTestReportPath = await writeFixture(tmpDir, 'load.md', 'Acceptance status: passed\n');
       const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', finalRssBenchmark());
       const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
@@ -248,7 +267,7 @@ describe('enterprise readiness audit', () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
     try {
       const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
-      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', finalAcceptanceEvidence());
       const loadTestReportPath = await writeFixture(
         tmpDir,
         'load.md',
@@ -283,11 +302,47 @@ describe('enterprise readiness audit', () => {
     }
   });
 
+  it('requires all eleven §19 acceptance evidence rows, not just a covered marker', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
+    try {
+      const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
+      const acceptanceEvidencePath = await writeFixture(
+        tmpDir,
+        'acceptance.md',
+        '| README §0.8 item | Status | Evidence |\n| --- | --- | --- |\n| load | Covered | measured |\n',
+      );
+      const loadTestReportPath = await writeFixture(tmpDir, 'load.md', finalLoadReport());
+      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', finalRssBenchmark());
+      const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
+
+      const report = buildEnterpriseReadinessAuditReport({
+        readmePath,
+        acceptanceEvidencePath,
+        loadTestReportPath,
+        rssBenchmarkPath,
+        releaseNotesPath,
+        requireReady: true,
+      });
+
+      expect(report.ready).toBe(false);
+      expect(report.checks.find(check => check.id === 'acceptance-evidence-open-rows')).toMatchObject({
+        status: 'blocked',
+        evidence: expect.arrayContaining([
+          'found=1',
+          expect.stringContaining('missing acceptance evidence item: 50 online users'),
+          expect.stringContaining('missing acceptance evidence item: Load-test report includes p50/p95'),
+        ]),
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('requires final RSS matrix rows and metrics, not just a complete marker', async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
     try {
       const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
-      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', finalAcceptanceEvidence());
       const loadTestReportPath = await writeFixture(tmpDir, 'load.md', finalLoadReport());
       const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', 'Coverage status: complete\n');
       const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
@@ -318,7 +373,7 @@ describe('enterprise readiness audit', () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
     try {
       const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
-      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', finalAcceptanceEvidence());
       const loadTestReportPath = await writeFixture(tmpDir, 'load.md', finalLoadReport());
       const rssBenchmarkPath = await writeFixture(
         tmpDir,
@@ -353,7 +408,7 @@ describe('enterprise readiness audit', () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
     try {
       const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
-      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', finalAcceptanceEvidence());
       const loadTestReportPath = await writeFixture(tmpDir, 'load.md', finalLoadReport());
       const rssBenchmarkPath = await writeFixture(
         tmpDir,
@@ -393,7 +448,7 @@ describe('enterprise readiness audit', () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
     try {
       const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme().replace('- [x] D10 scenario\n', ''));
-      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', finalAcceptanceEvidence());
       const loadTestReportPath = await writeFixture(tmpDir, 'load.md', finalLoadReport());
       const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', finalRssBenchmark());
       const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
