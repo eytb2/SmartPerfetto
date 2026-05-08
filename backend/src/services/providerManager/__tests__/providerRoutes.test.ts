@@ -9,6 +9,11 @@ import path from 'path';
 import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../../config';
 import { listEnterpriseAuditEvents } from '../../enterpriseAuditService';
 import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../../enterpriseDb';
+import { authenticate } from '../../../middleware/auth';
+import {
+  bindWorkspaceRouteContext,
+  requireWorkspaceRouteContext,
+} from '../../../middleware/workspaceRouteContext';
 import {
   SECRET_STORE_ALLOW_LOCAL_MASTER_KEY_ENV,
   SECRET_STORE_DIR_ENV,
@@ -257,5 +262,60 @@ describe('Provider Routes', () => {
       'provider.deactivated',
       'provider.deleted',
     ]));
+  });
+
+  it('uses workspace scope for workspace provider routes', async () => {
+    const dbPath = path.join(dir, 'enterprise.sqlite');
+    process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+    process.env[ENTERPRISE_DB_PATH_ENV] = dbPath;
+    process.env[SECRET_STORE_DIR_ENV] = path.join(dir, 'secrets');
+    process.env[SECRET_STORE_ALLOW_LOCAL_MASTER_KEY_ENV] = 'true';
+    delete process.env.SMARTPERFETTO_API_KEY;
+    resetProviderService();
+
+    const { default: workspaceProviderRoutes } = await import('../../../routes/providerRoutes');
+    const workspaceApp = express();
+    workspaceApp.use(express.json());
+    workspaceApp.use(
+      '/api/workspaces/:workspaceId/providers',
+      bindWorkspaceRouteContext,
+      authenticate,
+      requireWorkspaceRouteContext,
+      workspaceProviderRoutes,
+    );
+
+    const createRes = await ssoHeaders(
+      request(workspaceApp).post('/api/workspaces/workspace-a/providers'),
+    ).send({
+      name: 'Workspace OpenAI',
+      category: 'official',
+      type: 'openai',
+      models: { primary: 'gpt-5.5', light: 'gpt-5.4-mini' },
+      connection: {
+        agentRuntime: 'openai-agents-sdk',
+        openaiApiKey: 'sk-workspace-route',
+      },
+    });
+
+    expect(createRes.status).toBe(201);
+    const id = createRes.body.provider.id;
+    expect(await ssoHeaders(
+      request(workspaceApp).post(`/api/workspaces/workspace-a/providers/${id}/activate`),
+    )).toHaveProperty('status', 200);
+
+    const db = openEnterpriseDb(dbPath);
+    try {
+      const row = db.prepare(`
+        SELECT scope, owner_user_id, policy_json
+        FROM provider_credentials
+        WHERE id = ?
+      `).get(id) as { scope: string; owner_user_id: string | null; policy_json: string };
+      expect(row.scope).toBe('workspace');
+      expect(row.owner_user_id).toBeNull();
+      expect(JSON.parse(row.policy_json).isActive).toBe(true);
+    } finally {
+      db.close();
+    }
   });
 });

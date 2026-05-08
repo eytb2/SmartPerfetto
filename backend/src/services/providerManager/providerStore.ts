@@ -40,7 +40,13 @@ interface ProviderPolicyJson {
   secretVersion?: number;
 }
 
-const DEFAULT_PROVIDER_SCOPE: Required<ProviderScope> = {
+interface ResolvedProviderScope {
+  tenantId: string;
+  workspaceId: string;
+  userId: string | null;
+}
+
+const DEFAULT_PROVIDER_SCOPE = {
   tenantId: 'default-dev-tenant',
   workspaceId: 'default-workspace',
   userId: 'dev-user-123',
@@ -77,11 +83,14 @@ function assertSafeScopeSegment(value: string, label: string): string {
   return value;
 }
 
-function resolveProviderScope(scope?: ProviderScope): Required<ProviderScope> {
+function resolveProviderScope(scope?: ProviderScope): ResolvedProviderScope {
+  const rawUserId = scope === undefined ? DEFAULT_PROVIDER_SCOPE.userId : scope.userId;
   return {
     tenantId: assertSafeScopeSegment(scope?.tenantId || DEFAULT_PROVIDER_SCOPE.tenantId, 'tenant id'),
     workspaceId: assertSafeScopeSegment(scope?.workspaceId || DEFAULT_PROVIDER_SCOPE.workspaceId, 'workspace id'),
-    userId: assertSafeScopeSegment(scope?.userId || DEFAULT_PROVIDER_SCOPE.userId, 'user id'),
+    userId: rawUserId === undefined || rawUserId === null
+      ? null
+      : assertSafeScopeSegment(rawUserId, 'user id'),
   };
 }
 
@@ -135,11 +144,11 @@ function mergeConnectionSecrets(
   };
 }
 
-function providerSecretRef(scope: Required<ProviderScope>, providerId: string): string {
-  return `secret:provider:${scope.tenantId}:${scope.workspaceId}:${scope.userId}:${providerId}`;
+function providerSecretRef(scope: ResolvedProviderScope, providerId: string): string {
+  return `secret:provider:${scope.tenantId}:${scope.workspaceId}:${scope.userId ?? '_workspace'}:${providerId}`;
 }
 
-function ensureEnterpriseProviderGraph(scope: Required<ProviderScope>): void {
+function ensureEnterpriseProviderGraph(scope: ResolvedProviderScope): void {
   const now = Date.now();
   const db = openEnterpriseDb();
   try {
@@ -151,22 +160,24 @@ function ensureEnterpriseProviderGraph(scope: Required<ProviderScope>): void {
       INSERT OR IGNORE INTO workspaces (id, tenant_id, name, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?)
     `).run(scope.workspaceId, scope.tenantId, scope.workspaceId, now, now);
-    db.prepare(`
-      INSERT INTO users (id, tenant_id, email, display_name, idp_subject, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        email = excluded.email,
-        display_name = excluded.display_name,
-        updated_at = excluded.updated_at
-    `).run(
-      scope.userId,
-      scope.tenantId,
-      `${scope.userId}@provider.local`,
-      scope.userId,
-      `provider:${scope.userId}`,
-      now,
-      now,
-    );
+    if (scope.userId) {
+      db.prepare(`
+        INSERT INTO users (id, tenant_id, email, display_name, idp_subject, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          email = excluded.email,
+          display_name = excluded.display_name,
+          updated_at = excluded.updated_at
+      `).run(
+        scope.userId,
+        scope.tenantId,
+        `${scope.userId}@provider.local`,
+        scope.userId,
+        `provider:${scope.userId}`,
+        now,
+        now,
+      );
+    }
   } finally {
     db.close();
   }
@@ -224,6 +235,20 @@ export class ProviderStore {
       if (p.isActive) return p;
     }
     return undefined;
+  }
+
+  getActivePeer(id: string, scope?: ProviderScope): ProviderConfig | undefined {
+    if (enterpriseProviderStoreEnabled()) {
+      return this.getActiveEnterprisePeer(id, scope);
+    }
+    return this.getActive(scope);
+  }
+
+  getActiveWriteScope(scope?: ProviderScope): ProviderConfig | undefined {
+    if (enterpriseProviderStoreEnabled()) {
+      return this.getActiveEnterpriseWriteScope(scope);
+    }
+    return this.getActive(scope);
   }
 
   set(provider: ProviderConfig, scope?: ProviderScope): void {
@@ -423,7 +448,56 @@ export class ProviderStore {
     }
   }
 
-  private getEnterpriseRowById(id: string, scope: Required<ProviderScope>): ProviderCredentialRow | undefined {
+  private getActiveEnterprisePeer(id: string, scope?: ProviderScope): ProviderConfig | undefined {
+    const resolved = resolveProviderScope(scope);
+    const row = this.getEnterpriseRowById(id, resolved);
+    if (!row) return undefined;
+    return this.getActiveEnterpriseInCredentialScope({
+      tenantId: row.tenant_id,
+      workspaceId: row.workspace_id,
+      ownerUserId: row.owner_user_id,
+      credentialScope: row.scope,
+    });
+  }
+
+  private getActiveEnterpriseWriteScope(scope?: ProviderScope): ProviderConfig | undefined {
+    const resolved = resolveProviderScope(scope);
+    return this.getActiveEnterpriseInCredentialScope({
+      tenantId: resolved.tenantId,
+      workspaceId: resolved.workspaceId,
+      ownerUserId: resolved.userId,
+      credentialScope: resolved.userId ? 'personal' : 'workspace',
+    });
+  }
+
+  private getActiveEnterpriseInCredentialScope(input: {
+    tenantId: string;
+    workspaceId: string | null;
+    ownerUserId: string | null;
+    credentialScope: ProviderCredentialScope;
+  }): ProviderConfig | undefined {
+    const db = openEnterpriseDb();
+    try {
+      const rows = db.prepare<unknown[], ProviderCredentialRow>(`
+        SELECT *
+        FROM provider_credentials
+        WHERE tenant_id = @tenantId
+          AND workspace_id IS @workspaceId
+          AND owner_user_id IS @ownerUserId
+          AND scope = @credentialScope
+        ORDER BY updated_at DESC
+      `).all(input);
+      for (const row of rows) {
+        const provider = this.providerFromEnterpriseRow(row);
+        if (provider?.isActive) return provider;
+      }
+      return undefined;
+    } finally {
+      db.close();
+    }
+  }
+
+  private getEnterpriseRowById(id: string, scope: ResolvedProviderScope): ProviderCredentialRow | undefined {
     const db = openEnterpriseDb();
     try {
       return db.prepare<unknown[], ProviderCredentialRow>(`

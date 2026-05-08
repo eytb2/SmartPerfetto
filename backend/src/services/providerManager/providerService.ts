@@ -203,7 +203,7 @@ export class ProviderService {
     const target = this.store.get(id, scope);
     if (!target) throw new Error(`Provider not found: ${id}`);
 
-    const current = this.store.getActive(scope);
+    const current = this.store.getActivePeer(id, scope);
     if (current && current.id !== id) {
       this.store.set({ ...current, isActive: false, updatedAt: new Date().toISOString() }, scope);
     }
@@ -212,7 +212,7 @@ export class ProviderService {
   }
 
   deactivateAll(scope?: ProviderScope): void {
-    const current = this.store.getActive(scope);
+    const current = this.store.getActiveWriteScope(scope);
     if (current) {
       this.store.set({ ...current, isActive: false, updatedAt: new Date().toISOString() }, scope);
     }

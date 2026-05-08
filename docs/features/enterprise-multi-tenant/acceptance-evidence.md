@@ -1,8 +1,8 @@
 # Enterprise §19 Acceptance Evidence
 
 This file maps README §0.8 total-acceptance bullets to concrete automated
-evidence. It is intentionally conservative: load-test items and provider
-workspace-default behavior remain open until they have direct measured evidence.
+evidence. It is intentionally conservative: load-test items remain open until
+they have direct measured evidence.
 
 ## Evidence Matrix
 
@@ -11,7 +11,7 @@ workspace-default behavior remain open until they have direct measured evidence.
 | 50 online users + 5-15 running runs + stable pending queue | Open | Requires a real load-test environment and `load-test-report.md`. Do not mark complete from unit or route tests. |
 | Users cannot guess `traceId` / `sessionId` / `runId` / `reportId` for cross-resource access | Covered | `enterpriseTraceMetadataRoutes.test.ts` asserts cross-workspace and missing trace/file both return 404; `enterpriseReportRoutes.test.ts` asserts cross-workspace and missing reports/exports return 404; `agentRoutesRbac.test.ts` asserts cross-workspace run stream/status return 404; `traceProcessorProxyRoutes.test.ts` hides leases from other workspaces. |
 | A delete/cleanup does not affect B running run / active lease | Covered | `enterpriseTraceMetadataRoutes.test.ts` now covers scoped delete + cleanup of workspace A while workspace B keeps a running run, trace metadata, and active frontend lease intact. Existing cleanup/delete blockers also keep active holders/runs from being destroyed. |
-| Provider isolation: A personal provider does not affect B; workspace default changes only affect new sessions | Partial | `enterpriseProviderStore.test.ts` covers personal provider activation isolation by user; `agentAnalyzeSessionService.test.ts` covers live session provider pinning when active provider changes elsewhere. Missing direct workspace-default acceptance evidence, so README §0.8 keeps this bullet open. |
+| Provider isolation: A personal provider does not affect B; workspace default changes only affect new sessions | Covered | `enterpriseProviderStore.test.ts` covers personal provider activation isolation by user and proves a personal override does not deactivate the workspace default visible to another user. `providerRoutes.test.ts` proves workspace provider routes write workspace-scoped defaults. `agentAnalyzeSessionService.test.ts` proves a workspace default change is used by new sessions while an existing live session remains pinned to its original provider. |
 | Provider config changes do not resume the wrong SDK session | Covered | `providerSnapshot.test.ts` proves model/endpoint/secret changes alter the provider snapshot hash without exposing plaintext secrets; `agentAnalyzeSessionService.test.ts` refreshes in-memory SDK sessions and skips persisted SDK snapshot restore when the provider hash changed. |
 | SSE fetch-stream reconnects with `Last-Event-ID` | Covered | `agent_sse_transport_unittest.ts` sends replay cursor through the `Last-Event-ID` header; `sessionSseReplay.test.ts` prefers that header over the legacy query cursor; `streamProjector.contract.test.ts` replays only events after the cursor; `agentRoutesRbac.test.ts` replays persisted `analysis_completed` terminal events from DB. |
 | Two windows open two traces without pending trace / AI session / SSE / lease cross-talk | Covered | `verifyEnterpriseMultiTenantWindows.test.ts` asserts D1-D10 isolation checks; `session_manager_unittest.ts` stores pending traces with workspace/window-scoped sessionStorage keys, prevents another window from recovering them, merges stale session-cache writes, and isolates cached sessions by workspace. |
@@ -32,6 +32,7 @@ PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest \
   src/routes/__tests__/agentRoutesRbac.test.ts \
   src/routes/__tests__/traceProcessorProxyRoutes.test.ts \
   src/services/providerManager/__tests__/enterpriseProviderStore.test.ts \
+  src/services/providerManager/__tests__/providerRoutes.test.ts \
   src/services/providerManager/__tests__/providerSnapshot.test.ts \
   src/assistant/application/__tests__/agentAnalyzeSessionService.test.ts \
   src/assistant/stream/__tests__/sessionSseReplay.test.ts \

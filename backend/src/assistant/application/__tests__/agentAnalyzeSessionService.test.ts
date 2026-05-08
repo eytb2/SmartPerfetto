@@ -3,8 +3,10 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import { afterEach, describe, expect, test, beforeEach, jest } from '@jest/globals';
+import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../../config';
 import type { SessionLogger } from '../../../services/sessionLogger';
 import { resetProviderService } from '../../../services/providerManager';
 import { resolveProviderRuntimeSnapshot } from '../../../services/providerManager/providerSnapshot';
@@ -15,6 +17,12 @@ import {
 } from '../agentAnalyzeSessionService';
 import { AssistantApplicationService } from '../assistantApplicationService';
 import { getProviderService } from '../../../services/providerManager';
+import type { ProviderScope } from '../../../services/providerManager';
+import { ENTERPRISE_DB_PATH_ENV } from '../../../services/enterpriseDb';
+import {
+  SECRET_STORE_ALLOW_LOCAL_MASTER_KEY_ENV,
+  SECRET_STORE_DIR_ENV,
+} from '../../../services/providerManager/localSecretStore';
 
 const mockCreateAgentOrchestrator = jest.fn((_input: unknown) => ({
   analyze: jest.fn(),
@@ -61,8 +69,13 @@ function createSession(sessionId: string, traceId: string): AnalyzeManagedSessio
   };
 }
 
-function providerSnapshotHash(providerId: string | null): string {
-  return resolveProviderRuntimeSnapshot(getProviderService(), providerId).snapshotHash;
+function providerSnapshotHash(providerId: string | null, providerScope?: ProviderScope): string {
+  return resolveProviderRuntimeSnapshot(
+    getProviderService(),
+    providerId,
+    undefined,
+    providerScope,
+  ).snapshotHash;
 }
 
 function createRestoredContext() {
@@ -76,15 +89,23 @@ function createRestoredContext() {
 }
 
 describe('AgentAnalyzeSessionService session continuity', () => {
+  const originalEnv = {
+    enterprise: process.env[ENTERPRISE_FEATURE_FLAG_ENV],
+    enterpriseDbPath: process.env[ENTERPRISE_DB_PATH_ENV],
+    secretStoreDir: process.env[SECRET_STORE_DIR_ENV],
+    allowLocalMasterKey: process.env[SECRET_STORE_ALLOW_LOCAL_MASTER_KEY_ENV],
+  };
   let assistantAppService: AssistantApplicationService<AnalyzeManagedSession>;
   let sessionPersistenceService: any;
   let service: AgentAnalyzeSessionService<AnalyzeManagedSession>;
+  let providerDataDir: string;
 
   beforeEach(() => {
-    process.env.PROVIDER_DATA_DIR_OVERRIDE = path.join(
+    providerDataDir = path.join(
       os.tmpdir(),
       `analyze-session-provider-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     );
+    process.env.PROVIDER_DATA_DIR_OVERRIDE = providerDataDir;
     resetProviderService();
     assistantAppService = new AssistantApplicationService<AnalyzeManagedSession>();
     sessionPersistenceService = {
@@ -107,10 +128,31 @@ describe('AgentAnalyzeSessionService session continuity', () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     delete process.env.PROVIDER_DATA_DIR_OVERRIDE;
+    restoreEnvValue(ENTERPRISE_FEATURE_FLAG_ENV, originalEnv.enterprise);
+    restoreEnvValue(ENTERPRISE_DB_PATH_ENV, originalEnv.enterpriseDbPath);
+    restoreEnvValue(SECRET_STORE_DIR_ENV, originalEnv.secretStoreDir);
+    restoreEnvValue(SECRET_STORE_ALLOW_LOCAL_MASTER_KEY_ENV, originalEnv.allowLocalMasterKey);
     resetProviderService();
+    await fs.rm(providerDataDir, { recursive: true, force: true });
   });
+
+  function restoreEnvValue(key: string, value: string | undefined): void {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+
+  function enableEnterpriseProviderStore(): void {
+    process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+    process.env[ENTERPRISE_DB_PATH_ENV] = path.join(providerDataDir, 'enterprise.sqlite');
+    process.env[SECRET_STORE_DIR_ENV] = path.join(providerDataDir, 'secrets');
+    process.env[SECRET_STORE_ALLOW_LOCAL_MASTER_KEY_ENV] = 'true';
+    resetProviderService();
+  }
 
   test('reuses existing in-memory session for same trace', () => {
     const existing = createSession('agent-session-1', 'trace-1');
@@ -298,6 +340,72 @@ describe('AgentAnalyzeSessionService session continuity', () => {
     expect(prepared.isNewSession).toBe(false);
     expect(prepared.sessionId).toBe(existing.sessionId);
     expect(prepared.session.providerId).toBe('old-provider');
+  });
+
+  test('keeps live sessions pinned when workspace default provider changes', () => {
+    enableEnterpriseProviderStore();
+    const workspaceScope: ProviderScope = {
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+    };
+    const userScope: ProviderScope = {
+      ...workspaceScope,
+      userId: 'user-a',
+    };
+    const workspaceProviderA = getProviderService().create({
+      name: 'Workspace Provider A',
+      category: 'official',
+      type: 'openai',
+      models: { primary: 'gpt-workspace-a', light: 'gpt-workspace-a-light' },
+      connection: {
+        agentRuntime: 'openai-agents-sdk',
+        openaiApiKey: 'sk-workspace-provider-a',
+      },
+    }, workspaceScope);
+    getProviderService().activate(workspaceProviderA.id, workspaceScope);
+
+    const first = service.prepareSession({
+      traceId: 'trace-1',
+      query: 'first analysis',
+      options: {},
+      providerScope: userScope,
+    });
+
+    expect(first.session.providerId).toBe(workspaceProviderA.id);
+    expect(first.session.providerSnapshotHash).toBe(providerSnapshotHash(workspaceProviderA.id, userScope));
+
+    const workspaceProviderB = getProviderService().create({
+      name: 'Workspace Provider B',
+      category: 'official',
+      type: 'openai',
+      models: { primary: 'gpt-workspace-b', light: 'gpt-workspace-b-light' },
+      connection: {
+        agentRuntime: 'openai-agents-sdk',
+        openaiApiKey: 'sk-workspace-provider-b',
+      },
+    }, workspaceScope);
+    getProviderService().activate(workspaceProviderB.id, workspaceScope);
+
+    const followUp = service.prepareSession({
+      traceId: 'trace-1',
+      query: 'follow up',
+      requestedSessionId: first.sessionId,
+      options: {},
+      providerScope: userScope,
+    });
+    const newSession = service.prepareSession({
+      traceId: 'trace-2',
+      query: 'new analysis',
+      options: {},
+      providerScope: userScope,
+    });
+
+    expect(followUp.isNewSession).toBe(false);
+    expect(followUp.sessionId).toBe(first.sessionId);
+    expect(followUp.session.providerId).toBe(workspaceProviderA.id);
+    expect(followUp.session.providerSnapshotChanged).toBe(false);
+    expect(newSession.isNewSession).toBe(true);
+    expect(newSession.session.providerId).toBe(workspaceProviderB.id);
   });
 
   test('starts a new session when an explicit provider override differs from the live session', () => {

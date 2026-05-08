@@ -65,6 +65,13 @@ function scope(userId: string): ProviderScope {
   };
 }
 
+function workspaceScope(): ProviderScope {
+  return {
+    tenantId: 'tenant-a',
+    workspaceId: 'workspace-a',
+  };
+}
+
 function readProviderRows(): ProviderCredentialRow[] {
   const db = openEnterpriseDb(dbPath);
   try {
@@ -148,6 +155,43 @@ describe('enterprise provider store', () => {
     expect(svc.list(scope('user-b')).map(provider => provider.id)).toEqual([providerB.id]);
     expect(svc.getEffectiveEnv(scope('user-a'))!.OPENAI_API_KEY).toBe('sk-user-a');
     expect(svc.getEffectiveEnv(scope('user-b'))!.OPENAI_API_KEY).toBe('sk-user-b');
+  });
+
+  it('keeps workspace default active when a user activates a personal provider', () => {
+    const workspaceProvider = svc.create({
+      ...input,
+      name: 'Workspace Default',
+      connection: { openaiApiKey: 'sk-workspace-default' },
+    }, workspaceScope());
+    svc.activate(workspaceProvider.id, workspaceScope());
+
+    expect(svc.getEffectiveEnv(scope('user-a'))!.OPENAI_API_KEY).toBe('sk-workspace-default');
+    expect(svc.getEffectiveEnv(scope('user-b'))!.OPENAI_API_KEY).toBe('sk-workspace-default');
+
+    const personalProvider = svc.create({
+      ...input,
+      name: 'User A Provider',
+      connection: { openaiApiKey: 'sk-user-a-default' },
+    }, scope('user-a'));
+    svc.activate(personalProvider.id, scope('user-a'));
+
+    expect(svc.getEffectiveEnv(scope('user-a'))!.OPENAI_API_KEY).toBe('sk-user-a-default');
+    expect(svc.getEffectiveEnv(scope('user-b'))!.OPENAI_API_KEY).toBe('sk-workspace-default');
+
+    const rows = readProviderRows();
+    const workspaceRow = rows.find(row => row.id === workspaceProvider.id);
+    const personalRow = rows.find(row => row.id === personalProvider.id);
+    expect(workspaceRow).toEqual(expect.objectContaining({
+      owner_user_id: null,
+      scope: 'workspace',
+    }));
+    expect(workspaceRow?.secret_ref).toContain(':_workspace:');
+    expect(JSON.parse(workspaceRow!.policy_json).isActive).toBe(true);
+    expect(personalRow).toEqual(expect.objectContaining({
+      owner_user_id: 'user-a',
+      scope: 'personal',
+    }));
+    expect(JSON.parse(personalRow!.policy_json).isActive).toBe(true);
   });
 
   it('rotates provider secrets and audits secret lifecycle operations', () => {

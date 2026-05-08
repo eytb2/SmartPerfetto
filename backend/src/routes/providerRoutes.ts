@@ -11,6 +11,12 @@ import { hasRbacPermission, sendForbidden } from '../services/rbac';
 
 const router = express.Router();
 
+type WorkspaceScopedRequest = express.Request & {
+  workspaceRouteContext?: {
+    workspaceId: string;
+  };
+};
+
 router.use(authenticate);
 router.use((req, res, next) => {
   const context = requireRequestContext(req);
@@ -23,10 +29,11 @@ router.use((req, res, next) => {
 
 function providerScopeForRequest(req: express.Request): ProviderScope {
   const context = requireRequestContext(req);
+  const workspaceRouteContext = (req as WorkspaceScopedRequest).workspaceRouteContext;
   return {
     tenantId: context.tenantId,
     workspaceId: context.workspaceId,
-    userId: context.userId,
+    ...(workspaceRouteContext ? {} : { userId: context.userId }),
   };
 }
 
