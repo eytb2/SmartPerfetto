@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it } from '@jest/globals';
 import express from 'express';
 import request from 'supertest';
+import { markLegacyApi } from '../../middleware/legacyAgentApi';
 import reportRoutes from '../reportRoutes';
 import traceRoutes from '../simpleTraceRoutes';
 
@@ -13,8 +14,22 @@ const originalApiKey = process.env.SMARTPERFETTO_API_KEY;
 function makeApp(): express.Express {
   const app = express();
   app.use(express.json());
-  app.use('/api/traces', traceRoutes);
-  app.use('/api/reports', reportRoutes);
+  app.use(
+    '/api/traces',
+    markLegacyApi(
+      '/api/workspaces/:workspaceId/traces',
+      'Legacy trace API is deprecated. Migrate to workspace-scoped trace APIs',
+    ),
+    traceRoutes,
+  );
+  app.use(
+    '/api/reports',
+    markLegacyApi(
+      '/api/workspaces/:workspaceId/reports',
+      'Legacy report API is deprecated. Migrate to workspace-scoped report APIs',
+    ),
+    reportRoutes,
+  );
   return app;
 }
 
@@ -51,6 +66,8 @@ describe('RequestContext route coverage', () => {
     const res = await request(makeApp()).get('/api/traces');
 
     expect(res.status).toBe(401);
+    expect(res.headers.deprecation).toBe('true');
+    expect(res.headers.sunset).toBeDefined();
     expect(res.body.error).toBe('Unauthorized');
   });
 
@@ -60,6 +77,8 @@ describe('RequestContext route coverage', () => {
     const res = await request(makeApp()).get('/api/reports/missing-report');
 
     expect(res.status).toBe(401);
+    expect(res.headers.deprecation).toBe('true');
+    expect(res.headers.sunset).toBeDefined();
     expect(res.body.error).toBe('Unauthorized');
   });
 });

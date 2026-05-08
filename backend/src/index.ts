@@ -59,6 +59,7 @@ import {
   AGENT_API_V1_BASE,
   AGENT_API_V1_LLM_BASE,
   LEGACY_AGENT_API_BASE,
+  markLegacyApi,
   rejectLegacyAgentApi,
 } from './middleware/legacyAgentApi';
 
@@ -149,8 +150,22 @@ app.get('/debug', (req, res) => {
 app.use('/api/sql', sqlRoutes);
 app.use('/api/auth', enterpriseAuthRoutes);
 app.use('/api/auth', enterpriseApiKeyRoutes);
-app.use('/api/traces', simpleTraceRoutes);
-app.use(AGENT_API_V1_LLM_BASE, aiChatRoutes);
+app.use(
+  '/api/traces',
+  markLegacyApi(
+    '/api/workspaces/:workspaceId/traces',
+    'Legacy trace API is deprecated. Migrate to workspace-scoped trace APIs',
+  ),
+  simpleTraceRoutes,
+);
+app.use(
+  AGENT_API_V1_LLM_BASE,
+  markLegacyApi(
+    '/api/workspaces/:workspaceId/agent/llm',
+    'Legacy agent LLM API is deprecated. Migrate to workspace-scoped agent APIs',
+  ),
+  aiChatRoutes,
+);
 app.use('/api/perfetto', perfettoLocalRoutes);
 app.use('/api/auto-analysis', autoAnalysisRoutes);
 app.use('/api/sessions', sessionRoutes);
@@ -160,10 +175,31 @@ app.use('/api/template-analysis', templateAnalysisRoutes);
 app.use('/api/skills', skillRoutes);
 app.use('/api/admin', skillAdminRoutes);
 app.use('/api/admin', strategyAdminRoutes);
-app.use('/api/reports', reportRoutes);
-app.use(AGENT_API_V1_BASE, agentRoutes);
+app.use(
+  '/api/reports',
+  markLegacyApi(
+    '/api/workspaces/:workspaceId/reports',
+    'Legacy report API is deprecated. Migrate to workspace-scoped report APIs',
+  ),
+  reportRoutes,
+);
+app.use(
+  AGENT_API_V1_BASE,
+  markLegacyApi(
+    '/api/workspaces/:workspaceId/agent',
+    'Legacy agent API is deprecated. Migrate to workspace-scoped agent APIs',
+  ),
+  agentRoutes,
+);
 app.use('/api/advanced-ai', advancedAIRoutes);
-app.use('/api/v1/providers', providerRoutes);
+app.use(
+  '/api/v1/providers',
+  markLegacyApi(
+    '/api/workspaces/:workspaceId/providers',
+    'Legacy provider API is deprecated. Migrate to workspace-scoped provider APIs',
+  ),
+  providerRoutes,
+);
 app.use('/api/flamegraph', flamegraphRoutes);
 app.use('/api/critical-path', criticalPathRoutes);
 app.use('/api/baselines', baselineRoutes);

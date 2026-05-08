@@ -11,6 +11,17 @@ export const LEGACY_AGENT_API_BASE = '/api/agent';
 export const LEGACY_AGENT_API_LLM_BASE = '/api/agent/llm';
 export const LEGACY_AGENT_API_SUNSET = 'Wed, 30 Jun 2027 00:00:00 GMT';
 
+export function markLegacyApi(successor: string, message: string) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    recordLegacyApiUsage(req);
+    res.setHeader('Deprecation', 'true');
+    res.setHeader('Sunset', LEGACY_AGENT_API_SUNSET);
+    res.setHeader('Link', `<${successor}>; rel="successor-version"`);
+    res.setHeader('Warning', `299 - "${message}"`);
+    next();
+  };
+}
+
 export function markLegacyAgentApi(req: Request, res: Response, next: NextFunction): void {
   recordLegacyApiUsage(req);
   res.setHeader('Deprecation', 'true');
