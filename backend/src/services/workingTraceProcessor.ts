@@ -4,17 +4,16 @@
 
 import { EventEmitter } from 'events';
 import { spawn, spawnSync, ChildProcess, execSync } from 'child_process';
-import http from 'http';
+import net from 'net';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import {
   decodeQueryArgsSql,
-  decodeQueryResult,
-  encodeQueryArgs,
   encodeQueryResult,
 } from './traceProcessorProtobuf';
+import { executeTraceProcessorHttpRpcSql } from './traceProcessorHttpRpcClient';
 import { getPortPool } from './portPool';
 import { traceProcessorConfig } from '../config';
 import logger from '../utils/logger';
@@ -176,7 +175,32 @@ export interface TraceProcessor {
   getRuntimeStats(): TraceProcessorRuntimeStats;
   query(sql: string, options?: TraceProcessorQueryOptions): Promise<QueryResult>;
   queryRaw(body: Buffer, options?: TraceProcessorQueryOptions): Promise<Buffer>;
+  queryHealth(timeoutMs?: number): Promise<TraceProcessorHealthProbeResult>;
+  checkHealth(options?: TraceProcessorHealthCheckOptions): Promise<TraceProcessorHealthStatus>;
   destroy(): void;
+}
+
+export interface TraceProcessorHealthProbeResult {
+  ok: boolean;
+  durationMs: number;
+  error?: string;
+  detail?: string;
+}
+
+export interface TraceProcessorHealthCheckOptions {
+  queryTimeoutMs?: number;
+  rpcAcceptTimeoutMs?: number;
+}
+
+export interface TraceProcessorHealthStatus {
+  ok: boolean;
+  checkedAt: string;
+  processorId: string;
+  traceId: string;
+  httpPort: number;
+  liveness: TraceProcessorHealthProbeResult;
+  rpcAccept: TraceProcessorHealthProbeResult;
+  queryResponsive: TraceProcessorHealthProbeResult;
 }
 
 export interface TraceProcessorRuntimeStats {
@@ -209,6 +233,71 @@ export interface TraceProcessorCreateOptions {
   processorKey?: string;
   leaseId?: string;
   leaseMode?: 'shared' | 'isolated' | string;
+}
+
+function probeOk(startTime: number, detail?: string): TraceProcessorHealthProbeResult {
+  return {
+    ok: true,
+    durationMs: Date.now() - startTime,
+    ...(detail ? { detail } : {}),
+  };
+}
+
+function probeError(startTime: number, error: unknown, detail?: string): TraceProcessorHealthProbeResult {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    ok: false,
+    durationMs: Date.now() - startTime,
+    error: message,
+    ...(detail ? { detail } : {}),
+  };
+}
+
+function probeTcpAccept(
+  port: number,
+  timeoutMs: number,
+  hostname = '127.0.0.1',
+): Promise<TraceProcessorHealthProbeResult> {
+  const startTime = Date.now();
+  return new Promise((resolve) => {
+    let settled = false;
+    const socket = net.createConnection({ host: hostname, port });
+    const finish = (result: TraceProcessorHealthProbeResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      finish(probeError(startTime, new Error('RPC accept timeout')));
+    }, timeoutMs);
+    if (typeof (timer as any).unref === 'function') {
+      (timer as any).unref();
+    }
+    socket.once('connect', () => finish(probeOk(startTime)));
+    socket.once('error', error => finish(probeError(startTime, error)));
+  });
+}
+
+async function probeDedicatedHealthQuery(
+  port: number,
+  timeoutMs: number,
+): Promise<TraceProcessorHealthProbeResult> {
+  const startTime = Date.now();
+  try {
+    const result = await executeTraceProcessorHttpRpcSql({
+      port,
+      sql: 'SELECT 1',
+      timeoutMs,
+    });
+    if (result.error) {
+      return probeError(startTime, new Error(result.error));
+    }
+    return probeOk(startTime);
+  } catch (error) {
+    return probeError(startTime, error);
+  }
 }
 
 /**
@@ -494,7 +583,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
     }
 
     // Sequential stdlib loading on first query.
-    // Each module gets its own HTTP request (never exceeds the 60s query timeout),
+    // Each module gets its own HTTP request (bounded by the configured query timeout),
     // unlike the previous bulk approach that concatenated all 22 INCLUDEs into one
     // request which timed out on large (200MB+) traces.
     if (!this._criticalModulesLoaded
@@ -527,6 +616,49 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
     }
   }
 
+  async queryHealth(
+    timeoutMs = traceProcessorConfig.healthQueryTimeoutMs,
+  ): Promise<TraceProcessorHealthProbeResult> {
+    return probeDedicatedHealthQuery(this.httpPort, timeoutMs);
+  }
+
+  async checkHealth(
+    options: TraceProcessorHealthCheckOptions = {},
+  ): Promise<TraceProcessorHealthStatus> {
+    const liveness = this.checkProcessLiveness();
+    const rpcAccept = await probeTcpAccept(
+      this.httpPort,
+      options.rpcAcceptTimeoutMs ?? traceProcessorConfig.healthRpcAcceptTimeoutMs,
+    );
+    const queryResponsive = await this.queryHealth(
+      options.queryTimeoutMs ?? traceProcessorConfig.healthQueryTimeoutMs,
+    );
+    return {
+      ok: liveness.ok && rpcAccept.ok && queryResponsive.ok,
+      checkedAt: new Date().toISOString(),
+      processorId: this.id,
+      traceId: this.traceId,
+      httpPort: this.httpPort,
+      liveness,
+      rpcAccept,
+      queryResponsive,
+    };
+  }
+
+  private checkProcessLiveness(): TraceProcessorHealthProbeResult {
+    const startTime = Date.now();
+    const pid = this.process?.pid;
+    if (!pid) {
+      return probeError(startTime, new Error('No trace_processor pid'));
+    }
+    try {
+      process.kill(pid, 0);
+      return probeOk(startTime);
+    } catch (error) {
+      return probeError(startTime, error);
+    }
+  }
+
   private async enqueueHttpQuery(sql: string, options: TraceProcessorQueryOptions): Promise<QueryResult> {
     this._activeQueries++;
     try {
@@ -539,7 +671,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
   /**
    * Load critical stdlib modules one at a time in the background.
    * With only 3 Tier-0 modules this completes in a few seconds,
-   * well within the default 60s query timeout per module.
+   * well within the configured query timeout per module.
    */
   private async _loadCriticalModulesSequentially(): Promise<void> {
     this._activeQueries++;
@@ -923,9 +1055,13 @@ export class TraceProcessorFactory {
 
     const processor = new ExternalRpcProcessor(traceId, port);
 
-    // Verify connection with raw query — avoid triggering lazy stdlib load at registration time
+    // Verify connection with a dedicated health query — avoid triggering lazy
+    // stdlib load or the main SQL worker queue at registration time.
     try {
-      await processor._execRaw('SELECT 1');
+      const health = await processor.queryHealth(traceProcessorConfig.healthQueryTimeoutMs);
+      if (!health.ok) {
+        throw new Error(health.error || 'Health query failed');
+      }
       console.log(`[TraceProcessorFactory] External RPC connection verified on port ${port}`);
     } catch (error) {
       console.error(`[TraceProcessorFactory] Failed to verify external RPC connection:`, error);
@@ -1028,6 +1164,36 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
     }
   }
 
+  async queryHealth(
+    timeoutMs = traceProcessorConfig.healthQueryTimeoutMs,
+  ): Promise<TraceProcessorHealthProbeResult> {
+    return probeDedicatedHealthQuery(this.httpPort, timeoutMs);
+  }
+
+  async checkHealth(
+    options: TraceProcessorHealthCheckOptions = {},
+  ): Promise<TraceProcessorHealthStatus> {
+    const startTime = Date.now();
+    const liveness = probeOk(startTime, 'external_rpc_no_owned_process');
+    const rpcAccept = await probeTcpAccept(
+      this.httpPort,
+      options.rpcAcceptTimeoutMs ?? traceProcessorConfig.healthRpcAcceptTimeoutMs,
+    );
+    const queryResponsive = await this.queryHealth(
+      options.queryTimeoutMs ?? traceProcessorConfig.healthQueryTimeoutMs,
+    );
+    return {
+      ok: liveness.ok && rpcAccept.ok && queryResponsive.ok,
+      checkedAt: new Date().toISOString(),
+      processorId: this.id,
+      traceId: this.traceId,
+      httpPort: this.httpPort,
+      liveness,
+      rpcAccept,
+      queryResponsive,
+    };
+  }
+
   /**
    * Load critical stdlib modules one at a time in the background.
    * With only 3 Tier-0 modules this completes in a few seconds.
@@ -1077,62 +1243,12 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
   }
 
   /** Low-level query without stdlib lazy-load. Used by factory for connectivity checks. */
-  _execRaw(sql: string): Promise<QueryResult> {
-    const startTime = Date.now();
-
-    try {
-      // Use protobuf encoding for the query
-      const requestBody = encodeQueryArgs(sql);
-
-      return new Promise((resolve, reject) => {
-        const req = http.request({
-          hostname: '127.0.0.1',
-          port: this._httpPort,
-          path: '/query',
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-protobuf',
-            'Content-Length': requestBody.length,
-          },
-        }, (res) => {
-          const chunks: Buffer[] = [];
-
-          res.on('data', (chunk) => chunks.push(chunk));
-
-          res.on('end', () => {
-            const responseBody = Buffer.concat(chunks);
-
-            if (res.statusCode !== 200) {
-              reject(new Error(`HTTP ${res.statusCode}: ${responseBody.toString()}`));
-              return;
-            }
-
-            try {
-              const result = decodeQueryResult(responseBody);
-              resolve({
-                columns: result.columnNames,
-                rows: result.rows,
-                durationMs: Date.now() - startTime,
-                error: result.error,
-              });
-            } catch (decodeError: any) {
-              reject(new Error(`Failed to decode response: ${decodeError.message}`));
-            }
-          });
-        });
-
-        req.on('error', reject);
-        req.write(requestBody);
-        req.end();
-      });
-    } catch (error: any) {
-      return Promise.resolve({
-        columns: [],
-        rows: [],
-        durationMs: Date.now() - startTime,
-        error: error.message,
-      });
-    }
+  _execRaw(sql: string, options: TraceProcessorQueryOptions = {}): Promise<QueryResult> {
+    return executeTraceProcessorHttpRpcSql({
+      port: this._httpPort,
+      sql,
+      timeoutMs: options.timeoutMs ?? traceProcessorConfig.queryTimeoutMs,
+    });
   }
 
   destroy(): void {

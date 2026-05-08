@@ -115,8 +115,14 @@ export const traceProcessorConfig = {
   /** Server startup timeout (ms) */
   startupTimeoutMs: parseIntEnv('TP_STARTUP_TIMEOUT_MS', 30000),
 
-  /** Query execution timeout (ms) */
-  queryTimeoutMs: parseIntEnv('TP_QUERY_TIMEOUT_MS', 60000),
+  /** Query execution timeout (ms). Enterprise v1 requires 24h by default. */
+  queryTimeoutMs: parseIntEnv('TP_QUERY_TIMEOUT_MS', 24 * 60 * 60 * 1000),
+
+  /** Dedicated health-query timeout (ms); independent from the main SQL queue. */
+  healthQueryTimeoutMs: parseIntEnv('TP_HEALTH_QUERY_TIMEOUT_MS', 10000),
+
+  /** TCP accept probe timeout (ms) for trace_processor HTTP RPC health checks. */
+  healthRpcAcceptTimeoutMs: parseIntEnv('TP_HEALTH_RPC_ACCEPT_TIMEOUT_MS', 10000),
 
   /** Process kill timeout (ms) */
   killTimeoutMs: parseIntEnv('TP_KILL_TIMEOUT_MS', 2000),

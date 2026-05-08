@@ -11,6 +11,10 @@ import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 import {traceProcessorConfig} from '../../config';
 import {resetPortPool} from '../portPool';
 import {
+  decodeQueryArgsSql,
+  encodeQueryResult,
+} from '../traceProcessorProtobuf';
+import {
   TP_ADMISSION_CONTROL_ENV,
   TP_ESTIMATE_MULTIPLIER_ENV,
   TP_MIN_ESTIMATE_BYTES_ENV,
@@ -78,6 +82,10 @@ describe('WorkingTraceProcessor enterprise isolation anchors', () => {
     restoreEnvValue(TP_MIN_ESTIMATE_BYTES_ENV, originalAdmissionEnv.minEstimate);
   });
 
+  it('defaults trace processor query timeout to 24 hours', () => {
+    expect(traceProcessorConfig.queryTimeoutMs).toBe(24 * 60 * 60 * 1000);
+  });
+
   it('does not destroy an owned processor when a single HTTP query hits the wall-clock timeout', async () => {
     jest.useFakeTimers();
 
@@ -106,6 +114,71 @@ describe('WorkingTraceProcessor enterprise isolation anchors', () => {
     expect(processor.status).toBe('ready');
 
     processor.destroy();
+  });
+
+  it('applies the same wall-clock timeout to external raw RPC queries', async () => {
+    jest.useFakeTimers();
+
+    const request = Object.assign(new EventEmitter(), {
+      destroy: jest.fn(),
+      end: jest.fn(),
+      write: jest.fn(),
+    }) as unknown as http.ClientRequest;
+    const requestDestroy = (request as any).destroy as jest.Mock;
+    let requestOptions: any;
+
+    jest.spyOn(http, 'request').mockImplementation(((options: any) => {
+      requestOptions = options;
+      return request;
+    }) as any);
+
+    const processor = new ExternalRpcProcessor('trace-external-timeout', 9814);
+    const resultPromise = processor._execRaw('SELECT 1');
+    await flushPromises();
+
+    expect(requestOptions).toEqual(expect.objectContaining({
+      port: 9814,
+      timeout: traceProcessorConfig.queryTimeoutMs,
+    }));
+
+    jest.advanceTimersByTime(traceProcessorConfig.queryTimeoutMs + 1);
+
+    await expect(resultPromise).rejects.toThrow('Query timeout');
+    expect(requestDestroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs health SELECT 1 on a dedicated channel outside the SQL worker queue', async () => {
+    const processor = new ExternalRpcProcessor('trace-health', 9815);
+    const enqueueRawSpy = jest.spyOn((processor as any).sqlWorker, 'enqueueRaw');
+    const observedSql: string[] = [];
+
+    jest.spyOn(http, 'request').mockImplementation(((options: any, callback: any) => {
+      const request = Object.assign(new EventEmitter(), {
+        destroy: jest.fn(),
+        write: jest.fn((body: Buffer) => {
+          observedSql.push(decodeQueryArgsSql(Buffer.from(body)));
+        }),
+        end: jest.fn(() => {
+          const response = Object.assign(new EventEmitter(), { statusCode: 200 });
+          callback(response);
+          response.emit('data', encodeQueryResult({
+            columnNames: ['ok'],
+            rows: [[1]],
+          }));
+          response.emit('end');
+        }),
+      }) as unknown as http.ClientRequest;
+      expect(options).toEqual(expect.objectContaining({
+        port: 9815,
+        path: '/query',
+        timeout: traceProcessorConfig.healthQueryTimeoutMs,
+      }));
+      return request;
+    }) as any);
+
+    await expect(processor.queryHealth()).resolves.toMatchObject({ ok: true });
+    expect(observedSql).toEqual(['SELECT 1']);
+    expect(enqueueRawSpy).not.toHaveBeenCalled();
   });
 
   it('runs critical stdlib includes before the first external user query', async () => {
@@ -158,8 +231,8 @@ describe('WorkingTraceProcessor enterprise isolation anchors', () => {
 
   it('deduplicates external RPC wrappers by port and keeps aliases alive until the last remove', async () => {
     jest
-      .spyOn(ExternalRpcProcessor.prototype as any, '_execRaw')
-      .mockResolvedValue(okResult([[1]]) as never);
+      .spyOn(ExternalRpcProcessor.prototype, 'queryHealth')
+      .mockResolvedValue({ ok: true, durationMs: 1 } as never);
 
     const first = await TraceProcessorFactory.createFromExternalRpc('trace-a', 9813);
     const destroySpy = jest.spyOn(first, 'destroy');

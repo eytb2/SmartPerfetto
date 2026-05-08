@@ -69,7 +69,7 @@
 - [x] 4.6 SQL Worker（worker_thread / child process）+ non-preemptive priority queue P0/P1/P2（§11.7）
 - [x] 4.7 RAM budget + 启动后实测 RSS + admission control（§11.5），暴露 stats endpoint
 - [x] 4.8 Shared / isolated 自动判定（§11.6），UI 明确展示队列/共享/独立状态
-- [ ] 4.9 24h query timeout 覆盖 WorkingTraceProcessor 与 ExternalRpcProcessor 双路径；独立 health channel `SELECT 1`（§11.8）
+- [x] 4.9 24h query timeout 覆盖 WorkingTraceProcessor 与 ExternalRpcProcessor 双路径；独立 health channel `SELECT 1`（§11.8）
 - [ ] 4.10 crash recovery + backoff（1s/5s/15s + jitter）+ 稳定 leaseId；单 supervisor 重启，holder 不各自重试
 - [ ] 4.11 `/api/traces/cleanup` 企业模式禁用或 admin-only + draining + audit
 - [ ] 4.12 §11.11 漏洞清单：每行设计验收都打勾验证
