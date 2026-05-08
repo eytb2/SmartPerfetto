@@ -108,6 +108,37 @@ describe('TraceProcessorLeaseStore', () => {
     ]);
   });
 
+  it('refreshes an existing holder heartbeat without duplicating the holder', () => {
+    let lease = store.acquireHolder(scope, 'trace-a', {
+      holderType: 'frontend_http_rpc',
+      holderRef: 'window-a',
+      windowId: 'window-a',
+      frontendVisibility: 'visible',
+    }, { now: 1000 });
+    store.markStarting(scope, lease.id);
+    lease = store.markReady(scope, lease.id);
+    const originalHolderId = lease.holders[0].id;
+
+    lease = store.acquireHolder(scope, 'trace-a', {
+      holderType: 'frontend_http_rpc',
+      holderRef: 'window-a',
+      windowId: 'window-a',
+      frontendVisibility: 'hidden',
+    }, { now: 5000 });
+
+    expect(lease.state).toBe('active');
+    expect(lease.holderCount).toBe(1);
+    expect(lease.heartbeatAt).toBe(5000);
+    expect(lease.holders[0]).toMatchObject({
+      id: originalHolderId,
+      holderType: 'frontend_http_rpc',
+      holderRef: 'window-a',
+      heartbeatAt: 5000,
+      expiresAt: 5000 + 10 * 60 * 1000,
+      metadata: { frontendVisibility: 'hidden' },
+    });
+  });
+
   it('reuses shared leases but creates distinct isolated leases for the same trace', () => {
     const sharedA = store.acquireHolder(scope, 'trace-a', {
       holderType: 'frontend_http_rpc',
