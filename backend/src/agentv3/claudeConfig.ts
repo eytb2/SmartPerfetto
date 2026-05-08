@@ -6,6 +6,7 @@ import type { SceneType } from './sceneClassifier';
 import { getRegisteredScenes } from './strategyLoader';
 import { DEFAULT_OUTPUT_LANGUAGE, outputLanguageDisplayName, parseOutputLanguage, type OutputLanguage } from './outputLanguage';
 import { mergeIsolatedProviderEnv } from '../services/providerManager/envIsolation';
+import type { ProviderScope } from '../services/providerManager';
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
 
@@ -275,16 +276,19 @@ export function getSdkBinaryOption(env: Record<string, string | undefined> = pro
  * configured for the Claude Agent SDK runtime.
  * Falls back to raw process.env when no provider is configured.
  */
-export function createSdkEnv(sessionOverrideProviderId?: string | null): Record<string, string | undefined> {
+export function createSdkEnv(
+  sessionOverrideProviderId?: string | null,
+  providerScope?: ProviderScope,
+): Record<string, string | undefined> {
   // Lazy import to avoid circular dependency at module load time
   const { getProviderService } = require('../services/providerManager');
   const svc = getProviderService();
 
   const provider = typeof sessionOverrideProviderId === 'string'
-    ? svc.getRawProvider(sessionOverrideProviderId)
+    ? svc.getRawProvider(sessionOverrideProviderId, providerScope)
     : sessionOverrideProviderId === null
       ? undefined
-    : svc.getRawEffectiveProvider();
+    : svc.getRawEffectiveProvider(providerScope);
 
   if (typeof sessionOverrideProviderId === 'string' && !provider) {
     throw new Error(`Provider not found: ${sessionOverrideProviderId}`);
@@ -296,7 +300,7 @@ export function createSdkEnv(sessionOverrideProviderId?: string | null): Record<
   }
 
   const providerEnv = providerRuntime === 'claude-agent-sdk' && provider
-    ? svc.getEnvForProvider(provider.id)
+    ? svc.getEnvForProvider(provider.id, providerScope)
     : null;
   const env = mergeIsolatedProviderEnv(process.env, providerEnv);
 
@@ -312,16 +316,20 @@ export function createSdkEnv(sessionOverrideProviderId?: string | null): Record<
  * this reads providerManager env vars at call time when the provider matches
  * the Claude Agent SDK runtime.
  */
-export function resolveRuntimeConfig(baseConfig: ClaudeAgentConfig, providerId?: string | null): ClaudeAgentConfig {
+export function resolveRuntimeConfig(
+  baseConfig: ClaudeAgentConfig,
+  providerId?: string | null,
+  providerScope?: ProviderScope,
+): ClaudeAgentConfig {
   // Lazy import to avoid circular dependency
   const { getProviderService } = require('../services/providerManager');
   const svc = getProviderService();
 
   const provider = typeof providerId === 'string'
-    ? svc.getRawProvider(providerId)
+    ? svc.getRawProvider(providerId, providerScope)
     : providerId === null
       ? undefined
-    : svc.getRawEffectiveProvider();
+    : svc.getRawEffectiveProvider(providerScope);
 
   if (typeof providerId === 'string' && !provider) {
     throw new Error(`Provider not found: ${providerId}`);
@@ -333,7 +341,7 @@ export function resolveRuntimeConfig(baseConfig: ClaudeAgentConfig, providerId?:
   }
 
   const providerEnv = providerRuntime === 'claude-agent-sdk' && provider
-    ? svc.getEnvForProvider(provider.id)
+    ? svc.getEnvForProvider(provider.id, providerScope)
     : null;
 
   if (!providerEnv) return baseConfig;

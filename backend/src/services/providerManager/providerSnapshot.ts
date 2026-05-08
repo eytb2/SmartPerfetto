@@ -4,7 +4,7 @@
 
 import crypto from 'crypto';
 import type { ProviderService } from './providerService';
-import type { AgentRuntimeKind, ProviderConfig, ProviderTuning } from './types';
+import type { AgentRuntimeKind, ProviderConfig, ProviderScope, ProviderTuning } from './types';
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -223,9 +223,10 @@ function providerSecretVersion(provider: ProviderConfig): string {
 function providerRuntimeSnapshot(
   providerService: ProviderService,
   provider: ProviderConfig,
+  providerScope?: ProviderScope,
 ): ProviderRuntimeSnapshot {
   const runtimeKind = providerService.resolveAgentRuntime(provider);
-  const env = providerService.getEnvForProvider(provider.id) ?? {};
+  const env = providerService.getEnvForProvider(provider.id, providerScope) ?? {};
   const nonSecretEnv = pickEnv(env, PROVIDER_RUNTIME_ENV_KEYS);
   return {
     version: 1,
@@ -255,12 +256,13 @@ export function resolveProviderRuntimeSnapshot(
   providerService: ProviderService,
   providerId: string | null,
   runtimeOverride?: AgentRuntimeKind,
+  providerScope?: ProviderScope,
 ): ProviderRuntimeSnapshotResolution {
   const snapshot = typeof providerId === 'string'
     ? (() => {
-        const provider = providerService.getRawProvider(providerId);
+        const provider = providerService.getRawProvider(providerId, providerScope);
         if (!provider) throw new Error(`Provider not found: ${providerId}`);
-        return providerRuntimeSnapshot(providerService, provider);
+        return providerRuntimeSnapshot(providerService, provider, providerScope);
       })()
     : envRuntimeSnapshot(runtimeOverride);
   return {

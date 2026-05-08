@@ -66,6 +66,7 @@ import {
 import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from '../agentv3/outputLanguage';
 import { loadOpenAIConfig, type OpenAIAgentConfig } from './openAiConfig';
 import { createOpenAIToolsFromMcpDefinitions } from './openAiToolAdapter';
+import type { ProviderScope } from '../services/providerManager';
 
 interface OpenAISessionEntry {
   history?: AgentInputItem[];
@@ -120,6 +121,15 @@ function parseJsonObject(value: unknown): Record<string, unknown> | undefined {
   } catch {
     return undefined;
   }
+}
+
+function providerScopeFromOptions(options: AnalysisOptions): ProviderScope | undefined {
+  if (!options.tenantId || !options.workspaceId) return undefined;
+  return {
+    tenantId: options.tenantId,
+    workspaceId: options.workspaceId,
+    userId: options.userId,
+  };
 }
 
 function summarizeToolOutput(value: unknown): string {
@@ -206,7 +216,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     const startTime = Date.now();
     let accumulatedAnswer = '';
     let rounds = 0;
-    const config = loadOpenAIConfig(options.providerId);
+    const config = loadOpenAIConfig(options.providerId, providerScopeFromOptions(options));
     const sceneType = classifyScene(query);
     const quickMode = options.analysisMode === 'fast';
 

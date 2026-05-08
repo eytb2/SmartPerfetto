@@ -108,6 +108,12 @@ export interface ProviderConfig {
   custom?: ProviderCustom;
 }
 
+export interface ProviderScope {
+  tenantId: string;
+  workspaceId: string;
+  userId?: string;
+}
+
 export interface ModelOption {
   id: string;
   name: string;

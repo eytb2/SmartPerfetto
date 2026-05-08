@@ -5,7 +5,7 @@
 import type { TraceProcessorService } from '../services/traceProcessorService';
 import type { IOrchestrator } from '../agent/core/orchestratorTypes';
 import { createClaudeRuntime } from '../agentv3';
-import { getProviderService, type AgentRuntimeKind } from '../services/providerManager';
+import { getProviderService, type AgentRuntimeKind, type ProviderScope } from '../services/providerManager';
 
 export type BackendAgentRuntimeKind = AgentRuntimeKind;
 
@@ -26,6 +26,7 @@ export interface CreateAgentOrchestratorInput {
    */
   providerId?: string | null;
   runtimeOverride?: BackendAgentRuntimeKind;
+  providerScope?: ProviderScope;
 }
 
 function parseRuntimeEnv(value: string | undefined): BackendAgentRuntimeKind | undefined {
@@ -41,13 +42,14 @@ function parseRuntimeEnv(value: string | undefined): BackendAgentRuntimeKind | u
 export function resolveAgentRuntimeSelection(
   providerId?: string | null,
   runtimeOverride?: BackendAgentRuntimeKind,
+  providerScope?: ProviderScope,
 ): RuntimeSelection {
   const providerSvc = getProviderService();
   const provider = typeof providerId === 'string'
-    ? providerSvc.getRawProvider(providerId)
+    ? providerSvc.getRawProvider(providerId, providerScope)
     : providerId === null || runtimeOverride
       ? undefined
-      : providerSvc.getRawEffectiveProvider();
+      : providerSvc.getRawEffectiveProvider(providerScope);
 
   if (typeof providerId === 'string' && !provider) {
     throw new Error(`Provider not found: ${providerId}`);
@@ -82,7 +84,7 @@ export function resolveAgentRuntimeSelection(
 }
 
 export function createAgentOrchestrator(input: CreateAgentOrchestratorInput): IOrchestrator {
-  const selection = resolveAgentRuntimeSelection(input.providerId, input.runtimeOverride);
+  const selection = resolveAgentRuntimeSelection(input.providerId, input.runtimeOverride, input.providerScope);
   switch (selection.kind) {
     case 'openai-agents-sdk': {
       // Lazy import keeps the OpenAI runtime isolated from Claude-only startup

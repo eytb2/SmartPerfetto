@@ -886,6 +886,11 @@ async function handleAnalyzeRequest(
         query,
         requestedSessionId,
         providerId,
+        providerScope: {
+          tenantId: requestContext.tenantId,
+          workspaceId: requestContext.workspaceId,
+          userId: requestContext.userId,
+        },
         options,
       });
       sessionId = prepared.sessionId;

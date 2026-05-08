@@ -90,6 +90,7 @@ import {
   saveClaudeSessionMapToRuntimeSnapshots,
   type ClaudeSessionMapRuntimeEntry,
 } from '../services/runtimeSnapshotStore';
+import type { ProviderScope } from '../services/providerManager';
 
 const SESSION_MAP_FILE = path.resolve(__dirname, '../../logs/claude_session_map.json');
 /** Max age for session map entries before pruning (24 hours). */
@@ -144,6 +145,15 @@ function loadSessionMapForCurrentMode(): Map<string, SessionMapEntry> {
     console.warn('[ClaudeRuntime] Loaded legacy logs/claude_session_map.json for migration; future enterprise writes use runtime_snapshots');
   }
   return legacyMap;
+}
+
+function providerScopeFromOptions(options: AnalysisOptions): ProviderScope | undefined {
+  if (!options.tenantId || !options.workspaceId) return undefined;
+  return {
+    tenantId: options.tenantId,
+    workspaceId: options.workspaceId,
+    userId: options.userId,
+  };
 }
 
 /**
@@ -494,7 +504,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         return { apps: [], primaryApp: undefined, method: 'none' as const };
       });
 
-      const runtimeConfig = resolveRuntimeConfig(this.config, options.providerId);
+      const providerScope = providerScopeFromOptions(options);
+      const runtimeConfig = resolveRuntimeConfig(this.config, options.providerId, providerScope);
 
       let queryComplexity: QueryComplexity;
       let classifierSource: 'user_explicit' | 'hard_rule' | 'ai';
@@ -597,7 +608,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         effectivePrompt = `${traceSection}\n\n${effectivePrompt}`;
       }
 
-      const sdkEnv = createSdkEnv(options.providerId);
+      const sdkEnv = createSdkEnv(options.providerId, providerScope);
 
       const { stream, close: closeSdk } = sdkQueryWithRetry({
         prompt: effectivePrompt,
@@ -1661,7 +1672,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         outputLanguage: this.config.outputLanguage,
       });
 
-      const quickConfig = createQuickConfig(resolveRuntimeConfig(this.config, options.providerId));
+      const providerScope = providerScopeFromOptions(options);
+      const quickConfig = createQuickConfig(resolveRuntimeConfig(this.config, options.providerId, providerScope));
 
       const { handleMessage: bridge, getAccumulatedAnswer } = createSseBridge((update: StreamingUpdate) => {
         this.emitUpdate(update);
@@ -1691,7 +1703,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       if (sessionMapEntry && existingSdkSessionId && enterpriseSessionMapStoreEnabled()) {
         this.persistSessionMapEntry(sessionId, traceId, sessionMapKey, sessionMapEntry, options);
       }
-      const sdkEnv = createSdkEnv(options.providerId);
+      const sdkEnv = createSdkEnv(options.providerId, providerScope);
 
       // Prepend pre-queried trace data so the AI skips basic SQL turns in fast mode
       let quickPrompt = query;

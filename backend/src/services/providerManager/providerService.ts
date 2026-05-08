@@ -9,6 +9,7 @@ import type {
   OpenAIProtocol,
   ProviderConfig,
   ProviderCreateInput,
+  ProviderScope,
   ProviderUpdateInput,
   ProviderType,
 } from './types';
@@ -98,17 +99,17 @@ export class ProviderService {
     this.store.load();
   }
 
-  list(): ProviderConfig[] {
-    return this.store.getAll().map(maskProvider);
+  list(scope?: ProviderScope): ProviderConfig[] {
+    return this.store.getAll(scope).map(maskProvider);
   }
 
-  get(id: string): ProviderConfig | undefined {
-    const p = this.store.get(id);
+  get(id: string, scope?: ProviderScope): ProviderConfig | undefined {
+    const p = this.store.get(id, scope);
     return p ? maskProvider(p) : undefined;
   }
 
-  getRaw(id: string): ProviderConfig | undefined {
-    return this.store.get(id);
+  getRaw(id: string, scope?: ProviderScope): ProviderConfig | undefined {
+    return this.store.get(id, scope);
   }
 
   private static VALID_TYPES: ProviderType[] = [
@@ -121,7 +122,7 @@ export class ProviderService {
     'custom',
   ];
 
-  create(input: ProviderCreateInput): ProviderConfig {
+  create(input: ProviderCreateInput, scope?: ProviderScope): ProviderConfig {
     if (!input.name?.trim()) throw new Error('Provider name is required');
     if (!input.type) throw new Error('Provider type is required');
     if (!ProviderService.VALID_TYPES.includes(input.type as ProviderType)) {
@@ -147,12 +148,12 @@ export class ProviderService {
       ...(input.custom ? { custom: input.custom } : {}),
     };
 
-    this.store.set(provider);
+    this.store.set(provider, scope);
     return provider;
   }
 
-  update(id: string, input: ProviderUpdateInput): ProviderConfig {
-    const existing = this.store.get(id);
+  update(id: string, input: ProviderUpdateInput, scope?: ProviderScope): ProviderConfig {
+    const existing = this.store.get(id, scope);
     if (!existing) throw new Error(`Provider not found: ${id}`);
 
     const updated: ProviderConfig = {
@@ -177,61 +178,61 @@ export class ProviderService {
     if (input.tuning !== undefined) updated.tuning = input.tuning ?? undefined;
     if (input.custom !== undefined) updated.custom = input.custom ?? undefined;
 
-    this.store.set(updated);
+    this.store.set(updated, scope);
     return updated;
   }
 
-  delete(id: string): void {
-    const existing = this.store.get(id);
+  delete(id: string, scope?: ProviderScope): void {
+    const existing = this.store.get(id, scope);
     if (!existing) throw new Error(`Provider not found: ${id}`);
     if (existing.isActive) throw new Error('Cannot delete the active provider. Deactivate or switch first.');
-    this.store.delete(id);
+    this.store.delete(id, scope);
   }
 
-  activate(id: string): void {
-    const target = this.store.get(id);
+  activate(id: string, scope?: ProviderScope): void {
+    const target = this.store.get(id, scope);
     if (!target) throw new Error(`Provider not found: ${id}`);
 
-    const current = this.store.getActive();
+    const current = this.store.getActive(scope);
     if (current && current.id !== id) {
-      this.store.set({ ...current, isActive: false, updatedAt: new Date().toISOString() });
+      this.store.set({ ...current, isActive: false, updatedAt: new Date().toISOString() }, scope);
     }
 
-    this.store.set({ ...target, isActive: true, updatedAt: new Date().toISOString() });
+    this.store.set({ ...target, isActive: true, updatedAt: new Date().toISOString() }, scope);
   }
 
-  deactivateAll(): void {
-    const current = this.store.getActive();
+  deactivateAll(scope?: ProviderScope): void {
+    const current = this.store.getActive(scope);
     if (current) {
-      this.store.set({ ...current, isActive: false, updatedAt: new Date().toISOString() });
+      this.store.set({ ...current, isActive: false, updatedAt: new Date().toISOString() }, scope);
     }
   }
 
-  switchAgentRuntime(id: string, runtime: AgentRuntimeKind): ProviderConfig {
+  switchAgentRuntime(id: string, runtime: AgentRuntimeKind, scope?: ProviderScope): ProviderConfig {
     if (runtime !== 'claude-agent-sdk' && runtime !== 'openai-agents-sdk') {
       throw new Error(`Invalid agent runtime: ${runtime}`);
     }
-    return this.update(id, { connection: { agentRuntime: runtime } });
+    return this.update(id, { connection: { agentRuntime: runtime } }, scope);
   }
 
-  getEffectiveEnv(): Record<string, string> | null {
-    const active = this.store.getActive();
+  getEffectiveEnv(scope?: ProviderScope): Record<string, string> | null {
+    const active = this.store.getActive(scope);
     if (!active) return null;
     return this.toEnvVars(active);
   }
 
-  getEnvForProvider(id: string): Record<string, string> | null {
-    const provider = this.store.get(id);
+  getEnvForProvider(id: string, scope?: ProviderScope): Record<string, string> | null {
+    const provider = this.store.get(id, scope);
     if (!provider) return null;
     return this.toEnvVars(provider);
   }
 
-  getRawEffectiveProvider(): ProviderConfig | undefined {
-    return this.store.getActive();
+  getRawEffectiveProvider(scope?: ProviderScope): ProviderConfig | undefined {
+    return this.store.getActive(scope);
   }
 
-  getRawProvider(id: string): ProviderConfig | undefined {
-    return this.store.get(id);
+  getRawProvider(id: string, scope?: ProviderScope): ProviderConfig | undefined {
+    return this.store.get(id, scope);
   }
 
   resolveAgentRuntime(provider?: ProviderConfig | null): AgentRuntimeKind {

@@ -3,7 +3,7 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import { DEFAULT_OUTPUT_LANGUAGE, outputLanguageDisplayName, parseOutputLanguage, type OutputLanguage } from '../agentv3/outputLanguage';
-import { getProviderService, type OpenAIProtocol } from '../services/providerManager';
+import { getProviderService, type OpenAIProtocol, type ProviderScope } from '../services/providerManager';
 import { mergeIsolatedProviderEnv } from '../services/providerManager/envIsolation';
 
 export interface OpenAIAgentConfig {
@@ -38,13 +38,16 @@ function parseProtocol(value: string | undefined): OpenAIProtocol {
   return value === 'chat_completions' ? 'chat_completions' : 'responses';
 }
 
-export function createOpenAIEnv(providerId?: string | null): Record<string, string | undefined> {
+export function createOpenAIEnv(
+  providerId?: string | null,
+  providerScope?: ProviderScope,
+): Record<string, string | undefined> {
   const svc = getProviderService();
   const provider = typeof providerId === 'string'
-    ? svc.getRawProvider(providerId)
+    ? svc.getRawProvider(providerId, providerScope)
     : providerId === null
       ? undefined
-    : svc.getRawEffectiveProvider();
+    : svc.getRawEffectiveProvider(providerScope);
 
   if (typeof providerId === 'string' && !provider) {
     throw new Error(`Provider not found: ${providerId}`);
@@ -56,13 +59,13 @@ export function createOpenAIEnv(providerId?: string | null): Record<string, stri
   }
 
   const providerEnv = providerRuntime === 'openai-agents-sdk' && provider
-    ? svc.getEnvForProvider(provider.id)
+    ? svc.getEnvForProvider(provider.id, providerScope)
     : null;
   return mergeIsolatedProviderEnv(process.env, providerEnv);
 }
 
-export function loadOpenAIConfig(providerId?: string | null): OpenAIAgentConfig {
-  const env = createOpenAIEnv(providerId);
+export function loadOpenAIConfig(providerId?: string | null, providerScope?: ProviderScope): OpenAIAgentConfig {
+  const env = createOpenAIEnv(providerId, providerScope);
   return {
     model: env.OPENAI_MODEL || DEFAULT_MODEL,
     lightModel: env.OPENAI_LIGHT_MODEL || DEFAULT_LIGHT_MODEL,
@@ -84,8 +87,8 @@ export function loadOpenAIConfig(providerId?: string | null): OpenAIAgentConfig 
   };
 }
 
-export function hasOpenAICredentials(providerId?: string | null): boolean {
-  const env = createOpenAIEnv(providerId);
+export function hasOpenAICredentials(providerId?: string | null, providerScope?: ProviderScope): boolean {
+  const env = createOpenAIEnv(providerId, providerScope);
   const baseUrl = env.OPENAI_BASE_URL || '';
   return Boolean(
     env.OPENAI_API_KEY
@@ -95,8 +98,8 @@ export function hasOpenAICredentials(providerId?: string | null): boolean {
   );
 }
 
-export function getOpenAIRuntimeDiagnostics(providerId?: string | null) {
-  const config = loadOpenAIConfig(providerId);
+export function getOpenAIRuntimeDiagnostics(providerId?: string | null, providerScope?: ProviderScope) {
+  const config = loadOpenAIConfig(providerId, providerScope);
   const credentialSources: string[] = [];
   if (config.apiKey) credentialSources.push('openai_api_key');
   if (config.baseURL) credentialSources.push('openai_base_url');

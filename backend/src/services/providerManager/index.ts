@@ -9,6 +9,7 @@ export type {
   AgentRuntimeKind,
   OpenAIProtocol,
   ProviderConfig,
+  ProviderScope,
   ProviderCreateInput,
   ProviderUpdateInput,
   OfficialProviderTemplate,

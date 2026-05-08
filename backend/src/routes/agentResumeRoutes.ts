@@ -118,12 +118,17 @@ export function registerAgentResumeRoutes(
       sessionContextManager.set(sessionId, effectiveTraceId, restoredContext);
 
       const providerSvc = getProviderService();
+      const providerScope = {
+        tenantId: requestContext.tenantId,
+        workspaceId: requestContext.workspaceId,
+        userId: requestContext.userId,
+      };
       const snapshot = persistenceService.loadSessionStateSnapshot(sessionId);
       const snapshotProviderId = snapshot?.agentRuntimeProviderId;
       const restoredProviderId = snapshot
         ? snapshotProviderId ?? null
-        : providerSvc.getRawEffectiveProvider()?.id ?? null;
-      if (typeof snapshotProviderId === 'string' && !providerSvc.getRawProvider(snapshotProviderId)) {
+        : providerSvc.getRawEffectiveProvider(providerScope)?.id ?? null;
+      if (typeof snapshotProviderId === 'string' && !providerSvc.getRawProvider(snapshotProviderId, providerScope)) {
         return res.status(404).json({
           success: false,
           error: `Provider not found: ${snapshotProviderId}`,
@@ -135,6 +140,7 @@ export function registerAgentResumeRoutes(
         providerSvc,
         restoredProviderId,
         restoredProviderId ? undefined : snapshot?.agentRuntimeKind,
+        providerScope,
       ).snapshotHash;
       const providerSnapshotChanged = Boolean(
         snapshot?.agentRuntimeProviderSnapshotHash &&
@@ -144,6 +150,7 @@ export function registerAgentResumeRoutes(
         traceProcessorService: getTraceProcessorService(),
         providerId: restoredProviderId,
         runtimeOverride: restoredProviderId ? undefined : snapshot?.agentRuntimeKind,
+        providerScope,
       }) as any;
 
       const focusSnapshot = persistenceService.loadFocusStore(sessionId);

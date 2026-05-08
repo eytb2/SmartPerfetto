@@ -11,7 +11,7 @@ import {
 import { createAgentOrchestrator } from '../../agentRuntime';
 import { getProviderService } from '../../services/providerManager';
 import { resolveProviderRuntimeSnapshot } from '../../services/providerManager/providerSnapshot';
-import type { AgentRuntimeKind } from '../../services/providerManager';
+import type { AgentRuntimeKind, ProviderScope } from '../../services/providerManager';
 import { getTraceProcessorService } from '../../services/traceProcessorService';
 import {
   type EnhancedSessionContext,
@@ -112,6 +112,7 @@ interface PrepareAnalyzeSessionInput {
   query: string;
   requestedSessionId?: string;
   providerId?: string | null;
+  providerScope?: ProviderScope;
   options?: any;
 }
 
@@ -155,12 +156,13 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
 
   prepareSession(input: PrepareAnalyzeSessionInput): PrepareAnalyzeSessionResult<TSession> {
     const { traceId, query, requestedSessionId, options = {} } = input;
+    const providerScope = input.providerScope;
     const explicitProviderId = input.providerId !== undefined
       ? input.providerId
       : options.providerId as string | null | undefined;
     const providerSvc = getProviderService();
 
-    if (typeof explicitProviderId === 'string' && !providerSvc.getRawProvider(explicitProviderId)) {
+    if (typeof explicitProviderId === 'string' && !providerSvc.getRawProvider(explicitProviderId, providerScope)) {
       throw new AnalyzeSessionPreparationError(`Provider not found: ${explicitProviderId}`, {
         code: 'PROVIDER_NOT_FOUND',
         httpStatus: 404,
@@ -169,14 +171,14 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
 
     const activeProviderId = explicitProviderId !== undefined
       ? undefined
-      : providerSvc.getRawEffectiveProvider()?.id;
+      : providerSvc.getRawEffectiveProvider(providerScope)?.id;
     const sessionProviderId = explicitProviderId !== undefined
       ? explicitProviderId
       : activeProviderId ?? null;
     const resolveProviderSnapshotHash = (
       providerId: string | null,
       runtimeOverride?: AgentRuntimeKind,
-    ) => resolveProviderRuntimeSnapshot(providerSvc, providerId, runtimeOverride).snapshotHash;
+    ) => resolveProviderRuntimeSnapshot(providerSvc, providerId, runtimeOverride, providerScope).snapshotHash;
     const sessionProviderSnapshotHash = resolveProviderSnapshotHash(sessionProviderId);
 
     if (requestedSessionId) {
@@ -222,6 +224,7 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
           existingSession.orchestrator = createAgentOrchestrator({
             traceProcessorService: getTraceProcessorService(),
             providerId: liveSessionProviderId,
+            providerScope,
           });
           existingSession.providerId = liveSessionProviderId;
           existingSession.providerSnapshotHash = liveSessionProviderSnapshotHash;
@@ -297,7 +300,7 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
             stateSnapshot &&
             snapshotProviderId !== explicitProviderId,
           );
-          if (!snapshotProviderMismatch && typeof snapshotProviderId === 'string' && !providerSvc.getRawProvider(snapshotProviderId)) {
+          if (!snapshotProviderMismatch && typeof snapshotProviderId === 'string' && !providerSvc.getRawProvider(snapshotProviderId, providerScope)) {
             throw new AnalyzeSessionPreparationError(`Provider not found: ${snapshotProviderId}`, {
               code: 'PROVIDER_NOT_FOUND',
               httpStatus: 404,
@@ -326,6 +329,7 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
               traceProcessorService: getTraceProcessorService(),
               providerId: restoredProviderId,
               runtimeOverride: restoredProviderId ? undefined : stateSnapshot?.agentRuntimeKind,
+              providerScope,
             });
 
             const focusSnapshot = this.sessionPersistenceService.loadFocusStore(requestedSessionId);
@@ -497,6 +501,7 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
     const orchestrator: IOrchestrator = createAgentOrchestrator({
       traceProcessorService: getTraceProcessorService(),
       providerId: sessionProviderId,
+      providerScope,
     });
 
     const logger = this.createSessionLogger(sessionId);
