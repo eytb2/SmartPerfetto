@@ -794,6 +794,20 @@ export class TraceProcessorService extends EventEmitter {
     this.emit('trace-deleted', traceId);
   }
 
+  public cleanupProcessorsForTraces(traceIds: Iterable<string>): number {
+    const traceIdSet = new Set(traceIds);
+    let cleaned = 0;
+    for (const [processorKey, processor] of Array.from(this.processors.entries())) {
+      if (!traceIdSet.has(processor.traceId)) continue;
+      if (!TraceProcessorFactory.remove(processorKey)) {
+        processor.destroy();
+      }
+      this.processors.delete(processorKey);
+      cleaned++;
+    }
+    return cleaned;
+  }
+
   /**
    * Load a trace directly from a file path (for CLI/testing use)
    * This copies the file to the upload directory and processes it

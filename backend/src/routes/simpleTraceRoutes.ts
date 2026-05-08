@@ -17,9 +17,12 @@ import { attachRequestContext, requireRequestContext, type RequestContext } from
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import { getPortPool } from '../services/portPool';
 import { TraceProcessorFactory } from '../services/workingTraceProcessor';
+import { openEnterpriseDb } from '../services/enterpriseDb';
+import { recordEnterpriseAuditEvent } from '../services/enterpriseAuditService';
 import {
   getTraceProcessorLeaseStore,
   type TraceProcessorLeaseRecord,
+  type TraceProcessorLeaseState,
   type TraceProcessorHolderType,
 } from '../services/traceProcessorLeaseStore';
 import {
@@ -53,6 +56,7 @@ const STREAMED_UPLOAD_BYTES_CAP = 1024 * 1024 * 1024;
 export const TRACE_UPLOAD_MAX_BYTES_ENV = 'SMARTPERFETTO_TRACE_UPLOAD_MAX_BYTES';
 const URL_UPLOAD_TIMEOUT_MS = 300000;
 const TEMP_UPLOAD_SUFFIX = '.uploading';
+const CLEANUP_TERMINAL_LEASE_STATES = new Set<TraceProcessorLeaseState>(['released', 'failed']);
 
 class TraceUploadTooLargeError extends Error {
   constructor(readonly maxBytes: number) {
@@ -149,6 +153,103 @@ function recordLeaseRssFromProcessor(
 
 function queueLengthForTrace(traceId: string): number {
   return sharedQueueLengthForTrace(traceId, TraceProcessorFactory.getStats().processors);
+}
+
+function recordTraceCleanupAudit(
+  context: RequestContext,
+  action: 'trace_cleanup_blocked' | 'trace_cleanup_completed',
+  metadata: Record<string, unknown>,
+): void {
+  const db = openEnterpriseDb();
+  try {
+    const actor = db.prepare<unknown[], { id: string }>(`
+      SELECT id FROM users WHERE tenant_id = ? AND id = ? LIMIT 1
+    `).get(context.tenantId, context.userId);
+    recordEnterpriseAuditEvent(db, {
+      tenantId: context.tenantId,
+      workspaceId: context.workspaceId,
+      actorUserId: actor?.id,
+      action,
+      resourceType: 'trace_cleanup',
+      resourceId: context.workspaceId,
+      metadata,
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function cleanupEnterpriseWorkspaceProcessors(context: RequestContext): Promise<{
+  blocked: boolean;
+  blockedLeases: Array<{
+    id: string;
+    traceId: string;
+    state: string;
+    holderCount: number;
+    holderTypes: string[];
+  }>;
+  releasedLeaseIds: string[];
+  cleanedProcessors: number;
+  traceIds: string[];
+}> {
+  const scope = leaseScopeFromContext(context);
+  const traces = await listTraceMetadataForContext(context);
+  const traceIds = traces.map(trace => trace.id);
+  const traceIdSet = new Set(traceIds);
+  const store = getTraceProcessorLeaseStore();
+  const leases = store.listLeases(scope)
+    .filter(lease => traceIdSet.has(lease.traceId) && !CLEANUP_TERMINAL_LEASE_STATES.has(lease.state));
+  const blockedLeases = leases
+    .filter(lease => lease.holderCount > 0)
+    .map(lease => ({
+      id: lease.id,
+      traceId: lease.traceId,
+      state: lease.state,
+      holderCount: lease.holderCount,
+      holderTypes: Array.from(new Set(lease.holders.map(holder => holder.holderType))),
+    }));
+
+  if (blockedLeases.length > 0) {
+    recordTraceCleanupAudit(context, 'trace_cleanup_blocked', {
+      traceCount: traceIds.length,
+      blockedLeaseCount: blockedLeases.length,
+      blockedLeases,
+    });
+    return {
+      blocked: true,
+      blockedLeases,
+      releasedLeaseIds: [],
+      cleanedProcessors: 0,
+      traceIds,
+    };
+  }
+
+  const releasedLeaseIds: string[] = [];
+  for (const lease of leases) {
+    const drained = lease.state === 'draining'
+      ? lease
+      : store.beginDraining(scope, lease.id);
+    const current = store.getLeaseById(scope, drained.id);
+    if (current?.state === 'released') {
+      releasedLeaseIds.push(current.id);
+    }
+  }
+
+  const cleanedProcessors = getTraceProcessorService().cleanupProcessorsForTraces(traceIdSet);
+  recordTraceCleanupAudit(context, 'trace_cleanup_completed', {
+    traceCount: traceIds.length,
+    releasedLeaseCount: releasedLeaseIds.length,
+    cleanedProcessors,
+    traceIds,
+  });
+
+  return {
+    blocked: false,
+    blockedLeases: [],
+    releasedLeaseIds,
+    cleanedProcessors,
+    traceIds,
+  };
 }
 
 function ownedTraceIdForProcessorKey(processorKey: string, ownedTraceIds: Set<string>): string | null {
@@ -704,8 +805,31 @@ router.get('/stats', async (req, res) => {
 router.post('/cleanup', async (req, res) => {
   try {
     const context = requireRequestContext(req);
-    if (!isPrivilegedRequestContext(context)) {
+    const isEnterprise = enterpriseLeasesEnabled();
+    const canAdminCleanup = isEnterprise
+      ? hasRbacPermission(context, 'trace:delete_any')
+      : isPrivilegedRequestContext(context);
+    if (!canAdminCleanup) {
       return sendResourceNotFound(res);
+    }
+
+    if (isEnterprise) {
+      const result = await cleanupEnterpriseWorkspaceProcessors(context);
+      if (result.blocked) {
+        return res.status(409).json({
+          success: false,
+          error: 'Trace cleanup blocked by active trace processor leases',
+          blockedLeases: result.blockedLeases,
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: `Enterprise cleanup complete. Released ${result.releasedLeaseIds.length} lease(s) and cleaned ${result.cleanedProcessors} processor(s).`,
+        releasedLeaseIds: result.releasedLeaseIds,
+        cleanedProcessors: result.cleanedProcessors,
+        traceCount: result.traceIds.length,
+      });
     }
 
     console.log('[Traces] Starting full cleanup...');

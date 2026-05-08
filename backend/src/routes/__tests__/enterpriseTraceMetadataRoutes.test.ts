@@ -9,9 +9,11 @@ import os from 'os';
 import path from 'path';
 import request from 'supertest';
 import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../config';
+import { listEnterpriseAuditEvents } from '../../services/enterpriseAuditService';
 import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../../services/enterpriseDb';
 import { ENTERPRISE_DATA_DIR_ENV } from '../../services/traceMetadataStore';
 import { setTraceProcessorServiceForTests } from '../../services/traceProcessorService';
+import { getTraceProcessorLeaseStore, setTraceProcessorLeaseStoreForTests } from '../../services/traceProcessorLeaseStore';
 import { TraceProcessorFactory } from '../../services/workingTraceProcessor';
 import traceRoutes from '../simpleTraceRoutes';
 
@@ -45,6 +47,7 @@ let fakeTraceProcessorService: {
   getTraceWithPort: jest.Mock;
   getAllTraces: jest.Mock;
   deleteTrace: jest.Mock;
+  cleanupProcessorsForTraces: jest.Mock;
 };
 
 function makeApp(): express.Express {
@@ -70,6 +73,16 @@ function ssoHeaders(req: request.Test, workspaceId = 'workspace-a'): request.Tes
     .set('X-SmartPerfetto-SSO-Workspace-Id', workspaceId)
     .set('X-SmartPerfetto-SSO-Roles', 'analyst')
     .set('X-SmartPerfetto-SSO-Scopes', 'trace:read,trace:write,trace:download');
+}
+
+function adminHeaders(req: request.Test, workspaceId = 'workspace-a'): request.Test {
+  return req
+    .set('X-SmartPerfetto-SSO-User-Id', 'admin-a')
+    .set('X-SmartPerfetto-SSO-Email', 'admin-a@example.test')
+    .set('X-SmartPerfetto-SSO-Tenant-Id', 'tenant-a')
+    .set('X-SmartPerfetto-SSO-Workspace-Id', workspaceId)
+    .set('X-SmartPerfetto-SSO-Roles', 'workspace_admin')
+    .set('X-SmartPerfetto-SSO-Scopes', 'trace:read,trace:write,trace:delete:any,audit:read');
 }
 
 function readTraceAsset(traceId: string): TraceAssetRow | null {
@@ -114,6 +127,39 @@ function readTraceProcessorLeases(traceId: string): Array<{
   }
 }
 
+function readTraceProcessorLeaseRows(traceId: string): Array<{
+  id: string;
+  state: string;
+  holder_count: number;
+}> {
+  const db = openEnterpriseDb(dbPath);
+  try {
+    return db.prepare<unknown[], {
+      id: string;
+      state: string;
+      holder_count: number;
+    }>(`
+      SELECT l.id, l.state, COUNT(h.id) as holder_count
+      FROM trace_processor_leases l
+      LEFT JOIN trace_processor_holders h ON h.lease_id = l.id
+      WHERE l.trace_id = ?
+      GROUP BY l.id
+      ORDER BY l.id ASC
+    `).all(traceId);
+  } finally {
+    db.close();
+  }
+}
+
+function readAuditActions(): string[] {
+  const db = openEnterpriseDb(dbPath);
+  try {
+    return listEnterpriseAuditEvents(db).map(event => event.action);
+  } finally {
+    db.close();
+  }
+}
+
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-enterprise-trace-routes-'));
   dbPath = path.join(tmpDir, 'enterprise.sqlite');
@@ -134,6 +180,7 @@ beforeEach(async () => {
     getTraceWithPort: jest.fn(() => undefined),
     getAllTraces: jest.fn(() => []),
     deleteTrace: jest.fn(async () => undefined),
+    cleanupProcessorsForTraces: jest.fn(() => 0),
   };
   setTraceProcessorServiceForTests(fakeTraceProcessorService as any);
 });
@@ -141,6 +188,7 @@ beforeEach(async () => {
 afterEach(async () => {
   jest.restoreAllMocks();
   setTraceProcessorServiceForTests(null);
+  setTraceProcessorLeaseStoreForTests(null);
   restoreEnvValue(ENTERPRISE_FEATURE_FLAG_ENV, originalEnv.enterprise);
   restoreEnvValue('SMARTPERFETTO_SSO_TRUSTED_HEADERS', originalEnv.trustedHeaders);
   restoreEnvValue(ENTERPRISE_DB_PATH_ENV, originalEnv.enterpriseDbPath);
@@ -364,6 +412,101 @@ describe('enterprise trace metadata routes', () => {
       Buffer.byteLength(traceBytes),
       expectedTracePath,
     );
+  });
+
+  it('blocks enterprise cleanup when scoped trace processor leases still have active holders and audits the attempt', async () => {
+    const app = makeApp();
+    const sourceTracePath = path.join(tmpDir, 'active-cleanup.trace');
+    await fs.writeFile(sourceTracePath, 'active-cleanup');
+
+    const uploadRes = await ssoHeaders(
+      request(app)
+        .post('/api/traces/upload')
+        .attach('file', sourceTracePath),
+    );
+    expect(uploadRes.status).toBe(200);
+    const traceId = uploadRes.body.trace.id as string;
+
+    const cleanupRes = await adminHeaders(request(app).post('/api/traces/cleanup'));
+
+    expect(cleanupRes.status).toBe(409);
+    expect(cleanupRes.body).toEqual(expect.objectContaining({
+      success: false,
+      error: 'Trace cleanup blocked by active trace processor leases',
+    }));
+    expect(cleanupRes.body.blockedLeases).toEqual([
+      expect.objectContaining({
+        traceId,
+        holderCount: 1,
+        holderTypes: ['frontend_http_rpc'],
+      }),
+    ]);
+    expect(fakeTraceProcessorService.cleanupProcessorsForTraces).not.toHaveBeenCalled();
+    expect(readTraceProcessorLeaseRows(traceId)).toEqual([
+      expect.objectContaining({
+        state: 'active',
+        holder_count: 1,
+      }),
+    ]);
+    expect(readAuditActions()).toContain('trace_cleanup_blocked');
+  });
+
+  it('hides enterprise cleanup from non-admin analysts', async () => {
+    const app = makeApp();
+
+    const cleanupRes = await ssoHeaders(request(app).post('/api/traces/cleanup'));
+
+    expect(cleanupRes.status).toBe(404);
+    expect(cleanupRes.body.success).toBe(false);
+    expect(fakeTraceProcessorService.cleanupProcessorsForTraces).not.toHaveBeenCalled();
+    expect(readAuditActions()).not.toContain('trace_cleanup_completed');
+  });
+
+  it('drains idle enterprise leases before scoped processor cleanup and records an audit event', async () => {
+    const app = makeApp();
+    const sourceTracePath = path.join(tmpDir, 'idle-cleanup.trace');
+    await fs.writeFile(sourceTracePath, 'idle-cleanup');
+
+    const uploadRes = await ssoHeaders(
+      request(app)
+        .post('/api/traces/upload')
+        .attach('file', sourceTracePath),
+    );
+    expect(uploadRes.status).toBe(200);
+    const traceId = uploadRes.body.trace.id as string;
+    const scope = {
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'user-a',
+    };
+    const store = getTraceProcessorLeaseStore();
+    const lease = store.listLeases(scope, { traceId })[0];
+    for (const holder of lease.holders) {
+      store.releaseHolder(scope, lease.id, holder.holderType, holder.holderRef);
+    }
+
+    fakeTraceProcessorService.cleanupProcessorsForTraces.mockImplementation((traceIds: unknown) => {
+      expect(Array.from(traceIds as Iterable<string>)).toEqual([traceId]);
+      return 1;
+    });
+
+    const cleanupRes = await adminHeaders(request(app).post('/api/traces/cleanup'));
+
+    expect(cleanupRes.status).toBe(200);
+    expect(cleanupRes.body).toEqual(expect.objectContaining({
+      success: true,
+      releasedLeaseIds: [lease.id],
+      cleanedProcessors: 1,
+      traceCount: 1,
+    }));
+    expect(fakeTraceProcessorService.cleanupProcessorsForTraces).toHaveBeenCalledTimes(1);
+    expect(readTraceProcessorLeaseRows(traceId)).toEqual([
+      expect.objectContaining({
+        state: 'released',
+        holder_count: 0,
+      }),
+    ]);
+    expect(readAuditActions()).toContain('trace_cleanup_completed');
   });
 
   it('deletes enterprise trace files and trace_assets metadata through the scoped owner path', async () => {
