@@ -35,6 +35,7 @@ import ciGateRoutes from './routes/ciGateRoutes';
 import memoryRoutes from './routes/memoryRoutes';
 import caseRoutes from './routes/caseRoutes';
 import ragAdminRoutes from './routes/ragAdminRoutes';
+import enterpriseAuthRoutes from './routes/enterpriseAuthRoutes';
 import {authenticate} from './middleware/auth';
 import {
   assertTraceAnalysisConfiguredForStartup,
@@ -123,7 +124,9 @@ app.get('/health', (req, res) => {
           type: activeProvider.type,
         },
       } : {}),
-      authRequired: !!process.env.SMARTPERFETTO_API_KEY,
+      authRequired: !!process.env.SMARTPERFETTO_API_KEY
+        || process.env.SMARTPERFETTO_ENTERPRISE === 'true'
+        || !!process.env.SMARTPERFETTO_OIDC_ISSUER_URL,
       diagnostics: selectedDiagnostics,
     },
   });
@@ -143,6 +146,7 @@ app.get('/debug', (req, res) => {
 
 // API routes
 app.use('/api/sql', sqlRoutes);
+app.use('/api/auth', enterpriseAuthRoutes);
 app.use('/api/traces', simpleTraceRoutes);
 app.use(AGENT_API_V1_LLM_BASE, aiChatRoutes);
 app.use('/api/perfetto', perfettoLocalRoutes);

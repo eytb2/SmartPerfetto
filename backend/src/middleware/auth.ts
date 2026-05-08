@@ -6,6 +6,7 @@ import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { ErrorResponse } from '../types';
 import { resolveFeatureConfig } from '../config';
+import { EnterpriseSsoService } from '../services/enterpriseSsoService';
 
 type RequestContextAuthType = 'sso' | 'api_key' | 'dev';
 
@@ -31,6 +32,8 @@ interface AuthenticatedRequest extends Request {
 
 const API_KEY_ENV = 'SMARTPERFETTO_API_KEY';
 const SSO_TRUSTED_HEADERS_ENV = 'SMARTPERFETTO_SSO_TRUSTED_HEADERS';
+const SSO_SESSION_TOKEN_PREFIX = 'sp_sso_';
+const SSO_SESSION_COOKIE_NAME = 'sp_sso_session';
 export const DEFAULT_TENANT_ID = 'default-dev-tenant';
 export const DEFAULT_WORKSPACE_ID = 'default-workspace';
 export const DEFAULT_DEV_USER_ID = 'dev-user-123';
@@ -61,6 +64,19 @@ const getProvidedApiKey = (req: Request): string | undefined => {
     return headerKey.trim();
   }
   return undefined;
+};
+
+const requestHasSsoSessionCredential = (req: Request): boolean => {
+  const authHeader = req.headers.authorization;
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    return authHeader.slice('Bearer '.length).trim().startsWith(SSO_SESSION_TOKEN_PREFIX);
+  }
+  return typeof req.headers.cookie === 'string'
+    && req.headers.cookie.split(';').some((cookie) => {
+      const [name, value = ''] = cookie.trim().split('=');
+      return name === SSO_SESSION_COOKIE_NAME
+        && decodeURIComponent(value).startsWith(SSO_SESSION_TOKEN_PREFIX);
+    });
 };
 
 const safeEquals = (a: string, b: string): boolean => {
@@ -241,6 +257,25 @@ export const authenticate = async (
     attachIdentity(req, ssoIdentity);
     next();
     return;
+  }
+
+  if (requestHasSsoSessionCredential(req)) {
+    try {
+      const sessionIdentity = EnterpriseSsoService.getInstance().resolveRequestIdentityFromRequest(req);
+      if (sessionIdentity) {
+        attachIdentity(req, sessionIdentity);
+        next();
+        return;
+      }
+    } catch (error) {
+      if (resolveFeatureConfig(process.env).enterprise) {
+        sendUnauthorized(
+          res,
+          error instanceof Error ? error.message : 'Invalid SSO session',
+        );
+        return;
+      }
+    }
   }
 
   const configuredKey = process.env[API_KEY_ENV];

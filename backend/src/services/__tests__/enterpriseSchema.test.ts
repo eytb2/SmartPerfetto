@@ -101,6 +101,28 @@ describe('enterprise minimal schema', () => {
       'secret_version',
       'created_at',
     ]));
+    expect([...columnNames(db!, 'audit_events')]).toEqual(expect.arrayContaining([
+      'id',
+      'tenant_id',
+      'workspace_id',
+      'actor_user_id',
+      'action',
+      'resource_type',
+      'resource_id',
+      'metadata_json',
+      'created_at',
+    ]));
+    expect([...columnNames(db!, 'sso_sessions')]).toEqual(expect.arrayContaining([
+      'id',
+      'tenant_id',
+      'workspace_id',
+      'user_id',
+      'selected_workspace_id',
+      'auth_context_json',
+      'created_at',
+      'expires_at',
+      'revoked_at',
+    ]));
   });
 
   test('creates owner-guard and replay indexes for high-risk lookup paths', () => {
@@ -113,6 +135,10 @@ describe('enterprise minimal schema', () => {
     expect(indexes.has('idx_agent_events_replay')).toBe(true);
     expect(indexes.has('idx_agent_events_owner_guard')).toBe(true);
     expect(indexes.has('idx_provider_snapshots_provider')).toBe(true);
+    expect(indexes.has('idx_audit_events_tenant_time')).toBe(true);
+    expect(indexes.has('idx_audit_events_actor')).toBe(true);
+    expect(indexes.has('idx_sso_sessions_user')).toBe(true);
+    expect(indexes.has('idx_sso_sessions_expiry')).toBe(true);
   });
 
   test('is idempotent and records the applied schema version once', () => {
@@ -122,7 +148,7 @@ describe('enterprise minimal schema', () => {
     const rows = db!.prepare<unknown[], { version: number }>(
       'SELECT version FROM enterprise_schema_migrations ORDER BY version',
     ).all();
-    expect(rows).toEqual([{ version: 1 }]);
+    expect(rows).toEqual([{ version: 1 }, { version: 2 }]);
   });
 
   test('enforces the tenant workspace session run event chain', () => {

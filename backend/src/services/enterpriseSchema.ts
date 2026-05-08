@@ -19,6 +19,8 @@ export const ENTERPRISE_MINIMAL_SCHEMA_TABLES = [
   'analysis_runs',
   'agent_events',
   'provider_snapshots',
+  'audit_events',
+  'sso_sessions',
 ] as const;
 
 export type EnterpriseMinimalSchemaTable = typeof ENTERPRISE_MINIMAL_SCHEMA_TABLES[number];
@@ -184,6 +186,53 @@ const MIGRATIONS: MigrationStep[] = [
           ON agent_events(run_id, cursor);
         CREATE INDEX IF NOT EXISTS idx_agent_events_owner_guard
           ON agent_events(tenant_id, workspace_id, run_id, cursor);
+      `);
+    },
+  },
+  {
+    version: 2,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS audit_events (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT,
+          actor_user_id TEXT,
+          action TEXT NOT NULL,
+          resource_type TEXT NOT NULL,
+          resource_id TEXT,
+          metadata_json TEXT,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY (tenant_id) REFERENCES organizations(id) ON DELETE CASCADE,
+          FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL,
+          FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_time
+          ON audit_events(tenant_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_audit_events_actor
+          ON audit_events(tenant_id, actor_user_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_audit_events_resource
+          ON audit_events(tenant_id, resource_type, resource_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS sso_sessions (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT,
+          user_id TEXT NOT NULL,
+          selected_workspace_id TEXT,
+          auth_context_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL,
+          revoked_at INTEGER,
+          FOREIGN KEY (tenant_id) REFERENCES organizations(id) ON DELETE CASCADE,
+          FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (selected_workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sso_sessions_user
+          ON sso_sessions(tenant_id, user_id, expires_at);
+        CREATE INDEX IF NOT EXISTS idx_sso_sessions_expiry
+          ON sso_sessions(expires_at, revoked_at);
       `);
     },
   },
