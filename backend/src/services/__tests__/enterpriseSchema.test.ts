@@ -123,6 +123,19 @@ describe('enterprise minimal schema', () => {
       'expires_at',
       'revoked_at',
     ]));
+    expect([...columnNames(db!, 'api_keys')]).toEqual(expect.arrayContaining([
+      'id',
+      'tenant_id',
+      'workspace_id',
+      'owner_user_id',
+      'name',
+      'key_hash',
+      'scopes',
+      'created_at',
+      'expires_at',
+      'revoked_at',
+      'last_used_at',
+    ]));
   });
 
   test('creates owner-guard and replay indexes for high-risk lookup paths', () => {
@@ -139,6 +152,9 @@ describe('enterprise minimal schema', () => {
     expect(indexes.has('idx_audit_events_actor')).toBe(true);
     expect(indexes.has('idx_sso_sessions_user')).toBe(true);
     expect(indexes.has('idx_sso_sessions_expiry')).toBe(true);
+    expect(indexes.has('idx_api_keys_scope')).toBe(true);
+    expect(indexes.has('idx_api_keys_owner')).toBe(true);
+    expect(indexes.has('idx_api_keys_expiry')).toBe(true);
   });
 
   test('is idempotent and records the applied schema version once', () => {
@@ -148,7 +164,7 @@ describe('enterprise minimal schema', () => {
     const rows = db!.prepare<unknown[], { version: number }>(
       'SELECT version FROM enterprise_schema_migrations ORDER BY version',
     ).all();
-    expect(rows).toEqual([{ version: 1 }, { version: 2 }]);
+    expect(rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
   });
 
   test('enforces the tenant workspace session run event chain', () => {

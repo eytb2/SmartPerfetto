@@ -14,6 +14,7 @@ export const ENTERPRISE_MINIMAL_SCHEMA_TABLES = [
   'workspaces',
   'users',
   'memberships',
+  'api_keys',
   'trace_assets',
   'analysis_sessions',
   'analysis_runs',
@@ -233,6 +234,35 @@ const MIGRATIONS: MigrationStep[] = [
           ON sso_sessions(tenant_id, user_id, expires_at);
         CREATE INDEX IF NOT EXISTS idx_sso_sessions_expiry
           ON sso_sessions(expires_at, revoked_at);
+      `);
+    },
+  },
+  {
+    version: 3,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS api_keys (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT,
+          owner_user_id TEXT,
+          name TEXT NOT NULL,
+          key_hash TEXT NOT NULL UNIQUE,
+          scopes TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER,
+          revoked_at INTEGER,
+          last_used_at INTEGER,
+          FOREIGN KEY (tenant_id) REFERENCES organizations(id) ON DELETE CASCADE,
+          FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+          FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_keys_scope
+          ON api_keys(tenant_id, workspace_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_api_keys_owner
+          ON api_keys(tenant_id, owner_user_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_api_keys_expiry
+          ON api_keys(expires_at, revoked_at);
       `);
     },
   },

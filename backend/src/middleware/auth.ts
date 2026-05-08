@@ -6,6 +6,10 @@ import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { ErrorResponse } from '../types';
 import { resolveFeatureConfig } from '../config';
+import {
+  EnterpriseApiKeyService,
+  requestHasEnterpriseApiKeyCredential,
+} from '../services/enterpriseApiKeyService';
 import { EnterpriseSsoService } from '../services/enterpriseSsoService';
 
 type RequestContextAuthType = 'sso' | 'api_key' | 'dev';
@@ -272,6 +276,27 @@ export const authenticate = async (
         sendUnauthorized(
           res,
           error instanceof Error ? error.message : 'Invalid SSO session',
+        );
+        return;
+      }
+    }
+  }
+
+  if (requestHasEnterpriseApiKeyCredential(req)) {
+    try {
+      const apiKeyIdentity = EnterpriseApiKeyService.getInstance().resolveRequestIdentityFromRequest(req);
+      if (apiKeyIdentity) {
+        attachIdentity(req, apiKeyIdentity);
+        next();
+        return;
+      }
+      sendUnauthorized(res, 'Invalid or expired API key');
+      return;
+    } catch (error) {
+      if (resolveFeatureConfig(process.env).enterprise) {
+        sendUnauthorized(
+          res,
+          error instanceof Error ? error.message : 'Invalid or expired API key',
         );
         return;
       }

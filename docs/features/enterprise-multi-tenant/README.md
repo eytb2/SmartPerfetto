@@ -31,7 +31,7 @@
 ### 0.2 主线 A：身份与权限（§18）
 - [x] 2.1 `RequestContext` 接口与解析 middleware（SSO / API key / dev 三模式）
 - [x] 2.2 OIDC SSO 集成 + Onboarding flow（§15 全流程，含 audit）
-- [ ] 2.3 API key 管理（创建 / 撤销 / scope / 过期 / 审计）
+- [x] 2.3 API key 管理（创建 / 撤销 / scope / 过期 / 审计）
 - [ ] 2.4 Membership / Role / RBAC 权限矩阵（§8.2）+ owner guard 全 route 覆盖
 - [ ] 2.5 旧 API 兼容 wrapper：返回 `Deprecation: true` + `Sunset` header；统一走 RequestContext
 - [ ] 2.6 Resource-oriented API 切到 `/api/workspaces/:workspaceId/*`（§8.3）

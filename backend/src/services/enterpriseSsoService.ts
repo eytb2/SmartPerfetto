@@ -7,6 +7,12 @@ import type { Request } from 'express';
 import type Database from 'better-sqlite3';
 import { resolveFeatureConfig } from '../config';
 import type { RequestContextAuthType } from '../middleware/auth';
+import {
+  listEnterpriseAuditEvents,
+  recordEnterpriseAuditEvent,
+  type EnterpriseAuditInput,
+  type EnterpriseAuditRow,
+} from './enterpriseAuditService';
 import { openEnterpriseDb } from './enterpriseDb';
 import type { EnterpriseOidcUserInfo } from './enterpriseOidcClient';
 
@@ -73,25 +79,6 @@ export interface RequestSsoIdentity {
   workspaceId: string;
   roles: string[];
   scopes: string[];
-}
-
-interface AuditInput {
-  tenantId: string;
-  workspaceId?: string;
-  actorUserId?: string;
-  action: string;
-  resourceType: string;
-  resourceId?: string;
-  metadata?: Record<string, unknown>;
-}
-
-interface AuditRow {
-  action: string;
-  resource_type: string;
-  resource_id: string | null;
-  tenant_id: string;
-  workspace_id: string | null;
-  actor_user_id: string | null;
 }
 
 function nowMs(): number {
@@ -424,12 +411,8 @@ export class EnterpriseSsoService {
     return result.changes > 0;
   }
 
-  listAuditEvents(): AuditRow[] {
-    return this.db.prepare<unknown[], AuditRow>(`
-      SELECT action, resource_type, resource_id, tenant_id, workspace_id, actor_user_id
-      FROM audit_events
-      ORDER BY created_at ASC
-    `).all();
+  listAuditEvents(): EnterpriseAuditRow[] {
+    return listEnterpriseAuditEvents(this.db);
   }
 
   private extractSessionToken(req: Request): string | undefined {
@@ -683,22 +666,8 @@ export class EnterpriseSsoService {
     });
   }
 
-  private recordAudit(input: AuditInput): void {
-    this.db.prepare(`
-      INSERT INTO audit_events
-        (id, tenant_id, workspace_id, actor_user_id, action, resource_type, resource_id, metadata_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      crypto.randomUUID(),
-      input.tenantId,
-      input.workspaceId ?? null,
-      input.actorUserId ?? null,
-      input.action,
-      input.resourceType,
-      input.resourceId ?? null,
-      input.metadata ? JSON.stringify(input.metadata) : null,
-      nowMs(),
-    );
+  private recordAudit(input: EnterpriseAuditInput): void {
+    recordEnterpriseAuditEvent(this.db, input);
   }
 }
 
