@@ -39,9 +39,9 @@ import {
   registerCoreTools,
   StreamingUpdate,
   AgentRuntimeAnalysisResult,
-  ModelRouter,
   Hypothesis,
 } from '../agent';
+import { getSharedModelRouter } from '../agent/core/modelRouterSingleton';
 import type { IOrchestrator } from '../agent/core/orchestratorTypes';
 import {
   deriveConclusionContract,
@@ -582,15 +582,6 @@ function sendReplayableSessionEvent(
   });
   streamProjector.sendEvent(res, eventType, payload, event.seqId);
   return event.seqId;
-}
-
-let modelRouterInstance: ModelRouter | null = null;
-
-function getModelRouter(): ModelRouter {
-  if (!modelRouterInstance) {
-    modelRouterInstance = new ModelRouter();
-  }
-  return modelRouterInstance;
 }
 
 type TurnHistorySource = 'memory' | 'persistence';
@@ -2697,7 +2688,7 @@ async function runAgentDrivenAnalysis(
   const shouldGenerateTracks = options.generateTracks !== false;
 
   // Capture LLM call telemetry into session logs (privacy-safe: hashes + params only)
-  const modelRouter = getModelRouter();
+  const modelRouter = getSharedModelRouter();
   const onLlmTelemetry = (event: any) => {
     if (!event || event.sessionId !== sessionId) return;
     logger.debug('LLM', 'llmTelemetry', event);

@@ -38,6 +38,7 @@ import ragAdminRoutes from './routes/ragAdminRoutes';
 import enterpriseAuthRoutes from './routes/enterpriseAuthRoutes';
 import enterpriseApiKeyRoutes from './routes/enterpriseApiKeyRoutes';
 import enterpriseTenantRoutes from './routes/enterpriseTenantRoutes';
+import enterpriseRuntimeDashboardRoutes from './routes/enterpriseRuntimeDashboardRoutes';
 import traceProcessorProxyRoutes, { handleTraceProcessorProxyUpgrade } from './routes/traceProcessorProxyRoutes';
 import {authenticate} from './middleware/auth';
 import {
@@ -206,6 +207,7 @@ app.use('/api/perfetto-sql', perfettoSqlRoutes);
 app.use('/api/export', exportRoutes);
 app.use('/api/template-analysis', templateAnalysisRoutes);
 app.use('/api/skills', skillRoutes);
+app.use('/api/admin/runtime', enterpriseRuntimeDashboardRoutes);
 app.use('/api/admin', skillAdminRoutes);
 app.use('/api/admin', strategyAdminRoutes);
 app.use(
