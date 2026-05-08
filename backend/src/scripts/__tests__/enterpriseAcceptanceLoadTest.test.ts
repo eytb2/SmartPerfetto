@@ -24,6 +24,7 @@ function options(overrides: Partial<EnterpriseLoadTestOptions> = {}): Enterprise
     onlineUsers: 50,
     targetRunningRuns: 10,
     targetPendingRuns: 5,
+    maxErrorRate: 0.01,
     durationMs: 60_000,
     pollIntervalMs: 1000,
     traceIds: ['trace-a'],
@@ -60,6 +61,7 @@ describe('enterprise acceptance load test helpers', () => {
       '--users', '55',
       '--target-running', '12',
       '--target-pending', '7',
+      '--max-error-rate', '0.02',
       '--duration-ms', '120000',
       '--poll-interval-ms', '2000',
       '--trace-id', 'trace-a',
@@ -76,6 +78,7 @@ describe('enterprise acceptance load test helpers', () => {
       onlineUsers: 55,
       targetRunningRuns: 12,
       targetPendingRuns: 7,
+      maxErrorRate: 0.02,
       durationMs: 120000,
       pollIntervalMs: 2000,
       traceIds: ['trace-a', 'trace-b'],
@@ -210,7 +213,7 @@ describe('enterprise acceptance load test helpers', () => {
   });
 
   it('requires successful samples from 50 distinct online users', () => {
-    const opts = options({ onlineUsers: 50 });
+    const opts = options({ onlineUsers: 50, maxErrorRate: 0.05 });
     const summary = summarizeLoadTest({
       options: opts,
       httpSamples: [
@@ -415,6 +418,68 @@ describe('enterprise acceptance load test helpers', () => {
     });
   });
 
+  it('requires HTTP error rate to stay within the configured threshold', () => {
+    const opts = options({ onlineUsers: 50, maxErrorRate: 0.01 });
+    const runtimeSamples: RuntimeSample[] = [
+      {
+        timestamp: '2026-05-09T00:00:01.000Z',
+        queueLength: 1,
+        workerRssBytes: 256,
+        leaseRssBytes: null,
+        llmCostUsd: 0.1,
+        llmCalls: 1,
+      },
+    ];
+    const summary = summarizeLoadTest({
+      options: opts,
+      httpSamples: [
+        ...onlineUserSamples(50),
+        sample('analysis_status', 30, false, 'load-user-001'),
+      ],
+      runs: Array.from({ length: 15 }, (_unused, index) => ({
+        userId: `load-user-${String(index + 1).padStart(3, '0')}`,
+        traceId: 'trace-a',
+        startStatus: 200,
+        startOk: true,
+        lastStatus: 'running' as const,
+      })),
+      statusSnapshots: [
+        {
+          timestamp: '2026-05-09T00:00:01.000Z',
+          counts: {
+            queued: 1,
+            pending: 1,
+            running: 5,
+            completed: 0,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
+        {
+          timestamp: '2026-05-09T00:00:02.000Z',
+          counts: {
+            queued: 0,
+            pending: 1,
+            running: 5,
+            completed: 1,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
+      ],
+      runtimeSamples,
+    });
+
+    expect(evaluateAcceptance(opts, summary, runtimeSamples)).toEqual({
+      passed: false,
+      missing: ['error rate 1.96% exceeds max 1.00%'],
+    });
+  });
+
   it('renders the required load-test report fields', () => {
     const opts = options();
     const report = buildLoadTestReport({
@@ -475,6 +540,7 @@ describe('enterprise acceptance load test helpers', () => {
     expect(markdown).toContain('Acceptance status: passed');
     expect(markdown).toContain('| Online users | 50 |');
     expect(markdown).toContain('| Observed online users | 50 |');
+    expect(markdown).toContain('| Max error rate | 1.00% |');
     expect(markdown).toContain('| Overall p50 | 10ms |');
     expect(markdown).toContain('| Running-in-range samples | 2 |');
     expect(markdown).toContain('| Queued/pending samples | 2 |');

@@ -16,7 +16,7 @@ The final report must cover:
   polling samples.
 - Additional queued or pending runs, observed in at least two polling samples.
 - p50 and p95 HTTP latency.
-- Error rate.
+- Error rate within the configured threshold.
 - worker / lease RSS.
 - queue length.
 - LLM cost and a positive LLM call count.
@@ -35,6 +35,7 @@ PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
   --users 50 \
   --target-running 15 \
   --target-pending 10 \
+  --max-error-rate 0.01 \
   --duration-ms 300000 \
   --trace-id <existing-trace-id> \
   --output test-output/enterprise-acceptance-load-test.json \
@@ -55,6 +56,7 @@ If the backend requires `SMARTPERFETTO_API_KEY`, add:
   with measured output and `acceptance.passed = true` in the JSON report.
 - `acceptance.passed` requires observing successful requests from 50 distinct
   `online-user-*` clients; the configured `--users` value alone is not enough.
+- HTTP error rate must be at or below `--max-error-rate` (default `0.01`).
 - All requested `target-running + target-pending` analysis runs must start
   successfully; any start failure keeps the report open.
 - `acceptance.passed` also requires at least two status samples with 5-15

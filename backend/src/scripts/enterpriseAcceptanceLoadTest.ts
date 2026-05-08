@@ -16,6 +16,7 @@ export interface EnterpriseLoadTestOptions {
   onlineUsers: number;
   targetRunningRuns: number;
   targetPendingRuns: number;
+  maxErrorRate: number;
   durationMs: number;
   pollIntervalMs: number;
   traceIds: string[];
@@ -113,6 +114,7 @@ export interface EnterpriseLoadTestReport {
     onlineUsers: number;
     targetRunningRuns: number;
     targetPendingRuns: number;
+    maxErrorRate: number;
     durationMs: number;
     pollIntervalMs: number;
     traceCount: number;
@@ -137,6 +139,7 @@ interface RequestResult<T = any> {
 
 const DEFAULT_DURATION_MS = 5 * 60 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 1000;
+const DEFAULT_MAX_ERROR_RATE = 0.01;
 const TERMINAL_STATUSES = new Set<AnalysisStatus>(['completed', 'failed', 'error', 'quota_exceeded']);
 
 function printUsage(): void {
@@ -150,6 +153,7 @@ function printUsage(): void {
   console.log('  --users <n>                   Online user count. Default: 50.');
   console.log('  --target-running <n>          Target running analysis run count. Default: 15.');
   console.log('  --target-pending <n>          Extra pending run count. Default: 10.');
+  console.log('  --max-error-rate <0-1>        Maximum accepted HTTP error rate. Default: 0.01.');
   console.log('  --duration-ms <ms>            Test duration. Default: 300000.');
   console.log('  --poll-interval-ms <ms>       Poll interval. Default: 1000.');
   console.log('  --trace-id <id>               Existing trace id. Repeatable; required.');
@@ -167,6 +171,14 @@ function positiveInt(value: string, label: string): number {
   return parsed;
 }
 
+function boundedRate(value: string, label: string): number {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    throw new Error(`${label} must be a number between 0 and 1`);
+  }
+  return parsed;
+}
+
 function resolveOutputPath(cwd: string, value: string | undefined, fallbackName: string): string {
   return path.resolve(cwd, value ?? path.join('test-output', fallbackName));
 }
@@ -179,6 +191,7 @@ export function parseLoadTestArgs(argv: string[], cwd = process.cwd()): Enterpri
     onlineUsers: 50,
     targetRunningRuns: 15,
     targetPendingRuns: 10,
+    maxErrorRate: DEFAULT_MAX_ERROR_RATE,
     durationMs: DEFAULT_DURATION_MS,
     pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
     traceIds: [],
@@ -214,6 +227,9 @@ export function parseLoadTestArgs(argv: string[], cwd = process.cwd()): Enterpri
         break;
       case '--target-pending':
         options.targetPendingRuns = positiveInt(next(), '--target-pending');
+        break;
+      case '--max-error-rate':
+        options.maxErrorRate = boundedRate(next(), '--max-error-rate');
         break;
       case '--duration-ms':
         options.durationMs = positiveInt(next(), '--duration-ms');
@@ -358,6 +374,9 @@ export function evaluateAcceptance(
   const requestedRuns = options.targetRunningRuns + options.targetPendingRuns;
   if (options.onlineUsers < 50) missing.push('onlineUsers < 50');
   if (summary.onlineUsers.observed < 50) missing.push('observed online users < 50');
+  if (summary.errorRate > options.maxErrorRate) {
+    missing.push(`error rate ${formatPercent(summary.errorRate)} exceeds max ${formatPercent(options.maxErrorRate)}`);
+  }
   if (summary.analysis.started < requestedRuns) missing.push('started analysis runs < requested target');
   if (summary.analysis.startFailures > 0) missing.push('analysis start failures observed');
   if (summary.analysis.maxRunning < 5) missing.push('observed max running runs < 5');
@@ -606,6 +625,7 @@ export function buildLoadTestReport(input: {
       onlineUsers: input.options.onlineUsers,
       targetRunningRuns: input.options.targetRunningRuns,
       targetPendingRuns: input.options.targetPendingRuns,
+      maxErrorRate: input.options.maxErrorRate,
       durationMs: input.options.durationMs,
       pollIntervalMs: input.options.pollIntervalMs,
       traceCount: input.options.traceIds.length,
@@ -626,6 +646,10 @@ function formatMs(value: number | null): string {
 function formatBytes(value: number | null): string {
   if (value === null) return 'n/a';
   return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function formatPercent(value: number): string {
+  return `${(value * 100).toFixed(2)}%`;
 }
 
 export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): string {
@@ -650,6 +674,7 @@ export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): s
   lines.push(`| Observed online users | ${report.summary.onlineUsers.observed} |`);
   lines.push(`| Target running runs | ${report.config.targetRunningRuns} |`);
   lines.push(`| Target pending runs | ${report.config.targetPendingRuns} |`);
+  lines.push(`| Max error rate | ${formatPercent(report.config.maxErrorRate)} |`);
   lines.push(`| Duration | ${formatMs(report.config.durationMs)} |`);
   lines.push(`| Trace count | ${report.config.traceCount} |`);
   lines.push('');
@@ -659,7 +684,7 @@ export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): s
   lines.push('| --- | ---: |');
   lines.push(`| Total HTTP requests | ${report.summary.totalRequests} |`);
   lines.push(`| Failed HTTP requests | ${report.summary.failedRequests} |`);
-  lines.push(`| Error rate | ${(report.summary.errorRate * 100).toFixed(2)}% |`);
+  lines.push(`| Error rate | ${formatPercent(report.summary.errorRate)} |`);
   lines.push(`| Overall p50 | ${formatMs(report.summary.latency.overall.p50Ms)} |`);
   lines.push(`| Overall p95 | ${formatMs(report.summary.latency.overall.p95Ms)} |`);
   lines.push(`| Started analysis runs | ${report.summary.analysis.started} |`);
