@@ -92,8 +92,10 @@ export interface EnterpriseLoadTestSummary {
     maxQueueLength: number | null;
     maxWorkerRssBytes: number | null;
     maxLeaseRssBytes: number | null;
-    initialLlmCalls: number | null;
+    initialLlmCostUsd: number | null;
     finalLlmCostUsd: number | null;
+    llmCostDeltaUsd: number | null;
+    initialLlmCalls: number | null;
     finalLlmCalls: number | null;
     llmCallDelta: number | null;
   };
@@ -332,9 +334,9 @@ export function summarizeLoadTest(input: {
     ((snapshot.counts.pending ?? 0) + (snapshot.counts.queued ?? 0)) > 0
   ).length;
   const failedRequests = input.httpSamples.filter(sample => !sample.ok).length;
-  const lastRuntimeSample = input.runtimeSamples.length > 0
-    ? input.runtimeSamples[input.runtimeSamples.length - 1]
-    : undefined;
+  const llmCostSamples = numberSamples(input.runtimeSamples.map(sample => sample.llmCostUsd));
+  const initialLlmCostUsd = llmCostSamples[0] ?? null;
+  const finalLlmCostUsd = llmCostSamples.length > 0 ? llmCostSamples[llmCostSamples.length - 1] : null;
   const llmCallSamples = numberSamples(input.runtimeSamples.map(sample => sample.llmCalls));
   const initialLlmCalls = llmCallSamples[0] ?? null;
   const finalLlmCalls = llmCallSamples.length > 0 ? llmCallSamples[llmCallSamples.length - 1] : null;
@@ -368,8 +370,12 @@ export function summarizeLoadTest(input: {
       maxQueueLength: maxNullable(input.runtimeSamples.map(sample => sample.queueLength)),
       maxWorkerRssBytes: maxNullable(input.runtimeSamples.map(sample => sample.workerRssBytes)),
       maxLeaseRssBytes: maxNullable(input.runtimeSamples.map(sample => sample.leaseRssBytes)),
+      initialLlmCostUsd,
+      finalLlmCostUsd,
+      llmCostDeltaUsd: llmCostSamples.length >= 2 && initialLlmCostUsd !== null && finalLlmCostUsd !== null
+        ? finalLlmCostUsd - initialLlmCostUsd
+        : null,
       initialLlmCalls,
-      finalLlmCostUsd: lastRuntimeSample?.llmCostUsd ?? null,
       finalLlmCalls,
       llmCallDelta: initialLlmCalls !== null && finalLlmCalls !== null ? finalLlmCalls - initialLlmCalls : null,
     },
@@ -410,7 +416,11 @@ export function evaluateAcceptance(
     missing.push('missing worker/lease RSS samples');
   }
   if (summary.runtime.maxQueueLength === null) missing.push('missing queue length samples');
-  if (summary.runtime.finalLlmCostUsd === null) missing.push('missing LLM cost sample');
+  if (summary.runtime.finalLlmCostUsd === null || summary.runtime.llmCostDeltaUsd === null) {
+    missing.push('missing LLM cost sample');
+  } else if (summary.runtime.llmCostDeltaUsd < 0) {
+    missing.push('LLM cost sample decreased');
+  }
   if (summary.runtime.finalLlmCalls === null) missing.push('missing LLM call sample');
   else if (summary.runtime.llmCallDelta === null || summary.runtime.llmCallDelta <= 0) {
     missing.push('LLM call count did not increase');
@@ -721,8 +731,10 @@ export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): s
   lines.push(`| Max queue length | ${report.summary.runtime.maxQueueLength ?? 'n/a'} |`);
   lines.push(`| Max worker RSS | ${formatBytes(report.summary.runtime.maxWorkerRssBytes)} |`);
   lines.push(`| Max lease RSS | ${formatBytes(report.summary.runtime.maxLeaseRssBytes)} |`);
-  lines.push(`| Initial LLM calls | ${report.summary.runtime.initialLlmCalls ?? 'n/a'} |`);
+  lines.push(`| Initial LLM cost | ${report.summary.runtime.initialLlmCostUsd ?? 'n/a'} |`);
   lines.push(`| Final LLM cost | ${report.summary.runtime.finalLlmCostUsd ?? 'n/a'} |`);
+  lines.push(`| LLM cost delta | ${report.summary.runtime.llmCostDeltaUsd ?? 'n/a'} |`);
+  lines.push(`| Initial LLM calls | ${report.summary.runtime.initialLlmCalls ?? 'n/a'} |`);
   lines.push(`| Final LLM calls | ${report.summary.runtime.finalLlmCalls ?? 'n/a'} |`);
   lines.push(`| LLM call delta | ${report.summary.runtime.llmCallDelta ?? 'n/a'} |`);
   lines.push('');

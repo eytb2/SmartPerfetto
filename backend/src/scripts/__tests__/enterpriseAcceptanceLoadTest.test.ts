@@ -195,15 +195,17 @@ describe('enterprise acceptance load test helpers', () => {
       runningInRangeSnapshots: 2,
       pendingSnapshots: 2,
     }));
-    expect(summary.runtime).toEqual({
+    expect(summary.runtime).toEqual(expect.objectContaining({
       maxQueueLength: 9,
       maxWorkerRssBytes: 300,
       maxLeaseRssBytes: 250,
-      initialLlmCalls: 1,
+      initialLlmCostUsd: 0.1,
       finalLlmCostUsd: 0.4,
+      initialLlmCalls: 1,
       finalLlmCalls: 3,
       llmCallDelta: 2,
-    });
+    }));
+    expect(summary.runtime.llmCostDeltaUsd).toBeCloseTo(0.3);
   });
 
   it('requires direct load metrics before acceptance can pass', () => {
@@ -589,6 +591,67 @@ describe('enterprise acceptance load test helpers', () => {
     });
   });
 
+  it('requires LLM cost delta to be measurable during the load-test window', () => {
+    const opts = options({ onlineUsers: 50 });
+    const runtimeSamples = [
+      runtimeSample({ timestamp: '2026-05-09T00:00:00.000Z', llmCostUsd: 1.2, llmCalls: 7 }),
+      runtimeSample({ timestamp: '2026-05-09T00:00:01.000Z', llmCostUsd: null, llmCalls: 8 }),
+    ];
+    const summary = summarizeLoadTest({
+      options: opts,
+      httpSamples: onlineUserSamples(50),
+      runs: Array.from({ length: 15 }, (_unused, index) => ({
+        userId: `load-user-${String(index + 1).padStart(3, '0')}`,
+        traceId: 'trace-a',
+        startStatus: 200,
+        startOk: true,
+        lastStatus: 'running' as const,
+      })),
+      statusSnapshots: [
+        {
+          timestamp: '2026-05-09T00:00:01.000Z',
+          counts: {
+            queued: 1,
+            pending: 1,
+            running: 5,
+            completed: 0,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
+        {
+          timestamp: '2026-05-09T00:00:02.000Z',
+          counts: {
+            queued: 0,
+            pending: 1,
+            running: 5,
+            completed: 1,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
+      ],
+      runtimeSamples,
+    });
+
+    expect(summary.runtime).toEqual(expect.objectContaining({
+      initialLlmCostUsd: 1.2,
+      finalLlmCostUsd: 1.2,
+      llmCostDeltaUsd: null,
+      initialLlmCalls: 7,
+      finalLlmCalls: 8,
+      llmCallDelta: 1,
+    }));
+    expect(evaluateAcceptance(opts, summary, runtimeSamples)).toEqual({
+      passed: false,
+      missing: ['missing LLM cost sample'],
+    });
+  });
+
   it('renders the required load-test report fields', () => {
     const opts = options();
     const report = buildLoadTestReport({
@@ -662,8 +725,10 @@ describe('enterprise acceptance load test helpers', () => {
     expect(markdown).toContain('| Running-in-range samples | 2 |');
     expect(markdown).toContain('| Queued/pending samples | 2 |');
     expect(markdown).toContain('| Max worker RSS | 256.0 MiB |');
-    expect(markdown).toContain('| Initial LLM calls | 3 |');
+    expect(markdown).toContain('| Initial LLM cost | 0.75 |');
     expect(markdown).toContain('| Final LLM cost | 1.23 |');
+    expect(markdown).toContain('| LLM cost delta | 0.48 |');
+    expect(markdown).toContain('| Initial LLM calls | 3 |');
     expect(markdown).toContain('| Final LLM calls | 4 |');
     expect(markdown).toContain('| LLM call delta | 1 |');
   });
