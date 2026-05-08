@@ -5,6 +5,10 @@
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
+import {
+  REQUIRED_RSS_BENCHMARK_SCENES,
+  REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS,
+} from './enterpriseRssBenchmarkMatrix';
 
 type ReadinessStatus = 'passed' | 'blocked';
 
@@ -234,6 +238,46 @@ function isPresentMarkdownMetric(value: string | null): boolean {
   return value !== null && value.trim().length > 0 && value.trim().toLowerCase() !== 'n/a';
 }
 
+function splitMarkdownTableRow(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map(cell => cell.trim());
+}
+
+function isMarkdownSeparatorRow(line: string): boolean {
+  const cells = splitMarkdownTableRow(line);
+  return cells.length > 0 && cells.every(cell => /^:?-{3,}:?$/.test(cell));
+}
+
+function markdownTableRows(markdown: string): Array<Record<string, string>> {
+  const rows: Array<Record<string, string>> = [];
+  const lines = markdown.split(/\r?\n/);
+
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    if (!lines[i].trim().startsWith('|') || !isMarkdownSeparatorRow(lines[i + 1])) continue;
+    const headers = splitMarkdownTableRow(lines[i]);
+
+    let rowIndex = i + 2;
+    while (rowIndex < lines.length && lines[rowIndex].trim().startsWith('|')) {
+      if (!isMarkdownSeparatorRow(lines[rowIndex])) {
+        const cells = splitMarkdownTableRow(lines[rowIndex]);
+        const row: Record<string, string> = {};
+        headers.forEach((header, index) => {
+          row[header] = cells[index] ?? '';
+        });
+        rows.push(row);
+      }
+      rowIndex += 1;
+    }
+    i = rowIndex;
+  }
+
+  return rows;
+}
+
 function missingLoadReportMetricEvidence(markdown: string): string[] {
   const missing: string[] = [];
   const observedUsers = parseMarkdownNumber(markdownTableValue(markdown, 'Observed online users'));
@@ -277,6 +321,48 @@ function missingLoadReportMetricEvidence(markdown: string): string[] {
   return missing;
 }
 
+function missingRssBenchmarkMetricEvidence(markdown: string): string[] {
+  const missing: string[] = [];
+  const rssRows = markdownTableRows(markdown).filter(row =>
+    row.Scene !== undefined
+    && row['Size bucket'] !== undefined
+    && row.Status !== undefined
+  );
+  const requiredMetrics = [
+    ['Startup RSS', 'startup RSS'],
+    ['Load peak', 'load peak'],
+    ['Query headroom', 'query headroom'],
+  ] as const;
+
+  for (const scene of REQUIRED_RSS_BENCHMARK_SCENES) {
+    for (const sizeBucket of REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS) {
+      const cell = `${scene}:${sizeBucket}`;
+      const cellRows = rssRows.filter(row =>
+        row.Scene.trim().toLowerCase() === scene
+        && row['Size bucket'].trim().toUpperCase() === sizeBucket
+      );
+      if (cellRows.length === 0) {
+        missing.push(`missing RSS matrix cell ${cell}`);
+        continue;
+      }
+
+      const passedRows = cellRows.filter(row => row.Status.trim().toLowerCase().startsWith('passed'));
+      if (passedRows.length === 0) {
+        missing.push(`RSS cell ${cell} missing passed status`);
+        continue;
+      }
+
+      for (const [column, label] of requiredMetrics) {
+        if (passedRows.every(row => !isPresentMarkdownMetric(row[column] ?? null))) {
+          missing.push(`RSS cell ${cell} missing ${label}`);
+        }
+      }
+    }
+  }
+
+  return missing;
+}
+
 function auditLoadReport(markdown: string, filePath: string): ReadinessCheck {
   const lower = markdown.toLowerCase();
   const hasPendingStatus = lower.includes('status: pending');
@@ -306,13 +392,14 @@ function auditLoadReport(markdown: string, filePath: string): ReadinessCheck {
 
 function auditRssBenchmark(markdown: string, filePath: string): ReadinessCheck {
   const lower = markdown.toLowerCase();
-  const hasBlockedLanguage = lower.includes('blocked') || lower.includes('missing required matrix cells');
+  const hasBlockedLanguage = lower.includes('blocked');
   const hasCompleteMarker = markdown.includes('Coverage status: complete');
   const hasCandidateAuditMarker = lower.includes('candidate audit')
     || lower.includes('candidate_matrix_ready')
     || lower.includes('not rss benchmark evidence');
+  const missingMetrics = missingRssBenchmarkMetricEvidence(markdown);
 
-  if (hasBlockedLanguage || !hasCompleteMarker || hasCandidateAuditMarker) {
+  if (hasBlockedLanguage || !hasCompleteMarker || hasCandidateAuditMarker || missingMetrics.length > 0) {
     return blocked(
       'rss-benchmark-final',
       `${path.basename(filePath)} does not contain complete §0.4.3 RSS matrix evidence.`,
@@ -320,6 +407,7 @@ function auditRssBenchmark(markdown: string, filePath: string): ReadinessCheck {
         hasBlockedLanguage ? 'contains blocked/missing language' : 'no blocked/missing language found',
         hasCompleteMarker ? 'contains complete coverage marker' : 'missing complete coverage marker',
         hasCandidateAuditMarker ? 'contains candidate-audit marker' : 'does not contain candidate-audit marker',
+        ...missingMetrics,
       ],
     );
   }

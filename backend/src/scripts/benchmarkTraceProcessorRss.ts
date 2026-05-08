@@ -13,29 +13,28 @@ import {
   WorkingTraceProcessor,
   type TraceProcessorRuntimeStats,
 } from '../services/workingTraceProcessor';
+import {
+  REQUIRED_RSS_BENCHMARK_SCENES,
+  REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS,
+  type RequiredScene,
+  type RequiredSizeBucket,
+  type SizeBucket,
+} from './enterpriseRssBenchmarkMatrix';
+
+export {
+  REQUIRED_RSS_BENCHMARK_SCENES,
+  REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS,
+} from './enterpriseRssBenchmarkMatrix';
+export type {
+  RequiredScene,
+  RequiredSizeBucket,
+  SizeBucket,
+} from './enterpriseRssBenchmarkMatrix';
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
 const DEFAULT_SAMPLE_INTERVAL_MS = 250;
 
-export const REQUIRED_RSS_BENCHMARK_SCENES = [
-  'scroll',
-  'startup',
-  'anr',
-  'memory',
-  'heapprofd',
-  'vendor',
-] as const;
-
-export const REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS = [
-  '100MB',
-  '500MB',
-  '1GB',
-] as const;
-
-export type RequiredScene = typeof REQUIRED_RSS_BENCHMARK_SCENES[number];
-export type RequiredSizeBucket = typeof REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS[number];
-export type SizeBucket = RequiredSizeBucket | 'under-100MB';
 type BenchmarkPhase = 'startup_load' | 'post_load' | 'query';
 
 export interface QuerySpec {
@@ -626,8 +625,8 @@ export function buildMarkdownReport(report: BenchmarkReport): string {
   lines.push('');
   lines.push(`Coverage status: ${report.coverage.complete ? 'complete' : 'blocked_missing_required_traces'}`);
   lines.push('');
-  lines.push('| Trace | Scene | Size bucket | File size | Init | Startup RSS | Load peak | Query peak | Query delta | Status |');
-  lines.push('| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |');
+  lines.push('| Trace | Scene | Size bucket | File size | Init | Startup RSS | Load peak | Query peak | Query delta | Query headroom | Status |');
+  lines.push('| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |');
   for (const trace of report.traces) {
     lines.push([
       `| ${trace.label}`,
@@ -639,6 +638,7 @@ export function buildMarkdownReport(report: BenchmarkReport): string {
       formatBytes(trace.rssSummary.loadPeakRssBytes),
       formatBytes(trace.rssSummary.queryPeakRssBytes),
       formatBytes(trace.rssSummary.queryIncrementalRssBytes),
+      formatBytes(trace.rssSummary.queryHeadroomBytes),
       `${trace.status}${trace.error ? ` (${trace.error})` : ''} |`,
     ].join(' | '));
   }

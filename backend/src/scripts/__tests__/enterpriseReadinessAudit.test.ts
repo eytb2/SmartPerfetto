@@ -87,6 +87,41 @@ function finalLoadReport(): string {
   ].join('\n');
 }
 
+function finalRssBenchmark(): string {
+  const scenes = ['scroll', 'startup', 'anr', 'memory', 'heapprofd', 'vendor'];
+  const sizeBuckets = ['100MB', '500MB', '1GB'];
+  const rows = scenes.flatMap(scene =>
+    sizeBuckets.map(sizeBucket => [
+      `| ${scene}-${sizeBucket}`,
+      scene,
+      sizeBucket,
+      sizeBucket,
+      '10ms',
+      '100.0 MiB',
+      '200.0 MiB',
+      '210.0 MiB',
+      '10.0 MiB',
+      '63.00 GiB',
+      'passed |',
+    ].join(' | '))
+  );
+
+  return [
+    '# Trace Processor RSS Benchmark',
+    '',
+    'Coverage status: complete',
+    '',
+    '| Trace | Scene | Size bucket | File size | Init | Startup RSS | Load peak | Query peak | Query delta | Query headroom | Status |',
+    '| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |',
+    ...rows,
+    '',
+    'Missing required matrix cells:',
+    '',
+    '- none',
+    '',
+  ].join('\n');
+}
+
 describe('enterprise readiness audit', () => {
   it('parses artifact paths and require-ready mode', () => {
     const cwd = '/tmp/smartperfetto/backend';
@@ -156,7 +191,7 @@ describe('enterprise readiness audit', () => {
       const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
       const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
       const loadTestReportPath = await writeFixture(tmpDir, 'load.md', finalLoadReport());
-      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', 'Coverage status: complete\n');
+      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', finalRssBenchmark());
       const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
 
       const report = buildEnterpriseReadinessAuditReport({
@@ -182,7 +217,7 @@ describe('enterprise readiness audit', () => {
       const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
       const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
       const loadTestReportPath = await writeFixture(tmpDir, 'load.md', 'Acceptance status: passed\n');
-      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', 'Coverage status: complete\n');
+      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', finalRssBenchmark());
       const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
 
       const report = buildEnterpriseReadinessAuditReport({
@@ -224,7 +259,7 @@ describe('enterprise readiness audit', () => {
           'This preflight does not start analysis runs and is not README §0.8 acceptance evidence.',
         ].join('\n'),
       );
-      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', 'Coverage status: complete\n');
+      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', finalRssBenchmark());
       const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
 
       const report = buildEnterpriseReadinessAuditReport({
@@ -241,6 +276,72 @@ describe('enterprise readiness audit', () => {
         status: 'blocked',
         evidence: expect.arrayContaining([
           'contains preflight marker',
+        ]),
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('requires final RSS matrix rows and metrics, not just a complete marker', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
+    try {
+      const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
+      const loadTestReportPath = await writeFixture(tmpDir, 'load.md', finalLoadReport());
+      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', 'Coverage status: complete\n');
+      const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
+
+      const report = buildEnterpriseReadinessAuditReport({
+        readmePath,
+        acceptanceEvidencePath,
+        loadTestReportPath,
+        rssBenchmarkPath,
+        releaseNotesPath,
+        requireReady: true,
+      });
+
+      expect(report.ready).toBe(false);
+      expect(report.checks.find(check => check.id === 'rss-benchmark-final')).toMatchObject({
+        status: 'blocked',
+        evidence: expect.arrayContaining([
+          'missing RSS matrix cell scroll:100MB',
+          'missing RSS matrix cell vendor:1GB',
+        ]),
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('requires query headroom in final RSS benchmark rows', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
+    try {
+      const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
+      const loadTestReportPath = await writeFixture(tmpDir, 'load.md', finalLoadReport());
+      const rssBenchmarkPath = await writeFixture(
+        tmpDir,
+        'rss.md',
+        finalRssBenchmark().replace(/63\.00 GiB/g, 'n/a'),
+      );
+      const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
+
+      const report = buildEnterpriseReadinessAuditReport({
+        readmePath,
+        acceptanceEvidencePath,
+        loadTestReportPath,
+        rssBenchmarkPath,
+        releaseNotesPath,
+        requireReady: true,
+      });
+
+      expect(report.ready).toBe(false);
+      expect(report.checks.find(check => check.id === 'rss-benchmark-final')).toMatchObject({
+        status: 'blocked',
+        evidence: expect.arrayContaining([
+          'RSS cell scroll:100MB missing query headroom',
+          'RSS cell vendor:1GB missing query headroom',
         ]),
       });
     } finally {
@@ -294,7 +395,7 @@ describe('enterprise readiness audit', () => {
       const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme().replace('- [x] D10 scenario\n', ''));
       const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
       const loadTestReportPath = await writeFixture(tmpDir, 'load.md', finalLoadReport());
-      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', 'Coverage status: complete\n');
+      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', finalRssBenchmark());
       const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
 
       const report = buildEnterpriseReadinessAuditReport({

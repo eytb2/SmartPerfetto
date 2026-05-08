@@ -135,6 +135,7 @@ describe('trace processor RSS benchmark helpers', () => {
     const markdown = buildMarkdownReport(report);
 
     expect(markdown).toContain('Coverage status: blocked_missing_required_traces');
+    expect(markdown).toContain('Query headroom');
     expect(markdown).toContain('- startup:100MB');
     expect(markdown).toContain('| scroll-100MB | scroll | 100MB |');
   });
