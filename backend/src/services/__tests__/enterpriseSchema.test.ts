@@ -197,6 +197,8 @@ describe('enterprise core schema', () => {
       'question',
       'started_at',
       'completed_at',
+      'heartbeat_at',
+      'updated_at',
       'error_json',
     ]);
     expectColumns(db!, 'conversation_turns', [
@@ -323,6 +325,7 @@ describe('enterprise core schema', () => {
       'idx_analysis_sessions_owner_guard',
       'idx_analysis_sessions_tenant_workspace_id_unique',
       'idx_analysis_runs_status',
+      'idx_analysis_runs_heartbeat',
       'idx_analysis_runs_tenant_workspace_id_unique',
       'idx_conversation_turns_session',
       'idx_conversation_turns_run',
@@ -357,7 +360,14 @@ describe('enterprise core schema', () => {
     const rows = db!.prepare<unknown[], { version: number }>(
       'SELECT version FROM enterprise_schema_migrations ORDER BY version',
     ).all();
-    expect(rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }]);
+    expect(rows).toEqual([
+      { version: 1 },
+      { version: 2 },
+      { version: 3 },
+      { version: 4 },
+      { version: 5 },
+      { version: 6 },
+    ]);
   });
 
   test('enforces the full tenant workspace session run event chain', () => {

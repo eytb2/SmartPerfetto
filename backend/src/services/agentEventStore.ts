@@ -160,15 +160,34 @@ export function persistSerializedAgentEvent(
     if (terminalStatus) {
       db.prepare(`
         UPDATE analysis_runs
-        SET status = ?, completed_at = COALESCE(completed_at, ?)
+        SET status = ?,
+            completed_at = COALESCE(completed_at, ?),
+            heartbeat_at = ?,
+            updated_at = ?
         WHERE tenant_id = ? AND workspace_id = ? AND id = ?
-      `).run(terminalStatus, event.createdAt, scope.tenantId, scope.workspaceId, scope.runId);
+      `).run(
+        terminalStatus,
+        event.createdAt,
+        event.createdAt,
+        event.createdAt,
+        scope.tenantId,
+        scope.workspaceId,
+        scope.runId,
+      );
       db.prepare(`
         UPDATE analysis_sessions
         SET status = ?, updated_at = ?
         WHERE tenant_id = ? AND workspace_id = ? AND id = ?
       `).run(terminalStatus, event.createdAt, scope.tenantId, scope.workspaceId, scope.sessionId);
     } else {
+      db.prepare(`
+        UPDATE analysis_runs
+        SET heartbeat_at = ?, updated_at = ?
+        WHERE tenant_id = ?
+          AND workspace_id = ?
+          AND id = ?
+          AND status IN ('pending', 'running', 'awaiting_user')
+      `).run(event.createdAt, event.createdAt, scope.tenantId, scope.workspaceId, scope.runId);
       db.prepare(`
         UPDATE analysis_sessions
         SET updated_at = ?

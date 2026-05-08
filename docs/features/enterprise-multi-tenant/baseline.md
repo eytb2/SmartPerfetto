@@ -62,3 +62,42 @@ Missing §0.4.3 required matrix cells:
 - memory: 100MB, 500MB, 1GB
 - heapprofd: 100MB, 500MB, 1GB
 - vendor: 100MB, 500MB, 1GB
+
+## 2026-05-09 RSS Benchmark Local Startup Trace Pass
+
+Branch: `feature/enterprise-multi-tenant-agent-events`
+
+Command:
+
+```bash
+PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
+  TP_PORT_MIN=9840 TP_PORT_MAX=9859 \
+  npm run benchmark:trace-rss -- \
+  --trace startup=/Users/chris/Code/SmartPerfetto/Trace/StartUp_com.snapchat.android_2026-03-26_02_01_37_652_3347ms_sn140292552S000618_7.trace \
+  --trace startup=/Users/chris/Code/SmartPerfetto/Trace/StartUp_com.snapchat.android_2026-03-26_03_48_03_288_982ms_sn140292552S000186_8.trace \
+  --trace startup=/Users/chris/Code/SmartPerfetto/Trace/StartUp_com.android.chrome_2026-03-26_01_41_05_555_1353ms_sn140292552S000186_9.trace \
+  --output test-output/trace-processor-rss-benchmark-startup-local.json \
+  --markdown test-output/trace-processor-rss-benchmark-startup-local.md
+```
+
+Result: PASS for 3 real local startup traces in the 100MB bucket. §0.4.3
+remains incomplete because the required matrix still misses 17 of 18 cells.
+
+| Trace | Scene | Size bucket | File size | Init | Load peak | Query peak | Query delta | Status |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `StartUp_com.snapchat.android_2026-03-26_02_01_37_652_3347ms_sn140292552S000618_7.trace` | startup | 100MB | 198.5 MiB | 5571ms | 3038.0 MiB | 3341.9 MiB | 303.8 MiB | PASS |
+| `StartUp_com.snapchat.android_2026-03-26_03_48_03_288_982ms_sn140292552S000186_8.trace` | startup | 100MB | 198.3 MiB | 5256ms | 2992.5 MiB | 3279.8 MiB | 287.2 MiB | PASS |
+| `StartUp_com.android.chrome_2026-03-26_01_41_05_555_1353ms_sn140292552S000186_9.trace` | startup | 100MB | 183.7 MiB | 3191ms | 1500.5 MiB | 1521.2 MiB | 20.7 MiB | PASS |
+
+Observed §0.4.3 matrix cells:
+
+- startup: 100MB
+
+Missing §0.4.3 required matrix cells:
+
+- scroll: 100MB, 500MB, 1GB
+- startup: 500MB, 1GB
+- ANR: 100MB, 500MB, 1GB
+- memory: 100MB, 500MB, 1GB
+- heapprofd: 100MB, 500MB, 1GB
+- vendor: 100MB, 500MB, 1GB

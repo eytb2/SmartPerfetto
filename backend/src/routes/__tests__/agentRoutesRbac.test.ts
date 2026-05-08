@@ -16,6 +16,10 @@ import {
   resetAgentEventStoreForTests,
 } from '../../services/agentEventStore';
 import {
+  getAnalysisRunLifecycle,
+  resetAnalysisRunStoreForTests,
+} from '../../services/analysisRunStore';
+import {
   getTraceProcessorLeaseStore,
   setTraceProcessorLeaseStoreForTests,
 } from '../../services/traceProcessorLeaseStore';
@@ -69,6 +73,7 @@ afterEach(async () => {
   setTraceProcessorServiceForTests(null);
   setTraceProcessorLeaseStoreForTests(null);
   resetAgentEventStoreForTests();
+  resetAnalysisRunStoreForTests();
   if (originalApiKey === undefined) {
     delete process.env.SMARTPERFETTO_API_KEY;
   } else {
@@ -280,6 +285,16 @@ describe('agent route RBAC', () => {
 
       expect(analyzeRes.status).toBe(200);
       const { sessionId, runId } = analyzeRes.body;
+      const persistedRun = getAnalysisRunLifecycle({
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-a',
+        userId: 'analyst-user',
+      }, runId);
+      expect(persistedRun).toEqual(expect.objectContaining({
+        id: runId,
+        status: 'running',
+      }));
+      expect(persistedRun?.heartbeatAt).toEqual(expect.any(Number));
       persistSerializedAgentEvent({
         tenantId: 'tenant-a',
         workspaceId: 'workspace-a',

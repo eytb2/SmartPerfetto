@@ -90,6 +90,13 @@ import {
   type SerializedAgentEvent,
 } from '../services/agentEventStore';
 import {
+  heartbeatAnalysisRun,
+  isAnalysisRunHeartbeatFresh,
+  persistAnalysisRunState,
+  type AnalysisRunPersistenceScope,
+  type PersistedAnalysisRunStatus,
+} from '../services/analysisRunStore';
+import {
   AgentAnalyzeSessionService,
   AnalyzeSessionPreparationError,
   type AnalyzeSessionRunContext,
@@ -284,6 +291,7 @@ function startSessionRun(
     });
   }
 
+  persistSessionRunState(session, 'pending');
   return run;
 }
 
@@ -299,6 +307,7 @@ function markSessionRunStatus(
   }
   session.activeRun.error = error;
   session.lastRun = { ...session.activeRun };
+  persistSessionRunState(session, status, error);
 }
 
 // Attach/echo requestId for all agent endpoints.
@@ -404,6 +413,72 @@ function agentEventScopeFromSession(session: AnalysisSession): AgentEventPersist
     traceId: session.traceId,
     query: run.query || session.query,
   };
+}
+
+function analysisRunScopeFromSession(session: AnalysisSession): AnalysisRunPersistenceScope | null {
+  return agentEventScopeFromSession(session);
+}
+
+function persistSessionRunState(
+  session: AnalysisSession,
+  status: PersistedAnalysisRunStatus,
+  error?: string,
+): void {
+  const scope = analysisRunScopeFromSession(session);
+  if (!scope) return;
+  try {
+    persistAnalysisRunState(scope, status, { error });
+  } catch (persistError) {
+    const message = persistError instanceof Error ? persistError.message : String(persistError);
+    session.logger.warn('AnalysisRun', 'Failed to persist run state', {
+      sessionId: session.sessionId,
+      runId: scope.runId,
+      status,
+      error: message,
+    });
+  }
+}
+
+function heartbeatSessionRun(session: AnalysisSession): void {
+  const scope = analysisRunScopeFromSession(session);
+  if (!scope) return;
+  try {
+    heartbeatAnalysisRun(scope);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    session.logger.warn('AnalysisRun', 'Failed to persist run heartbeat', {
+      sessionId: session.sessionId,
+      runId: scope.runId,
+      error: message,
+    });
+  }
+}
+
+function startSessionRunHeartbeat(session: AnalysisSession): NodeJS.Timeout | undefined {
+  if (!analysisRunScopeFromSession(session)) return undefined;
+  heartbeatSessionRun(session);
+  return setInterval(() => heartbeatSessionRun(session), AGENT_RUN_HEARTBEAT_INTERVAL_MS);
+}
+
+function isPersistedSessionRunFresh(session: AnalysisSession, now: number): boolean {
+  const scope = analysisRunScopeFromSession(session);
+  if (!scope) return false;
+  try {
+    return isAnalysisRunHeartbeatFresh(
+      scope,
+      scope.runId,
+      now,
+      AGENT_RUN_HEARTBEAT_MAX_STALE_MS,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    session.logger.warn('AnalysisRun', 'Failed to inspect persisted run heartbeat', {
+      sessionId: session.sessionId,
+      runId: scope.runId,
+      error: message,
+    });
+    return true;
+  }
 }
 
 function persistBufferedAgentEvent(session: AnalysisSession, event: SerializedAgentEvent): void {
@@ -863,6 +938,8 @@ const MAX_SESSION_AGENT_DIALOGUE = 800;
 const MAX_SESSION_AGENT_RESPONSES = 400;
 const TERMINAL_SESSION_MAX_IDLE_MS = 30 * 60 * 1000;
 const NON_TERMINAL_SESSION_MAX_IDLE_MS = 2 * 60 * 60 * 1000;
+const AGENT_RUN_HEARTBEAT_INTERVAL_MS = 30 * 1000;
+const AGENT_RUN_HEARTBEAT_MAX_STALE_MS = NON_TERMINAL_SESSION_MAX_IDLE_MS;
 
 function trimSessionArray<T>(items: T[], maxEntries: number): void {
   if (items.length > maxEntries) {
@@ -2564,6 +2641,8 @@ async function runAgentDrivenAnalysis(
   const { logger } = session;
   session.status = 'running';
   session.lastActivityAt = Date.now();
+  persistSessionRunState(session, 'running');
+  const runHeartbeatInterval = startSessionRunHeartbeat(session);
   logger.info('AgentDrivenAnalysis', 'Starting agent-driven analysis', {
     query,
     traceId,
@@ -2829,6 +2908,9 @@ async function runAgentDrivenAnalysis(
     logger.close();
     throw error;
   } finally {
+    if (runHeartbeatInterval) {
+      clearInterval(runHeartbeatInterval);
+    }
     // Prevent listener accumulation across multi-turn requests in the same session.
     if (session.orchestratorUpdateHandler) {
       session.orchestrator.off('update', session.orchestratorUpdateHandler);
@@ -4500,6 +4582,16 @@ const sessionCleanupInterval = setInterval(() => {
   assistantAppService.cleanupIdleSessions({
     terminalMaxIdleMs: TERMINAL_SESSION_MAX_IDLE_MS,
     nonTerminalMaxIdleMs: NON_TERMINAL_SESSION_MAX_IDLE_MS,
+    shouldCleanup: (_sessionId, session, context) => {
+      if (!resolveFeatureConfig().enterprise || !context.isAbandonedNonTerminal) {
+        return true;
+      }
+      if (isPersistedSessionRunFresh(session, context.now)) {
+        session.lastActivityAt = context.now;
+        return false;
+      }
+      return true;
+    },
     onCleanup: (sessionId, session) => {
       console.log(`[AgentRoutes] Cleaning up stale session: ${sessionId}`);
       session.sseClients.forEach((client) => {

@@ -24,6 +24,16 @@ export interface SessionCleanupOptions<T extends ManagedAssistantSession> {
   terminalMaxIdleMs: number;
   nonTerminalMaxIdleMs: number;
   now?: number;
+  shouldCleanup?: (
+    sessionId: string,
+    session: T,
+    context: {
+      now: number;
+      idleMs: number;
+      isTerminal: boolean;
+      isAbandonedNonTerminal: boolean;
+    },
+  ) => boolean;
   onCleanup?: (sessionId: string, session: T) => void;
 }
 
@@ -99,6 +109,14 @@ export class AssistantApplicationService<T extends ManagedAssistantSession> {
         (isTerminal && idle > options.terminalMaxIdleMs) ||
         (isAbandonedNonTerminal && idle > options.nonTerminalMaxIdleMs)
       ) {
+        if (options.shouldCleanup?.(sessionId, session, {
+          now,
+          idleMs: idle,
+          isTerminal,
+          isAbandonedNonTerminal,
+        }) === false) {
+          continue;
+        }
         options.onCleanup?.(sessionId, session);
         this.sessions.delete(sessionId);
         removed.push(sessionId);

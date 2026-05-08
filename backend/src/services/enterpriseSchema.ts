@@ -507,6 +507,17 @@ const MIGRATIONS: MigrationStep[] = [
       `);
     },
   },
+  {
+    version: 6,
+    up: (db) => {
+      addColumnIfMissing(db, 'analysis_runs', 'heartbeat_at', 'INTEGER');
+      addColumnIfMissing(db, 'analysis_runs', 'updated_at', 'INTEGER');
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_analysis_runs_heartbeat
+          ON analysis_runs(tenant_id, workspace_id, status, heartbeat_at);
+      `);
+    },
+  },
 ];
 
 export function applyEnterpriseMinimalSchema(db: Database.Database): void {
