@@ -9,16 +9,18 @@ import os from 'os';
 import path from 'path';
 import Database from 'better-sqlite3';
 import { applyEnterpriseMinimalSchema } from '../services/enterpriseSchema';
+import type { EnterpriseRepositoryScope } from '../services/enterpriseRepository';
 import {
   getTracesDir,
   listTraceMetadata,
   readTraceMetadataForContext,
   writeTraceMetadata,
 } from '../services/traceMetadataStore';
+import { TraceProcessorLeaseStore } from '../services/traceProcessorLeaseStore';
 import { ownerFieldsFromContext } from '../services/resourceOwnership';
 import type { RequestContext } from '../middleware/auth';
 
-type ScenarioName = 'D1' | 'D2';
+type ScenarioName = 'D1' | 'D2' | 'D5';
 
 interface VerifyOptions {
   tracePath?: string;
@@ -167,6 +169,14 @@ function context(label: string, input: {
       scopes: ['trace:read', 'trace:write', 'agent:run', 'report:read'],
       requestId: `req-${label}`,
     },
+  };
+}
+
+function leaseScope(wc: WindowContext): EnterpriseRepositoryScope {
+  return {
+    tenantId: wc.context.tenantId,
+    workspaceId: wc.context.workspaceId,
+    userId: wc.context.userId,
   };
 }
 
@@ -502,6 +512,96 @@ async function scenarioD2(
   };
 }
 
+async function scenarioD5(
+  db: Database.Database,
+  tracePath: string,
+  userAWindow1: WindowContext,
+): Promise<ScenarioReport> {
+  const upload = await simulateUpload(db, userAWindow1, tracePath, 'd5-user-a-sleep.pftrace');
+  const store = new TraceProcessorLeaseStore(db);
+  const scope = leaseScope(userAWindow1);
+  const holderRef = userAWindow1.context.windowId ?? userAWindow1.label;
+  const startedAt = 1_777_000_000_000;
+  const offlineAt = startedAt + 30_000;
+  const insideGraceAt = offlineAt + 30 * 60 * 1000 - 1;
+  const afterGraceAt = offlineAt + 30 * 60 * 1000 + 1;
+  const recoveredAt = afterGraceAt + 1_000;
+
+  let lease = store.acquireHolder(scope, upload.traceId, {
+    holderType: 'frontend_http_rpc',
+    holderRef,
+    windowId: holderRef,
+    frontendVisibility: 'visible',
+    metadata: { scenario: 'D5' },
+  }, { now: startedAt });
+  store.markStarting(scope, lease.id);
+  lease = store.markReady(scope, lease.id);
+
+  lease = store.acquireHolderForLease(scope, lease.id, {
+    holderType: 'frontend_http_rpc',
+    holderRef,
+    windowId: holderRef,
+    frontendVisibility: 'offline',
+    metadata: {
+      heartbeat: 'frontend',
+      scenario: 'D5',
+    },
+  }, { now: offlineAt });
+  const offlineHolder = lease.holders.find(holder => holder.holderRef === holderRef);
+
+  const insideGraceSweep = store.sweepExpired(insideGraceAt);
+  const insideGraceLease = store.getLeaseById(scope, lease.id);
+
+  const afterGraceSweep = store.sweepExpired(afterGraceAt);
+  const afterGraceLease = store.getLeaseById(scope, lease.id);
+
+  const recoveredLease = store.acquireHolderForLease(scope, lease.id, {
+    holderType: 'frontend_http_rpc',
+    holderRef,
+    windowId: holderRef,
+    frontendVisibility: 'visible',
+    metadata: {
+      heartbeat: 'frontend',
+      scenario: 'D5',
+      recovery: 'pageshow',
+    },
+  }, { now: recoveredAt });
+  const recoveredHolder = recoveredLease.holders.find(holder => holder.holderRef === holderRef);
+
+  const checks = {
+    offlineHeartbeatKeepsThirtyMinuteGrace: (offlineHolder?.expiresAt ?? 0) >= insideGraceAt,
+    leaseStaysActiveInsideOfflineGrace: insideGraceSweep.holdersRemoved === 0
+      && insideGraceLease?.state === 'active'
+      && insideGraceLease.holderCount === 1,
+    staleOfflineHolderDoesNotReleaseLease: afterGraceSweep.holdersRemoved === 1
+      && afterGraceLease?.state === 'idle'
+      && afterGraceLease.holderCount === 0,
+    pageshowHeartbeatReacquiresSameLease: recoveredLease.id === lease.id
+      && recoveredLease.state === 'active'
+      && recoveredLease.holderCount === 1
+      && recoveredHolder?.metadata?.frontendVisibility === 'visible'
+      && recoveredHolder.expiresAt !== null
+      && recoveredHolder.expiresAt >= recoveredAt + 90_000,
+  };
+
+  return {
+    checks,
+    details: {
+      traceId: upload.traceId,
+      leaseId: lease.id,
+      offlineHolderExpiresAt: offlineHolder?.expiresAt ?? null,
+      insideGraceAt,
+      afterGraceAt,
+      recoveredAt,
+      insideGraceSweep,
+      afterGraceSweep,
+      afterGraceLeaseState: afterGraceLease?.state ?? null,
+      recoveredLeaseState: recoveredLease.state,
+      recoveredHolder,
+    },
+  };
+}
+
 function allChecksPassed(report: EnterpriseWindowRegressionReport): boolean {
   return Object.values(report.scenarios).every(scenario =>
     Object.values(scenario.checks).every(Boolean),
@@ -563,6 +663,7 @@ export async function runEnterpriseWindowRegression(
         windows.userBWindow1,
         input.longSqlMs ?? 100,
       ),
+      D5: await scenarioD5(db, tracePath, windows.userAWindow1),
     };
     const report: EnterpriseWindowRegressionReport = {
       timestamp: new Date().toISOString(),
@@ -570,6 +671,7 @@ export async function runEnterpriseWindowRegression(
       checks: {
         D1: scenarioPassed(scenarios.D1),
         D2: scenarioPassed(scenarios.D2),
+        D5: scenarioPassed(scenarios.D5),
       },
       uploadRoot,
       tracePath,
@@ -577,7 +679,8 @@ export async function runEnterpriseWindowRegression(
       coverageLimitations: [
         'D1 covers same-name trace isolation across three users and two windows at the trace metadata, TraceAsset, workspace RBAC, and analysis session/run schema layers.',
         'D2 covers a deterministic long-SQL window at the run/event metadata layer without invoking a real LLM provider.',
-        'Production TraceProcessorLease holder/state assertions are covered by the §0.4.4 lease store and route tests; backend proxy and queue behavior remain future §0.7 D1/D2 final-acceptance work.',
+        'D5 covers TraceProcessorLease holder grace and pageshow-style reacquire semantics after offline heartbeat expiry; frontend stale-lease reload signaling is covered by HttpRpcEngine unit tests.',
+        'Production backend proxy and queue behavior remain future §0.7 D1/D2/D5 final-acceptance work against a live browser and trace_processor_shell.',
       ],
     };
     report.passed = allChecksPassed(report);

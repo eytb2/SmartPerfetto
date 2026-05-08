@@ -109,7 +109,7 @@
 - [ ] D2 A 长 SQL 中，B 上传并分析另一个 trace → A 的 SSE 不断、A lease 不被 destroy、B 能排队或运行
 - [ ] D3 A 前端 timeline，B 跑 full agent → A WebSocket 走 lease；P0 不被 P2 长任务无限阻塞
 - [ ] D4 trace_processor_shell crash → leaseId 稳定；前端不持有旧 port；supervisor 单点重启
-- [ ] D5 浏览器断网 / 休眠 30 分钟后恢复 → frontend grace 生效；reacquire lease 或自动 reload
+- [x] D5 浏览器断网 / 休眠 30 分钟后恢复 → frontend grace 生效；reacquire lease 或自动 reload
 - [ ] D6 SSE 在 conclusion 后、analysis_completed 前断开 → AgentEvent replay 能补回 reportUrl
 - [ ] D7 手动 cleanup / delete → running run / active lease / 正在生成的 report 被 draining 保护
 - [ ] D8 Provider 配置在 session 中途变更 → resume 校验 ProviderSnapshot hash，不复用错误 SDK session
