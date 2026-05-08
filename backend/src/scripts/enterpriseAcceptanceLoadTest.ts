@@ -13,6 +13,7 @@ export interface EnterpriseLoadTestOptions {
   tenantId: string;
   workspaceId: string;
   apiKey?: string;
+  preflightOnly: boolean;
   onlineUsers: number;
   targetRunningRuns: number;
   targetPendingRuns: number;
@@ -136,6 +137,42 @@ export interface EnterpriseLoadTestReport {
   httpSamples: HttpSample[];
 }
 
+export interface EnterpriseLoadTestPreflightCheck {
+  id: string;
+  status: 'passed' | 'blocked';
+  message: string;
+  evidence: string[];
+}
+
+export interface EnterpriseLoadTestTraceListProbe {
+  status: number;
+  ok: boolean;
+  traceIds: string[] | null;
+  error?: string;
+}
+
+export interface EnterpriseLoadTestPreflightReport {
+  generatedAt: string;
+  target: {
+    baseUrl: string;
+    tenantId: string;
+    workspaceId: string;
+  };
+  config: {
+    onlineUsers: number;
+    targetRunningRuns: number;
+    targetPendingRuns: number;
+    maxErrorRate: number;
+    durationMs: number;
+    pollIntervalMs: number;
+    traceIds: string[];
+  };
+  ready: boolean;
+  checks: EnterpriseLoadTestPreflightCheck[];
+  runtimeSamples: RuntimeSample[];
+  httpSamples: HttpSample[];
+}
+
 interface RequestResult<T = any> {
   status: number;
   ok: boolean;
@@ -166,6 +203,7 @@ function printUsage(): void {
   console.log('  --query <text>                Analysis query. Default: 企业验收压测：快速检查 trace.');
   console.log('  --output <path>               JSON report path.');
   console.log('  --markdown <path>             Optional Markdown report path.');
+  console.log('  --preflight-only              Check load-test prerequisites without starting runs.');
   console.log('  --help                        Show this help.');
 }
 
@@ -194,6 +232,7 @@ export function parseLoadTestArgs(argv: string[], cwd = process.cwd()): Enterpri
     baseUrl: 'http://localhost:3000',
     tenantId: 'tenant-a',
     workspaceId: 'workspace-a',
+    preflightOnly: false,
     onlineUsers: 50,
     targetRunningRuns: 15,
     targetPendingRuns: 10,
@@ -254,6 +293,9 @@ export function parseLoadTestArgs(argv: string[], cwd = process.cwd()): Enterpri
         break;
       case '--markdown':
         options.markdownPath = resolveOutputPath(cwd, next(), 'enterprise-acceptance-load-test.md');
+        break;
+      case '--preflight-only':
+        options.preflightOnly = true;
         break;
       case '--help':
         printUsage();
@@ -539,6 +581,137 @@ function readRuntimeSample(body: any): RuntimeSample {
   };
 }
 
+export function extractTraceIdsFromTraceListBody(body: any): string[] | null {
+  if (!Array.isArray(body?.traces)) return null;
+  return body.traces
+    .map((trace: any) => trace?.id)
+    .filter((id: any): id is string => typeof id === 'string' && id.length > 0);
+}
+
+function preflightCheck(
+  id: string,
+  passed: boolean,
+  message: string,
+  evidence: string[],
+): EnterpriseLoadTestPreflightCheck {
+  return {
+    id,
+    status: passed ? 'passed' : 'blocked',
+    message,
+    evidence,
+  };
+}
+
+export function buildLoadTestPreflightReport(input: {
+  options: EnterpriseLoadTestOptions;
+  traceList: EnterpriseLoadTestTraceListProbe;
+  runtimeSamples: RuntimeSample[];
+  httpSamples: HttpSample[];
+}): EnterpriseLoadTestPreflightReport {
+  const { options, traceList, runtimeSamples, httpSamples } = input;
+  const firstRuntimeSample = runtimeSamples[0];
+  const missingTraceIds = traceList.traceIds === null
+    ? options.traceIds
+    : options.traceIds.filter(traceId => !traceList.traceIds!.includes(traceId));
+  const checks: EnterpriseLoadTestPreflightCheck[] = [
+    preflightCheck(
+      'load-shape-config',
+      options.onlineUsers >= 50
+        && options.targetRunningRuns >= 5
+        && options.targetRunningRuns <= 15
+        && options.targetPendingRuns > 0,
+      'Load shape can exercise README §0.8 online/running/pending acceptance.',
+      [
+        `users=${options.onlineUsers}`,
+        `targetRunning=${options.targetRunningRuns}`,
+        `targetPending=${options.targetPendingRuns}`,
+        `maxErrorRate=${formatPercent(options.maxErrorRate)}`,
+      ],
+    ),
+    preflightCheck(
+      'trace-id-configured',
+      options.traceIds.length > 0,
+      'At least one existing trace id is configured.',
+      options.traceIds.length > 0 ? options.traceIds : ['no --trace-id provided'],
+    ),
+    preflightCheck(
+      'trace-list-access',
+      traceList.ok && traceList.traceIds !== null,
+      'Trace list endpoint is reachable and returns a parseable trace list.',
+      [
+        `status=${traceList.status}`,
+        traceList.traceIds === null ? 'trace list body did not contain traces[]' : `visibleTraces=${traceList.traceIds.length}`,
+        ...(traceList.error ? [`error=${traceList.error}`] : []),
+      ],
+    ),
+    preflightCheck(
+      'trace-id-access',
+      options.traceIds.length > 0 && traceList.traceIds !== null && missingTraceIds.length === 0,
+      'Configured trace ids are visible in the target workspace.',
+      missingTraceIds.length === 0
+        ? options.traceIds
+        : missingTraceIds.map(traceId => `missing traceId=${traceId}`),
+    ),
+    preflightCheck(
+      'runtime-dashboard-access',
+      runtimeSamples.length > 0,
+      'Runtime dashboard endpoint is reachable before the load run.',
+      runtimeSamples.length > 0
+        ? [`samples=${runtimeSamples.length}`, `firstSample=${runtimeSamples[0]!.timestamp}`]
+        : ['no successful /api/admin/runtime sample'],
+    ),
+    preflightCheck(
+      'runtime-rss-and-queue-counters',
+      !!firstRuntimeSample
+        && firstRuntimeSample.queueLength !== null
+        && (firstRuntimeSample.workerRssBytes !== null || firstRuntimeSample.leaseRssBytes !== null),
+      'Runtime dashboard exposes queue length and worker/lease RSS counters.',
+      firstRuntimeSample
+        ? [
+            `queueLength=${firstRuntimeSample.queueLength ?? 'missing'}`,
+            `workerRssBytes=${firstRuntimeSample.workerRssBytes ?? 'missing'}`,
+            `leaseRssBytes=${firstRuntimeSample.leaseRssBytes ?? 'missing'}`,
+          ]
+        : ['no runtime sample'],
+    ),
+    preflightCheck(
+      'runtime-llm-counters',
+      !!firstRuntimeSample
+        && firstRuntimeSample.llmCostUsd !== null
+        && firstRuntimeSample.llmCalls !== null,
+      'Runtime dashboard exposes LLM cost and call counters.',
+      firstRuntimeSample
+        ? [
+            `llmCostUsd=${firstRuntimeSample.llmCostUsd ?? 'missing'}`,
+            `llmCalls=${firstRuntimeSample.llmCalls ?? 'missing'}`,
+          ]
+        : ['no runtime sample'],
+    ),
+  ];
+
+  return {
+    generatedAt: new Date().toISOString(),
+    target: {
+      baseUrl: options.baseUrl,
+      tenantId: options.tenantId,
+      workspaceId: options.workspaceId,
+    },
+    config: {
+      onlineUsers: options.onlineUsers,
+      targetRunningRuns: options.targetRunningRuns,
+      targetPendingRuns: options.targetPendingRuns,
+      maxErrorRate: options.maxErrorRate,
+      durationMs: options.durationMs,
+      pollIntervalMs: options.pollIntervalMs,
+      traceIds: options.traceIds,
+    },
+    ready: checks.every(check => check.status === 'passed'),
+    checks,
+    runtimeSamples,
+    httpSamples,
+  };
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -651,6 +824,33 @@ async function sampleRuntimeDashboard(
   if (response.ok && response.body) {
     runtimeSamples.push(readRuntimeSample(response.body));
   }
+}
+
+export async function runEnterpriseAcceptanceLoadTestPreflight(
+  options: EnterpriseLoadTestOptions,
+): Promise<EnterpriseLoadTestPreflightReport> {
+  const httpSamples: HttpSample[] = [];
+  const runtimeSamples: RuntimeSample[] = [];
+
+  await sampleRuntimeDashboard(options, httpSamples, runtimeSamples);
+  const traceListResponse = await requestJson<any>(options, httpSamples, {
+    operation: 'trace_list_preflight',
+    userId: 'load-preflight-user',
+    path: `/api/workspaces/${encodeURIComponent(options.workspaceId)}/traces`,
+  });
+  const traceList: EnterpriseLoadTestTraceListProbe = {
+    status: traceListResponse.status,
+    ok: traceListResponse.ok,
+    traceIds: traceListResponse.ok ? extractTraceIdsFromTraceListBody(traceListResponse.body) : null,
+    ...(traceListResponse.sample.error ? { error: traceListResponse.sample.error } : {}),
+  };
+
+  return buildLoadTestPreflightReport({
+    options,
+    traceList,
+    runtimeSamples,
+    httpSamples,
+  });
 }
 
 export function buildLoadTestReport(input: {
@@ -776,6 +976,35 @@ export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): s
   return `${lines.join('\n')}\n`;
 }
 
+export function buildMarkdownLoadTestPreflightReport(report: EnterpriseLoadTestPreflightReport): string {
+  const lines: string[] = [];
+  lines.push('# Enterprise Acceptance Load Test Preflight');
+  lines.push('');
+  lines.push(`Generated: ${report.generatedAt}`);
+  lines.push(`Target: ${report.target.baseUrl} / tenant=${report.target.tenantId} / workspace=${report.target.workspaceId}`);
+  lines.push('');
+  lines.push(`Preflight status: ${report.ready ? 'ready' : 'blocked'}`);
+  lines.push('');
+  lines.push('This preflight does not start analysis runs and is not README §0.8 acceptance evidence.');
+  lines.push('');
+  lines.push('## Checks');
+  lines.push('');
+  lines.push('| Check | Status | Evidence |');
+  lines.push('| --- | --- | --- |');
+  for (const check of report.checks) {
+    lines.push(`| ${check.id} | ${check.status} | ${check.evidence.join('<br>')} |`);
+  }
+  lines.push('');
+  lines.push('## HTTP Samples');
+  lines.push('');
+  lines.push('| Operation | User | Status | OK | Duration | Error |');
+  lines.push('| --- | --- | ---: | --- | ---: | --- |');
+  for (const sample of report.httpSamples) {
+    lines.push(`| ${sample.operation} | ${sample.userId} | ${sample.status} | ${sample.ok ? 'yes' : 'no'} | ${formatMs(sample.durationMs)} | ${sample.error ?? ''} |`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
 export async function runEnterpriseAcceptanceLoadTest(options: EnterpriseLoadTestOptions): Promise<EnterpriseLoadTestReport> {
   if (options.traceIds.length === 0) {
     throw new Error('At least one --trace-id is required for a real load test run');
@@ -814,6 +1043,25 @@ export async function runEnterpriseAcceptanceLoadTest(options: EnterpriseLoadTes
 
 async function main(): Promise<void> {
   const options = parseLoadTestArgs(process.argv.slice(2));
+  if (options.preflightOnly) {
+    const preflight = await runEnterpriseAcceptanceLoadTestPreflight(options);
+    await fs.mkdir(path.dirname(options.outputPath), { recursive: true });
+    await fs.writeFile(options.outputPath, `${JSON.stringify(preflight, null, 2)}\n`);
+    console.log(`[Enterprise Load Test Preflight] JSON report: ${options.outputPath}`);
+    if (options.markdownPath) {
+      await fs.mkdir(path.dirname(options.markdownPath), { recursive: true });
+      await fs.writeFile(options.markdownPath, buildMarkdownLoadTestPreflightReport(preflight));
+      console.log(`[Enterprise Load Test Preflight] Markdown report: ${options.markdownPath}`);
+    }
+    if (!preflight.ready) {
+      const blocked = preflight.checks
+        .filter(check => check.status === 'blocked')
+        .map(check => check.id);
+      console.warn(`[Enterprise Load Test Preflight] Blocked: ${blocked.join(', ')}`);
+      process.exitCode = 2;
+    }
+    return;
+  }
   const report = await runEnterpriseAcceptanceLoadTest(options);
   await fs.mkdir(path.dirname(options.outputPath), { recursive: true });
   await fs.writeFile(options.outputPath, `${JSON.stringify(report, null, 2)}\n`);

@@ -28,6 +28,25 @@ The final report must cover:
 
 ## Command
 
+Before the real run, use preflight mode to verify the target environment without
+starting analysis runs or simulating 50 online clients. This is only an
+environment-readiness check; it is not §0.8 acceptance evidence:
+
+```bash
+PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
+  npm run benchmark:enterprise-load -- \
+  --preflight-only \
+  --base-url http://localhost:3000 \
+  --tenant-id tenant-a \
+  --workspace-id workspace-a \
+  --users 50 \
+  --target-running 15 \
+  --target-pending 10 \
+  --trace-id <existing-trace-id> \
+  --output test-output/enterprise-acceptance-load-preflight.json \
+  --markdown test-output/enterprise-acceptance-load-preflight.md
+```
+
 Run from `backend/` with Node 24 against a prepared enterprise backend and at
 least one already uploaded trace in the target workspace:
 
@@ -77,3 +96,7 @@ If the backend requires `SMARTPERFETTO_API_KEY`, add:
   and then during the test window. Runtime evidence must include a measurable
   LLM cost delta plus an increased LLM call count; historical positive cost or
   call totals are not enough evidence that this run exercised a real LLM.
+- `--preflight-only` checks load shape, trace list access, configured traceId
+  visibility, runtime dashboard access, queue/RSS counters, and LLM counters
+  without starting analysis runs. A passing preflight only means the environment
+  is ready for the real command; it does not close either README §0.8 row.

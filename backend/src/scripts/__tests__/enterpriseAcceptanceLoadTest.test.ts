@@ -5,8 +5,11 @@
 import path from 'path';
 import {
   buildLoadTestReport,
+  buildLoadTestPreflightReport,
   buildMarkdownLoadTestReport,
+  buildMarkdownLoadTestPreflightReport,
   evaluateAcceptance,
+  extractTraceIdsFromTraceListBody,
   parseLoadTestArgs,
   percentile,
   summarizeLoadTest,
@@ -22,6 +25,7 @@ function options(overrides: Partial<EnterpriseLoadTestOptions> = {}): Enterprise
     baseUrl: 'http://localhost:3000',
     tenantId: 'tenant-a',
     workspaceId: 'workspace-a',
+    preflightOnly: false,
     onlineUsers: 50,
     targetRunningRuns: 10,
     targetPendingRuns: 5,
@@ -123,12 +127,14 @@ describe('enterprise acceptance load test helpers', () => {
       '--query', '验收压测',
       '--output', 'out/load.json',
       '--markdown', 'out/load.md',
+      '--preflight-only',
     ], cwd);
 
     expect(parsed).toEqual(expect.objectContaining({
       baseUrl: 'http://127.0.0.1:3000',
       tenantId: 'tenant-z',
       workspaceId: 'workspace-z',
+      preflightOnly: true,
       onlineUsers: 55,
       targetRunningRuns: 12,
       targetPendingRuns: 7,
@@ -147,6 +153,90 @@ describe('enterprise acceptance load test helpers', () => {
     expect(percentile([10], 0.95)).toBe(10);
     expect(percentile([100, 10, 30, 20], 0.5)).toBe(20);
     expect(percentile([100, 10, 30, 20], 0.95)).toBe(100);
+  });
+
+  it('extracts trace ids from workspace trace list responses', () => {
+    expect(extractTraceIdsFromTraceListBody({
+      traces: [
+        { id: 'trace-a' },
+        { id: 'trace-b' },
+        { name: 'missing id' },
+      ],
+    })).toEqual(['trace-a', 'trace-b']);
+    expect(extractTraceIdsFromTraceListBody({ traces: 'not-array' })).toBeNull();
+  });
+
+  it('builds a ready preflight report without treating it as load evidence', () => {
+    const opts = options({
+      traceIds: ['trace-a', 'trace-b'],
+      targetRunningRuns: 10,
+      targetPendingRuns: 5,
+    });
+    const report = buildLoadTestPreflightReport({
+      options: opts,
+      traceList: {
+        status: 200,
+        ok: true,
+        traceIds: ['trace-a', 'trace-b', 'trace-c'],
+      },
+      runtimeSamples: [
+        runtimeSample({
+          queueLength: 0,
+          workerRssBytes: 0,
+          leaseRssBytes: 0,
+          llmCostUsd: 0,
+          llmCalls: 0,
+        }),
+      ],
+      httpSamples: [
+        runtimeDashboardSample(),
+        sample('trace_list_preflight', 12, true, 'load-preflight-user'),
+      ],
+    });
+
+    expect(report.ready).toBe(true);
+    expect(report.checks.every(check => check.status === 'passed')).toBe(true);
+    const markdown = buildMarkdownLoadTestPreflightReport(report);
+    expect(markdown).toContain('Preflight status: ready');
+    expect(markdown).toContain('not README §0.8 acceptance evidence');
+    expect(markdown).toContain('| trace-id-access | passed | trace-a<br>trace-b |');
+  });
+
+  it('blocks preflight when runtime counters or configured traces are missing', () => {
+    const report = buildLoadTestPreflightReport({
+      options: options({
+        onlineUsers: 20,
+        targetRunningRuns: 20,
+        targetPendingRuns: 0,
+        traceIds: ['trace-missing'],
+      }),
+      traceList: {
+        status: 200,
+        ok: true,
+        traceIds: ['trace-a'],
+      },
+      runtimeSamples: [
+        runtimeSample({
+          queueLength: null,
+          workerRssBytes: null,
+          leaseRssBytes: null,
+          llmCostUsd: null,
+          llmCalls: null,
+        }),
+      ],
+      httpSamples: [
+        runtimeDashboardSample(),
+        sample('trace_list_preflight', 12, true, 'load-preflight-user'),
+      ],
+    });
+
+    expect(report.ready).toBe(false);
+    expect(report.checks.filter(check => check.status === 'blocked').map(check => check.id)).toEqual([
+      'load-shape-config',
+      'trace-id-access',
+      'runtime-rss-and-queue-counters',
+      'runtime-llm-counters',
+    ]);
   });
 
   it('summarizes latency, error rate, run counts, queue, RSS, and LLM cost', () => {
