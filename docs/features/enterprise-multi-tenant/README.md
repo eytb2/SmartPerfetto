@@ -95,7 +95,7 @@
 - [ ] 6.1 Unit：RequestContext / RBAC / owner guard / provider resolution / ProviderSnapshot hash
 - [ ] 6.2 Integration：trace upload/list/delete/download；agent analyze/resume/respond/stream；report read/delete
 - [ ] 6.3 Concurrency：多用户同时 upload / analyze / query / cancel / cleanup
-- [ ] 6.4 Dual-window e2e：D1-D10 每个场景至少 1 个自动化用例（详见 §0.7）
+- [x] 6.4 Dual-window e2e：D1-D10 每个场景至少 1 个自动化用例（详见 §0.7）
 - [ ] 6.5 Security：ID 枚举、跨 tenant、无权限访问统一 404
 - [ ] 6.6 Runtime：lease acquire / release / heartbeat / stale / crash recovery
 - [ ] 6.7 Persistence：backend restart / queue shadow 恢复 / DB reconnect / SecretStore failure
@@ -105,9 +105,9 @@
 - [ ] 6.11 PR Gate：合入前 `npm run verify:pr` 通过
 
 ### 0.7 §23 反证循环（双窗口阻断验收，每条都对应一个自动化测试）
-- [ ] D1 两窗口分别上传同名 trace → temp file / TraceAsset / lease / session 不互相覆盖
-- [ ] D2 A 长 SQL 中，B 上传并分析另一个 trace → A 的 SSE 不断、A lease 不被 destroy、B 能排队或运行
-- [ ] D3 A 前端 timeline，B 跑 full agent → A WebSocket 走 lease；P0 不被 P2 长任务无限阻塞
+- [x] D1 两窗口分别上传同名 trace → temp file / TraceAsset / lease / session 不互相覆盖
+- [x] D2 A 长 SQL 中，B 上传并分析另一个 trace → A 的 SSE 不断、A lease 不被 destroy、B 能排队或运行
+- [x] D3 A 前端 timeline，B 跑 full agent → A WebSocket 走 lease；P0 不被 P2 长任务无限阻塞
 - [x] D4 trace_processor_shell crash → leaseId 稳定；前端不持有旧 port；supervisor 单点重启
 - [x] D5 浏览器断网 / 休眠 30 分钟后恢复 → frontend grace 生效；reacquire lease 或自动 reload
 - [x] D6 SSE 在 conclusion 后、analysis_completed 前断开 → AgentEvent replay 能补回 reportUrl

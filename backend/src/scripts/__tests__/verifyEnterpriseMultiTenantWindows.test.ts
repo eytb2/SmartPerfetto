@@ -31,7 +31,7 @@ describe('verifyEnterpriseMultiTenantWindows script', () => {
     await fs.rm(tempRoot, { recursive: true, force: true });
   });
 
-  test('covers current D1/D2/D4/D5/D6/D7/D8/D9/D10 isolation invariants without invoking a real provider', async () => {
+  test('covers current D1-D10 isolation invariants without invoking a real provider', async () => {
     const tracePath = path.join(tempRoot, 'fixture.pftrace');
     const uploadRoot = path.join(tempRoot, 'uploads');
     const outputPath = path.join(tempRoot, 'report.json');
@@ -48,6 +48,7 @@ describe('verifyEnterpriseMultiTenantWindows script', () => {
     expect(report.checks).toEqual({
       D1: true,
       D2: true,
+      D3: true,
       D4: true,
       D5: true,
       D6: true,
@@ -59,6 +60,7 @@ describe('verifyEnterpriseMultiTenantWindows script', () => {
     expect(Object.values(report.scenarios.D1.checks)).toEqual(expect.arrayContaining([true]));
     expect(Object.values(report.scenarios.D1.checks).every(Boolean)).toBe(true);
     expect(Object.values(report.scenarios.D2.checks).every(Boolean)).toBe(true);
+    expect(Object.values(report.scenarios.D3.checks).every(Boolean)).toBe(true);
     expect(Object.values(report.scenarios.D4.checks).every(Boolean)).toBe(true);
     expect(Object.values(report.scenarios.D5.checks).every(Boolean)).toBe(true);
     expect(Object.values(report.scenarios.D6.checks).every(Boolean)).toBe(true);
@@ -70,6 +72,15 @@ describe('verifyEnterpriseMultiTenantWindows script', () => {
     expect(report.scenarios.D6.details).toEqual(expect.objectContaining({
       reportUrl: expect.stringMatching(/^\/api\/reports\//),
       crossTenantReplayCount: 0,
+    }));
+    expect(report.scenarios.D3.details).toEqual(expect.objectContaining({
+      queryDispatchOrder: ['running-p2', 'p0', 'p1', 'queued-p2'],
+      queuedStats: expect.objectContaining({
+        running: true,
+        queuedP0: 1,
+        queuedP1: 1,
+        queuedP2: 1,
+      }),
     }));
     expect(report.scenarios.D8.details).toEqual(expect.objectContaining({
       providerSnapshotChanged: true,
@@ -93,6 +104,6 @@ describe('verifyEnterpriseMultiTenantWindows script', () => {
 
     const traceFiles = (await fs.readdir(path.join(uploadRoot, 'traces')))
       .filter(file => file.endsWith('.trace'));
-    expect(traceFiles).toHaveLength(14);
+    expect(traceFiles).toHaveLength(16);
   });
 });
