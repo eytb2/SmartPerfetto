@@ -260,8 +260,11 @@ fi
 
 assets=()
 asset_lines=()
-target asset_path asset_name asset_sha asset_size
 for target in "${TARGETS[@]}"; do
+  asset_path=""
+  asset_name=""
+  asset_sha=""
+  asset_size=""
   asset_path="$(asset_path_for_target "$target")"
   asset_name="$(asset_name_for_target "$target")"
   if [ ! -f "$asset_path" ]; then
