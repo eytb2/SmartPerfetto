@@ -27,6 +27,7 @@ import { normalizeTraceProcessorQueryPriority } from '../services/traceProcessor
 import { hasRbacPermission, sendForbidden } from '../services/rbac';
 import { EnterpriseSsoService } from '../services/enterpriseSsoService';
 import { EnterpriseApiKeyService } from '../services/enterpriseApiKeyService';
+import type { EnterpriseRepositoryScope } from '../services/enterpriseRepository';
 
 const router = Router();
 const READY_STATES = new Set<TraceProcessorLeaseState>(['ready', 'idle', 'active']);
@@ -62,6 +63,7 @@ interface RequestIdentity {
 interface ProxyTarget {
   lease: TraceProcessorLeaseRecord;
   port: number;
+  scope: EnterpriseRepositoryScope;
 }
 
 function sanitizeContextId(value: unknown): string {
@@ -266,7 +268,7 @@ async function resolveProxyTargetForContext(
     throw new TraceProcessorProxyError(404, 'Trace not found for trace processor lease');
   }
 
-  await traceProcessorService.ensureProcessorForLease(lease.traceId, lease.id, lease.mode);
+  await traceProcessorService.ensureProcessorForLease(lease.traceId, lease.id, lease.mode, scope);
   const traceWithPort = traceProcessorService.getTraceWithLeasePort(lease.traceId, lease.id, lease.mode);
   if (!traceWithPort?.port) {
     throw new TraceProcessorProxyError(503, 'Trace processor HTTP RPC port is not ready');
@@ -275,6 +277,7 @@ async function resolveProxyTargetForContext(
   return {
     lease,
     port: traceWithPort.port,
+    scope,
   };
 }
 
@@ -351,6 +354,7 @@ async function forwardQueryRpc(req: Request, res: Response): Promise<void> {
     priority,
     leaseId: target.lease.id,
     leaseMode: target.lease.mode,
+    leaseScope: target.scope,
   });
   res.setHeader('content-type', 'application/x-protobuf');
   res.status(200).send(responseBody);

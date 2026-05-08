@@ -634,5 +634,5 @@ export function getTraceProcessorLeaseStore(): TraceProcessorLeaseStore {
 
 export function setTraceProcessorLeaseStoreForTests(store: TraceProcessorLeaseStore | null): void {
   singleton = store;
-  singletonDbPath = null;
+  singletonDbPath = store ? resolveEnterpriseDbPath() : null;
 }

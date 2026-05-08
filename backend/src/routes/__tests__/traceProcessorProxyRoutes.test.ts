@@ -249,7 +249,16 @@ describe('trace processor lease proxy routes', () => {
     expect(queryRawMock).toHaveBeenCalledWith(
       'trace-a',
       queryBody,
-      { priority: 'p0', leaseId: lease.id, leaseMode: 'shared' },
+      {
+        priority: 'p0',
+        leaseId: lease.id,
+        leaseMode: 'shared',
+        leaseScope: {
+          tenantId: 'tenant-a',
+          workspaceId: 'workspace-a',
+          userId: 'user-a',
+        },
+      },
     );
   });
 

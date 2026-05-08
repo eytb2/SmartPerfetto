@@ -1035,7 +1035,7 @@ async function handleAnalyzeRequest(
           { mode: agentRunLeaseDecision.mode },
         );
         agentRunLease = markLeaseReadyIfNew(agentRunLease, scope);
-        await traceProcessorService.ensureProcessorForLease(traceId, agentRunLease.id, agentRunLease.mode);
+        await traceProcessorService.ensureProcessorForLease(traceId, agentRunLease.id, agentRunLease.mode, scope);
       } catch (leaseError: any) {
         if (agentRunLease) {
           try {
@@ -1073,7 +1073,12 @@ async function handleAnalyzeRequest(
       traceContext: traceContext && traceContext.length > 0 ? traceContext : undefined,
       providerId: sessionForRun.providerId !== undefined ? sessionForRun.providerId : providerId,
       traceProcessorLease: agentRunLease
-        ? { traceId, leaseId: agentRunLease.id, mode: agentRunLease.mode }
+        ? {
+          traceId,
+          leaseId: agentRunLease.id,
+          mode: agentRunLease.mode,
+          leaseScope: leaseScopeFromRequestContext(requestContext),
+        }
         : undefined,
     }).catch((error) => {
       const session = assistantAppService.getSession(sessionId);

@@ -9,7 +9,12 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { WorkingTraceProcessor, TraceProcessorFactory } from './workingTraceProcessor';
 import type { TraceProcessorQueryOptions } from './traceProcessorSqlWorker';
-import type { TraceProcessorLeaseMode } from './traceProcessorLeaseStore';
+import {
+  getTraceProcessorLeaseStore,
+  type TraceProcessorLeaseMode,
+  type TraceProcessorLeaseState,
+} from './traceProcessorLeaseStore';
+import type { EnterpriseRepositoryScope } from './enterpriseRepository';
 
 export interface TraceInfo {
   id: string;
@@ -51,12 +56,25 @@ export interface TraceProcessorLeaseQueryContext {
   traceId: string;
   leaseId: string;
   mode: TraceProcessorLeaseMode | string;
+  leaseScope?: EnterpriseRepositoryScope;
 }
 
 export type TraceProcessorServiceQueryOptions = TraceProcessorQueryOptions & {
   leaseId?: string;
   leaseMode?: TraceProcessorLeaseMode | string;
+  leaseScope?: EnterpriseRepositoryScope;
 };
+
+export interface TraceProcessorLeaseRestartPolicy {
+  backoffMs?: number[];
+  jitterMs?: number;
+  sleep?: (delayMs: number) => Promise<void>;
+  random?: () => number;
+}
+
+const DEFAULT_LEASE_RESTART_BACKOFF_MS = [1000, 5000, 15000];
+const DEFAULT_LEASE_RESTART_JITTER_MS = 250;
+const LEASE_RESTART_CONFLICT_STATES = new Set<TraceProcessorLeaseState>(['draining', 'released', 'failed']);
 
 /**
  * Manages trace files and processors using the actual Perfetto Trace Processor WASM
@@ -68,9 +86,14 @@ export class TraceProcessorService extends EventEmitter {
   private uploadDir: string;
   /** Guards against concurrent auto-recovery for the same trace. */
   private recoveryInProgress: Map<string, Promise<TraceProcessor>> = new Map();
+  /** Single lease supervisor per processor key; holders wait instead of retrying. */
+  private leaseRestartInProgress: Map<string, Promise<TraceProcessor>> = new Map();
   private readonly queryLeaseContext = new AsyncLocalStorage<TraceProcessorLeaseQueryContext>();
 
-  constructor(uploadDir = './uploads/traces') {
+  constructor(
+    uploadDir = './uploads/traces',
+    private readonly leaseRestartPolicy: TraceProcessorLeaseRestartPolicy = {},
+  ) {
     super();
     this.uploadDir = path.resolve(uploadDir);
     this.ensureUploadDir();
@@ -107,6 +130,7 @@ export class TraceProcessorService extends EventEmitter {
         traceId,
         leaseId: options.leaseId,
         mode: options.leaseMode ?? 'shared',
+        ...(options.leaseScope ? { leaseScope: options.leaseScope } : {}),
       };
     }
     const stored = this.queryLeaseContext.getStore();
@@ -318,7 +342,12 @@ export class TraceProcessorService extends EventEmitter {
     const processorKey = this.processorKeyForLease(traceId, leaseContext?.leaseId, leaseContext?.mode);
     let processor = this.processors.get(processorKey);
     if (!processor && leaseContext) {
-      processor = await this.ensureProcessorForLease(traceId, leaseContext.leaseId, leaseContext.mode);
+      processor = await this.ensureProcessorForLease(
+        traceId,
+        leaseContext.leaseId,
+        leaseContext.mode,
+        leaseContext.leaseScope,
+      );
     }
     if (!processor) {
       throw new Error(`No processor for trace ${traceId}`);
@@ -329,6 +358,14 @@ export class TraceProcessorService extends EventEmitter {
 
     // Auto-recover dead processor
     if (processor.status === 'error') {
+      if (leaseContext?.leaseId) {
+        try {
+          processor = await this.restartLeaseProcessor(traceId, leaseContext);
+        } catch (err: any) {
+          throw new Error(`HTTP server not ready (auto-recovery failed: ${err.message})`);
+        }
+        return processor;
+      }
       // Serialize concurrent recovery attempts for the same trace
       let recovery = this.recoveryInProgress.get(processorKey);
       if (!recovery) {
@@ -366,7 +403,7 @@ export class TraceProcessorService extends EventEmitter {
     options: TraceProcessorServiceQueryOptions = {},
   ): Promise<QueryResult> {
     const processor = await this.processorForQuery(traceId, options);
-    const { leaseId: _leaseId, leaseMode: _leaseMode, ...queryOptions } = options;
+    const { leaseId: _leaseId, leaseMode: _leaseMode, leaseScope: _leaseScope, ...queryOptions } = options;
     return await processor.query(sql, queryOptions);
   }
 
@@ -376,7 +413,7 @@ export class TraceProcessorService extends EventEmitter {
     options: TraceProcessorServiceQueryOptions = {},
   ): Promise<Buffer> {
     const processor = await this.processorForQuery(traceId, options);
-    const { leaseId: _leaseId, leaseMode: _leaseMode, ...queryOptions } = options;
+    const { leaseId: _leaseId, leaseMode: _leaseMode, leaseScope: _leaseScope, ...queryOptions } = options;
     return await processor.queryRaw(body, queryOptions);
   }
 
@@ -570,12 +607,21 @@ export class TraceProcessorService extends EventEmitter {
     traceId: string,
     leaseId: string,
     mode: TraceProcessorLeaseMode | string,
+    leaseScope?: EnterpriseRepositoryScope,
   ): Promise<TraceProcessor> {
     const key = this.processorKeyForLease(traceId, leaseId, mode);
     const existing = this.processors.get(key);
     if (existing && existing.status === 'ready') {
       this.touchTrace(traceId);
       return existing;
+    }
+    if (existing && existing.status === 'error') {
+      return this.restartLeaseProcessor(traceId, {
+        traceId,
+        leaseId,
+        mode,
+        ...(leaseScope ? { leaseScope } : {}),
+      });
     }
 
     const trace = this.traces.get(traceId);
@@ -589,6 +635,131 @@ export class TraceProcessorService extends EventEmitter {
     }
 
     return this.createProcessor(traceId, { leaseId, mode });
+  }
+
+  private async restartLeaseProcessor(
+    traceId: string,
+    leaseContext: TraceProcessorLeaseQueryContext,
+  ): Promise<TraceProcessor> {
+    const processorKey = this.processorKeyForLease(traceId, leaseContext.leaseId, leaseContext.mode);
+    const inProgress = this.leaseRestartInProgress.get(processorKey);
+    if (inProgress) {
+      console.log(`[TraceProcessorService] Waiting for lease supervisor restart of ${processorKey}`);
+      return inProgress;
+    }
+
+    const restart = this.runLeaseRestartSupervisor(traceId, leaseContext, processorKey)
+      .finally(() => {
+        this.leaseRestartInProgress.delete(processorKey);
+      });
+    this.leaseRestartInProgress.set(processorKey, restart);
+    return restart;
+  }
+
+  private async runLeaseRestartSupervisor(
+    traceId: string,
+    leaseContext: TraceProcessorLeaseQueryContext,
+    processorKey: string,
+  ): Promise<TraceProcessor> {
+    const backoffMs = this.leaseRestartPolicy.backoffMs ?? DEFAULT_LEASE_RESTART_BACKOFF_MS;
+    const attempts = Math.max(1, backoffMs.length);
+    let lastError: unknown;
+
+    console.warn(`[TraceProcessorService] Lease processor crashed; supervisor restarting ${processorKey}`);
+    this.markLeaseCrashedForRestart(leaseContext);
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const delayMs = this.restartBackoffDelayMs(backoffMs, attempt);
+      if (delayMs > 0) {
+        await this.restartSleep(delayMs);
+      }
+
+      this.markLeaseRestarting(leaseContext);
+      this.destroyProcessorForRestart(processorKey);
+
+      try {
+        const processor = await this.createProcessor(traceId, leaseContext);
+        this.markLeaseReadyAfterRestart(leaseContext);
+        console.log(
+          `[TraceProcessorService] Lease processor restart succeeded for ${processorKey} ` +
+          `(attempt ${attempt + 1}/${attempts})`,
+        );
+        return processor;
+      } catch (error: any) {
+        lastError = error;
+        console.warn(
+          `[TraceProcessorService] Lease processor restart failed for ${processorKey} ` +
+          `(attempt ${attempt + 1}/${attempts}): ${error?.message || error}`,
+        );
+      }
+    }
+
+    this.markLeaseFailedAfterRestart(leaseContext);
+    throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Lease processor restart failed'));
+  }
+
+  private restartBackoffDelayMs(backoffMs: number[], attemptIndex: number): number {
+    const base = backoffMs[Math.min(attemptIndex, backoffMs.length - 1)] ?? 0;
+    const jitterMs = this.leaseRestartPolicy.jitterMs ?? DEFAULT_LEASE_RESTART_JITTER_MS;
+    if (base <= 0 || jitterMs <= 0) return Math.max(0, base);
+    const random = this.leaseRestartPolicy.random ?? Math.random;
+    return base + Math.floor(random() * jitterMs);
+  }
+
+  private restartSleep(delayMs: number): Promise<void> {
+    if (this.leaseRestartPolicy.sleep) return this.leaseRestartPolicy.sleep(delayMs);
+    return new Promise(resolve => {
+      const timer = setTimeout(resolve, delayMs);
+      if (typeof (timer as any).unref === 'function') {
+        (timer as any).unref();
+      }
+    });
+  }
+
+  private destroyProcessorForRestart(processorKey: string): void {
+    const processor = this.processors.get(processorKey);
+    this.processors.delete(processorKey);
+    if (TraceProcessorFactory.remove(processorKey)) return;
+    try {
+      processor?.destroy();
+    } catch {
+      // Best-effort cleanup before the supervisor creates the replacement.
+    }
+  }
+
+  private markLeaseCrashedForRestart(context: TraceProcessorLeaseQueryContext): void {
+    if (!context.leaseScope) return;
+    const store = getTraceProcessorLeaseStore();
+    const lease = store.getLeaseById(context.leaseScope, context.leaseId);
+    if (!lease) throw new Error(`Trace processor lease not found: ${context.leaseId}`);
+    if (LEASE_RESTART_CONFLICT_STATES.has(lease.state)) {
+      throw new Error(`Trace processor lease ${lease.id} is ${lease.state}`);
+    }
+    if (lease.state === 'crashed' || lease.state === 'restarting') return;
+    store.markCrashed(context.leaseScope, lease.id);
+  }
+
+  private markLeaseRestarting(context: TraceProcessorLeaseQueryContext): void {
+    if (!context.leaseScope) return;
+    const store = getTraceProcessorLeaseStore();
+    const lease = store.getLeaseById(context.leaseScope, context.leaseId);
+    if (!lease) throw new Error(`Trace processor lease not found: ${context.leaseId}`);
+    if (lease.state === 'restarting') return;
+    if (lease.state !== 'crashed') return;
+    store.markRestarting(context.leaseScope, lease.id);
+  }
+
+  private markLeaseReadyAfterRestart(context: TraceProcessorLeaseQueryContext): void {
+    if (!context.leaseScope) return;
+    getTraceProcessorLeaseStore().markReady(context.leaseScope, context.leaseId);
+  }
+
+  private markLeaseFailedAfterRestart(context: TraceProcessorLeaseQueryContext): void {
+    if (!context.leaseScope) return;
+    const store = getTraceProcessorLeaseStore();
+    const lease = store.getLeaseById(context.leaseScope, context.leaseId);
+    if (!lease || lease.state === 'failed' || lease.state === 'released') return;
+    store.markFailed(context.leaseScope, context.leaseId);
   }
 
   /**
