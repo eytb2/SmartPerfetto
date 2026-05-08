@@ -48,6 +48,7 @@ let fakeTraceProcessorService: {
   getAllTraces: jest.Mock;
   deleteTrace: jest.Mock;
   cleanupProcessorsForTraces: jest.Mock;
+  registerExternalRpc: jest.Mock;
 };
 
 function makeApp(): express.Express {
@@ -160,6 +161,17 @@ function readAuditActions(): string[] {
   }
 }
 
+function readCount(table: 'trace_assets' | 'trace_processor_leases'): number {
+  const db = openEnterpriseDb(dbPath);
+  try {
+    return db.prepare<unknown[], { count: number }>(`
+      SELECT COUNT(*) as count FROM ${table}
+    `).get()?.count ?? 0;
+  } finally {
+    db.close();
+  }
+}
+
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-enterprise-trace-routes-'));
   dbPath = path.join(tmpDir, 'enterprise.sqlite');
@@ -181,6 +193,7 @@ beforeEach(async () => {
     getAllTraces: jest.fn(() => []),
     deleteTrace: jest.fn(async () => undefined),
     cleanupProcessorsForTraces: jest.fn(() => 0),
+    registerExternalRpc: jest.fn(async () => undefined),
   };
   setTraceProcessorServiceForTests(fakeTraceProcessorService as any);
 });
@@ -199,6 +212,25 @@ afterEach(async () => {
 });
 
 describe('enterprise trace metadata routes', () => {
+  it('disables legacy direct RPC registration in enterprise mode before creating naked-port state', async () => {
+    const app = makeApp();
+
+    const registerRes = await ssoHeaders(
+      request(app)
+        .post('/api/traces/register-rpc')
+        .send({ port: 9123, traceName: 'direct-rpc.trace' }),
+    );
+
+    expect(registerRes.status).toBe(410);
+    expect(registerRes.body).toEqual(expect.objectContaining({
+      success: false,
+      error: expect.stringContaining('disabled in enterprise mode'),
+    }));
+    expect(fakeTraceProcessorService.registerExternalRpc).not.toHaveBeenCalled();
+    expect(readCount('trace_assets')).toBe(0);
+    expect(readCount('trace_processor_leases')).toBe(0);
+  });
+
   it('stores uploaded trace metadata in trace_assets and moves the trace into scoped data storage', async () => {
     const app = makeApp();
     const sourceTracePath = path.join(tmpDir, 'fixture.trace');

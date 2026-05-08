@@ -866,6 +866,12 @@ router.post('/register-rpc', async (req, res) => {
     if (!hasRbacPermission(context, 'trace:write')) {
       return sendForbidden(res, 'Registering traces requires trace:write permission');
     }
+    if (enterpriseLeasesEnabled()) {
+      return res.status(410).json({
+        success: false,
+        error: 'Direct RPC registration is disabled in enterprise mode; use backend lease proxy targets.',
+      });
+    }
     const { port, traceName } = req.body;
 
     if (!port) {
