@@ -14,9 +14,10 @@ import { getPortPool } from '../services/portPool';
 import { TraceProcessorFactory } from '../services/workingTraceProcessor';
 import {
   buildTraceOwnerMetadata,
+  deleteTraceMetadata,
   getTraceFilePath,
-  getTracesDir,
-  listTraceMetadata,
+  getWritableTraceDirForContext,
+  listTraceMetadataForContext,
   readTraceMetadata,
   readTraceMetadataForContext,
   type TraceMetadata,
@@ -56,7 +57,7 @@ async function finalizeTraceUpload(
   const tps = getTraceProcessorService();
 
   if (tps) {
-    await tps.initializeUploadWithId(traceId, filename, size);
+    await tps.initializeUploadWithId(traceId, filename, size, finalPath);
     console.log(`[TraceProcessor] Initialized upload with traceId: ${traceId}`);
   }
 
@@ -161,7 +162,7 @@ router.post(
       const file = req.file;
 
       // Store trace info (in a real app, this would go to a database)
-      const tracesDir = getTracesDir();
+      const tracesDir = getWritableTraceDirForContext(context);
       await fs.mkdir(tracesDir, { recursive: true });
 
       // Generate trace ID upfront for consistency
@@ -257,7 +258,7 @@ router.post('/upload-url', async (req, res) => {
       });
     }
 
-    const tracesDir = getTracesDir();
+    const tracesDir = getWritableTraceDirForContext(context);
     await fs.mkdir(tracesDir, { recursive: true });
 
     const traceId = uuidv4();
@@ -297,11 +298,7 @@ router.get('/', async (req, res) => {
     if (!hasRbacPermission(context, 'trace:read')) {
       return sendForbidden(res, 'Listing traces requires trace:read permission');
     }
-    const ownedTraces: TraceMetadata[] = [];
-    for (const trace of await listTraceMetadata()) {
-      const owned = await readTraceMetadataForContext(trace.id, context);
-      if (owned) ownedTraces.push(owned);
-    }
+    const ownedTraces: TraceMetadata[] = await listTraceMetadataForContext(context);
 
     // Sort by upload date (newest first)
     ownedTraces.sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
@@ -325,10 +322,8 @@ router.get('/stats', async (req, res) => {
       return sendForbidden(res, 'Trace stats require trace:read permission');
     }
     const ownedTraceIds = new Set<string>();
-    for (const metadata of await listTraceMetadata()) {
-      if (await readTraceMetadataForContext(metadata.id, context)) {
-        ownedTraceIds.add(metadata.id);
-      }
+    for (const metadata of await listTraceMetadataForContext(context)) {
+      ownedTraceIds.add(metadata.id);
     }
     const portPoolStats = getPortPool().getStats();
     const processorStats = TraceProcessorFactory.getStats();
@@ -523,8 +518,6 @@ router.delete('/:id', async (req, res) => {
     if (!canDeleteTraceResource(metadata, context)) {
       return sendForbidden(res, 'Deleting this trace requires trace delete permission');
     }
-    const tracesDir = getTracesDir();
-
     console.log(`[Traces] Deleting trace ${id} and cleaning up resources...`);
 
     // First, cleanup the trace processor (this will release the port)
@@ -537,22 +530,18 @@ router.delete('/:id', async (req, res) => {
     }
 
     // Delete trace file
-    const tracePath = path.join(tracesDir, `${id}.trace`);
+    const tracePath = metadata.path || getTraceFilePath(id);
     try {
-      await fs.unlink(tracePath);
-      console.log(`[Traces] Trace file deleted: ${tracePath}`);
+      if (tracePath) {
+        await fs.unlink(tracePath);
+        console.log(`[Traces] Trace file deleted: ${tracePath}`);
+      }
     } catch (error) {
       // File might not exist, continue
     }
 
-    // Delete metadata file
-    const infoPath = path.join(tracesDir, `${id}.json`);
-    try {
-      await fs.unlink(infoPath);
-      console.log(`[Traces] Metadata file deleted: ${infoPath}`);
-    } catch (error) {
-      // File might not exist, continue
-    }
+    await deleteTraceMetadata(id);
+    console.log(`[Traces] Metadata deleted for ${id}`);
 
     console.log(`[Traces] Trace ${id} fully deleted`);
     res.json({ success: true, message: 'Trace deleted successfully' });

@@ -4,7 +4,10 @@
 
 import path from 'path';
 import fs from 'fs/promises';
+import type Database from 'better-sqlite3';
+import { resolveFeatureConfig } from '../config';
 import type { RequestContext } from '../middleware/auth';
+import { openEnterpriseDb } from './enterpriseDb';
 import {
   ownerFieldsFromContext,
   type ResourceOwnerFields,
@@ -22,14 +25,62 @@ export interface TraceMetadata extends ResourceOwnerFields {
   externalRpc?: boolean;
 }
 
+interface TraceAssetRow {
+  id: string;
+  tenant_id: string;
+  workspace_id: string;
+  owner_user_id: string | null;
+  local_path: string;
+  size_bytes: number | null;
+  status: string;
+  metadata_json: string | null;
+  created_at: number;
+  expires_at: number | null;
+}
+
 const SAFE_TRACE_ID_RE = /^[a-zA-Z0-9._:-]+$/;
+export const ENTERPRISE_DATA_DIR_ENV = 'SMARTPERFETTO_DATA_DIR';
 
 export function getUploadRoot(): string {
   return process.env.UPLOAD_DIR || './uploads';
 }
 
+export function resolveEnterpriseDataRoot(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = env[ENTERPRISE_DATA_DIR_ENV];
+  return path.resolve(configured && configured.trim().length > 0 ? configured : 'data');
+}
+
 export function getTracesDir(): string {
   return path.join(getUploadRoot(), 'traces');
+}
+
+function enterpriseTraceStoreEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return resolveFeatureConfig(env).enterprise;
+}
+
+function assertSafePathSegment(value: string, label: string): string {
+  if (!SAFE_TRACE_ID_RE.test(value) || value === '.' || value === '..') {
+    throw new Error(`Unsafe ${label}: ${value}`);
+  }
+  return value;
+}
+
+export function getEnterpriseTracesDirForContext(
+  context: RequestContext,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return path.join(
+    resolveEnterpriseDataRoot(env),
+    assertSafePathSegment(context.tenantId, 'tenant id'),
+    assertSafePathSegment(context.workspaceId, 'workspace id'),
+    'traces',
+  );
+}
+
+export function getWritableTraceDirForContext(context: RequestContext): string {
+  return enterpriseTraceStoreEnabled()
+    ? getEnterpriseTracesDirForContext(context)
+    : getTracesDir();
 }
 
 export function isSafeTraceId(traceId: string): boolean {
@@ -46,9 +97,161 @@ export function getTraceFilePath(traceId: string): string | null {
   return path.join(getTracesDir(), `${traceId}.trace`);
 }
 
+function parseMetadataJson(value: string | null): Record<string, unknown> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function metadataDateMs(uploadedAt: string | undefined): number {
+  const parsed = uploadedAt ? Date.parse(uploadedAt) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function metadataJsonForRow(metadata: TraceMetadata): string {
+  return JSON.stringify({
+    filename: metadata.filename,
+    uploadedAt: metadata.uploadedAt,
+    ...(typeof metadata.port === 'number' ? { port: metadata.port } : {}),
+    ...(metadata.externalRpc ? { externalRpc: true } : {}),
+  });
+}
+
+function rowToTraceMetadata(row: TraceAssetRow): TraceMetadata {
+  const extra = parseMetadataJson(row.metadata_json);
+  const filename = typeof extra.filename === 'string'
+    ? extra.filename
+    : path.basename(row.local_path);
+  const uploadedAt = typeof extra.uploadedAt === 'string'
+    ? extra.uploadedAt
+    : new Date(row.created_at).toISOString();
+  const port = typeof extra.port === 'number' ? extra.port : undefined;
+  const externalRpc = extra.externalRpc === true;
+
+  return {
+    id: row.id,
+    filename,
+    size: row.size_bytes ?? 0,
+    uploadedAt,
+    status: row.status,
+    path: row.local_path,
+    tenantId: row.tenant_id,
+    workspaceId: row.workspace_id,
+    ...(row.owner_user_id ? { userId: row.owner_user_id } : {}),
+    ...(typeof port === 'number' ? { port } : {}),
+    ...(externalRpc ? { externalRpc: true } : {}),
+  };
+}
+
+function withEnterpriseTraceDb<T>(fn: (db: Database.Database) => T): T {
+  const db = openEnterpriseDb();
+  try {
+    return fn(db);
+  } finally {
+    db.close();
+  }
+}
+
+function ensureEnterpriseTraceOwner(
+  db: Database.Database,
+  tenantId: string,
+  workspaceId: string,
+  userId: string | undefined,
+): void {
+  const now = Date.now();
+  db.prepare(`
+    INSERT OR IGNORE INTO organizations (id, name, status, plan, created_at, updated_at)
+    VALUES (?, ?, 'active', 'enterprise', ?, ?)
+  `).run(tenantId, tenantId, now, now);
+  db.prepare(`
+    INSERT OR IGNORE INTO workspaces (id, tenant_id, name, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(workspaceId, tenantId, workspaceId, now, now);
+
+  if (!userId) return;
+  db.prepare(`
+    INSERT INTO users (id, tenant_id, email, display_name, idp_subject, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      email = excluded.email,
+      display_name = excluded.display_name,
+      updated_at = excluded.updated_at
+  `).run(
+    userId,
+    tenantId,
+    `${userId}@trace.local`,
+    userId,
+    `trace:${userId}`,
+    now,
+    now,
+  );
+}
+
+function enterpriseLocalPathForMetadata(metadata: TraceMetadata): string {
+  if (metadata.path && metadata.path.trim().length > 0) return metadata.path;
+  if (metadata.externalRpc && typeof metadata.port === 'number') {
+    return `external-rpc:${metadata.port}`;
+  }
+  const fallbackPath = getTraceFilePath(metadata.id);
+  if (!fallbackPath) throw new Error(`Unsafe trace id: ${metadata.id}`);
+  return fallbackPath;
+}
+
+function writeEnterpriseTraceMetadata(metadata: TraceMetadata): void {
+  if (!metadata.tenantId || !metadata.workspaceId) {
+    throw new Error('Enterprise trace metadata requires tenantId and workspaceId');
+  }
+  const tenantId = assertSafePathSegment(metadata.tenantId, 'tenant id');
+  const workspaceId = assertSafePathSegment(metadata.workspaceId, 'workspace id');
+  const ownerUserId = metadata.userId
+    ? assertSafePathSegment(metadata.userId, 'user id')
+    : null;
+  const createdAt = metadataDateMs(metadata.uploadedAt);
+
+  withEnterpriseTraceDb((db) => {
+    ensureEnterpriseTraceOwner(db, tenantId, workspaceId, ownerUserId ?? undefined);
+    db.prepare(`
+      INSERT INTO trace_assets
+        (id, tenant_id, workspace_id, owner_user_id, local_path, size_bytes, status, metadata_json, created_at, expires_at)
+      VALUES
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        tenant_id = excluded.tenant_id,
+        workspace_id = excluded.workspace_id,
+        owner_user_id = excluded.owner_user_id,
+        local_path = excluded.local_path,
+        size_bytes = excluded.size_bytes,
+        status = excluded.status,
+        metadata_json = excluded.metadata_json,
+        expires_at = excluded.expires_at
+    `).run(
+      metadata.id,
+      tenantId,
+      workspaceId,
+      ownerUserId,
+      enterpriseLocalPathForMetadata(metadata),
+      metadata.size,
+      metadata.status,
+      metadataJsonForRow(metadata),
+      createdAt,
+      null,
+    );
+  });
+}
+
 export async function writeTraceMetadata(metadata: TraceMetadata): Promise<void> {
   if (!isSafeTraceId(metadata.id)) {
     throw new Error(`Unsafe trace id: ${metadata.id}`);
+  }
+  if (enterpriseTraceStoreEnabled()) {
+    writeEnterpriseTraceMetadata(metadata);
+    return;
   }
   const tracesDir = getTracesDir();
   await fs.mkdir(tracesDir, { recursive: true });
@@ -58,7 +261,23 @@ export async function writeTraceMetadata(metadata: TraceMetadata): Promise<void>
   );
 }
 
+function readEnterpriseTraceMetadata(traceId: string): TraceMetadata | null {
+  return withEnterpriseTraceDb((db) => {
+    const row = db.prepare<unknown[], TraceAssetRow>(`
+      SELECT *
+      FROM trace_assets
+      WHERE id = ?
+    `).get(traceId);
+    return row ? rowToTraceMetadata(row) : null;
+  });
+}
+
 export async function readTraceMetadata(traceId: string): Promise<TraceMetadata | null> {
+  if (enterpriseTraceStoreEnabled()) {
+    if (!isSafeTraceId(traceId)) return null;
+    return readEnterpriseTraceMetadata(traceId);
+  }
+
   const metadataPath = getTraceMetadataPath(traceId);
   if (!metadataPath) return null;
 
@@ -74,7 +293,22 @@ export async function readTraceMetadata(traceId: string): Promise<TraceMetadata 
   }
 }
 
+function listEnterpriseTraceMetadata(): TraceMetadata[] {
+  return withEnterpriseTraceDb((db) => {
+    const rows = db.prepare<unknown[], TraceAssetRow>(`
+      SELECT *
+      FROM trace_assets
+      ORDER BY created_at DESC
+    `).all();
+    return rows.map(rowToTraceMetadata);
+  });
+}
+
 export async function listTraceMetadata(): Promise<TraceMetadata[]> {
+  if (enterpriseTraceStoreEnabled()) {
+    return listEnterpriseTraceMetadata();
+  }
+
   const tracesDir = getTracesDir();
   let files: string[];
   try {
@@ -93,6 +327,45 @@ export async function listTraceMetadata(): Promise<TraceMetadata[]> {
   return traces;
 }
 
+export async function listTraceMetadataForContext(context: RequestContext): Promise<TraceMetadata[]> {
+  if (enterpriseTraceStoreEnabled()) {
+    return withEnterpriseTraceDb((db) => {
+      const rows = db.prepare<unknown[], TraceAssetRow>(`
+        SELECT *
+        FROM trace_assets
+        WHERE tenant_id = ?
+          AND workspace_id = ?
+        ORDER BY created_at DESC
+      `).all(context.tenantId, context.workspaceId);
+      return rows.map(rowToTraceMetadata).filter(metadata => canReadTraceResource(metadata, context));
+    });
+  }
+
+  const ownedTraces: TraceMetadata[] = [];
+  for (const trace of await listTraceMetadata()) {
+    const owned = await readTraceMetadataForContext(trace.id, context);
+    if (owned) ownedTraces.push(owned);
+  }
+  return ownedTraces;
+}
+
+export async function deleteTraceMetadata(traceId: string): Promise<void> {
+  if (!isSafeTraceId(traceId)) return;
+  if (enterpriseTraceStoreEnabled()) {
+    withEnterpriseTraceDb((db) => {
+      db.prepare('DELETE FROM trace_assets WHERE id = ?').run(traceId);
+    });
+    return;
+  }
+  const metadataPath = getTraceMetadataPath(traceId);
+  if (!metadataPath) return;
+  try {
+    await fs.unlink(metadataPath);
+  } catch {
+    // Already deleted.
+  }
+}
+
 export function buildTraceOwnerMetadata(context: RequestContext): ResourceOwnerFields {
   return ownerFieldsFromContext(context);
 }
@@ -108,6 +381,21 @@ export async function readTraceMetadataForContext(
   traceId: string,
   context: RequestContext,
 ): Promise<TraceMetadata | null> {
+  if (enterpriseTraceStoreEnabled()) {
+    if (!isSafeTraceId(traceId)) return null;
+    const metadata = withEnterpriseTraceDb((db) => {
+      const row = db.prepare<unknown[], TraceAssetRow>(`
+        SELECT *
+        FROM trace_assets
+        WHERE id = ?
+          AND tenant_id = ?
+          AND workspace_id = ?
+      `).get(traceId, context.tenantId, context.workspaceId);
+      return row ? rowToTraceMetadata(row) : null;
+    });
+    return isTraceMetadataOwnedByContext(metadata, context) ? metadata : null;
+  }
+
   const metadata = await readTraceMetadata(traceId);
   return isTraceMetadataOwnedByContext(metadata, context) ? metadata : null;
 }

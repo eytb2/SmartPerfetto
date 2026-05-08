@@ -12,6 +12,7 @@ export interface TraceInfo {
   id: string;
   filename: string;
   size: number;
+  filePath?: string;
   uploadTime: Date;
   lastAccessTime?: Date; // Track last query/access time for smart cleanup
   status: 'uploading' | 'processing' | 'ready' | 'error';
@@ -88,11 +89,17 @@ export class TraceProcessorService extends EventEmitter {
    * Initialize a trace upload with a specific ID
    * Use this when you already have a trace ID (e.g., from a file upload)
    */
-  public async initializeUploadWithId(traceId: string, filename: string, size: number): Promise<void> {
+  public async initializeUploadWithId(
+    traceId: string,
+    filename: string,
+    size: number,
+    filePath?: string,
+  ): Promise<void> {
     const traceInfo: TraceInfo = {
       id: traceId,
       filename,
       size,
+      ...(filePath ? { filePath } : {}),
       uploadTime: new Date(),
       status: 'uploading',
     };
@@ -409,6 +416,7 @@ export class TraceProcessorService extends EventEmitter {
           id: traceId,
           filename: metadata.filename || `${traceId}.trace`,
           size: metadata.size || fs.statSync(tracePath).size,
+          filePath: tracePath,
           uploadTime: new Date(metadata.uploadedAt || Date.now()),
           status: 'ready',
           metadata: metadata.metadata,
@@ -420,6 +428,7 @@ export class TraceProcessorService extends EventEmitter {
           id: traceId,
           filename: `${traceId}.trace`,
           size: stats.size,
+          filePath: tracePath,
           uploadTime: new Date(stats.mtime),
           status: 'ready',
         };
@@ -511,6 +520,7 @@ export class TraceProcessorService extends EventEmitter {
     // Copy file to upload directory
     const destPath = this.getTraceFilePath(traceId);
     fs.copyFileSync(filePath, destPath);
+    traceInfo.filePath = destPath;
 
     // Process the trace
     await this.processTrace(traceId);
@@ -527,7 +537,7 @@ export class TraceProcessorService extends EventEmitter {
    * file-backed or external RPC".
    */
   public getTraceFilePath(traceId: string): string {
-    return path.join(this.uploadDir, `${traceId}.trace`);
+    return this.traces.get(traceId)?.filePath || path.join(this.uploadDir, `${traceId}.trace`);
   }
 
   /**
@@ -606,4 +616,8 @@ export function getTraceProcessorService(): TraceProcessorService {
     _singletonInstance = new TraceProcessorService();
   }
   return _singletonInstance;
+}
+
+export function setTraceProcessorServiceForTests(service: TraceProcessorService | null): void {
+  _singletonInstance = service;
 }
