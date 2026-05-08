@@ -297,7 +297,6 @@ create_args=(create "$TAG" "${assets[@]}" --title "SmartPerfetto $TAG" --notes-f
 edit_args=(edit "$TAG" --title "SmartPerfetto $TAG" --notes-file "$NOTES_FILE" --target "$TARGET_SHA")
 if [ "$DRAFT" = true ]; then
   create_args+=(--draft)
-  edit_args+=(--draft)
 else
   edit_args+=(--draft=false)
 fi
