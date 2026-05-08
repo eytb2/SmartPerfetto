@@ -20,7 +20,7 @@ import { TraceProcessorLeaseStore } from '../services/traceProcessorLeaseStore';
 import { ownerFieldsFromContext } from '../services/resourceOwnership';
 import type { RequestContext } from '../middleware/auth';
 
-type ScenarioName = 'D1' | 'D2' | 'D4' | 'D5';
+type ScenarioName = 'D1' | 'D2' | 'D4' | 'D5' | 'D6';
 
 interface VerifyOptions {
   tracePath?: string;
@@ -337,6 +337,7 @@ function appendAgentEvent(
   runId: string,
   cursor: number,
   eventType = 'progress',
+  payload?: Record<string, unknown>,
 ): void {
   db.prepare(`
     INSERT INTO agent_events
@@ -349,13 +350,39 @@ function appendAgentEvent(
     runId,
     cursor,
     eventType,
-    JSON.stringify({
+    JSON.stringify(payload ?? {
       scenario: 'enterprise-window',
       label: wc.label,
       cursor,
     }),
     Date.now(),
   );
+}
+
+function listAgentEventsAfter(
+  db: Database.Database,
+  wc: WindowContext,
+  runId: string,
+  lastEventId: number,
+): Array<{ cursor: number; eventType: string; payload: Record<string, unknown> }> {
+  return db.prepare<unknown[], { cursor: number; event_type: string; payload_json: string }>(`
+    SELECT cursor, event_type, payload_json
+    FROM agent_events
+    WHERE tenant_id = ?
+      AND workspace_id = ?
+      AND run_id = ?
+      AND cursor > ?
+    ORDER BY cursor ASC
+  `).all(
+    wc.context.tenantId,
+    wc.context.workspaceId,
+    runId,
+    lastEventId,
+  ).map(row => ({
+    cursor: row.cursor,
+    eventType: row.event_type,
+    payload: JSON.parse(row.payload_json) as Record<string, unknown>,
+  }));
 }
 
 function scalar<T>(db: Database.Database, sql: string, params: unknown[] = [], column = 'value'): T {
@@ -693,6 +720,109 @@ async function scenarioD5(
   };
 }
 
+async function scenarioD6(
+  db: Database.Database,
+  tracePath: string,
+  userAWindow1: WindowContext,
+  userCWindow1: WindowContext,
+): Promise<ScenarioReport> {
+  const upload = await simulateUpload(db, userAWindow1, tracePath, 'd6-user-a-sse-replay.pftrace');
+  const run = createAnalysisRun(db, userAWindow1, upload, 'running');
+  const reportId = `report-${crypto.randomUUID()}`;
+  const reportUrl = `/api/reports/${reportId}`;
+  const disconnectedAfterCursor = 10;
+  const completedCursor = 11;
+
+  appendAgentEvent(db, userAWindow1, run.runId, disconnectedAfterCursor, 'conclusion', {
+    type: 'conclusion',
+    data: {
+      summary: 'client received conclusion before disconnect',
+    },
+  });
+
+  db.prepare(`
+    INSERT INTO report_artifacts
+      (id, tenant_id, workspace_id, session_id, run_id, local_path, content_hash, visibility, created_by, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'private', ?, ?, NULL)
+  `).run(
+    reportId,
+    userAWindow1.context.tenantId,
+    userAWindow1.context.workspaceId,
+    run.sessionId,
+    run.runId,
+    `reports/${reportId}.html`,
+    crypto.createHash('sha256').update(reportId).digest('hex'),
+    userAWindow1.context.userId,
+    Date.now(),
+  );
+  appendAgentEvent(db, userAWindow1, run.runId, completedCursor, 'analysis_completed', {
+    type: 'analysis_completed',
+    data: {
+      reportId,
+      reportUrl,
+    },
+  });
+  db.prepare(`
+    UPDATE analysis_runs SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?
+  `).run(Date.now(), Date.now(), run.runId);
+  db.prepare(`
+    UPDATE analysis_sessions SET status = 'completed', updated_at = ? WHERE id = ?
+  `).run(Date.now(), run.sessionId);
+
+  const replayed = listAgentEventsAfter(db, userAWindow1, run.runId, disconnectedAfterCursor);
+  const crossTenantReplay = listAgentEventsAfter(db, userCWindow1, run.runId, disconnectedAfterCursor);
+  const terminal = replayed.find(event => event.eventType === 'analysis_completed');
+  const terminalPayload = terminal?.payload.data as { reportId?: string; reportUrl?: string } | undefined;
+  const reportRow = db.prepare<unknown[], { id: string; run_id: string }>(`
+    SELECT id, run_id FROM report_artifacts
+    WHERE tenant_id = ? AND workspace_id = ? AND id = ?
+  `).get(
+    userAWindow1.context.tenantId,
+    userAWindow1.context.workspaceId,
+    reportId,
+  );
+  const runStatus = scalar<string>(
+    db,
+    'SELECT status AS value FROM analysis_runs WHERE id = ?',
+    [run.runId],
+  );
+  const sessionStatus = scalar<string>(
+    db,
+    'SELECT status AS value FROM analysis_sessions WHERE id = ?',
+    [run.sessionId],
+  );
+
+  const checks = {
+    conclusionPersistedBeforeDisconnect: scalar<number>(
+      db,
+      'SELECT COUNT(*) AS value FROM agent_events WHERE run_id = ? AND cursor = ? AND event_type = ?',
+      [run.runId, disconnectedAfterCursor, 'conclusion'],
+    ) === 1,
+    terminalReplayAfterLastEventIdIncludesReportUrl: replayed.length === 1
+      && terminal?.cursor === completedCursor
+      && terminalPayload?.reportUrl === reportUrl,
+    replayUsesMonotonicCursorAfterDisconnect: replayed.map(event => event.cursor).join(',') === String(completedCursor),
+    replayIsTenantWorkspaceScoped: crossTenantReplay.length === 0,
+    reportArtifactMatchesReplayedUrl: reportRow?.id === reportId && reportRow.run_id === run.runId,
+    terminalEventCompletesRunAndSession: runStatus === 'completed' && sessionStatus === 'completed',
+  };
+
+  return {
+    checks,
+    details: {
+      traceId: upload.traceId,
+      run,
+      disconnectedAfterCursor,
+      replayed,
+      crossTenantReplayCount: crossTenantReplay.length,
+      reportId,
+      reportUrl,
+      runStatus,
+      sessionStatus,
+    },
+  };
+}
+
 function allChecksPassed(report: EnterpriseWindowRegressionReport): boolean {
   return Object.values(report.scenarios).every(scenario =>
     Object.values(scenario.checks).every(Boolean),
@@ -756,6 +886,7 @@ export async function runEnterpriseWindowRegression(
       ),
       D4: await scenarioD4(db, tracePath, windows.userAWindow1),
       D5: await scenarioD5(db, tracePath, windows.userAWindow1),
+      D6: await scenarioD6(db, tracePath, windows.userAWindow1, windows.userCWindow1),
     };
     const report: EnterpriseWindowRegressionReport = {
       timestamp: new Date().toISOString(),
@@ -765,6 +896,7 @@ export async function runEnterpriseWindowRegression(
         D2: scenarioPassed(scenarios.D2),
         D4: scenarioPassed(scenarios.D4),
         D5: scenarioPassed(scenarios.D5),
+        D6: scenarioPassed(scenarios.D6),
       },
       uploadRoot,
       tracePath,
@@ -774,7 +906,8 @@ export async function runEnterpriseWindowRegression(
         'D2 covers a deterministic long-SQL window at the run/event metadata layer without invoking a real LLM provider.',
         'D4 covers the lease state contract and frontend proxy target stability around a simulated trace_processor crash; TraceProcessorService restart backoff and single-supervisor behavior are covered by traceProcessorLeaseProcessorRouting tests.',
         'D5 covers TraceProcessorLease holder grace and pageshow-style reacquire semantics after offline heartbeat expiry; frontend stale-lease reload signaling is covered by HttpRpcEngine unit tests.',
-        'Production backend proxy and queue behavior remain future §0.7 D1/D2/D4/D5 final-acceptance work against a live browser and trace_processor_shell.',
+        'D6 covers the persisted AgentEvent replay contract after a conclusion cursor; the live stream route path is covered by agentRoutesRbac tests.',
+        'Production backend proxy and queue behavior remain future §0.7 D1/D2/D4/D5/D6 final-acceptance work against a live browser and trace_processor_shell.',
       ],
     };
     report.passed = allChecksPassed(report);
