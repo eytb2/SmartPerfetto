@@ -8,6 +8,7 @@ import path from 'path';
 import fs from 'fs/promises';
 import net from 'net';
 import { v4 as uuidv4 } from 'uuid';
+import { attachRequestContext } from '../middleware/auth';
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import { getPortPool } from '../services/portPool';
 import { TraceProcessorFactory } from '../services/workingTraceProcessor';
@@ -92,6 +93,8 @@ router.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+router.use(attachRequestContext);
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({

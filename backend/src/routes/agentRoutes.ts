@@ -217,7 +217,7 @@ router.use((req, res, next) => {
   next();
 });
 
-// Apply API-key auth to all Agent endpoints (dev fallback still applies when key is not configured).
+// Apply API-key auth and RequestContext to all Agent endpoints (dev fallback still applies when key is not configured).
 router.use(authenticate);
 
 // ============================================================================

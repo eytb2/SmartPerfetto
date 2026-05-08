@@ -12,6 +12,7 @@
 import express from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
+import { attachRequestContext } from '../middleware/auth';
 import { REPORT_CAUSAL_MAP_CSS, REPORT_CAUSAL_MAP_SCRIPT } from '../services/reportCausalMapAssets';
 import { localize, parseOutputLanguage } from '../agentv3/outputLanguage';
 
@@ -23,6 +24,8 @@ const REPORTS_DIR = path.resolve(__dirname, '../../logs/reports');
 if (!fs.existsSync(REPORTS_DIR)) {
   fs.mkdirSync(REPORTS_DIR, { recursive: true });
 }
+
+router.use(attachRequestContext);
 
 // In-memory cache backed by disk persistence
 type PersistedReport = {
