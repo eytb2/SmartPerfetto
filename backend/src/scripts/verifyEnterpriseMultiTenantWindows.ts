@@ -20,7 +20,7 @@ import { TraceProcessorLeaseStore } from '../services/traceProcessorLeaseStore';
 import { ownerFieldsFromContext } from '../services/resourceOwnership';
 import type { RequestContext } from '../middleware/auth';
 
-type ScenarioName = 'D1' | 'D2' | 'D4' | 'D5' | 'D6';
+type ScenarioName = 'D1' | 'D2' | 'D4' | 'D5' | 'D6' | 'D7';
 
 interface VerifyOptions {
   tracePath?: string;
@@ -823,6 +823,97 @@ async function scenarioD6(
   };
 }
 
+async function scenarioD7(
+  db: Database.Database,
+  tracePath: string,
+  userAWindow1: WindowContext,
+): Promise<ScenarioReport> {
+  const upload = await simulateUpload(db, userAWindow1, tracePath, 'd7-user-a-delete-draining.pftrace');
+  const run = createAnalysisRun(db, userAWindow1, upload, 'running');
+  const store = new TraceProcessorLeaseStore(db);
+  const scope = leaseScope(userAWindow1);
+  const windowId = userAWindow1.context.windowId ?? userAWindow1.label;
+  const reportId = `report-${crypto.randomUUID()}`;
+
+  let lease = store.acquireHolder(scope, upload.traceId, {
+    holderType: 'frontend_http_rpc',
+    holderRef: windowId,
+    windowId,
+    frontendVisibility: 'visible',
+    metadata: { scenario: 'D7' },
+  });
+  store.markStarting(scope, lease.id);
+  lease = store.markReady(scope, lease.id);
+  lease = store.acquireHolderForLease(scope, lease.id, {
+    holderType: 'agent_run',
+    holderRef: run.runId,
+    runId: run.runId,
+    sessionId: run.sessionId,
+    metadata: { scenario: 'D7' },
+  });
+  lease = store.acquireHolderForLease(scope, lease.id, {
+    holderType: 'report_generation',
+    holderRef: reportId,
+    reportId,
+    metadata: { scenario: 'D7' },
+  });
+
+  const activeRuns = db.prepare<unknown[], { id: string; status: string }>(`
+    SELECT id, status
+    FROM analysis_runs
+    WHERE tenant_id = ? AND workspace_id = ? AND session_id = ? AND status = 'running'
+  `).all(userAWindow1.context.tenantId, userAWindow1.context.workspaceId, run.sessionId);
+  const activeHolderTypes = Array.from(new Set(lease.holders.map(holder => holder.holderType))).sort();
+  const blockedBeforeDelete = lease.holderCount > 0 || activeRuns.length > 0;
+  const drainingLease = store.beginDraining(scope, lease.id);
+  let newHolderRejected = false;
+  try {
+    store.acquireHolderForLease(scope, drainingLease.id, {
+      holderType: 'manual_register',
+      holderRef: 'port:9810',
+      metadata: { scenario: 'D7' },
+    });
+  } catch {
+    newHolderRejected = true;
+  }
+  const traceAssetStillPresent = scalar<number>(
+    db,
+    'SELECT COUNT(*) AS value FROM trace_assets WHERE id = ?',
+    [upload.traceId],
+  ) === 1;
+  const fileStillPresent = fs.existsSync(upload.localPath);
+
+  const checks = {
+    deleteDetectsRunningRunBeforeRemovingTrace: activeRuns.length === 1
+      && activeRuns[0]?.id === run.runId
+      && activeRuns[0]?.status === 'running',
+    activeLeaseBlocksCleanupOrDelete: blockedBeforeDelete
+      && drainingLease.id === lease.id
+      && drainingLease.state === 'draining'
+      && drainingLease.holderCount === 3,
+    reportGenerationHolderIsProtected: activeHolderTypes.includes('report_generation')
+      && lease.holders.some(holder => holder.holderRef === reportId),
+    drainingLeaseRejectsNewWork: newHolderRejected,
+    blockedDeleteLeavesTraceAssetAndFileIntact: traceAssetStillPresent && fileStillPresent,
+  };
+
+  return {
+    checks,
+    details: {
+      traceId: upload.traceId,
+      run,
+      leaseId: lease.id,
+      activeRuns,
+      activeHolderTypes,
+      drainingState: drainingLease.state,
+      drainingHolderCount: drainingLease.holderCount,
+      newHolderRejected,
+      traceAssetStillPresent,
+      fileStillPresent,
+    },
+  };
+}
+
 function allChecksPassed(report: EnterpriseWindowRegressionReport): boolean {
   return Object.values(report.scenarios).every(scenario =>
     Object.values(scenario.checks).every(Boolean),
@@ -887,6 +978,7 @@ export async function runEnterpriseWindowRegression(
       D4: await scenarioD4(db, tracePath, windows.userAWindow1),
       D5: await scenarioD5(db, tracePath, windows.userAWindow1),
       D6: await scenarioD6(db, tracePath, windows.userAWindow1, windows.userCWindow1),
+      D7: await scenarioD7(db, tracePath, windows.userAWindow1),
     };
     const report: EnterpriseWindowRegressionReport = {
       timestamp: new Date().toISOString(),
@@ -897,6 +989,7 @@ export async function runEnterpriseWindowRegression(
         D4: scenarioPassed(scenarios.D4),
         D5: scenarioPassed(scenarios.D5),
         D6: scenarioPassed(scenarios.D6),
+        D7: scenarioPassed(scenarios.D7),
       },
       uploadRoot,
       tracePath,
@@ -907,7 +1000,8 @@ export async function runEnterpriseWindowRegression(
         'D4 covers the lease state contract and frontend proxy target stability around a simulated trace_processor crash; TraceProcessorService restart backoff and single-supervisor behavior are covered by traceProcessorLeaseProcessorRouting tests.',
         'D5 covers TraceProcessorLease holder grace and pageshow-style reacquire semantics after offline heartbeat expiry; frontend stale-lease reload signaling is covered by HttpRpcEngine unit tests.',
         'D6 covers the persisted AgentEvent replay contract after a conclusion cursor; the live stream route path is covered by agentRoutesRbac tests.',
-        'Production backend proxy and queue behavior remain future §0.7 D1/D2/D4/D5/D6 final-acceptance work against a live browser and trace_processor_shell.',
+        'D7 covers running run, active lease, report_generation holder, and draining rejection invariants; actual route blocking is covered by enterpriseTraceMetadataRoutes tests.',
+        'Production backend proxy and queue behavior remain future §0.7 D1/D2/D4/D5/D6/D7 final-acceptance work against a live browser and trace_processor_shell.',
       ],
     };
     report.passed = allChecksPassed(report);

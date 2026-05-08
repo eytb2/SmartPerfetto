@@ -31,7 +31,7 @@ describe('verifyEnterpriseMultiTenantWindows script', () => {
     await fs.rm(tempRoot, { recursive: true, force: true });
   });
 
-  test('covers current D1/D2/D4/D5/D6 isolation invariants without invoking a real provider', async () => {
+  test('covers current D1/D2/D4/D5/D6/D7 isolation invariants without invoking a real provider', async () => {
     const tracePath = path.join(tempRoot, 'fixture.pftrace');
     const uploadRoot = path.join(tempRoot, 'uploads');
     const outputPath = path.join(tempRoot, 'report.json');
@@ -45,13 +45,14 @@ describe('verifyEnterpriseMultiTenantWindows script', () => {
     });
 
     expect(report.passed).toBe(true);
-    expect(report.checks).toEqual({ D1: true, D2: true, D4: true, D5: true, D6: true });
+    expect(report.checks).toEqual({ D1: true, D2: true, D4: true, D5: true, D6: true, D7: true });
     expect(Object.values(report.scenarios.D1.checks)).toEqual(expect.arrayContaining([true]));
     expect(Object.values(report.scenarios.D1.checks).every(Boolean)).toBe(true);
     expect(Object.values(report.scenarios.D2.checks).every(Boolean)).toBe(true);
     expect(Object.values(report.scenarios.D4.checks).every(Boolean)).toBe(true);
     expect(Object.values(report.scenarios.D5.checks).every(Boolean)).toBe(true);
     expect(Object.values(report.scenarios.D6.checks).every(Boolean)).toBe(true);
+    expect(Object.values(report.scenarios.D7.checks).every(Boolean)).toBe(true);
     expect(report.coverageLimitations.join('\n')).toContain('TraceProcessorLease');
     expect(report.scenarios.D6.details).toEqual(expect.objectContaining({
       reportUrl: expect.stringMatching(/^\/api\/reports\//),
@@ -65,6 +66,6 @@ describe('verifyEnterpriseMultiTenantWindows script', () => {
 
     const traceFiles = (await fs.readdir(path.join(uploadRoot, 'traces')))
       .filter(file => file.endsWith('.trace'));
-    expect(traceFiles).toHaveLength(9);
+    expect(traceFiles).toHaveLength(10);
   });
 });

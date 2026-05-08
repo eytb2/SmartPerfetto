@@ -655,7 +655,7 @@ describe('enterprise trace metadata routes', () => {
       userId: 'user-a',
     };
     const store = getTraceProcessorLeaseStore();
-    const lease = store.listLeases(scope, { traceId })[0];
+    const lease = store.listLeases(scope, { traceId })[0]!;
     for (const holder of lease.holders) {
       store.releaseHolder(scope, lease.id, holder.holderType, holder.holderRef);
     }
@@ -684,6 +684,83 @@ describe('enterprise trace metadata routes', () => {
     expect(readAuditActions()).toContain('trace_cleanup_completed');
   });
 
+  it('blocks enterprise trace delete while runs, active leases, or report holders still own the trace', async () => {
+    const app = makeApp();
+    const sourceTracePath = path.join(tmpDir, 'active-delete.trace');
+    await fs.writeFile(sourceTracePath, 'active-delete');
+
+    const uploadRes = await ssoHeaders(
+      request(app)
+        .post('/api/traces/upload')
+        .attach('file', sourceTracePath),
+    );
+    expect(uploadRes.status).toBe(200);
+    const traceId = uploadRes.body.trace.id as string;
+    const row = readTraceAsset(traceId);
+    expect(row).not.toBeNull();
+
+    const now = Date.now();
+    const sessionId = 'session-active-delete';
+    const runId = 'run-active-delete';
+    const db = openEnterpriseDb(dbPath);
+    try {
+      db.prepare(`
+        INSERT INTO analysis_sessions
+          (id, tenant_id, workspace_id, trace_id, created_by, title, visibility, status, created_at, updated_at)
+        VALUES (?, 'tenant-a', 'workspace-a', ?, 'user-a', 'active delete', 'private', 'running', ?, ?)
+      `).run(sessionId, traceId, now, now);
+      db.prepare(`
+        INSERT INTO analysis_runs
+          (id, tenant_id, workspace_id, session_id, mode, status, question, started_at)
+        VALUES (?, 'tenant-a', 'workspace-a', ?, 'full', 'running', 'active delete', ?)
+      `).run(runId, sessionId, now);
+    } finally {
+      db.close();
+    }
+
+    const scope = {
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'user-a',
+    };
+    const store = getTraceProcessorLeaseStore();
+    const lease = store.listLeases(scope, { traceId })[0]!;
+    store.acquireHolderForLease(scope, lease.id, {
+      holderType: 'report_generation',
+      holderRef: 'report-active-delete',
+      reportId: 'report-active-delete',
+    });
+
+    const deleteRes = await ssoHeaders(request(app).delete(`/api/traces/${traceId}`));
+
+    expect(deleteRes.status).toBe(409);
+    expect(deleteRes.body).toEqual(expect.objectContaining({
+      success: false,
+      error: 'Trace delete blocked by active analysis runs or trace processor leases',
+      activeRuns: [
+        expect.objectContaining({ runId, sessionId, status: 'running' }),
+      ],
+    }));
+    expect(deleteRes.body.blockedLeases).toEqual([
+      expect.objectContaining({
+        traceId,
+        state: 'draining',
+        holderCount: 2,
+        holderTypes: expect.arrayContaining(['frontend_http_rpc', 'report_generation']),
+      }),
+    ]);
+    expect(fakeTraceProcessorService.deleteTrace).not.toHaveBeenCalled();
+    await expect(fs.access(row!.local_path)).resolves.toBeUndefined();
+    expect(readTraceAsset(traceId)).not.toBeNull();
+    expect(readTraceProcessorLeaseRows(traceId)).toEqual([
+      expect.objectContaining({
+        state: 'draining',
+        holder_count: 2,
+      }),
+    ]);
+    expect(readAuditActions()).toContain('trace_delete_blocked');
+  });
+
   it('deletes enterprise trace files and trace_assets metadata through the scoped owner path', async () => {
     const app = makeApp();
     const sourceTracePath = path.join(tmpDir, 'delete-me.trace');
@@ -698,6 +775,16 @@ describe('enterprise trace metadata routes', () => {
     const traceId = uploadRes.body.trace.id as string;
     const row = readTraceAsset(traceId);
     expect(row).not.toBeNull();
+    const scope = {
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'user-a',
+    };
+    const store = getTraceProcessorLeaseStore();
+    const lease = store.listLeases(scope, { traceId })[0];
+    for (const holder of lease.holders) {
+      store.releaseHolder(scope, lease.id, holder.holderType, holder.holderRef);
+    }
 
     const deleteRes = await ssoHeaders(request(app).delete(`/api/traces/${traceId}`));
 

@@ -57,6 +57,7 @@ export const TRACE_UPLOAD_MAX_BYTES_ENV = 'SMARTPERFETTO_TRACE_UPLOAD_MAX_BYTES'
 const URL_UPLOAD_TIMEOUT_MS = 300000;
 const TEMP_UPLOAD_SUFFIX = '.uploading';
 const CLEANUP_TERMINAL_LEASE_STATES = new Set<TraceProcessorLeaseState>(['released', 'failed']);
+const DELETE_BLOCKING_RUN_STATUSES = new Set(['pending', 'running', 'awaiting_user']);
 
 class TraceUploadTooLargeError extends Error {
   constructor(readonly maxBytes: number) {
@@ -192,6 +193,112 @@ function recordTraceCleanupAudit(
   }
 }
 
+function recordTraceDeleteAudit(
+  context: RequestContext,
+  traceId: string,
+  action: 'trace_delete_blocked',
+  metadata: Record<string, unknown>,
+): void {
+  const db = openEnterpriseDb();
+  try {
+    const actor = db.prepare<unknown[], { id: string }>(`
+      SELECT id FROM users WHERE tenant_id = ? AND id = ? LIMIT 1
+    `).get(context.tenantId, context.userId);
+    recordEnterpriseAuditEvent(db, {
+      tenantId: context.tenantId,
+      workspaceId: context.workspaceId,
+      actorUserId: actor?.id,
+      action,
+      resourceType: 'trace',
+      resourceId: traceId,
+      metadata,
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function summarizeLeaseBlockers(leases: TraceProcessorLeaseRecord[]): Array<{
+  id: string;
+  traceId: string;
+  state: string;
+  holderCount: number;
+  holderTypes: string[];
+}> {
+  return leases.map(lease => ({
+    id: lease.id,
+    traceId: lease.traceId,
+    state: lease.state,
+    holderCount: lease.holderCount,
+    holderTypes: Array.from(new Set(lease.holders.map(holder => holder.holderType))),
+  }));
+}
+
+function listActiveTraceRuns(context: RequestContext, traceId: string): Array<{
+  runId: string;
+  sessionId: string;
+  status: string;
+}> {
+  const db = openEnterpriseDb();
+  try {
+    return db.prepare<unknown[], { run_id: string; session_id: string; status: string }>(`
+      SELECT r.id AS run_id, r.session_id, r.status
+      FROM analysis_runs r
+      JOIN analysis_sessions s
+        ON s.tenant_id = r.tenant_id
+       AND s.workspace_id = r.workspace_id
+       AND s.id = r.session_id
+      WHERE r.tenant_id = ?
+        AND r.workspace_id = ?
+        AND s.trace_id = ?
+      ORDER BY r.started_at ASC, r.id ASC
+    `).all(context.tenantId, context.workspaceId, traceId)
+      .filter(row => DELETE_BLOCKING_RUN_STATUSES.has(row.status))
+      .map(row => ({
+        runId: row.run_id,
+        sessionId: row.session_id,
+        status: row.status,
+      }));
+  } finally {
+    db.close();
+  }
+}
+
+function blockEnterpriseTraceDeleteIfActive(
+  context: RequestContext,
+  traceId: string,
+): {
+  blocked: boolean;
+  blockedLeases: ReturnType<typeof summarizeLeaseBlockers>;
+  activeRuns: Array<{ runId: string; sessionId: string; status: string }>;
+} {
+  const scope = leaseScopeFromContext(context);
+  const store = getTraceProcessorLeaseStore();
+  const activeLeases = store.listLeases(scope, { traceId })
+    .filter(lease => !CLEANUP_TERMINAL_LEASE_STATES.has(lease.state) && lease.holderCount > 0);
+  const drainedLeases = activeLeases.map(lease =>
+    lease.state === 'draining' ? lease : store.beginDraining(scope, lease.id),
+  );
+  const activeRuns = listActiveTraceRuns(context, traceId);
+  const blockedLeases = summarizeLeaseBlockers(drainedLeases);
+  const blocked = blockedLeases.length > 0 || activeRuns.length > 0;
+
+  if (blocked) {
+    recordTraceDeleteAudit(context, traceId, 'trace_delete_blocked', {
+      blockedLeaseCount: blockedLeases.length,
+      activeRunCount: activeRuns.length,
+      blockedLeases,
+      activeRuns,
+    });
+  }
+
+  return {
+    blocked,
+    blockedLeases,
+    activeRuns,
+  };
+}
+
 async function cleanupEnterpriseWorkspaceProcessors(context: RequestContext): Promise<{
   blocked: boolean;
   blockedLeases: Array<{
@@ -212,15 +319,9 @@ async function cleanupEnterpriseWorkspaceProcessors(context: RequestContext): Pr
   const store = getTraceProcessorLeaseStore();
   const leases = store.listLeases(scope)
     .filter(lease => traceIdSet.has(lease.traceId) && !CLEANUP_TERMINAL_LEASE_STATES.has(lease.state));
-  const blockedLeases = leases
-    .filter(lease => lease.holderCount > 0)
-    .map(lease => ({
-      id: lease.id,
-      traceId: lease.traceId,
-      state: lease.state,
-      holderCount: lease.holderCount,
-      holderTypes: Array.from(new Set(lease.holders.map(holder => holder.holderType))),
-    }));
+  const blockedLeases = summarizeLeaseBlockers(
+    leases.filter(lease => lease.holderCount > 0),
+  );
 
   if (blockedLeases.length > 0) {
     recordTraceCleanupAudit(context, 'trace_cleanup_blocked', {
@@ -998,6 +1099,17 @@ router.delete('/:id', async (req, res) => {
     }
     if (!canDeleteTraceResource(metadata, context)) {
       return sendForbidden(res, 'Deleting this trace requires trace delete permission');
+    }
+    if (enterpriseLeasesEnabled()) {
+      const blockers = blockEnterpriseTraceDeleteIfActive(context, id);
+      if (blockers.blocked) {
+        return res.status(409).json({
+          success: false,
+          error: 'Trace delete blocked by active analysis runs or trace processor leases',
+          blockedLeases: blockers.blockedLeases,
+          activeRuns: blockers.activeRuns,
+        });
+      }
     }
     console.log(`[Traces] Deleting trace ${id} and cleaning up resources...`);
 
