@@ -46,10 +46,26 @@ function sample(operation: string, durationMs: number, ok = true, userId = 'user
   };
 }
 
+function runtimeDashboardSample(): HttpSample {
+  return sample('runtime_dashboard', 5, true, 'load-runtime-admin');
+}
+
+function analyzeStartSample(): HttpSample {
+  return sample('analyze_start', 30, true, 'load-user-001');
+}
+
 function onlineUserSamples(count: number): HttpSample[] {
   return Array.from({ length: count }, (_unused, index) =>
     sample('trace_list', 10, true, `online-user-${String(index + 1).padStart(3, '0')}`)
   );
+}
+
+function passingHttpSamples(onlineUsers = 50): HttpSample[] {
+  return [
+    runtimeDashboardSample(),
+    analyzeStartSample(),
+    ...onlineUserSamples(onlineUsers),
+  ];
 }
 
 function runtimeSample(overrides: Partial<RuntimeSample> = {}): RuntimeSample {
@@ -184,11 +200,11 @@ describe('enterprise acceptance load test helpers', () => {
     const summary = summarizeLoadTest({
       options: options(),
       httpSamples: [
+        sample('runtime_dashboard', 80, false),
         sample('trace_list', 10),
         sample('trace_list', 20),
         sample('analyze_start', 100),
         sample('analysis_status', 50),
-        sample('runtime_dashboard', 80, false),
       ],
       runs: [
         analysisRun(0, { userId: 'user-a', lastStatus: 'completed' }),
@@ -219,6 +235,7 @@ describe('enterprise acceptance load test helpers', () => {
       maxQueueLength: 9,
       maxWorkerRssBytes: 300,
       maxLeaseRssBytes: 250,
+      preRunBaselineSampled: false,
       initialLlmCostUsd: 0.1,
       finalLlmCostUsd: 0.4,
       initialLlmCalls: 1,
@@ -247,6 +264,7 @@ describe('enterprise acceptance load test helpers', () => {
         'observed max running runs < 5',
         'no queued/pending runs observed',
         'missing worker/lease RSS samples',
+        'missing pre-run runtime baseline sample',
         'missing queue length samples',
         'missing LLM cost sample',
         'missing LLM call sample',
@@ -261,6 +279,8 @@ describe('enterprise acceptance load test helpers', () => {
     const summary = summarizeLoadTest({
       options: opts,
       httpSamples: [
+        runtimeDashboardSample(),
+        analyzeStartSample(),
         ...onlineUserSamples(49),
         sample('trace_list', 10, false, 'online-user-050'),
       ],
@@ -308,7 +328,7 @@ describe('enterprise acceptance load test helpers', () => {
     const runtimeSamples = passingRuntimeSamples();
     const summary = summarizeLoadTest({
       options: opts,
-      httpSamples: onlineUserSamples(50),
+      httpSamples: passingHttpSamples(50),
       runs: analysisRuns(15),
       statusSnapshots: [
         {
@@ -351,7 +371,7 @@ describe('enterprise acceptance load test helpers', () => {
     ];
     const summary = summarizeLoadTest({
       options: opts,
-      httpSamples: onlineUserSamples(50),
+      httpSamples: passingHttpSamples(50),
       runs: [
         ...analysisRuns(14),
         {
@@ -412,7 +432,7 @@ describe('enterprise acceptance load test helpers', () => {
     const runtimeSamples = passingRuntimeSamples();
     const summary = summarizeLoadTest({
       options: opts,
-      httpSamples: onlineUserSamples(50),
+      httpSamples: passingHttpSamples(50),
       runs: [
         ...analysisRuns(14),
         missingIdRun,
@@ -455,12 +475,61 @@ describe('enterprise acceptance load test helpers', () => {
     });
   });
 
+  it('requires runtime baseline before analysis runs start', () => {
+    const opts = options({ onlineUsers: 50 });
+    const runtimeSamples = passingRuntimeSamples();
+    const summary = summarizeLoadTest({
+      options: opts,
+      httpSamples: [
+        analyzeStartSample(),
+        ...onlineUserSamples(50),
+        runtimeDashboardSample(),
+      ],
+      runs: analysisRuns(15),
+      statusSnapshots: [
+        {
+          timestamp: '2026-05-09T00:00:01.000Z',
+          counts: {
+            queued: 1,
+            pending: 1,
+            running: 5,
+            completed: 0,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
+        {
+          timestamp: '2026-05-09T00:00:02.000Z',
+          counts: {
+            queued: 0,
+            pending: 1,
+            running: 5,
+            completed: 1,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
+      ],
+      runtimeSamples,
+    });
+
+    expect(summary.runtime.preRunBaselineSampled).toBe(false);
+    expect(evaluateAcceptance(opts, summary, runtimeSamples)).toEqual({
+      passed: false,
+      missing: ['missing pre-run runtime baseline sample'],
+    });
+  });
+
   it('rejects terminal failed, error, or quota_exceeded analysis runs', () => {
     const opts = options({ onlineUsers: 50 });
     const runtimeSamples = passingRuntimeSamples();
     const summary = summarizeLoadTest({
       options: opts,
-      httpSamples: onlineUserSamples(50),
+      httpSamples: passingHttpSamples(50),
       runs: [
         ...analysisRuns(12),
         analysisRun(12, { lastStatus: 'failed' }),
@@ -515,7 +584,7 @@ describe('enterprise acceptance load test helpers', () => {
     const summary = summarizeLoadTest({
       options: opts,
       httpSamples: [
-        ...onlineUserSamples(50),
+        ...passingHttpSamples(50),
         sample('analysis_status', 30, false, 'load-user-001'),
       ],
       runs: analysisRuns(15),
@@ -552,7 +621,7 @@ describe('enterprise acceptance load test helpers', () => {
 
     expect(evaluateAcceptance(opts, summary, runtimeSamples)).toEqual({
       passed: false,
-      missing: ['error rate 1.96% exceeds max 1.00%'],
+      missing: ['error rate 1.89% exceeds max 1.00%'],
     });
   });
 
@@ -564,7 +633,7 @@ describe('enterprise acceptance load test helpers', () => {
     ];
     const summary = summarizeLoadTest({
       options: opts,
-      httpSamples: onlineUserSamples(50),
+      httpSamples: passingHttpSamples(50),
       runs: analysisRuns(15),
       statusSnapshots: [
         {
@@ -616,7 +685,7 @@ describe('enterprise acceptance load test helpers', () => {
     ];
     const summary = summarizeLoadTest({
       options: opts,
-      httpSamples: onlineUserSamples(50),
+      httpSamples: passingHttpSamples(50),
       runs: analysisRuns(15),
       statusSnapshots: [
         {
@@ -667,7 +736,7 @@ describe('enterprise acceptance load test helpers', () => {
     const opts = options();
     const report = buildLoadTestReport({
       options: opts,
-      httpSamples: [...onlineUserSamples(50), sample('analyze_start', 30)],
+      httpSamples: passingHttpSamples(50),
       runs: analysisRuns(15),
       statusSnapshots: [
         {
@@ -726,6 +795,7 @@ describe('enterprise acceptance load test helpers', () => {
     expect(markdown).toContain('| Started runs missing ids | 0 |');
     expect(markdown).toContain('| Running-in-range samples | 2 |');
     expect(markdown).toContain('| Queued/pending samples | 2 |');
+    expect(markdown).toContain('| Pre-run runtime baseline | yes |');
     expect(markdown).toContain('| Max worker RSS | 256.0 MiB |');
     expect(markdown).toContain('| Initial LLM cost | 0.75 |');
     expect(markdown).toContain('| Final LLM cost | 1.23 |');

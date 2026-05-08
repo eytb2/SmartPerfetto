@@ -11,6 +11,8 @@ executed in this environment.
 The final report must cover:
 
 - 50 distinct online users with successful sampled requests.
+- A successful runtime dashboard baseline sampled before the first
+  `analyze_start` request.
 - All requested analysis runs start successfully with `sessionId` / `runId`
   evidence and without start failures.
 - No analysis run ends in `failed`, `error`, or `quota_exceeded`.
@@ -60,6 +62,9 @@ If the backend requires `SMARTPERFETTO_API_KEY`, add:
 - `acceptance.passed` requires observing successful requests from 50 distinct
   `online-user-*` clients; the configured `--users` value alone is not enough.
 - HTTP error rate must be at or below `--max-error-rate` (default `0.01`).
+- The first successful runtime dashboard sample must occur before the first
+  `analyze_start`, so later runtime samples cannot masquerade as the pre-run
+  baseline.
 - All requested `target-running + target-pending` analysis runs must start
   successfully and return `sessionId` / `runId`; any start failure or missing
   identifier keeps the report open.

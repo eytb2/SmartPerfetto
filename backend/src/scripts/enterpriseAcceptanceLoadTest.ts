@@ -90,6 +90,7 @@ export interface EnterpriseLoadTestSummary {
     terminal: Record<string, number>;
   };
   runtime: {
+    preRunBaselineSampled: boolean;
     maxQueueLength: number | null;
     maxWorkerRssBytes: number | null;
     maxLeaseRssBytes: number | null;
@@ -306,6 +307,16 @@ function numberSamples(values: Array<number | null | undefined>): number[] {
   return values.filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
 }
 
+function hasPreRunRuntimeBaseline(samples: HttpSample[]): boolean {
+  const firstAnalyzeStartIndex = samples.findIndex(sample => sample.operation === 'analyze_start');
+  const firstRuntimeDashboardIndex = samples.findIndex(sample =>
+    sample.operation === 'runtime_dashboard' && sample.ok
+  );
+  return firstAnalyzeStartIndex >= 0
+    && firstRuntimeDashboardIndex >= 0
+    && firstRuntimeDashboardIndex < firstAnalyzeStartIndex;
+}
+
 export function summarizeLoadTest(input: {
   options: EnterpriseLoadTestOptions;
   httpSamples: HttpSample[];
@@ -369,6 +380,7 @@ export function summarizeLoadTest(input: {
       terminal,
     },
     runtime: {
+      preRunBaselineSampled: hasPreRunRuntimeBaseline(input.httpSamples),
       maxQueueLength: maxNullable(input.runtimeSamples.map(sample => sample.queueLength)),
       maxWorkerRssBytes: maxNullable(input.runtimeSamples.map(sample => sample.workerRssBytes)),
       maxLeaseRssBytes: maxNullable(input.runtimeSamples.map(sample => sample.leaseRssBytes)),
@@ -420,6 +432,7 @@ export function evaluateAcceptance(
   if (summary.runtime.maxWorkerRssBytes === null && summary.runtime.maxLeaseRssBytes === null) {
     missing.push('missing worker/lease RSS samples');
   }
+  if (!summary.runtime.preRunBaselineSampled) missing.push('missing pre-run runtime baseline sample');
   if (summary.runtime.maxQueueLength === null) missing.push('missing queue length samples');
   if (summary.runtime.finalLlmCostUsd === null || summary.runtime.llmCostDeltaUsd === null) {
     missing.push('missing LLM cost sample');
@@ -735,6 +748,7 @@ export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): s
   lines.push(`| Running-in-range samples | ${report.summary.analysis.runningInRangeSnapshots} |`);
   lines.push(`| Queued/pending samples | ${report.summary.analysis.pendingSnapshots} |`);
   lines.push(`| Max queue length | ${report.summary.runtime.maxQueueLength ?? 'n/a'} |`);
+  lines.push(`| Pre-run runtime baseline | ${report.summary.runtime.preRunBaselineSampled ? 'yes' : 'no'} |`);
   lines.push(`| Max worker RSS | ${formatBytes(report.summary.runtime.maxWorkerRssBytes)} |`);
   lines.push(`| Max lease RSS | ${formatBytes(report.summary.runtime.maxLeaseRssBytes)} |`);
   lines.push(`| Initial LLM cost | ${report.summary.runtime.initialLlmCostUsd ?? 'n/a'} |`);
