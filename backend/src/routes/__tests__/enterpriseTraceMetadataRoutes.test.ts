@@ -909,6 +909,94 @@ describe('enterprise trace metadata routes', () => {
     expect(readAuditActions()).toContain('trace_cleanup_completed');
   });
 
+  it('keeps another workspace running run and active lease intact during scoped delete and cleanup', async () => {
+    const app = makeApp();
+    const sourceTraceA = path.join(tmpDir, 'delete-a.trace');
+    const sourceTraceB = path.join(tmpDir, 'active-b.trace');
+    await fs.writeFile(sourceTraceA, 'delete-a');
+    await fs.writeFile(sourceTraceB, 'active-b');
+
+    const [uploadA, uploadB] = await Promise.all([
+      scopedSsoHeaders(
+        request(app)
+          .post('/api/traces/upload')
+          .attach('file', sourceTraceA),
+        { userId: 'user-a', workspaceId: 'workspace-a' },
+      ),
+      scopedSsoHeaders(
+        request(app)
+          .post('/api/traces/upload')
+          .attach('file', sourceTraceB),
+        { userId: 'user-b', workspaceId: 'workspace-b' },
+      ),
+    ]);
+    expect(uploadA.status).toBe(200);
+    expect(uploadB.status).toBe(200);
+    const traceA = uploadA.body.trace.id as string;
+    const traceB = uploadB.body.trace.id as string;
+    const rowA = readTraceAsset(traceA);
+    const rowB = readTraceAsset(traceB);
+    expect(rowA?.workspace_id).toBe('workspace-a');
+    expect(rowB?.workspace_id).toBe('workspace-b');
+
+    const now = Date.now();
+    const db = openEnterpriseDb(dbPath);
+    try {
+      db.prepare(`
+        INSERT INTO analysis_sessions
+          (id, tenant_id, workspace_id, trace_id, created_by, title, visibility, status, created_at, updated_at)
+        VALUES ('session-b-running', 'tenant-a', 'workspace-b', ?, 'user-b', 'running b', 'private', 'running', ?, ?)
+      `).run(traceB, now, now);
+      db.prepare(`
+        INSERT INTO analysis_runs
+          (id, tenant_id, workspace_id, session_id, mode, status, question, started_at)
+        VALUES ('run-b-running', 'tenant-a', 'workspace-b', 'session-b-running', 'full', 'running', 'keep b running', ?)
+      `).run(now);
+    } finally {
+      db.close();
+    }
+
+    const leaseStore = getTraceProcessorLeaseStore();
+    const scopeA = { tenantId: 'tenant-a', workspaceId: 'workspace-a', userId: 'user-a' };
+    const leaseA = leaseStore.listLeases(scopeA, { traceId: traceA })[0]!;
+    for (const holder of leaseA.holders) {
+      leaseStore.releaseHolder(scopeA, leaseA.id, holder.holderType, holder.holderRef);
+    }
+
+    const deleteA = await scopedSsoHeaders(
+      request(app).delete(`/api/traces/${traceA}`),
+      { userId: 'user-a', workspaceId: 'workspace-a' },
+    );
+    expect(deleteA.status).toBe(200);
+    expect(fakeTraceProcessorService.deleteTrace).toHaveBeenCalledWith(traceA);
+
+    const cleanupA = await adminHeaders(request(app).post('/api/traces/cleanup'), 'workspace-a');
+    expect(cleanupA.status).toBe(200);
+    const cleanupCalls = fakeTraceProcessorService.cleanupProcessorsForTraces.mock.calls;
+    const cleanupTraceSet = fakeTraceProcessorService.cleanupProcessorsForTraces
+      .mock.calls[cleanupCalls.length - 1]?.[0] as Set<string>;
+    expect(Array.from(cleanupTraceSet)).not.toContain(traceB);
+
+    const verifyDb = openEnterpriseDb(dbPath);
+    try {
+      expect(verifyDb.prepare(`
+        SELECT status
+        FROM analysis_runs
+        WHERE id = 'run-b-running'
+      `).get()).toEqual({ status: 'running' });
+    } finally {
+      verifyDb.close();
+    }
+    expect(readTraceAsset(traceA)).toBeNull();
+    expect(readTraceAsset(traceB)).not.toBeNull();
+    expect(readTraceProcessorLeaseRows(traceB)).toEqual([
+      expect.objectContaining({
+        state: 'active',
+        holder_count: 1,
+      }),
+    ]);
+  });
+
   it('blocks enterprise trace delete while runs, active leases, or report holders still own the trace', async () => {
     const app = makeApp();
     const sourceTracePath = path.join(tmpDir, 'active-delete.trace');

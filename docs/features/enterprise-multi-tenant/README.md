@@ -118,15 +118,15 @@
 
 ### 0.8 §19 总验收
 - [ ] 50 在线用户 + 5-15 running run + pending 排队稳定
-- [ ] 任意用户不能猜测 traceId/sessionId/runId/reportId 越权访问
-- [ ] A 删除/cleanup 自己资源不影响 B 的 running run / active lease
+- [x] 任意用户不能猜测 traceId/sessionId/runId/reportId 越权访问
+- [x] A 删除/cleanup 自己资源不影响 B 的 running run / active lease
 - [ ] Provider 隔离：A 改个人 provider 不影响 B；管理员改 workspace default 只影响新 session
-- [ ] Provider config 变更后 resume 不复用错误 SDK session
-- [ ] SSE fetch-stream 断线后 `Last-Event-ID` 续推
-- [ ] 双窗口同时打开两 trace，pending trace / AI session / SSE / lease 全不串
-- [ ] 单次慢 SQL 不直接 kill frontend-owned lease
-- [ ] Memory / SQL learning / case / baseline 默认 tenant/workspace 隔离
-- [ ] Tenant export / tombstone / async purge / audit proof 全可用
+- [x] Provider config 变更后 resume 不复用错误 SDK session
+- [x] SSE fetch-stream 断线后 `Last-Event-ID` 续推
+- [x] 双窗口同时打开两 trace，pending trace / AI session / SSE / lease 全不串
+- [x] 单次慢 SQL 不直接 kill frontend-owned lease
+- [x] Memory / SQL learning / case / baseline 默认 tenant/workspace 隔离
+- [x] Tenant export / tombstone / async purge / audit proof 全可用
 - [ ] 压测记录 p50/p95、错误率、worker RSS、queue length、LLM cost
 
 ### 0.9 新增 / 引用文档登记（开发过程中持续追加）
@@ -151,6 +151,7 @@
 - [x] `docs/features/enterprise-multi-tenant/persistence-coverage-matrix.md`（§0.6.7 backend restart/queue shadow/DB reconnect/SecretStore failure 覆盖证据）
 - [x] `docs/features/enterprise-multi-tenant/sse-coverage-matrix.md`（§0.6.8 fetch-stream reconnect/cursor replay/terminal event 落库覆盖证据）
 - [x] `docs/features/enterprise-multi-tenant/pr-gate-regression-evidence.md`（§0.6.10/§0.6.11 scene trace regression 与 PR gate 证据）
+- [ ] `docs/features/enterprise-multi-tenant/acceptance-evidence.md`（§0.8 §19 总验收证据；50 用户压测 / workspace default provider / load metrics 仍未完成）
 
 ### 0.10 PR / 提交收尾（每次 PR 都要走）
 - [ ] 每个主线 / 子主线一个独立 PR；不跨主线串改动
