@@ -27,8 +27,10 @@ import * as path from 'path';
 
 import {Router, type Router as ExpressRouter} from 'express';
 
+import {authenticate, requireRequestContext} from '../middleware/auth';
 import {CaseLibrary} from '../services/caseLibrary';
 import {CaseGraph} from '../services/caseGraph';
+import {knowledgeScopeFromRequestContext} from '../services/scopedKnowledgeStore';
 import type {
   CaseEdge,
   CaseEducationalLevel,
@@ -65,18 +67,21 @@ export function createCaseRoutes(
   const lib = library ?? getDefaultLibrary();
   const g = graph ?? getDefaultGraph();
   const router = Router();
+  router.use(authenticate);
 
   // -------------------------------------------------------------------
   // Edge endpoints — registered BEFORE the `/:caseId` routes so the
   // literal "edges" path segment isn't captured as a caseId.
   // -------------------------------------------------------------------
 
-  router.get('/edges', (_req, res) => {
-    const edges = g.listEdges();
+  router.get('/edges', (req, res) => {
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
+    const edges = g.listEdges(scope);
     res.json({success: true, edges, count: edges.length});
   });
 
   router.post('/edges', (req, res) => {
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
     const edge = req.body as CaseEdge | undefined;
     if (
       !edge ||
@@ -92,7 +97,7 @@ export function createCaseRoutes(
       });
     }
     try {
-      g.addEdge(edge);
+      g.addEdge(edge, scope);
       return res.status(201).json({success: true, edge});
     } catch (err) {
       return res.status(400).json({
@@ -103,16 +108,21 @@ export function createCaseRoutes(
   });
 
   router.get('/edges/:caseId', (req, res) => {
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
     const direction = (req.query.direction ?? 'both') as
       | 'in'
       | 'out'
       | 'both';
-    const related = g.findRelated(req.params.caseId, {direction});
+    const related = g.findRelated(req.params.caseId, {
+      direction,
+      knowledgeScope: scope,
+    });
     res.json({success: true, related, count: related.length});
   });
 
   router.delete('/edges/:edgeId', (req, res) => {
-    const removed = g.removeEdge(req.params.edgeId);
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
+    const removed = g.removeEdge(req.params.edgeId, scope);
     if (!removed) {
       return res.status(404).json({
         success: false,
@@ -127,6 +137,7 @@ export function createCaseRoutes(
   // -------------------------------------------------------------------
 
   router.get('/', (req, res) => {
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
     const {status, tag, level} = req.query as {
       status?: string;
       tag?: string;
@@ -136,11 +147,12 @@ export function createCaseRoutes(
       status: status as CurationStatus | undefined,
       anyOfTags: tag ? [tag] : undefined,
       educationalLevel: level as CaseEducationalLevel | undefined,
-    });
+    }, scope);
     res.json({success: true, cases, count: cases.length});
   });
 
   router.post('/', (req, res) => {
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
     const c = req.body as CaseNode | undefined;
     if (!c || !c.caseId || !c.title || !c.status) {
       return res.status(400).json({
@@ -149,7 +161,7 @@ export function createCaseRoutes(
       });
     }
     try {
-      lib.saveCase(c);
+      lib.saveCase(c, scope);
       return res.status(201).json({success: true, case: c});
     } catch (err) {
       return res.status(400).json({
@@ -160,7 +172,8 @@ export function createCaseRoutes(
   });
 
   router.get('/:caseId', (req, res) => {
-    const c = lib.getCase(req.params.caseId);
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
+    const c = lib.getCase(req.params.caseId, scope);
     if (!c) {
       return res.status(404).json({
         success: false,
@@ -171,7 +184,8 @@ export function createCaseRoutes(
   });
 
   router.delete('/:caseId', (req, res) => {
-    const removed = lib.removeCase(req.params.caseId);
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
+    const removed = lib.removeCase(req.params.caseId, scope);
     if (!removed) {
       return res.status(404).json({
         success: false,
@@ -183,9 +197,10 @@ export function createCaseRoutes(
 
   /** POST /api/cases/:caseId/publish — body `{reviewer}`. */
   router.post('/:caseId/publish', (req, res) => {
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
     const reviewer = (req.body?.reviewer ?? '') as string;
     try {
-      const published = lib.publishCase(req.params.caseId, {reviewer});
+      const published = lib.publishCase(req.params.caseId, {reviewer}, scope);
       return res.json({success: true, case: published});
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -196,9 +211,10 @@ export function createCaseRoutes(
 
   /** POST /api/cases/:caseId/archive — body `{reason}`. */
   router.post('/:caseId/archive', (req, res) => {
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
     const reason = (req.body?.reason ?? '') as string;
     try {
-      const archived = lib.archiveCase(req.params.caseId, {reason});
+      const archived = lib.archiveCase(req.params.caseId, {reason}, scope);
       return res.json({success: true, case: archived});
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

@@ -30,7 +30,9 @@ import * as path from 'path';
 
 import {Router, type Router as ExpressRouter} from 'express';
 
+import {authenticate, requireRequestContext} from '../middleware/auth';
 import {ProjectMemory} from '../agentv3/projectMemory';
+import {knowledgeScopeFromRequestContext} from '../services/scopedKnowledgeStore';
 import type {MemoryPromotionPolicy} from '../types/sparkContracts';
 
 const DEFAULT_STORAGE_PATH = path.resolve(
@@ -49,6 +51,7 @@ function getDefaultMemory(): ProjectMemory {
 export function createMemoryRoutes(memory?: ProjectMemory): ExpressRouter {
   const m = memory ?? getDefaultMemory();
   const router = Router();
+  router.use(authenticate);
 
   /**
    * GET /api/memory
@@ -57,6 +60,7 @@ export function createMemoryRoutes(memory?: ProjectMemory): ExpressRouter {
    * Lists entries deterministically; returns the count alongside.
    */
   router.get('/', (req, res) => {
+    const storageScope = knowledgeScopeFromRequestContext(requireRequestContext(req));
     const {scope, projectKey, tag} = req.query as {
       scope?: string;
       projectKey?: string;
@@ -68,7 +72,7 @@ export function createMemoryRoutes(memory?: ProjectMemory): ExpressRouter {
       scope: filterScope,
       projectKey,
       anyOfTags: tag ? [tag] : undefined,
-    });
+    }, storageScope);
     res.json({success: true, entries, count: entries.length});
   });
 
@@ -79,6 +83,7 @@ export function createMemoryRoutes(memory?: ProjectMemory): ExpressRouter {
    * removal so the reviewer trail stays permanent.
    */
   router.get('/audit', (_req, res) => {
+    requireRequestContext(_req);
     const audit = m.getPromotionAudit();
     res.json({success: true, audit, count: audit.length});
   });
@@ -95,6 +100,7 @@ export function createMemoryRoutes(memory?: ProjectMemory): ExpressRouter {
    * surface from §4.5. Not exposed to the agent.
    */
   router.post('/promote', (req, res) => {
+    const storageScope = knowledgeScopeFromRequestContext(requireRequestContext(req));
     const {entryId, policy} = (req.body ?? {}) as {
       entryId?: string;
       policy?: MemoryPromotionPolicy;
@@ -106,8 +112,8 @@ export function createMemoryRoutes(memory?: ProjectMemory): ExpressRouter {
       });
     }
     try {
-      m.promoteEntry(entryId, policy);
-      const entry = m.getProjectMemoryEntry(entryId);
+      m.promoteEntry(entryId, policy, storageScope);
+      const entry = m.getProjectMemoryEntry(entryId, storageScope);
       return res.status(200).json({success: true, entry});
     } catch (err) {
       return res.status(400).json({
@@ -119,7 +125,8 @@ export function createMemoryRoutes(memory?: ProjectMemory): ExpressRouter {
 
   /** DELETE /api/memory/:entryId */
   router.delete('/:entryId', (req, res) => {
-    const removed = m.removeProjectMemoryEntry(req.params.entryId);
+    const storageScope = knowledgeScopeFromRequestContext(requireRequestContext(req));
+    const removed = m.removeProjectMemoryEntry(req.params.entryId, storageScope);
     if (!removed) {
       return res.status(404).json({
         success: false,

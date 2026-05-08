@@ -364,6 +364,10 @@ export interface PatternProvenance {
   analysisRunId?: string;
   sessionId?: string;
   turnIndex?: number;
+  /** Enterprise scope for learned memory isolation. */
+  sourceTenantId?: string;
+  sourceWorkspaceId?: string;
+  sourceRunId?: string;
   /** sha256 of trace file content (NOT the upload UUID — see scene/traceHash.ts). */
   traceContentHash?: string;
 }

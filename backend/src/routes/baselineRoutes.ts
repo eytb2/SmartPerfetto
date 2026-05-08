@@ -26,8 +26,9 @@ import * as path from 'path';
 
 import {Router, type Router as ExpressRouter} from 'express';
 
-import {authenticate} from '../middleware/auth';
+import {authenticate, requireRequestContext} from '../middleware/auth';
 import {BaselineStore} from '../services/baselineStore';
+import {knowledgeScopeFromRequestContext} from '../services/scopedKnowledgeStore';
 import type {BaselineRecord} from '../types/sparkContracts';
 
 /** Default storage path. Lives under `backend/logs/` next to the other
@@ -48,6 +49,7 @@ function getDefaultStore(): BaselineStore {
 export function createBaselineRoutes(store?: BaselineStore): ExpressRouter {
   const s = store ?? getDefaultStore();
   const router = Router();
+  router.use(authenticate);
 
   /**
    * POST /api/baselines
@@ -56,7 +58,8 @@ export function createBaselineRoutes(store?: BaselineStore): ExpressRouter {
    * (sampleCount ≥ 3, redactionState='redacted' when key carries
    * identifiable info) surface as 400 with a descriptive `error`.
    */
-  router.post('/', authenticate, (req, res) => {
+  router.post('/', (req, res) => {
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
     const record = req.body as BaselineRecord | undefined;
     if (!record || typeof record !== 'object') {
       return res
@@ -70,7 +73,7 @@ export function createBaselineRoutes(store?: BaselineStore): ExpressRouter {
       });
     }
     try {
-      s.addBaseline(record);
+      s.addBaseline(record, scope);
       return res.status(201).json({success: true, baseline: record});
     } catch (err) {
       return res.status(400).json({
@@ -82,7 +85,8 @@ export function createBaselineRoutes(store?: BaselineStore): ExpressRouter {
 
   /** GET /api/baselines/:id */
   router.get('/:id', (req, res) => {
-    const baseline = s.getBaseline(req.params.id);
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
+    const baseline = s.getBaseline(req.params.id, scope);
     if (!baseline) {
       return res
         .status(404)
@@ -92,9 +96,10 @@ export function createBaselineRoutes(store?: BaselineStore): ExpressRouter {
   });
 
   /** DELETE /api/baselines/:id */
-  router.delete('/:id', authenticate, (req, res) => {
+  router.delete('/:id', (req, res) => {
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
     const id = req.params.id as string;
-    const removed = s.removeBaseline(id);
+    const removed = s.removeBaseline(id, scope);
     if (!removed) {
       return res
         .status(404)
@@ -111,6 +116,7 @@ export function createBaselineRoutes(store?: BaselineStore): ExpressRouter {
    *   keyPrefix  — restrict by baselineId prefix, e.g. `appId/deviceId`
    */
   router.get('/', (req, res) => {
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
     const {status, keyPrefix} = req.query as {
       status?: string;
       keyPrefix?: string;
@@ -118,7 +124,7 @@ export function createBaselineRoutes(store?: BaselineStore): ExpressRouter {
     const list = s.listBaselines({
       status: status as BaselineRecord['status'] | undefined,
       keyPrefix,
-    });
+    }, scope);
     return res.json({success: true, baselines: list, count: list.length});
   });
 

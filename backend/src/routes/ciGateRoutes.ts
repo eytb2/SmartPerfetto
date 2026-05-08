@@ -27,6 +27,7 @@ import * as path from 'path';
 
 import {Router, type Router as ExpressRouter} from 'express';
 
+import {requireRequestContext} from '../middleware/auth';
 import {
   computeBaselineDiff,
   evaluateRegressionGate,
@@ -35,6 +36,10 @@ import {
 } from '../services/baselineDiffer';
 import {BaselineStore} from '../services/baselineStore';
 import {CiGateRunStore} from '../services/ciGateRunStore';
+import {
+  type KnowledgeScope,
+  knowledgeScopeFromRequestContext,
+} from '../services/scopedKnowledgeStore';
 import type {
   CiGateRunCandidateSnapshot,
   CiGateRunRecord,
@@ -109,6 +114,7 @@ export function createCiGateRoutes(deps: CiGateRoutesDeps = {}): ExpressRouter {
   router.post('/gate-eval', (req, res) => {
     const baselineStore = resolveBaselineStore();
     const runStore = resolveRunStore();
+    const storageScope = knowledgeScopeFromRequestContext(requireRequestContext(req));
     const body = (req.body ?? {}) as EvalBody;
 
     const gateId = stringField(body.gateId);
@@ -140,7 +146,11 @@ export function createCiGateRoutes(deps: CiGateRoutesDeps = {}): ExpressRouter {
       });
     }
 
-    const candidateOrError = parseCandidate(body.candidate, baselineStore);
+    const candidateOrError = parseCandidate(
+      body.candidate,
+      baselineStore,
+      storageScope,
+    );
     if ('error' in candidateOrError) {
       return res
         .status(400)
@@ -149,7 +159,7 @@ export function createCiGateRoutes(deps: CiGateRoutesDeps = {}): ExpressRouter {
     const candidate = candidateOrError.candidate;
     const ciContext = parseCiContext(body.ciContext);
 
-    const baseline = baselineStore.getBaseline(baselineId);
+    const baseline = baselineStore.getBaseline(baselineId, storageScope);
 
     if (!baseline) {
       const skipped = makeSkippedRun({
@@ -310,6 +320,7 @@ function parseRules(value: unknown): RegressionRule[] | undefined {
 function parseCandidate(
   value: unknown,
   baselineStore: BaselineStore,
+  storageScope?: KnowledgeScope,
 ):
   | {candidate: ResolvedCandidate}
   | {error: string} {
@@ -341,7 +352,10 @@ function parseCandidate(
     if (!candidateBaselineId) {
       return {error: "candidate.baselineId is required for kind='baseline'"};
     }
-    const candidateBaseline = baselineStore.getBaseline(candidateBaselineId);
+    const candidateBaseline = baselineStore.getBaseline(
+      candidateBaselineId,
+      storageScope,
+    );
     if (!candidateBaseline) {
       return {
         error: `candidate baseline '${candidateBaselineId}' not found`,

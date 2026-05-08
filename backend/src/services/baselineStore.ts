@@ -33,6 +33,14 @@ import {
   type BaselineRecord,
   type PerfBaselineKey,
 } from '../types/sparkContracts';
+import {
+  enterpriseKnowledgeStoreEnabled,
+  type KnowledgeScope,
+  getScopedKnowledgeRecord,
+  listScopedKnowledgeRecords,
+  removeScopedKnowledgeRecord,
+  upsertScopedKnowledgeRecord,
+} from './scopedKnowledgeStore';
 
 /** Minimum sample count enforced for `status='published'`. */
 export const BASELINE_PUBLISH_MIN_SAMPLES = 3;
@@ -43,6 +51,9 @@ interface StorageEnvelope {
   schemaVersion: 1;
   baselines: BaselineRecord[];
 }
+
+const KNOWLEDGE_KIND = 'baseline';
+const BASELINE_ROW_SCOPE = 'baseline';
 
 /** Normalize an appId or deviceId to detect when it carries
  * identifiable raw info. Heuristic: package-style ids
@@ -118,21 +129,45 @@ export class BaselineStore {
    * before writing — invalid records throw rather than silently
    * downgrading status, so the operator sees the failure.
    */
-  addBaseline(record: BaselineRecord): void {
+  addBaseline(record: BaselineRecord, scope?: KnowledgeScope): void {
     this.load();
     this.assertPublishInvariants(record);
+    if (enterpriseKnowledgeStoreEnabled()) {
+      upsertScopedKnowledgeRecord(
+        KNOWLEDGE_KIND,
+        record.baselineId,
+        BASELINE_ROW_SCOPE,
+        record,
+        scope,
+        {createdAt: record.capturedAt, updatedAt: Date.now()},
+      );
+      return;
+    }
     this.baselines.set(record.baselineId, record);
     this.persist();
   }
 
   /** Get a baseline by id. */
-  getBaseline(baselineId: string): BaselineRecord | undefined {
+  getBaseline(
+    baselineId: string,
+    scope?: KnowledgeScope,
+  ): BaselineRecord | undefined {
+    if (enterpriseKnowledgeStoreEnabled()) {
+      return getScopedKnowledgeRecord<BaselineRecord>(
+        KNOWLEDGE_KIND,
+        baselineId,
+        scope,
+      )?.record;
+    }
     this.load();
     return this.baselines.get(baselineId);
   }
 
   /** Remove a baseline. Returns whether anything was actually removed. */
-  removeBaseline(baselineId: string): boolean {
+  removeBaseline(baselineId: string, scope?: KnowledgeScope): boolean {
+    if (enterpriseKnowledgeStoreEnabled()) {
+      return removeScopedKnowledgeRecord(KNOWLEDGE_KIND, baselineId, scope);
+    }
     this.load();
     const had = this.baselines.delete(baselineId);
     if (had) this.persist();
@@ -143,9 +178,18 @@ export class BaselineStore {
    * List baselines with optional filters. Results are stable-ordered
    * by baselineId for deterministic consumers.
    */
-  listBaselines(opts: BaselineStoreListOptions = {}): BaselineRecord[] {
+  listBaselines(
+    opts: BaselineStoreListOptions = {},
+    scope?: KnowledgeScope,
+  ): BaselineRecord[] {
     this.load();
-    let out = Array.from(this.baselines.values());
+    let out = enterpriseKnowledgeStoreEnabled()
+      ? listScopedKnowledgeRecords<BaselineRecord>(
+          KNOWLEDGE_KIND,
+          scope,
+          {rowScope: BASELINE_ROW_SCOPE},
+        ).map(row => row.record)
+      : Array.from(this.baselines.values());
     if (opts.status) {
       out = out.filter(b => b.status === opts.status);
     }

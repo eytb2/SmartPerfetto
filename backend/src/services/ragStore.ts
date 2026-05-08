@@ -32,6 +32,14 @@ import {
   type RagSourceKind,
   makeSparkProvenance,
 } from '../types/sparkContracts';
+import {
+  enterpriseKnowledgeStoreEnabled,
+  type KnowledgeScope,
+  getScopedKnowledgeRecord,
+  listScopedKnowledgeRecords,
+  removeScopedKnowledgeRecord,
+  upsertScopedKnowledgeRecord,
+} from './scopedKnowledgeStore';
 
 /** Source kinds that require a `license` field at ingestion time. */
 const LICENSE_REQUIRED_KINDS: ReadonlySet<RagSourceKind> = new Set([
@@ -59,11 +67,16 @@ interface StorageEnvelope {
   chunks: RagChunk[];
 }
 
+const KNOWLEDGE_KIND = 'rag_chunk';
+const RAG_ROW_SCOPE_PREFIX = 'rag:';
+
 export interface RagStoreSearchOptions {
   /** Maximum hits returned. Defaults to 5. */
   topK?: number;
   /** Restrict the search to a subset of source kinds. */
   kinds?: RagSourceKind[];
+  /** Enterprise tenant/workspace scope. Ignored by legacy JSON storage. */
+  scope?: KnowledgeScope;
 }
 
 /** Per-kind index summary returned by `getStats()`. */
@@ -134,19 +147,33 @@ export class RagStore {
    * the chunk lacks one — the caller is expected to surface this back
    * to the operator rather than silently dropping the chunk.
    */
-  addChunk(chunk: RagChunk): void {
+  addChunk(chunk: RagChunk, scope?: KnowledgeScope): void {
     this.load();
     if (LICENSE_REQUIRED_KINDS.has(chunk.kind) && !chunk.license) {
       throw new Error(
         `License required for source kind '${chunk.kind}' but missing on chunk '${chunk.chunkId}'`,
       );
     }
+    if (enterpriseKnowledgeStoreEnabled()) {
+      upsertScopedKnowledgeRecord(
+        KNOWLEDGE_KIND,
+        chunk.chunkId,
+        ragRowScope(chunk.kind),
+        chunk,
+        scope,
+        {createdAt: chunk.indexedAt, updatedAt: chunk.indexedAt},
+      );
+      return;
+    }
     this.chunks.set(chunk.chunkId, chunk);
     this.persist();
   }
 
   /** Remove a chunk. Returns whether anything was actually removed. */
-  removeChunk(chunkId: string): boolean {
+  removeChunk(chunkId: string, scope?: KnowledgeScope): boolean {
+    if (enterpriseKnowledgeStoreEnabled()) {
+      return removeScopedKnowledgeRecord(KNOWLEDGE_KIND, chunkId, scope);
+    }
     this.load();
     const had = this.chunks.delete(chunkId);
     if (had) this.persist();
@@ -154,16 +181,30 @@ export class RagStore {
   }
 
   /** Get a chunk by id, or undefined when absent. */
-  getChunk(chunkId: string): RagChunk | undefined {
+  getChunk(chunkId: string, scope?: KnowledgeScope): RagChunk | undefined {
+    if (enterpriseKnowledgeStoreEnabled()) {
+      return getScopedKnowledgeRecord<RagChunk>(
+        KNOWLEDGE_KIND,
+        chunkId,
+        scope,
+      )?.record;
+    }
     this.load();
     return this.chunks.get(chunkId);
   }
 
   /** Per-kind chunk counts plus the freshest indexedAt seen for each. */
-  getStats(): RagStoreStats {
+  getStats(scope?: KnowledgeScope): RagStoreStats {
     this.load();
     const stats = emptyStats();
-    for (const c of this.chunks.values()) {
+    const chunks = enterpriseKnowledgeStoreEnabled()
+      ? listScopedKnowledgeRecords<RagChunk>(
+          KNOWLEDGE_KIND,
+          scope,
+          {rowScopePrefix: RAG_ROW_SCOPE_PREFIX, includeSystem: true},
+        ).map(row => row.record)
+      : Array.from(this.chunks.values());
+    for (const c of chunks) {
       const s = stats[c.kind];
       s.chunkCount++;
       if (s.lastIndexedAt === undefined || c.indexedAt > s.lastIndexedAt) {
@@ -189,18 +230,23 @@ export class RagStore {
     this.load();
     const topK = opts.topK ?? 5;
     const kindFilter = opts.kinds ? new Set(opts.kinds) : null;
+    const chunks = enterpriseKnowledgeStoreEnabled()
+      ? listScopedKnowledgeRecords<RagChunk>(
+          KNOWLEDGE_KIND,
+          opts.scope,
+          {rowScopePrefix: RAG_ROW_SCOPE_PREFIX, includeSystem: true},
+        ).map(row => row.record)
+      : Array.from(this.chunks.values());
 
     const probed = opts.kinds
       ? [...opts.kinds]
-      : Array.from(
-          new Set(Array.from(this.chunks.values()).map(c => c.kind)),
-        );
+      : Array.from(new Set(chunks.map(c => c.kind)));
 
     const queryTokens = new Set(tokenize(query));
     const candidates: Array<{chunk: RagChunk; score: number}> = [];
     let eligibleSeen = 0;
 
-    for (const chunk of this.chunks.values()) {
+    for (const chunk of chunks) {
       if (kindFilter && !kindFilter.has(chunk.kind)) continue;
       if (chunk.unsupportedReason) continue;
       eligibleSeen++;
@@ -226,7 +272,7 @@ export class RagStore {
     }));
 
     let unsupportedReason: string | undefined;
-    if (this.chunks.size === 0) {
+    if (chunks.length === 0) {
       unsupportedReason = 'index empty';
     } else if (eligibleSeen === 0) {
       // Either every chunk in the probed kinds is blocked, or the kind
@@ -272,4 +318,8 @@ export class RagStore {
 /** Whether the given source kind needs a `license` field at ingest time. */
 export function ragStoreRequiresLicense(kind: RagSourceKind): boolean {
   return LICENSE_REQUIRED_KINDS.has(kind);
+}
+
+function ragRowScope(kind: RagSourceKind): string {
+  return `${RAG_ROW_SCOPE_PREFIX}${kind}`;
 }

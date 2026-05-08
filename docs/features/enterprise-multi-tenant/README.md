@@ -45,7 +45,7 @@
 - [x] 3.4 report metadata 入 DB；report 内容迁到 `data/{tenantId}/{workspaceId}/reports/`（§14.2）
 - [x] 3.5 `logs/claude_session_map.json` 迁到 `runtime_snapshots`
 - [x] 3.6 provider 从 `data/providers.json` 迁到 DB metadata + encrypted SecretStore
-- [ ] 3.7 Memory / RAG / Case / Baseline 表加 scope（§14.1，先 filter 后语义召回）
+- [x] 3.7 Memory / RAG / Case / Baseline 表加 scope（§14.1，先 filter 后语义召回）
 - [ ] 3.8 双写 → 切读 → 退役 三阶段（§17），每阶段都能回滚；准备 filesystem + DB snapshot
 - [ ] 3.9 SecretStore：libsodium 加密 + OS keyring 解 master key + secret rotation + 读取审计
 - [ ] 3.10 集成测试：backend restart 后 session/report/trace metadata 可恢复

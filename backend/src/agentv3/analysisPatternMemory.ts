@@ -35,6 +35,11 @@ import {
   injectionWeightForSupersede,
   type SupersedeStoreHandle,
 } from './selfImprove/supersedeStore';
+import {
+  enterpriseKnowledgeStoreEnabled,
+  type KnowledgeScope,
+  resolveKnowledgeScope,
+} from '../services/scopedKnowledgeStore';
 
 const PATTERNS_FILE = path.resolve(__dirname, '../../logs/analysis_patterns.json');
 const NEGATIVE_PATTERNS_FILE = path.resolve(__dirname, '../../logs/analysis_negative_patterns.json');
@@ -238,6 +243,34 @@ export interface PatternSaveExtras {
   failureModeHash?: string;
   provenance?: PatternProvenance;
   bucketKey?: string;
+  /** Enterprise tenant/workspace scope for learned pattern isolation. */
+  knowledgeScope?: KnowledgeScope;
+}
+
+function withKnowledgeScopeProvenance(
+  provenance: PatternProvenance | undefined,
+  scope: KnowledgeScope | undefined,
+): PatternProvenance | undefined {
+  if (!enterpriseKnowledgeStoreEnabled() && !scope) return provenance;
+  const resolved = resolveKnowledgeScope(scope);
+  return {
+    ...(provenance ?? {}),
+    sourceTenantId: resolved.tenantId,
+    sourceWorkspaceId: resolved.workspaceId,
+    sourceRunId: resolved.sourceRunId ?? provenance?.analysisRunId,
+  };
+}
+
+function patternMatchesKnowledgeScope(
+  pattern: {provenance?: PatternProvenance},
+  scope: KnowledgeScope | undefined,
+): boolean {
+  if (!enterpriseKnowledgeStoreEnabled()) return true;
+  const resolved = resolveKnowledgeScope(scope);
+  return (
+    pattern.provenance?.sourceTenantId === resolved.tenantId &&
+    pattern.provenance?.sourceWorkspaceId === resolved.workspaceId
+  );
 }
 
 /** Load patterns from disk. */
@@ -392,9 +425,16 @@ export async function saveAnalysisPattern(
 
   const patterns = loadPatterns();
   const now = Date.now();
+  const provenance = withKnowledgeScopeProvenance(
+    extras.provenance,
+    extras.knowledgeScope,
+  );
 
   // Deduplicate: check if a very similar pattern already exists (>70% similarity)
-  const existingIdx = patterns.findIndex(p => weightedJaccardSimilarity(p.traceFeatures, features) > 0.7);
+  const existingIdx = patterns.findIndex(p =>
+    patternMatchesKnowledgeScope(p, extras.knowledgeScope) &&
+    weightedJaccardSimilarity(p.traceFeatures, features) > 0.7,
+  );
 
   if (existingIdx >= 0) {
     // Update existing pattern: merge insights, bump match count
@@ -406,7 +446,7 @@ export async function saveAnalysisPattern(
     if (confidence !== undefined) existing.confidence = confidence;
     if (extras.failureModeHash) existing.failureModeHash = extras.failureModeHash;
     if (extras.bucketKey) existing.bucketKey = extras.bucketKey;
-    if (extras.provenance) existing.provenance = extras.provenance;
+    if (provenance) existing.provenance = provenance;
     // Re-saves don't downgrade status — a provisional pattern that has
     // already auto-confirmed must not slip back to provisional.
   } else {
@@ -423,7 +463,7 @@ export async function saveAnalysisPattern(
       status: extras.status ?? 'provisional',
       failureModeHash: extras.failureModeHash,
       bucketKey: extras.bucketKey,
-      provenance: extras.provenance,
+      provenance,
     });
   }
 
@@ -451,9 +491,16 @@ export async function saveNegativePattern(
   if (features.length === 0 || failedApproaches.length === 0) return;
 
   const patterns = loadNegativePatterns();
+  const provenance = withKnowledgeScopeProvenance(
+    extras.provenance,
+    extras.knowledgeScope,
+  );
 
   // Deduplicate: merge into existing pattern if >70% similar
-  const existingIdx = patterns.findIndex(p => weightedJaccardSimilarity(p.traceFeatures, features) > 0.7);
+  const existingIdx = patterns.findIndex(p =>
+    patternMatchesKnowledgeScope(p, extras.knowledgeScope) &&
+    weightedJaccardSimilarity(p.traceFeatures, features) > 0.7,
+  );
 
   const now = Date.now();
   // Recurrence detection: a fresh negative on a hash that's currently being
@@ -476,7 +523,7 @@ export async function saveNegativePattern(
     existing.createdAt = now;
     if (extras.failureModeHash) existing.failureModeHash = extras.failureModeHash;
     if (extras.bucketKey) existing.bucketKey = extras.bucketKey;
-    if (extras.provenance) existing.provenance = extras.provenance;
+    if (provenance) existing.provenance = provenance;
   } else {
     const id = `neg-${now}-${Math.random().toString(36).substring(2, 6)}`;
     patterns.push({
@@ -490,7 +537,7 @@ export async function saveNegativePattern(
       status: extras.status ?? 'provisional',
       failureModeHash: extras.failureModeHash,
       bucketKey: extras.bucketKey,
-      provenance: extras.provenance,
+      provenance,
     });
   }
 
@@ -508,7 +555,10 @@ export async function saveNegativePattern(
  * Find patterns similar to the current trace features.
  * Returns matched patterns sorted by effective score (similarity × decay).
  */
-export function matchPatterns(features: string[]): Array<AnalysisPatternEntry & { score: number }> {
+export function matchPatterns(
+  features: string[],
+  scope?: KnowledgeScope,
+): Array<AnalysisPatternEntry & { score: number }> {
   if (features.length === 0) return [];
 
   const patterns = loadPatterns();
@@ -516,6 +566,7 @@ export function matchPatterns(features: string[]): Array<AnalysisPatternEntry & 
 
   return patterns
     .filter(p => p.createdAt >= cutoff)
+    .filter(p => patternMatchesKnowledgeScope(p, scope))
     .filter(p => getEffectiveStatus(p) !== 'rejected')
     .map(p => {
       const rawSimilarity = weightedJaccardSimilarity(p.traceFeatures, features);
@@ -537,7 +588,10 @@ export function matchPatterns(features: string[]): Array<AnalysisPatternEntry & 
  * Find negative patterns similar to the current trace features.
  * Negative patterns persist longer (90 days) and use the same weighted matching.
  */
-export function matchNegativePatterns(features: string[]): Array<NegativePatternEntry & { score: number }> {
+export function matchNegativePatterns(
+  features: string[],
+  scope?: KnowledgeScope,
+): Array<NegativePatternEntry & { score: number }> {
   if (features.length === 0) return [];
 
   const patterns = loadNegativePatterns();
@@ -545,6 +599,7 @@ export function matchNegativePatterns(features: string[]): Array<NegativePattern
 
   return patterns
     .filter(p => p.createdAt >= cutoff)
+    .filter(p => patternMatchesKnowledgeScope(p, scope))
     .filter(p => getEffectiveStatus(p) !== 'rejected')
     .map(p => {
       const frequencyGain = 1 + Math.log2(1 + p.matchCount) * 0.1;
@@ -626,6 +681,10 @@ export async function saveQuickPathPattern(
   const patterns = loadQuickPatterns();
   const now = Date.now();
   const id = `qp-${now}-${Math.random().toString(36).substring(2, 6)}`;
+  const provenance = withKnowledgeScopeProvenance(
+    extras.provenance,
+    extras.knowledgeScope,
+  );
   patterns.push({
     id,
     traceFeatures: features,
@@ -638,7 +697,7 @@ export async function saveQuickPathPattern(
     status: extras.status ?? 'provisional',
     failureModeHash: extras.failureModeHash,
     bucketKey: extras.bucketKey,
-    provenance: extras.provenance,
+    provenance,
   });
 
   const cutoff = now - QUICK_PATTERN_TTL_MS;
@@ -657,12 +716,14 @@ export async function saveQuickPathPattern(
  */
 export function matchQuickPatternsAsBackup(
   features: string[],
+  scope?: KnowledgeScope,
 ): Array<AnalysisPatternEntry & { score: number }> {
   if (features.length === 0) return [];
   const patterns = loadQuickPatterns();
   const cutoff = Date.now() - QUICK_PATTERN_TTL_MS;
   return patterns
     .filter(p => p.createdAt >= cutoff)
+    .filter(p => patternMatchesKnowledgeScope(p, scope))
     .filter(p => getEffectiveStatus(p) !== 'rejected')
     .map(p => {
       const rawSimilarity = weightedJaccardSimilarity(p.traceFeatures, features);
@@ -693,10 +754,12 @@ export async function promoteQuickPatternIfMatching(input: {
   sceneType: string;
   architectureType?: string;
   verifierPassed: boolean;
+  knowledgeScope?: KnowledgeScope;
 }): Promise<boolean> {
   if (!input.verifierPassed) return false;
   const candidates = loadQuickPatterns();
   const winner = candidates
+    .filter(p => patternMatchesKnowledgeScope(p, input.knowledgeScope))
     .filter(p => getEffectiveStatus(p) !== 'rejected' && getEffectiveStatus(p) !== 'disputed')
     .filter(p => p.sceneType === input.sceneType && p.architectureType === input.architectureType)
     .map(p => ({
@@ -728,6 +791,7 @@ export async function promoteQuickPatternIfMatching(input: {
       failureModeHash: winner.pattern.failureModeHash,
       bucketKey: winner.pattern.bucketKey,
       provenance: winner.pattern.provenance,
+      knowledgeScope: input.knowledgeScope,
     },
   );
   return true;
@@ -842,8 +906,11 @@ export async function sweepAutoConfirm(now: number = Date.now()): Promise<void> 
  * Build a system prompt section from matched patterns.
  * Provides cross-session context to Claude.
  */
-export function buildPatternContextSection(features: string[]): string | undefined {
-  const matches = matchPatterns(features);
+export function buildPatternContextSection(
+  features: string[],
+  scope?: KnowledgeScope,
+): string | undefined {
+  const matches = matchPatterns(features, scope);
   if (matches.length === 0) return undefined;
 
   const lines = matches.map((m, i) => {
@@ -865,8 +932,11 @@ ${lines.join('\n\n')}
  * Build a system prompt section from matched negative patterns.
  * Warns Claude about strategies that previously FAILED for similar traces.
  */
-export function buildNegativePatternSection(features: string[]): string | undefined {
-  const matches = matchNegativePatterns(features);
+export function buildNegativePatternSection(
+  features: string[],
+  scope?: KnowledgeScope,
+): string | undefined {
+  const matches = matchNegativePatterns(features, scope);
   if (matches.length === 0) return undefined;
 
   const lines: string[] = [];

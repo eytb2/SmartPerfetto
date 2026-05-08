@@ -16,13 +16,14 @@
  * File I/O is mocked — no actual disk writes.
  */
 
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 
 // ── Mock fs before importing module ──────────────────────────────────────
 
 let mockPatterns: any[] = [];
 let mockNegativePatterns: any[] = [];
 let mockQuickPatterns: any[] = [];
+const originalEnterprise = process.env.SMARTPERFETTO_ENTERPRISE;
 
 // Temporary storage for atomic write simulation (writeFile to .tmp, then rename)
 let tmpWriteBuffer: Map<string, string> = new Map();
@@ -104,6 +105,14 @@ beforeEach(() => {
   // Disable the real SQLite supersede store for fs-mocked tests; PR9b's
   // own integration tests cover the live store behaviour.
   setSupersedeStoreForTesting(null);
+});
+
+afterEach(() => {
+  if (originalEnterprise === undefined) {
+    delete process.env.SMARTPERFETTO_ENTERPRISE;
+  } else {
+    process.env.SMARTPERFETTO_ENTERPRISE = originalEnterprise;
+  }
 });
 
 // ── Feature Extraction ───────────────────────────────────────────────────
@@ -526,6 +535,75 @@ describe('saveAnalysisPattern with extras', () => {
     // Re-save with overlapping features → triggers the merge branch.
     await saveAnalysisPattern(['arch:STANDARD', 'scene:scrolling'], ['v2'], 'scrolling', 'STANDARD');
     expect(mockPatterns[0].status).toBe('confirmed');
+  });
+});
+
+describe('enterprise scope isolation', () => {
+  const scopeA = {tenantId: 'tenant-a', workspaceId: 'workspace-a', userId: 'user-a'};
+  const scopeB = {tenantId: 'tenant-b', workspaceId: 'workspace-b', userId: 'user-b'};
+  const features = ['arch:STANDARD', 'scene:scrolling'];
+
+  beforeEach(() => {
+    process.env.SMARTPERFETTO_ENTERPRISE = 'true';
+  });
+
+  it('saves source scope provenance and filters positive matches before similarity ranking', async () => {
+    await saveAnalysisPattern(
+      features,
+      ['tenant-a insight'],
+      'scrolling',
+      'STANDARD',
+      0.9,
+      {knowledgeScope: scopeA},
+    );
+    await saveAnalysisPattern(
+      features,
+      ['tenant-b insight'],
+      'scrolling',
+      'STANDARD',
+      0.9,
+      {knowledgeScope: scopeB},
+    );
+
+    expect(mockPatterns).toHaveLength(2);
+    expect(mockPatterns[0].provenance.sourceTenantId).toBe('tenant-a');
+    expect(mockPatterns[1].provenance.sourceTenantId).toBe('tenant-b');
+    expect(matchPatterns(features, scopeA).map(p => p.keyInsights[0])).toEqual([
+      'tenant-a insight',
+    ]);
+    expect(matchPatterns(features, scopeB).map(p => p.keyInsights[0])).toEqual([
+      'tenant-b insight',
+    ]);
+  });
+
+  it('filters negative and quick-path matches by the same enterprise scope', async () => {
+    await saveNegativePattern(
+      features,
+      [{type: 'sql_error', approach: 'bad sql', reason: 'tenant-a'}],
+      'scrolling',
+      'STANDARD',
+      {knowledgeScope: scopeA},
+    );
+    await saveNegativePattern(
+      features,
+      [{type: 'sql_error', approach: 'bad sql', reason: 'tenant-b'}],
+      'scrolling',
+      'STANDARD',
+      {knowledgeScope: scopeB},
+    );
+    await saveQuickPathPattern(
+      features,
+      ['tenant-a quick'],
+      'scrolling',
+      'STANDARD',
+      {knowledgeScope: scopeA},
+    );
+
+    expect(matchNegativePatterns(features, scopeA)[0].failedApproaches[0].reason)
+      .toBe('tenant-a');
+    expect(matchNegativePatterns(features, scopeB)[0].failedApproaches[0].reason)
+      .toBe('tenant-b');
+    expect(matchQuickPatternsAsBackup(features, scopeB)).toHaveLength(0);
   });
 });
 

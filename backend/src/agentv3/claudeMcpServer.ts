@@ -44,6 +44,11 @@ import {
 import {ProjectMemory} from './projectMemory';
 import {CaseLibrary} from '../services/caseLibrary';
 import {
+  enterpriseKnowledgeStoreEnabled,
+  type KnowledgeScope,
+  resolveKnowledgeScope,
+} from '../services/scopedKnowledgeStore';
+import {
   McpToolRegistry,
   MCP_NAME_PREFIX as REGISTRY_MCP_NAME_PREFIX,
 } from './mcpToolRegistry';
@@ -173,9 +178,25 @@ const REASONING_NUDGE_ZH = '\n\n[REFLECT] 在执行下一步之前：这个数�
 const REASONING_NUDGE_EN = '\n\n[REFLECT] Before the next action: what is the key finding from this data? Does it support or refute your hypothesis? If there is an important inference, record it with submit_hypothesis or write_analysis_note.';
 export const MIN_PHASE_SUMMARY_CHARS = 15;
 
-export function loadLearnedSqlFixPairs(maxPairs = 10): SqlErrorFixPair[] {
+function sqlErrorLogFile(scope?: KnowledgeScope): string {
+  if (!enterpriseKnowledgeStoreEnabled()) {
+    return path.join(SQL_ERROR_LOG_DIR, 'error_fix_pairs.json');
+  }
+  const resolved = resolveKnowledgeScope(scope);
+  return path.join(
+    SQL_ERROR_LOG_DIR,
+    resolved.tenantId,
+    resolved.workspaceId,
+    'error_fix_pairs.json',
+  );
+}
+
+export function loadLearnedSqlFixPairs(
+  maxPairs = 10,
+  scope?: KnowledgeScope,
+): SqlErrorFixPair[] {
   try {
-    const logFile = path.join(SQL_ERROR_LOG_DIR, 'error_fix_pairs.json');
+    const logFile = sqlErrorLogFile(scope);
     if (!fs.existsSync(logFile)) return [];
     const data = fs.readFileSync(logFile, 'utf-8');
     const pairs: SqlErrorFixPair[] = JSON.parse(data);
@@ -189,9 +210,12 @@ export function loadLearnedSqlFixPairs(maxPairs = 10): SqlErrorFixPair[] {
   }
 }
 
-async function logSqlErrorFixPair(pair: SqlErrorFixPair): Promise<void> {
+async function logSqlErrorFixPair(
+  pair: SqlErrorFixPair,
+  scope?: KnowledgeScope,
+): Promise<void> {
   try {
-    const logFile = path.join(SQL_ERROR_LOG_DIR, 'error_fix_pairs.json');
+    const logFile = sqlErrorLogFile(scope);
     let pairs: SqlErrorFixPair[] = [];
     try {
       const data = await fs.promises.readFile(logFile, 'utf-8');
@@ -208,7 +232,7 @@ async function logSqlErrorFixPair(pair: SqlErrorFixPair): Promise<void> {
     }
     // Keep last 200 pairs
     if (pairs.length > 200) pairs = pairs.slice(-200);
-    await fs.promises.mkdir(SQL_ERROR_LOG_DIR, { recursive: true });
+    await fs.promises.mkdir(path.dirname(logFile), { recursive: true });
     // Atomic write: write to tmp file, then rename
     const tmpFile = logFile + '.tmp';
     await fs.promises.writeFile(tmpFile, JSON.stringify(pairs));
@@ -347,6 +371,8 @@ export interface ClaudeMcpServerOptions {
   skillNotesBudget?: import('./selfImprove/skillNotesInjector').SkillNotesBudget;
   /** User-facing output language for backend-emitted progress and hints. */
   outputLanguage?: OutputLanguage;
+  /** Enterprise tenant/workspace scope for knowledge, memory, case, and baseline tools. */
+  knowledgeScope?: KnowledgeScope;
 }
 
 /**
@@ -361,6 +387,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
   const watchdogRef = options.watchdogWarning;
   const skillNotesBudget = options.skillNotesBudget;
   const outputLanguage = options.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE;
+  const knowledgeScope = options.knowledgeScope;
 
   /** Normalize skill params: ensure process_name ↔ package are both set. */
   function normalizeSkillParams(params: Record<string, any> | undefined, defaultPackage?: string): Record<string, any> {
@@ -534,7 +561,10 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             return jaccard > 0.3; // At least 30% token overlap
           });
           if (matchingError) {
-            await logSqlErrorFixPair({ ...matchingError, fixedSql: sql });
+            await logSqlErrorFixPair(
+              { ...matchingError, fixedSql: sql },
+              knowledgeScope,
+            );
             const idx = recentSqlErrors.indexOf(matchingError);
             if (idx >= 0) recentSqlErrors.splice(idx, 1);
           }
@@ -673,7 +703,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           recentSqlErrors.push(errorPair);
           if (recentSqlErrors.length > 10) recentSqlErrors.shift();
           // Persist to disk (fire-and-forget) for cross-session learning
-          logSqlErrorFixPair(errorPair).catch(() => {});
+          logSqlErrorFixPair(errorPair, knowledgeScope).catch(() => {});
         }
 
         if (emitUpdate && result.displayResults?.length) {
@@ -1217,6 +1247,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       const result = store.search(query, {
         topK: top_k ?? 5,
         kinds: ['androidperformance.com'],
+        scope: knowledgeScope,
       });
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result) }],
@@ -1261,7 +1292,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           };
         }
       }
-      const baseline = store.getBaseline(id);
+      const baseline = store.getBaseline(id, knowledgeScope);
       if (!baseline) {
         return {
           content: [{
@@ -1299,8 +1330,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     },
     async ({ base_baseline_id, candidate_baseline_id, rules, gate_id }) => {
       const store = getBaselineStore();
-      const base = store.getBaseline(base_baseline_id);
-      const candidate = store.getBaseline(candidate_baseline_id);
+      const base = store.getBaseline(base_baseline_id, knowledgeScope);
+      const candidate = store.getBaseline(candidate_baseline_id, knowledgeScope);
       if (!base) {
         return {
           content: [{
@@ -1366,6 +1397,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       const result = store.search(query, {
         topK: top_k ?? 5,
         kinds: ['aosp'],
+        scope: knowledgeScope,
       });
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result) }],
@@ -1391,6 +1423,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       const result = store.search(query, {
         topK: top_k ?? 5,
         kinds: ['oem_sdk'],
+        scope: knowledgeScope,
       });
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result) }],
@@ -1425,7 +1458,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         projectKey: project_key,
         scope,
         topK: top_k ?? 5,
-      });
+      }, knowledgeScope);
       return {
         content: [{
           type: 'text' as const,
@@ -1466,10 +1499,10 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       // through this tool — those are operator-side concerns.
       const allCases = include_unpublished
         ? [
-            ...library.listCases({status: 'published'}),
-            ...library.listCases({status: 'reviewed'}),
+            ...library.listCases({status: 'published'}, knowledgeScope),
+            ...library.listCases({status: 'reviewed'}, knowledgeScope),
           ]
-        : library.listCases({status: 'published'});
+        : library.listCases({status: 'published'}, knowledgeScope);
 
       const candidates: Array<{caseScore: number; case: typeof allCases[number]}> = [];
       for (const c of allCases) {
@@ -2196,8 +2229,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         }
       }
 
-      const positiveMatches = matchPatterns(features);
-      const negativeMatches = matchNegativePatterns(features);
+      const positiveMatches = matchPatterns(features, knowledgeScope);
+      const negativeMatches = matchNegativePatterns(features, knowledgeScope);
 
       if (positiveMatches.length === 0 && negativeMatches.length === 0) {
         return {

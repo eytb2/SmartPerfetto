@@ -38,11 +38,21 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import {type CaseEdge} from '../types/sparkContracts';
+import {
+  enterpriseKnowledgeStoreEnabled,
+  type KnowledgeScope,
+  listScopedKnowledgeRecords,
+  removeScopedKnowledgeRecord,
+  upsertScopedKnowledgeRecord,
+} from './scopedKnowledgeStore';
 
 interface StorageEnvelope {
   schemaVersion: 1;
   edges: CaseEdge[];
 }
+
+const KNOWLEDGE_KIND = 'case_edge';
+const CASE_EDGE_ROW_SCOPE_PREFIX = 'case_edge:';
 
 /** Build the canonical dedup key for an edge. */
 function edgeKey(edge: Pick<CaseEdge, 'fromCaseId' | 'toCaseId' | 'relation'>): string {
@@ -57,6 +67,8 @@ export interface FindRelatedOptions {
   direction?: 'out' | 'in' | 'both';
   /** Maximum hits returned. Defaults to 10. */
   topK?: number;
+  /** Enterprise tenant/workspace scope. Ignored by legacy JSON storage. */
+  knowledgeScope?: KnowledgeScope;
 }
 
 /**
@@ -92,19 +104,44 @@ export class CaseGraph {
    * same `(from, to, relation)` triplet replaces weight + note +
    * edgeId (so callers can keep the latest curator note).
    */
-  addEdge(edge: CaseEdge): void {
+  addEdge(edge: CaseEdge, scope?: KnowledgeScope): void {
     this.load();
     if (edge.fromCaseId === edge.toCaseId) {
       throw new Error(
         `Self-loops are not permitted: edge '${edge.edgeId}' has fromCaseId === toCaseId === '${edge.fromCaseId}'`,
       );
     }
+    if (enterpriseKnowledgeStoreEnabled()) {
+      for (const existing of this.listEnterpriseEdges(scope)) {
+        if (
+          edgeKey(existing.record) === edgeKey(edge) &&
+          existing.record.edgeId !== edge.edgeId
+        ) {
+          removeScopedKnowledgeRecord(
+            KNOWLEDGE_KIND,
+            existing.record.edgeId,
+            scope,
+          );
+        }
+      }
+      upsertScopedKnowledgeRecord(
+        KNOWLEDGE_KIND,
+        edge.edgeId,
+        caseEdgeRowScope(edge.relation),
+        edge,
+        scope,
+      );
+      return;
+    }
     this.edges.set(edgeKey(edge), edge);
     this.persist();
   }
 
   /** Remove an edge by canonical id. Returns whether it was present. */
-  removeEdge(edgeId: string): boolean {
+  removeEdge(edgeId: string, scope?: KnowledgeScope): boolean {
+    if (enterpriseKnowledgeStoreEnabled()) {
+      return removeScopedKnowledgeRecord(KNOWLEDGE_KIND, edgeId, scope);
+    }
     this.load();
     let foundKey: string | undefined;
     for (const [k, e] of this.edges) {
@@ -120,7 +157,13 @@ export class CaseGraph {
   }
 
   /** Get all edges originating at the case. */
-  getEdgesFrom(caseId: string): CaseEdge[] {
+  getEdgesFrom(caseId: string, scope?: KnowledgeScope): CaseEdge[] {
+    if (enterpriseKnowledgeStoreEnabled()) {
+      return this.listEnterpriseEdges(scope)
+        .map(row => row.record)
+        .filter(e => e.fromCaseId === caseId)
+        .sort((a, b) => a.edgeId.localeCompare(b.edgeId));
+    }
     this.load();
     return Array.from(this.edges.values())
       .filter(e => e.fromCaseId === caseId)
@@ -128,7 +171,13 @@ export class CaseGraph {
   }
 
   /** Get all edges pointing at the case. */
-  getEdgesTo(caseId: string): CaseEdge[] {
+  getEdgesTo(caseId: string, scope?: KnowledgeScope): CaseEdge[] {
+    if (enterpriseKnowledgeStoreEnabled()) {
+      return this.listEnterpriseEdges(scope)
+        .map(row => row.record)
+        .filter(e => e.toCaseId === caseId)
+        .sort((a, b) => a.edgeId.localeCompare(b.edgeId));
+    }
     this.load();
     return Array.from(this.edges.values())
       .filter(e => e.toCaseId === caseId)
@@ -151,7 +200,10 @@ export class CaseGraph {
     const topK = opts.topK ?? 10;
 
     const candidates: Array<{caseId: string; edge: CaseEdge}> = [];
-    for (const e of this.edges.values()) {
+    const edges = enterpriseKnowledgeStoreEnabled()
+      ? this.listEnterpriseEdges(opts.knowledgeScope).map(row => row.record)
+      : Array.from(this.edges.values());
+    for (const e of edges) {
       if (relations && !relations.has(e.relation)) continue;
       if (
         (direction === 'out' || direction === 'both') &&
@@ -180,7 +232,12 @@ export class CaseGraph {
 
   /** All edges, deterministically ordered by canonical key. Used by
    * the export bundler that joins this with the case library. */
-  listEdges(): CaseEdge[] {
+  listEdges(scope?: KnowledgeScope): CaseEdge[] {
+    if (enterpriseKnowledgeStoreEnabled()) {
+      return this.listEnterpriseEdges(scope)
+        .map(row => row.record)
+        .sort((a, b) => edgeKey(a).localeCompare(edgeKey(b)));
+    }
     this.load();
     return Array.from(this.edges.values()).sort((a, b) =>
       edgeKey(a).localeCompare(edgeKey(b)),
@@ -188,7 +245,10 @@ export class CaseGraph {
   }
 
   /** Total edge count. */
-  size(): number {
+  size(scope?: KnowledgeScope): number {
+    if (enterpriseKnowledgeStoreEnabled()) {
+      return this.listEnterpriseEdges(scope).length;
+    }
     this.load();
     return this.edges.size;
   }
@@ -205,4 +265,16 @@ export class CaseGraph {
     fs.writeFileSync(tmp, JSON.stringify(envelope, null, 2), 'utf-8');
     fs.renameSync(tmp, this.storagePath);
   }
+
+  private listEnterpriseEdges(scope?: KnowledgeScope) {
+    return listScopedKnowledgeRecords<CaseEdge>(
+      KNOWLEDGE_KIND,
+      scope,
+      {rowScopePrefix: CASE_EDGE_ROW_SCOPE_PREFIX},
+    );
+  }
+}
+
+function caseEdgeRowScope(relation: string): string {
+  return `${CASE_EDGE_ROW_SCOPE_PREFIX}${relation}`;
 }

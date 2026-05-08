@@ -91,6 +91,7 @@ import {
   type ClaudeSessionMapRuntimeEntry,
 } from '../services/runtimeSnapshotStore';
 import type { ProviderScope } from '../services/providerManager';
+import type { KnowledgeScope } from '../services/scopedKnowledgeStore';
 
 const SESSION_MAP_FILE = path.resolve(__dirname, '../../logs/claude_session_map.json');
 /** Max age for session map entries before pruning (24 hours). */
@@ -153,6 +154,16 @@ function providerScopeFromOptions(options: AnalysisOptions): ProviderScope | und
     tenantId: options.tenantId,
     workspaceId: options.workspaceId,
     userId: options.userId,
+  };
+}
+
+function knowledgeScopeFromOptions(options: AnalysisOptions): KnowledgeScope | undefined {
+  if (!options.tenantId || !options.workspaceId) return undefined;
+  return {
+    tenantId: options.tenantId,
+    workspaceId: options.workspaceId,
+    userId: options.userId,
+    sourceRunId: options.runId,
   };
 }
 
@@ -1448,6 +1459,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
             sessionId,
             turnIndex: ctx.previousTurns.length,
           },
+          knowledgeScope: knowledgeScopeFromOptions(options),
         };
         saveAnalysisPattern(fullFeatures, insights, sceneType, ctx.architecture?.type, turnConfidence, patternExtras)
           .catch(err => console.warn('[ClaudeRuntime] Pattern save failed:', (err as Error).message));
@@ -1460,6 +1472,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           sceneType,
           architectureType: ctx.architecture?.type,
           verifierPassed: true,
+          knowledgeScope: knowledgeScopeFromOptions(options),
         }).catch(err => console.warn('[ClaudeRuntime] Quick→full promote failed:', (err as Error).message));
       }
 
@@ -1478,7 +1491,9 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
       // P1: Save negative patterns to long-term memory (fire-and-forget)
       if (failedApproaches.length > 0 && fullFeatures.length > 0) {
-        saveNegativePattern(fullFeatures, failedApproaches, sceneType, ctx.architecture?.type)
+        saveNegativePattern(fullFeatures, failedApproaches, sceneType, ctx.architecture?.type, {
+          knowledgeScope: knowledgeScopeFromOptions(options),
+        })
           .catch(err => console.warn('[ClaudeRuntime] Negative pattern save failed:', (err as Error).message));
       }
 
@@ -1661,6 +1676,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         lightweight: true,
         skillNotesBudget: quickNotesBudget,
         outputLanguage: this.config.outputLanguage,
+        knowledgeScope: knowledgeScopeFromOptions(options),
       });
 
       const systemPrompt = buildQuickSystemPrompt({
@@ -1882,6 +1898,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         saveQuickPathPattern(quickFeatures, insights, sceneType, cachedArch?.type, {
           status: 'provisional',
           provenance: { sessionId, turnIndex: previousTurns.length },
+          knowledgeScope: knowledgeScopeFromOptions(options),
         }).catch(err => console.warn('[ClaudeRuntime] Quick pattern save failed:', (err as Error).message));
       }
 
@@ -2415,8 +2432,14 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       sceneType,
       packageName: effectivePackageName,
     });
-    const patternContext = buildPatternContextSection(traceFeatures);
-    const negativePatternContext = buildNegativePatternSection(traceFeatures);
+    const patternContext = buildPatternContextSection(
+      traceFeatures,
+      knowledgeScopeFromOptions(options),
+    );
+    const negativePatternContext = buildNegativePatternSection(
+      traceFeatures,
+      knowledgeScopeFromOptions(options),
+    );
 
     // Phase 6: Session-scoped artifact store + analysis notes
     if (!this.artifactStores.has(sessionId)) {
@@ -2465,7 +2488,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     // Seed new sessions with previously learned fix pairs from disk (cross-session learning)
     let sqlErrors = this.sessionSqlErrors.get(sessionId);
     if (!sqlErrors) {
-      sqlErrors = loadLearnedSqlFixPairs(5);
+      sqlErrors = loadLearnedSqlFixPairs(5, knowledgeScopeFromOptions(options));
       this.sessionSqlErrors.set(sessionId, sqlErrors);
     }
 
@@ -2499,6 +2522,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       comparisonContext,
       skillNotesBudget: fullNotesBudget,
       outputLanguage: this.config.outputLanguage,
+      knowledgeScope: knowledgeScopeFromOptions(options),
     });
 
     // Phase 9: (removed — skillCatalog was populated but never used in prompt;

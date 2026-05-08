@@ -67,6 +67,7 @@ import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from '../agent
 import { loadOpenAIConfig, type OpenAIAgentConfig } from './openAiConfig';
 import { createOpenAIToolsFromMcpDefinitions } from './openAiToolAdapter';
 import type { ProviderScope } from '../services/providerManager';
+import type { KnowledgeScope } from '../services/scopedKnowledgeStore';
 
 interface OpenAISessionEntry {
   history?: AgentInputItem[];
@@ -129,6 +130,16 @@ function providerScopeFromOptions(options: AnalysisOptions): ProviderScope | und
     tenantId: options.tenantId,
     workspaceId: options.workspaceId,
     userId: options.userId,
+  };
+}
+
+function knowledgeScopeFromOptions(options: AnalysisOptions): KnowledgeScope | undefined {
+  if (!options.tenantId || !options.workspaceId) return undefined;
+  return {
+    tenantId: options.tenantId,
+    workspaceId: options.workspaceId,
+    userId: options.userId,
+    sourceRunId: options.runId,
   };
 }
 
@@ -737,7 +748,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
 
     let sqlErrors = this.sessionSqlErrors.get(sessionId);
     if (!sqlErrors) {
-      sqlErrors = loadLearnedSqlFixPairs(5);
+      sqlErrors = loadLearnedSqlFixPairs(5, knowledgeScopeFromOptions(options));
       this.sessionSqlErrors.set(sessionId, sqlErrors);
     }
 
@@ -770,6 +781,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       lightweight,
       skillNotesBudget,
       outputLanguage: config.outputLanguage,
+      knowledgeScope: knowledgeScopeFromOptions(options),
     });
 
     const tools = createOpenAIToolsFromMcpDefinitions(toolDefinitions);

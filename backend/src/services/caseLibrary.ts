@@ -35,11 +35,22 @@ import {
   type CurationStatus,
   makeSparkProvenance,
 } from '../types/sparkContracts';
+import {
+  enterpriseKnowledgeStoreEnabled,
+  type KnowledgeScope,
+  getScopedKnowledgeRecord,
+  listScopedKnowledgeRecords,
+  removeScopedKnowledgeRecord,
+  upsertScopedKnowledgeRecord,
+} from './scopedKnowledgeStore';
 
 interface StorageEnvelope {
   schemaVersion: 1;
   cases: CaseNode[];
 }
+
+const KNOWLEDGE_KIND = 'case_node';
+const CASE_ROW_SCOPE_PREFIX = 'case:';
 
 export interface ListOptions {
   status?: CurationStatus;
@@ -91,32 +102,62 @@ export class CaseLibrary {
    * is the dedicated `publishCase()` call so the gate cannot be
    * bypassed by a field update.
    */
-  saveCase(record: CaseNode): void {
+  saveCase(record: CaseNode, scope?: KnowledgeScope): void {
     this.load();
     if (record.status === 'published') {
       throw new Error(
         `Use publishCase() to advance a case to 'published'; saveCase() rejects published records to keep the gate auditable`,
       );
     }
+    if (enterpriseKnowledgeStoreEnabled()) {
+      upsertScopedKnowledgeRecord(
+        KNOWLEDGE_KIND,
+        record.caseId,
+        caseRowScope(record.status),
+        record,
+        scope,
+        {createdAt: record.createdAt, updatedAt: Date.now()},
+      );
+      return;
+    }
     this.cases.set(record.caseId, record);
     this.persist();
   }
 
-  getCase(caseId: string): CaseNode | undefined {
+  getCase(caseId: string, scope?: KnowledgeScope): CaseNode | undefined {
+    if (enterpriseKnowledgeStoreEnabled()) {
+      return getScopedKnowledgeRecord<CaseNode>(
+        KNOWLEDGE_KIND,
+        caseId,
+        scope,
+      )?.record;
+    }
     this.load();
     return this.cases.get(caseId);
   }
 
-  removeCase(caseId: string): boolean {
+  removeCase(caseId: string, scope?: KnowledgeScope): boolean {
+    if (enterpriseKnowledgeStoreEnabled()) {
+      return removeScopedKnowledgeRecord(KNOWLEDGE_KIND, caseId, scope);
+    }
     this.load();
     const had = this.cases.delete(caseId);
     if (had) this.persist();
     return had;
   }
 
-  listCases(opts: ListOptions = {}): CaseNode[] {
+  listCases(opts: ListOptions = {}, scope?: KnowledgeScope): CaseNode[] {
     this.load();
-    let out = Array.from(this.cases.values());
+    let out = enterpriseKnowledgeStoreEnabled()
+      ? listScopedKnowledgeRecords<CaseNode>(
+          KNOWLEDGE_KIND,
+          scope,
+          {
+            rowScope: opts.status ? caseRowScope(opts.status) : undefined,
+            rowScopePrefix: opts.status ? undefined : CASE_ROW_SCOPE_PREFIX,
+          },
+        ).map(row => row.record)
+      : Array.from(this.cases.values());
     if (opts.status) out = out.filter(c => c.status === opts.status);
     if (opts.educationalLevel)
       out = out.filter(c => c.educationalLevel === opts.educationalLevel);
@@ -139,7 +180,11 @@ export class CaseLibrary {
    * without a follow-up read. Stamps `curatedBy` / `curatedAt` from
    * the reviewer + wall clock.
    */
-  publishCase(caseId: string, opts: PublishOptions): CaseNode {
+  publishCase(
+    caseId: string,
+    opts: PublishOptions,
+    scope?: KnowledgeScope,
+  ): CaseNode {
     this.load();
     const trimmedReviewer = opts.reviewer?.trim();
     if (!trimmedReviewer) {
@@ -147,7 +192,13 @@ export class CaseLibrary {
         `Cannot publish case '${caseId}' without a reviewer signoff`,
       );
     }
-    const existing = this.cases.get(caseId);
+    const existing = enterpriseKnowledgeStoreEnabled()
+      ? getScopedKnowledgeRecord<CaseNode>(
+          KNOWLEDGE_KIND,
+          caseId,
+          scope,
+        )?.record
+      : this.cases.get(caseId);
     if (!existing) {
       throw new Error(`Cannot publish case '${caseId}': not found`);
     }
@@ -162,6 +213,17 @@ export class CaseLibrary {
       curatedBy: trimmedReviewer,
       curatedAt: Date.now(),
     };
+    if (enterpriseKnowledgeStoreEnabled()) {
+      upsertScopedKnowledgeRecord(
+        KNOWLEDGE_KIND,
+        caseId,
+        caseRowScope(published.status),
+        published,
+        scope,
+        {createdAt: published.createdAt, updatedAt: published.curatedAt},
+      );
+      return published;
+    }
     this.cases.set(caseId, published);
     this.persist();
     return published;
@@ -174,13 +236,23 @@ export class CaseLibrary {
    * reason on `traceUnavailableReason` so consumers see why the trace
    * is gone.
    */
-  archiveCase(caseId: string, opts: ArchiveOptions): CaseNode {
+  archiveCase(
+    caseId: string,
+    opts: ArchiveOptions,
+    scope?: KnowledgeScope,
+  ): CaseNode {
     this.load();
     const reason = opts.reason?.trim();
     if (!reason) {
       throw new Error(`archiveCase requires a non-empty reason`);
     }
-    const existing = this.cases.get(caseId);
+    const existing = enterpriseKnowledgeStoreEnabled()
+      ? getScopedKnowledgeRecord<CaseNode>(
+          KNOWLEDGE_KIND,
+          caseId,
+          scope,
+        )?.record
+      : this.cases.get(caseId);
     if (!existing) {
       throw new Error(`Cannot archive case '${caseId}': not found`);
     }
@@ -193,13 +265,24 @@ export class CaseLibrary {
       traceArtifactId: undefined,
       traceUnavailableReason: reason,
     };
+    if (enterpriseKnowledgeStoreEnabled()) {
+      upsertScopedKnowledgeRecord(
+        KNOWLEDGE_KIND,
+        caseId,
+        caseRowScope(archived.status),
+        archived,
+        scope,
+        {createdAt: archived.createdAt, updatedAt: Date.now()},
+      );
+      return archived;
+    }
     this.cases.set(caseId, archived);
     this.persist();
     return archived;
   }
 
   /** Stats by status — useful for the admin dashboard. */
-  getStats(): Record<CurationStatus, number> {
+  getStats(scope?: KnowledgeScope): Record<CurationStatus, number> {
     this.load();
     const out: Record<CurationStatus, number> = {
       draft: 0,
@@ -207,7 +290,14 @@ export class CaseLibrary {
       published: 0,
       private: 0,
     };
-    for (const c of this.cases.values()) out[c.status]++;
+    const cases = enterpriseKnowledgeStoreEnabled()
+      ? listScopedKnowledgeRecords<CaseNode>(
+          KNOWLEDGE_KIND,
+          scope,
+          {rowScopePrefix: CASE_ROW_SCOPE_PREFIX},
+        ).map(row => row.record)
+      : Array.from(this.cases.values());
+    for (const c of cases) out[c.status]++;
     return out;
   }
 
@@ -223,4 +313,8 @@ export class CaseLibrary {
     fs.writeFileSync(tmp, JSON.stringify(envelope, null, 2), 'utf-8');
     fs.renameSync(tmp, this.storagePath);
   }
+}
+
+function caseRowScope(status: CurationStatus): string {
+  return `${CASE_ROW_SCOPE_PREFIX}${status}`;
 }

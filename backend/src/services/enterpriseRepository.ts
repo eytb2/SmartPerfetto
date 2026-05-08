@@ -18,7 +18,8 @@ export type EnterpriseWorkspaceScopedTable =
   | 'analysis_sessions'
   | 'analysis_runs'
   | 'agent_events'
-  | 'runtime_snapshots';
+  | 'runtime_snapshots'
+  | 'memory_entries';
 
 export const ENTERPRISE_WORKSPACE_SCOPED_TABLES: readonly EnterpriseWorkspaceScopedTable[] = [
   'trace_assets',
@@ -26,6 +27,7 @@ export const ENTERPRISE_WORKSPACE_SCOPED_TABLES: readonly EnterpriseWorkspaceSco
   'analysis_runs',
   'agent_events',
   'runtime_snapshots',
+  'memory_entries',
 ];
 
 export type EnterpriseQueryCriteria = Record<string, SqliteBindValue | undefined>;

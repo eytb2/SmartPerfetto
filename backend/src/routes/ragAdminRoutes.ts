@@ -30,7 +30,9 @@ import * as path from 'path';
 
 import {Router, type Router as ExpressRouter} from 'express';
 
+import {authenticate, requireRequestContext} from '../middleware/auth';
 import {RagStore} from '../services/ragStore';
+import {knowledgeScopeFromRequestContext} from '../services/scopedKnowledgeStore';
 import type {RagSourceKind} from '../types/sparkContracts';
 
 const DEFAULT_STORAGE_PATH = path.resolve(
@@ -48,13 +50,16 @@ function getDefaultStore(): RagStore {
 export function createRagAdminRoutes(store?: RagStore): ExpressRouter {
   const s = store ?? getDefaultStore();
   const router = Router();
+  router.use(authenticate);
 
-  router.get('/stats', (_req, res) => {
-    res.json({success: true, stats: s.getStats()});
+  router.get('/stats', (req, res) => {
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
+    res.json({success: true, stats: s.getStats(scope)});
   });
 
   router.get('/chunks/:chunkId', (req, res) => {
-    const chunk = s.getChunk(req.params.chunkId);
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
+    const chunk = s.getChunk(req.params.chunkId, scope);
     if (!chunk) {
       return res.status(404).json({
         success: false,
@@ -65,7 +70,8 @@ export function createRagAdminRoutes(store?: RagStore): ExpressRouter {
   });
 
   router.delete('/chunks/:chunkId', (req, res) => {
-    const removed = s.removeChunk(req.params.chunkId);
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
+    const removed = s.removeChunk(req.params.chunkId, scope);
     if (!removed) {
       return res.status(404).json({
         success: false,
@@ -76,6 +82,7 @@ export function createRagAdminRoutes(store?: RagStore): ExpressRouter {
   });
 
   router.post('/search', (req, res) => {
+    const scope = knowledgeScopeFromRequestContext(requireRequestContext(req));
     const {query, kinds, topK} = (req.body ?? {}) as {
       query?: string;
       kinds?: RagSourceKind[];
@@ -90,6 +97,7 @@ export function createRagAdminRoutes(store?: RagStore): ExpressRouter {
     const result = s.search(query, {
       ...(kinds ? {kinds} : {}),
       ...(topK ? {topK} : {}),
+      scope,
     });
     res.json({success: true, result});
   });

@@ -47,6 +47,14 @@ import {
   type MemoryPromotionTrigger,
   type MemoryScope,
 } from '../types/sparkContracts';
+import {
+  enterpriseKnowledgeStoreEnabled,
+  type KnowledgeScope,
+  getScopedKnowledgeRecord,
+  listScopedKnowledgeRecords,
+  removeScopedKnowledgeRecord,
+  upsertScopedKnowledgeRecord,
+} from '../services/scopedKnowledgeStore';
 
 const VALID_PROMOTION_TRIGGERS: ReadonlySet<MemoryPromotionTrigger> = new Set([
   'user_feedback',
@@ -68,6 +76,9 @@ interface StorageEnvelope {
   entries: ProjectMemoryEntry[];
   promotionAudit: PromotionAuditEntry[];
 }
+
+const KNOWLEDGE_KIND = 'project_memory';
+const MEMORY_ROW_SCOPE_PREFIX = 'memory:';
 
 export interface ListOptions {
   scope?: Exclude<MemoryScope, 'session'>;
@@ -138,22 +149,56 @@ export class ProjectMemory {
    *   - scope is 'world' but promotionPolicy is missing
    *   - promotionPolicy carries a trigger outside the canonical enum
    */
-  saveProjectMemoryEntry(entry: ProjectMemoryEntry): void {
+  saveProjectMemoryEntry(
+    entry: ProjectMemoryEntry,
+    storageScope?: KnowledgeScope,
+  ): void {
     this.load();
     this.assertSaveInvariants(entry);
+    if (enterpriseKnowledgeStoreEnabled()) {
+      upsertScopedKnowledgeRecord(
+        KNOWLEDGE_KIND,
+        entry.entryId,
+        memoryRowScope(entry.scope),
+        entry,
+        storageScope,
+        {
+          createdAt: entry.createdAt,
+          updatedAt: entry.lastSeenAt ?? entry.createdAt,
+          sourceRunId: storageScope?.sourceRunId ?? storageScope?.runId,
+        },
+      );
+      return;
+    }
     this.entries.set(entry.entryId, entry);
     this.persist();
   }
 
   /** Get an entry by id. */
-  getProjectMemoryEntry(entryId: string): ProjectMemoryEntry | undefined {
+  getProjectMemoryEntry(
+    entryId: string,
+    storageScope?: KnowledgeScope,
+  ): ProjectMemoryEntry | undefined {
+    if (enterpriseKnowledgeStoreEnabled()) {
+      return getScopedKnowledgeRecord<ProjectMemoryEntry>(
+        KNOWLEDGE_KIND,
+        entryId,
+        storageScope,
+      )?.record;
+    }
     this.load();
     return this.entries.get(entryId);
   }
 
   /** Remove an entry. Returns whether it was present. The promotion
    * audit log is NOT redacted — past promotions stay traceable. */
-  removeProjectMemoryEntry(entryId: string): boolean {
+  removeProjectMemoryEntry(
+    entryId: string,
+    storageScope?: KnowledgeScope,
+  ): boolean {
+    if (enterpriseKnowledgeStoreEnabled()) {
+      return removeScopedKnowledgeRecord(KNOWLEDGE_KIND, entryId, storageScope);
+    }
     this.load();
     const had = this.entries.delete(entryId);
     if (had) this.persist();
@@ -161,9 +206,21 @@ export class ProjectMemory {
   }
 
   /** Filtered list, deterministically ordered by entryId. */
-  listProjectMemoryEntries(opts: ListOptions = {}): ProjectMemoryEntry[] {
+  listProjectMemoryEntries(
+    opts: ListOptions = {},
+    storageScope?: KnowledgeScope,
+  ): ProjectMemoryEntry[] {
     this.load();
-    let out = Array.from(this.entries.values());
+    let out = enterpriseKnowledgeStoreEnabled()
+      ? listScopedKnowledgeRecords<ProjectMemoryEntry>(
+          KNOWLEDGE_KIND,
+          storageScope,
+          {
+            rowScope: opts.scope ? memoryRowScope(opts.scope) : undefined,
+            rowScopePrefix: opts.scope ? undefined : MEMORY_ROW_SCOPE_PREFIX,
+          },
+        ).map(row => row.record)
+      : Array.from(this.entries.values());
     if (opts.scope) out = out.filter(e => e.scope === opts.scope);
     if (opts.projectKey)
       out = out.filter(e => e.projectKey === opts.projectKey);
@@ -180,13 +237,26 @@ export class ProjectMemory {
    * tags. Never writes — `lastSeenAt` and any other mutable counters
    * remain frozen even after thousands of recall calls.
    */
-  recallProjectMemory(opts: RecallOptions = {}): RecallHit[] {
+  recallProjectMemory(
+    opts: RecallOptions = {},
+    storageScope?: KnowledgeScope,
+  ): RecallHit[] {
     this.load();
     const topK = opts.topK ?? 5;
     const wantedTags = opts.tags ? new Set(opts.tags) : null;
     const candidates: RecallHit[] = [];
+    const entries = enterpriseKnowledgeStoreEnabled()
+      ? listScopedKnowledgeRecords<ProjectMemoryEntry>(
+          KNOWLEDGE_KIND,
+          storageScope,
+          {
+            rowScope: opts.scope ? memoryRowScope(opts.scope) : undefined,
+            rowScopePrefix: opts.scope ? undefined : MEMORY_ROW_SCOPE_PREFIX,
+          },
+        ).map(row => row.record)
+      : Array.from(this.entries.values());
 
-    for (const entry of this.entries.values()) {
+    for (const entry of entries) {
       if (opts.scope && entry.scope !== opts.scope) continue;
       if (opts.projectKey && entry.projectKey !== opts.projectKey) continue;
       if (entry.unsupportedReason) continue;
@@ -212,7 +282,11 @@ export class ProjectMemory {
    * any trigger outside the enum; appends a row to the promotion
    * audit log; sets `entry.promotionPolicy` to the supplied policy.
    */
-  promoteEntry(entryId: string, policy: MemoryPromotionPolicy): void {
+  promoteEntry(
+    entryId: string,
+    policy: MemoryPromotionPolicy,
+    storageScope?: KnowledgeScope,
+  ): void {
     this.load();
     if (!VALID_PROMOTION_TRIGGERS.has(policy.trigger)) {
       throw new Error(
@@ -234,7 +308,13 @@ export class ProjectMemory {
         "Promotion with trigger='skill_eval_pass' requires an `evalCaseId` field",
       );
     }
-    const entry = this.entries.get(entryId);
+    const entry = enterpriseKnowledgeStoreEnabled()
+      ? getScopedKnowledgeRecord<ProjectMemoryEntry>(
+          KNOWLEDGE_KIND,
+          entryId,
+          storageScope,
+        )?.record
+      : this.entries.get(entryId);
     if (!entry) {
       throw new Error(`Cannot promote: entry '${entryId}' not found`);
     }
@@ -249,6 +329,23 @@ export class ProjectMemory {
       promotionLevel: (entry.promotionLevel ?? 0) + 1,
       promotionPolicy: policy,
     };
+    if (enterpriseKnowledgeStoreEnabled()) {
+      upsertScopedKnowledgeRecord(
+        KNOWLEDGE_KIND,
+        entryId,
+        memoryRowScope(promoted.scope),
+        promoted,
+        storageScope,
+        {
+          createdAt: promoted.createdAt,
+          updatedAt: Date.now(),
+          sourceRunId: storageScope?.sourceRunId ?? storageScope?.runId,
+        },
+      );
+      this.auditLog.push({entryId, policy, auditedAt: Date.now()});
+      this.persist();
+      return;
+    }
     this.entries.set(entryId, promoted);
     this.auditLog.push({entryId, policy, auditedAt: Date.now()});
     this.persist();
@@ -261,10 +358,17 @@ export class ProjectMemory {
   }
 
   /** Count entries currently in storage by scope. */
-  getStats(): Record<'project' | 'world', number> {
+  getStats(storageScope?: KnowledgeScope): Record<'project' | 'world', number> {
     this.load();
     const out = {project: 0, world: 0};
-    for (const entry of this.entries.values()) {
+    const entries = enterpriseKnowledgeStoreEnabled()
+      ? listScopedKnowledgeRecords<ProjectMemoryEntry>(
+          KNOWLEDGE_KIND,
+          storageScope,
+          {rowScopePrefix: MEMORY_ROW_SCOPE_PREFIX},
+        ).map(row => row.record)
+      : Array.from(this.entries.values());
+    for (const entry of entries) {
       if (entry.scope === 'project') out.project++;
       else if (entry.scope === 'world') out.world++;
     }
@@ -306,4 +410,11 @@ export class ProjectMemory {
     fs.writeFileSync(tmp, JSON.stringify(envelope, null, 2), 'utf-8');
     fs.renameSync(tmp, this.storagePath);
   }
+}
+
+function memoryRowScope(scope: MemoryScope): string {
+  if (scope === 'session') {
+    throw new Error(`ProjectMemory does not store session-scope entries`);
+  }
+  return `${MEMORY_ROW_SCOPE_PREFIX}${scope}`;
 }
