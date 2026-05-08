@@ -60,9 +60,9 @@ state is intentionally conservative:
 Latest acceptance-evidence PR validation:
 
 - PR: https://github.com/Gracker/SmartPerfetto/pull/129
-- Head: `50deb113`
+- Head: `11f57643`
 - Remote checks: `quality`, `gate`, and `docker-smoke` passed on run
-  `25583529012`.
+  `25583825465`.
 - Current readiness audit:
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run enterprise:readiness-audit -- --require-ready`
   - Result: blocked as expected until README §0.4.3, §0.8, and the terminal
@@ -73,6 +73,7 @@ Latest acceptance-evidence PR validation:
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run typecheck`
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run test:core`
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run test:scene-trace-regression`
+  - `PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run verify:pr`
   - `git diff --check`
 
 ## Known Limits Before Final Release
