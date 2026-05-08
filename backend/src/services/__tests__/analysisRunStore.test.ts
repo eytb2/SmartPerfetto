@@ -85,6 +85,43 @@ describe('analysis run store', () => {
     }
   });
 
+  it('reopens the enterprise DB handle when the configured DB path changes', async () => {
+    const firstDbPath = process.env[ENTERPRISE_DB_PATH_ENV]!;
+    const firstScope = scope({ runId: 'run-first', sessionId: 'session-first' });
+    persistAnalysisRunState(firstScope, 'running', { now: 1_777_000_000_000 });
+
+    process.env[ENTERPRISE_DB_PATH_ENV] = path.join(tmpDir, 'enterprise-reconnected.sqlite');
+    const secondScope = scope({ runId: 'run-second', sessionId: 'session-second' });
+    persistAnalysisRunState(secondScope, 'running', { now: 1_777_000_010_000 });
+
+    expect(getAnalysisRunLifecycle(secondScope, 'run-second')).toEqual(expect.objectContaining({
+      id: 'run-second',
+      status: 'running',
+    }));
+    expect(getAnalysisRunLifecycle(firstScope, 'run-first')).toBeNull();
+
+    const firstDb = openEnterpriseDb(firstDbPath);
+    try {
+      expect(firstDb.prepare('SELECT id, status FROM analysis_runs WHERE id = ?').get('run-first')).toEqual({
+        id: 'run-first',
+        status: 'running',
+      });
+      expect(firstDb.prepare('SELECT id FROM analysis_runs WHERE id = ?').get('run-second')).toBeUndefined();
+    } finally {
+      firstDb.close();
+    }
+
+    const secondDb = openEnterpriseDb(process.env[ENTERPRISE_DB_PATH_ENV]!);
+    try {
+      expect(secondDb.prepare('SELECT id, status FROM analysis_runs WHERE id = ?').get('run-second')).toEqual({
+        id: 'run-second',
+        status: 'running',
+      });
+    } finally {
+      secondDb.close();
+    }
+  });
+
   it('marks terminal runs stale for cleanup decisions', () => {
     const runScope = scope({ runId: 'run-failed' });
 
