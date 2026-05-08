@@ -128,6 +128,45 @@ describe('enterprise readiness audit', () => {
     }
   });
 
+  it('rejects load-test preflight output even if it contains a passing marker', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
+    try {
+      const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
+      const loadTestReportPath = await writeFixture(
+        tmpDir,
+        'load.md',
+        [
+          '# Enterprise Acceptance Load Test Preflight',
+          'Preflight status: ready',
+          'Acceptance status: passed',
+          'This preflight does not start analysis runs and is not README §0.8 acceptance evidence.',
+        ].join('\n'),
+      );
+      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', 'Coverage status: complete\n');
+      const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
+
+      const report = buildEnterpriseReadinessAuditReport({
+        readmePath,
+        acceptanceEvidencePath,
+        loadTestReportPath,
+        rssBenchmarkPath,
+        releaseNotesPath,
+        requireReady: true,
+      });
+
+      expect(report.ready).toBe(false);
+      expect(report.checks.find(check => check.id === 'load-test-report-final')).toMatchObject({
+        status: 'blocked',
+        evidence: expect.arrayContaining([
+          'contains preflight marker',
+        ]),
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('requires all ten D1-D10 rows, not just a checked §0 summary', async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
     try {

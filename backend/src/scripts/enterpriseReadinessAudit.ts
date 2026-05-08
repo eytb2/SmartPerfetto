@@ -222,14 +222,16 @@ function auditLoadReport(markdown: string, filePath: string): ReadinessCheck {
   const lower = markdown.toLowerCase();
   const hasPendingStatus = lower.includes('status: pending');
   const hasAcceptancePass = markdown.includes('Acceptance status: passed');
+  const hasPreflightMarker = lower.includes('preflight');
 
-  if (hasPendingStatus || !hasAcceptancePass) {
+  if (hasPendingStatus || !hasAcceptancePass || hasPreflightMarker) {
     return blocked(
       'load-test-report-final',
       `${path.basename(filePath)} is not a final passing load-test report.`,
       [
         hasPendingStatus ? 'contains Status: pending' : 'does not contain Status: pending',
         hasAcceptancePass ? 'contains passing acceptance marker' : 'missing passing acceptance marker',
+        hasPreflightMarker ? 'contains preflight marker' : 'does not contain preflight marker',
       ],
     );
   }
