@@ -12,6 +12,10 @@ import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../config';
 import { ENTERPRISE_DB_PATH_ENV } from '../../services/enterpriseDb';
 import { ENTERPRISE_DATA_DIR_ENV, writeTraceMetadata } from '../../services/traceMetadataStore';
 import {
+  persistSerializedAgentEvent,
+  resetAgentEventStoreForTests,
+} from '../../services/agentEventStore';
+import {
   getTraceProcessorLeaseStore,
   setTraceProcessorLeaseStoreForTests,
 } from '../../services/traceProcessorLeaseStore';
@@ -64,6 +68,7 @@ afterEach(async () => {
   jest.restoreAllMocks();
   setTraceProcessorServiceForTests(null);
   setTraceProcessorLeaseStoreForTests(null);
+  resetAgentEventStoreForTests();
   if (originalApiKey === undefined) {
     delete process.env.SMARTPERFETTO_API_KEY;
   } else {
@@ -216,6 +221,100 @@ describe('agent route RBAC', () => {
         mode: 'isolated',
       });
       expect(['active', 'idle']).toContain(leases[0].state);
+    } finally {
+      leaseStore?.close();
+      setTraceProcessorLeaseStoreForTests(null);
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('replays persisted terminal SSE events before falling back to the in-memory buffer', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-agent-event-replay-'));
+    let leaseStore: ReturnType<typeof getTraceProcessorLeaseStore> | null = null;
+    try {
+      const traceId = 'trace-agent-event-replay';
+      const tracePath = path.join(tmpDir, `${traceId}.trace`);
+      await fs.writeFile(tracePath, 'trace bytes');
+      delete process.env.SMARTPERFETTO_API_KEY;
+      process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+      process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+      process.env[ENTERPRISE_DB_PATH_ENV] = path.join(tmpDir, 'enterprise.sqlite');
+      process.env[ENTERPRISE_DATA_DIR_ENV] = path.join(tmpDir, 'data');
+      process.env.UPLOAD_DIR = path.join(tmpDir, 'uploads');
+
+      await writeTraceMetadata({
+        id: traceId,
+        filename: `${traceId}.trace`,
+        size: 11,
+        uploadedAt: new Date().toISOString(),
+        status: 'ready',
+        path: tracePath,
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-a',
+        userId: 'analyst-user',
+      });
+      setTraceProcessorServiceForTests({
+        getOrLoadTrace: jest.fn(async () => ({
+          id: traceId,
+          filename: `${traceId}.trace`,
+          size: 11,
+          filePath: tracePath,
+          uploadTime: new Date(),
+          status: 'ready',
+        })),
+        getTrace: jest.fn(() => ({
+          id: traceId,
+          filename: `${traceId}.trace`,
+          size: 11,
+          filePath: tracePath,
+          uploadTime: new Date(),
+          status: 'ready',
+        })),
+        ensureProcessorForLease: jest.fn(async () => undefined),
+        runWithLease: jest.fn(() => new Promise<unknown>(() => undefined)),
+        query: jest.fn(async () => ({ columns: [], rows: [], durationMs: 1 })),
+      } as any);
+
+      const analyzeRes = await analystHeaders(request(makeApp()).post('/api/agent/v1/analyze'))
+        .send({ traceId, query: 'analyze this trace' });
+
+      expect(analyzeRes.status).toBe(200);
+      const { sessionId, runId } = analyzeRes.body;
+      persistSerializedAgentEvent({
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-a',
+        userId: 'analyst-user',
+        sessionId,
+        runId,
+        traceId,
+        query: 'analyze this trace',
+      }, {
+        cursor: 99,
+        eventType: 'analysis_completed',
+        eventData: JSON.stringify({
+          type: 'analysis_completed',
+          data: { reportUrl: '/api/reports/report-from-db' },
+        }),
+        createdAt: 1_777_000_002_000,
+      });
+
+      const streamRes = await analystHeaders(
+        request(makeApp())
+          .get(`/api/agent/v1/${sessionId}/stream`)
+          .set('Last-Event-ID', '98')
+          .set('Accept', 'text/event-stream'),
+      );
+
+      expect(streamRes.status).toBe(200);
+      expect(streamRes.text).toContain('id: 99');
+      expect(streamRes.text).toContain('event: analysis_completed');
+      expect(streamRes.text).toContain('/api/reports/report-from-db');
+      leaseStore = getTraceProcessorLeaseStore();
+      expect(leaseStore.listLeases({
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-a',
+        userId: 'analyst-user',
+      }, { traceId })).toHaveLength(1);
     } finally {
       leaseStore?.close();
       setTraceProcessorLeaseStoreForTests(null);

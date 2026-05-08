@@ -81,7 +81,14 @@ import {
   appendReplayableSseEvent,
   hasTerminalReplayAfter,
   parseLastEventId,
+  TERMINAL_SSE_EVENT_TYPES,
 } from '../assistant/stream/sessionSseReplay';
+import {
+  listSerializedAgentEventsAfter,
+  persistSerializedAgentEvent,
+  type AgentEventPersistenceScope,
+  type SerializedAgentEvent,
+} from '../services/agentEventStore';
 import {
   AgentAnalyzeSessionService,
   AnalyzeSessionPreparationError,
@@ -378,6 +385,85 @@ interface AnalysisSession {
 const assistantAppService = new AssistantApplicationService<AnalysisSession>();
 const streamProjector = new StreamProjector();
 
+function agentEventScopeFromSession(session: AnalysisSession): AgentEventPersistenceScope | null {
+  const run = session.activeRun || session.lastRun;
+  if (
+    !resolveFeatureConfig().enterprise ||
+    !session.tenantId ||
+    !session.workspaceId ||
+    !run?.runId
+  ) {
+    return null;
+  }
+  return {
+    tenantId: session.tenantId,
+    workspaceId: session.workspaceId,
+    userId: session.userId,
+    sessionId: session.sessionId,
+    runId: run.runId,
+    traceId: session.traceId,
+    query: run.query || session.query,
+  };
+}
+
+function persistBufferedAgentEvent(session: AnalysisSession, event: SerializedAgentEvent): void {
+  const scope = agentEventScopeFromSession(session);
+  if (!scope) return;
+  try {
+    persistSerializedAgentEvent(scope, event);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    session.logger.warn('AgentEvents', 'Failed to persist SSE event', {
+      sessionId: session.sessionId,
+      runId: scope.runId,
+      eventType: event.eventType,
+      cursor: event.cursor,
+      error: message,
+    });
+  }
+}
+
+function replayPersistedAgentEvents(
+  session: AnalysisSession,
+  res: express.Response,
+  lastEventId: number,
+): { replayed: number; includesTerminal: boolean; lastCursor: number } {
+  const scope = agentEventScopeFromSession(session);
+  if (!scope) return { replayed: 0, includesTerminal: false, lastCursor: lastEventId };
+  let events: SerializedAgentEvent[] = [];
+  try {
+    events = listSerializedAgentEventsAfter(scope, scope.runId, lastEventId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    session.logger.warn('AgentEvents', 'Failed to load persisted SSE replay events', {
+      sessionId: session.sessionId,
+      runId: scope.runId,
+      lastEventId,
+      error: message,
+    });
+    return { replayed: 0, includesTerminal: false, lastCursor: lastEventId };
+  }
+
+  let replayed = 0;
+  let includesTerminal = false;
+  let lastCursor = lastEventId;
+  for (const event of events) {
+    try {
+      res.write(`id: ${event.cursor}\n`);
+      res.write(`event: ${event.eventType}\n`);
+      res.write(`data: ${event.eventData}\n\n`);
+      replayed++;
+      lastCursor = event.cursor;
+      if (TERMINAL_SSE_EVENT_TYPES.has(event.eventType)) {
+        includesTerminal = true;
+      }
+    } catch {
+      break;
+    }
+  }
+  return { replayed, includesTerminal, lastCursor };
+}
+
 function sendReplayableSessionEvent(
   session: AnalysisSession,
   res: express.Response,
@@ -385,6 +471,12 @@ function sendReplayableSessionEvent(
   payload: unknown
 ): number {
   const event = appendReplayableSseEvent(session, eventType, payload);
+  persistBufferedAgentEvent(session, {
+    cursor: event.seqId,
+    eventType: event.eventType,
+    eventData: event.eventData,
+    createdAt: Date.now(),
+  });
   streamProjector.sendEvent(res, eventType, payload, event.seqId);
   return event.seqId;
 }
@@ -1189,12 +1281,28 @@ function handleSessionStream(req: express.Request, res: express.Response, sessio
     ...buildStreamObservability(session),
   });
 
+  let ringReplayAfter = lastEventId;
+  if (lastEventId !== null) {
+    const persistedReplay = replayPersistedAgentEvents(session, res, lastEventId);
+    ringReplayAfter = persistedReplay.lastCursor;
+    if (persistedReplay.replayed > 0) {
+      console.log(
+        `[AgentRoutes] Replayed ${persistedReplay.replayed} persisted SSE events for ${sessionId} ` +
+        `(after seqId ${lastEventId})`
+      );
+    }
+    if (persistedReplay.includesTerminal) {
+      res.end();
+      return;
+    }
+  }
+
   // Replay missed events from the ring buffer if reconnecting.
-  if (lastEventId !== null && session.sseEventBuffer.length > 0) {
-    const replayIncludesTerminal = hasTerminalReplayAfter(session, lastEventId);
-    const replayed = streamProjector.replayBufferedEvents(res, session.sseEventBuffer, lastEventId);
+  if (ringReplayAfter !== null && session.sseEventBuffer.length > 0) {
+    const replayIncludesTerminal = hasTerminalReplayAfter(session, ringReplayAfter);
+    const replayed = streamProjector.replayBufferedEvents(res, session.sseEventBuffer, ringReplayAfter);
     if (replayed > 0) {
-      console.log(`[AgentRoutes] Replayed ${replayed} missed SSE events for ${sessionId} (after seqId ${lastEventId})`);
+      console.log(`[AgentRoutes] Replayed ${replayed} missed SSE events for ${sessionId} (after seqId ${ringReplayAfter})`);
     }
     if (replayIncludesTerminal) {
       res.end();
@@ -3070,6 +3178,12 @@ function broadcastToAgentDrivenClients(sessionId: string, update: StreamingUpdat
     seqId,
     onBufferedEvent: (event) => {
       session.sseEventBuffer.push(event);
+      persistBufferedAgentEvent(session, {
+        cursor: event.seqId,
+        eventType: event.eventType,
+        eventData: event.eventData,
+        createdAt: Date.now(),
+      });
       // Trim ring buffer to cap
       if (session.sseEventBuffer.length > SSE_RING_BUFFER_SIZE) {
         session.sseEventBuffer.splice(0, session.sseEventBuffer.length - SSE_RING_BUFFER_SIZE);
