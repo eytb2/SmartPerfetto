@@ -170,6 +170,8 @@ describe('enterprise acceptance load test helpers', () => {
       startFailures: 1,
       maxRunning: 10,
       maxPending: 5,
+      runningInRangeSnapshots: 2,
+      pendingSnapshots: 2,
     }));
     expect(summary.runtime).toEqual({
       maxQueueLength: 9,
@@ -228,6 +230,19 @@ describe('enterprise acceptance load test helpers', () => {
             unknown: 0,
           },
         },
+        {
+          timestamp: '2026-05-09T00:00:02.000Z',
+          counts: {
+            queued: 0,
+            pending: 1,
+            running: 5,
+            completed: 1,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
       ],
       runtimeSamples: [
         {
@@ -254,6 +269,55 @@ describe('enterprise acceptance load test helpers', () => {
     ])).toEqual({
       passed: false,
       missing: ['observed online users < 50'],
+    });
+  });
+
+  it('requires running and pending state to be stable across multiple samples', () => {
+    const opts = options({ onlineUsers: 50 });
+    const runtimeSamples: RuntimeSample[] = [
+      {
+        timestamp: '2026-05-09T00:00:01.000Z',
+        queueLength: 1,
+        workerRssBytes: 256,
+        leaseRssBytes: null,
+        llmCostUsd: 0.1,
+        llmCalls: 1,
+      },
+    ];
+    const summary = summarizeLoadTest({
+      options: opts,
+      httpSamples: onlineUserSamples(50),
+      runs: [],
+      statusSnapshots: [
+        {
+          timestamp: '2026-05-09T00:00:01.000Z',
+          counts: {
+            queued: 1,
+            pending: 1,
+            running: 5,
+            completed: 0,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
+      ],
+      runtimeSamples,
+    });
+
+    expect(summary.analysis).toEqual(expect.objectContaining({
+      maxRunning: 5,
+      maxPending: 2,
+      runningInRangeSnapshots: 1,
+      pendingSnapshots: 1,
+    }));
+    expect(evaluateAcceptance(opts, summary, runtimeSamples)).toEqual({
+      passed: false,
+      missing: [
+        'running runs were not stable for at least 2 samples',
+        'queued/pending runs were not stable for at least 2 samples',
+      ],
     });
   });
 
@@ -287,6 +351,19 @@ describe('enterprise acceptance load test helpers', () => {
             unknown: 0,
           },
         },
+        {
+          timestamp: '2026-05-09T00:00:02.000Z',
+          counts: {
+            queued: 0,
+            pending: 1,
+            running: 5,
+            completed: 1,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
       ],
       runtimeSamples: [
         {
@@ -305,6 +382,8 @@ describe('enterprise acceptance load test helpers', () => {
     expect(markdown).toContain('| Online users | 50 |');
     expect(markdown).toContain('| Observed online users | 50 |');
     expect(markdown).toContain('| Overall p50 | 10ms |');
+    expect(markdown).toContain('| Running-in-range samples | 2 |');
+    expect(markdown).toContain('| Queued/pending samples | 2 |');
     expect(markdown).toContain('| Max worker RSS | 256.0 MiB |');
     expect(markdown).toContain('| Final LLM cost | 1.23 |');
   });

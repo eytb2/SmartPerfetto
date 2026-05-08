@@ -11,8 +11,9 @@ executed in this environment.
 The final report must cover:
 
 - 50 distinct online users with successful sampled requests.
-- 5 to 15 simultaneously running analysis runs.
-- Additional queued or pending runs.
+- 5 to 15 simultaneously running analysis runs, observed in at least two
+  polling samples.
+- Additional queued or pending runs, observed in at least two polling samples.
 - p50 and p95 HTTP latency.
 - Error rate.
 - worker / lease RSS.
@@ -53,3 +54,6 @@ If the backend requires `SMARTPERFETTO_API_KEY`, add:
   with measured output and `acceptance.passed = true` in the JSON report.
 - `acceptance.passed` requires observing successful requests from 50 distinct
   `online-user-*` clients; the configured `--users` value alone is not enough.
+- `acceptance.passed` also requires at least two status samples with 5-15
+  running runs and at least two status samples with queued/pending runs, so a
+  single transient spike cannot satisfy the "stable pending queue" requirement.

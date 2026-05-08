@@ -83,6 +83,8 @@ export interface EnterpriseLoadTestSummary {
     startFailures: number;
     maxRunning: number;
     maxPending: number;
+    runningInRangeSnapshots: number;
+    pendingSnapshots: number;
     terminal: Record<string, number>;
   };
   runtime: {
@@ -300,6 +302,13 @@ export function summarizeLoadTest(input: {
   const maxPending = Math.max(0, ...input.statusSnapshots.map(snapshot =>
     (snapshot.counts.pending ?? 0) + (snapshot.counts.queued ?? 0)
   ));
+  const runningInRangeSnapshots = input.statusSnapshots.filter((snapshot) => {
+    const running = snapshot.counts.running ?? 0;
+    return running >= 5 && running <= 15;
+  }).length;
+  const pendingSnapshots = input.statusSnapshots.filter(snapshot =>
+    ((snapshot.counts.pending ?? 0) + (snapshot.counts.queued ?? 0)) > 0
+  ).length;
   const failedRequests = input.httpSamples.filter(sample => !sample.ok).length;
   const lastRuntimeSample = input.runtimeSamples.length > 0
     ? input.runtimeSamples[input.runtimeSamples.length - 1]
@@ -326,6 +335,8 @@ export function summarizeLoadTest(input: {
       startFailures: input.runs.filter(run => !run.startOk).length,
       maxRunning,
       maxPending,
+      runningInRangeSnapshots,
+      pendingSnapshots,
       terminal,
     },
     runtime: {
@@ -347,8 +358,14 @@ export function evaluateAcceptance(
   if (options.onlineUsers < 50) missing.push('onlineUsers < 50');
   if (summary.onlineUsers.observed < 50) missing.push('observed online users < 50');
   if (summary.analysis.maxRunning < 5) missing.push('observed max running runs < 5');
-  if (summary.analysis.maxRunning > 15) missing.push('observed max running runs > 15');
+  else if (summary.analysis.maxRunning > 15) missing.push('observed max running runs > 15');
+  else if (summary.analysis.runningInRangeSnapshots < 2) {
+    missing.push('running runs were not stable for at least 2 samples');
+  }
   if (summary.analysis.maxPending < 1) missing.push('no queued/pending runs observed');
+  else if (summary.analysis.pendingSnapshots < 2) {
+    missing.push('queued/pending runs were not stable for at least 2 samples');
+  }
   if (summary.latency.overall.p50Ms === null || summary.latency.overall.p95Ms === null) {
     missing.push('missing p50/p95 latency samples');
   }
@@ -644,6 +661,8 @@ export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): s
   lines.push(`| Start failures | ${report.summary.analysis.startFailures} |`);
   lines.push(`| Max running runs observed | ${report.summary.analysis.maxRunning} |`);
   lines.push(`| Max queued/pending runs observed | ${report.summary.analysis.maxPending} |`);
+  lines.push(`| Running-in-range samples | ${report.summary.analysis.runningInRangeSnapshots} |`);
+  lines.push(`| Queued/pending samples | ${report.summary.analysis.pendingSnapshots} |`);
   lines.push(`| Max queue length | ${report.summary.runtime.maxQueueLength ?? 'n/a'} |`);
   lines.push(`| Max worker RSS | ${formatBytes(report.summary.runtime.maxWorkerRssBytes)} |`);
   lines.push(`| Max lease RSS | ${formatBytes(report.summary.runtime.maxLeaseRssBytes)} |`);
