@@ -3,10 +3,19 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import {EventEmitter} from 'events';
+import fs from 'fs/promises';
 import http from 'http';
+import os from 'os';
+import path from 'path';
 import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
 import {traceProcessorConfig} from '../../config';
 import {resetPortPool} from '../portPool';
+import {
+  TP_ADMISSION_CONTROL_ENV,
+  TP_ESTIMATE_MULTIPLIER_ENV,
+  TP_MIN_ESTIMATE_BYTES_ENV,
+  TP_RAM_BUDGET_BYTES_ENV,
+} from '../traceProcessorRamBudget';
 import {
   ExternalRpcProcessor,
   QueryResult,
@@ -37,7 +46,22 @@ async function flushPromises(): Promise<void> {
   await Promise.resolve();
 }
 
+function restoreEnvValue(key: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+}
+
 describe('WorkingTraceProcessor enterprise isolation anchors', () => {
+  const originalAdmissionEnv = {
+    admission: process.env[TP_ADMISSION_CONTROL_ENV],
+    budget: process.env[TP_RAM_BUDGET_BYTES_ENV],
+    multiplier: process.env[TP_ESTIMATE_MULTIPLIER_ENV],
+    minEstimate: process.env[TP_MIN_ESTIMATE_BYTES_ENV],
+  };
+
   beforeEach(() => {
     TraceProcessorFactory.cleanup();
     resetPortPool();
@@ -48,6 +72,10 @@ describe('WorkingTraceProcessor enterprise isolation anchors', () => {
     jest.useRealTimers();
     TraceProcessorFactory.cleanup();
     resetPortPool();
+    restoreEnvValue(TP_ADMISSION_CONTROL_ENV, originalAdmissionEnv.admission);
+    restoreEnvValue(TP_RAM_BUDGET_BYTES_ENV, originalAdmissionEnv.budget);
+    restoreEnvValue(TP_ESTIMATE_MULTIPLIER_ENV, originalAdmissionEnv.multiplier);
+    restoreEnvValue(TP_MIN_ESTIMATE_BYTES_ENV, originalAdmissionEnv.minEstimate);
   });
 
   it('does not destroy an owned processor when a single HTTP query hits the wall-clock timeout', async () => {
@@ -147,5 +175,23 @@ describe('WorkingTraceProcessor enterprise isolation anchors', () => {
 
     expect(TraceProcessorFactory.remove('trace-b')).toBe(true);
     expect(destroySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects owned processor creation before spawn when RAM admission is over budget', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-tp-admission-'));
+    const tracePath = path.join(tmpDir, 'trace-a.perfetto');
+    await fs.writeFile(tracePath, Buffer.alloc(4096));
+    process.env[TP_ADMISSION_CONTROL_ENV] = 'true';
+    process.env[TP_RAM_BUDGET_BYTES_ENV] = '1';
+    process.env[TP_ESTIMATE_MULTIPLIER_ENV] = '1';
+    process.env[TP_MIN_ESTIMATE_BYTES_ENV] = '1024';
+
+    try {
+      await expect(TraceProcessorFactory.create('trace-admission', tracePath))
+        .rejects.toMatchObject({ name: 'TraceProcessorAdmissionError' });
+      expect(TraceProcessorFactory.get('trace-admission')).toBeUndefined();
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
   });
 });

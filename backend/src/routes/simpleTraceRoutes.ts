@@ -115,6 +115,20 @@ function markLeaseReadyIfNew(
   return store.markReady(scope, starting.id);
 }
 
+function recordLeaseRssFromProcessor(
+  lease: TraceProcessorLeaseRecord,
+  context: RequestContext,
+): TraceProcessorLeaseRecord {
+  const processor = TraceProcessorFactory.getStats().processors
+    .find(item => item.traceId === lease.traceId);
+  const rssBytes = processor?.rssBytes
+    ?? processor?.peakRssBytes
+    ?? processor?.startupRssBytes
+    ?? null;
+  if (rssBytes === null) return lease;
+  return getTraceProcessorLeaseStore().recordRss(leaseScopeFromContext(context), lease.id, rssBytes);
+}
+
 function acquireFrontendTraceLease(
   context: RequestContext,
   traceId: string,
@@ -135,7 +149,7 @@ function acquireFrontendTraceLease(
       },
     },
   );
-  return markLeaseReadyIfNew(lease, context);
+  return recordLeaseRssFromProcessor(markLeaseReadyIfNew(lease, context), context);
 }
 
 function acquireManualRegisterLease(
@@ -156,7 +170,7 @@ function acquireManualRegisterLease(
       },
     },
   );
-  return markLeaseReadyIfNew(lease, context);
+  return recordLeaseRssFromProcessor(markLeaseReadyIfNew(lease, context), context);
 }
 
 async function finalizeTraceUpload(
@@ -522,14 +536,21 @@ router.get('/stats', async (req, res) => {
     const traceService = getTraceProcessorService();
     const traces = traceService.getAllTraces().filter(t => ownedTraceIds.has(t.id));
     const allocations = portPoolStats.allocations.filter(a => ownedTraceIds.has(a.traceId));
+    const processors = processorStats.processors.filter(processor => ownedTraceIds.has(processor.traceId));
+    const queueLength = processors.reduce((sum, processor) => {
+      const worker = processor.sqlWorker;
+      return sum + (worker ? worker.queuedP0 + worker.queuedP1 + worker.queuedP2 : 0);
+    }, 0);
     const leases = enterpriseLeasesEnabled()
       ? getTraceProcessorLeaseStore().listLeases(leaseScopeFromContext(context))
         .filter(lease => ownedTraceIds.has(lease.traceId))
       : [];
+    const activeLeases = leases.filter(lease => lease.state !== 'released' && lease.state !== 'failed');
 
     res.json({
       success: true,
       stats: {
+        ramBudget: processorStats.ramBudget,
         portPool: {
           total: portPoolStats.total,
           available: portPoolStats.available,
@@ -541,12 +562,16 @@ router.get('/stats', async (req, res) => {
           })),
         },
         processors: {
-          count: processorStats.traceIds.filter(traceId => ownedTraceIds.has(traceId)).length,
-          traceIds: processorStats.traceIds.filter(traceId => ownedTraceIds.has(traceId)),
-          items: processorStats.processors.filter(processor => ownedTraceIds.has(processor.traceId)),
+          count: processors.length,
+          traceIds: processors.map(processor => processor.traceId),
+          queueLength,
+          items: processors,
         },
         leases: {
           count: leases.length,
+          activeCount: activeLeases.length,
+          crashCount: leases.filter(lease => lease.state === 'crashed').length,
+          holderCount: leases.reduce((sum, lease) => sum + lease.holderCount, 0),
           items: leases.map(lease => ({
             id: lease.id,
             traceId: lease.traceId,

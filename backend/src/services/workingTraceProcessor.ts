@@ -24,6 +24,11 @@ import {
   TraceProcessorSqlWorker,
   type TraceProcessorQueryOptions,
 } from './traceProcessorSqlWorker';
+import {
+  assertTraceProcessorAdmission,
+  getTraceProcessorRamBudgetStats,
+  type TraceProcessorRamBudgetStats,
+} from './traceProcessorRamBudget';
 
 const IS_TEST_ENV = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
 
@@ -183,6 +188,9 @@ export interface TraceProcessorRuntimeStats {
   httpPort: number;
   pid?: number;
   rssBytes: number | null;
+  startupRssBytes?: number | null;
+  peakRssBytes?: number | null;
+  lastRssSampleAt?: number | null;
   rssSampleSource: 'procfs' | 'ps' | 'unavailable' | 'external';
   rssSampleError?: string;
   sqlWorker?: {
@@ -220,6 +228,12 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
   private serverReady = false;
   private _activeQueries = 0;
   private readonly sqlWorker: TraceProcessorSqlWorker;
+  private startupRssBytes: number | null = null;
+  private peakRssBytes: number | null = null;
+  private lastRssBytes: number | null = null;
+  private lastRssSampleAt: number | null = null;
+  private lastRssSampleSource: TraceProcessorRuntimeStats['rssSampleSource'] = 'unavailable';
+  private lastRssSampleError: string | undefined;
   private _criticalModulesLoaded = false;
   private _criticalModulesLoadPromise: Promise<void> | null = null;
   private _criticalModulesLoadFailures = 0;
@@ -231,8 +245,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
   }
 
   public getRuntimeStats(): TraceProcessorRuntimeStats {
-    const pid = this.process?.pid;
-    const rssSample = pid ? readProcessRssBytes(pid) : null;
+    const rssSample = this.sampleRss();
     return {
       kind: 'owned_process',
       processorId: this.id,
@@ -240,11 +253,32 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
       status: this.status,
       activeQueries: this.activeQueries,
       httpPort: this.httpPort,
-      ...(pid ? { pid } : {}),
-      rssBytes: rssSample?.rssBytes ?? null,
-      rssSampleSource: rssSample?.source ?? 'unavailable',
-      ...(rssSample?.error ? { rssSampleError: rssSample.error } : {}),
+      ...(this.process?.pid ? { pid: this.process.pid } : {}),
+      rssBytes: rssSample.rssBytes,
+      startupRssBytes: this.startupRssBytes,
+      peakRssBytes: this.peakRssBytes,
+      lastRssSampleAt: this.lastRssSampleAt,
+      rssSampleSource: rssSample.source,
+      ...(rssSample.error ? { rssSampleError: rssSample.error } : {}),
       sqlWorker: this.sqlWorker.getStats(),
+    };
+  }
+
+  private sampleRss(): { rssBytes: number | null; source: TraceProcessorRuntimeStats['rssSampleSource']; error?: string } {
+    const pid = this.process?.pid;
+    const rssSample = pid ? readProcessRssBytes(pid) : null;
+    this.lastRssBytes = rssSample?.rssBytes ?? null;
+    this.lastRssSampleSource = rssSample?.source ?? 'unavailable';
+    this.lastRssSampleError = rssSample?.error;
+    this.lastRssSampleAt = Date.now();
+    if (this.lastRssBytes !== null) {
+      if (this.startupRssBytes === null) this.startupRssBytes = this.lastRssBytes;
+      this.peakRssBytes = Math.max(this.peakRssBytes ?? 0, this.lastRssBytes);
+    }
+    return {
+      rssBytes: this.lastRssBytes,
+      source: this.lastRssSampleSource,
+      ...(this.lastRssSampleError ? { error: this.lastRssSampleError } : {}),
     };
   }
 
@@ -293,6 +327,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
       if (testResult.error) {
         throw new Error(`Server verification failed: ${testResult.error}`);
       }
+      this.sampleRss();
 
       this.status = 'ready';
       console.log(`[TraceProcessor] Processor ${this.id} ready (HTTP mode) for trace ${this.traceId}`);
@@ -727,6 +762,13 @@ export class TraceProcessorFactory {
       }
     }
 
+    const traceSizeBytes = fs.statSync(tracePath).size;
+    assertTraceProcessorAdmission({
+      traceId,
+      traceSizeBytes,
+      processors: Array.from(this.processors.values()).map(processor => processor.getRuntimeStats()),
+    });
+
     const maxAttempts = 8;
     let lastError: any;
 
@@ -808,11 +850,18 @@ export class TraceProcessorFactory {
     this.externalProcessorsByPort.clear();
   }
 
-  static getStats(): { count: number; traceIds: string[]; processors: TraceProcessorRuntimeStats[] } {
+  static getStats(): {
+    count: number;
+    traceIds: string[];
+    processors: TraceProcessorRuntimeStats[];
+    ramBudget: TraceProcessorRamBudgetStats;
+  } {
+    const processors = Array.from(this.processors.values()).map(processor => processor.getRuntimeStats());
     return {
       count: this.processors.size,
       traceIds: Array.from(this.processors.keys()),
-      processors: Array.from(this.processors.values()).map(processor => processor.getRuntimeStats()),
+      processors,
+      ramBudget: getTraceProcessorRamBudgetStats(processors),
     };
   }
 

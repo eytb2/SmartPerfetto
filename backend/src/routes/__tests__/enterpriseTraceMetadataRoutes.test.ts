@@ -12,6 +12,7 @@ import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../config';
 import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../../services/enterpriseDb';
 import { ENTERPRISE_DATA_DIR_ENV } from '../../services/traceMetadataStore';
 import { setTraceProcessorServiceForTests } from '../../services/traceProcessorService';
+import { TraceProcessorFactory } from '../../services/workingTraceProcessor';
 import traceRoutes from '../simpleTraceRoutes';
 
 const originalEnv = {
@@ -42,6 +43,7 @@ let fakeTraceProcessorService: {
   initializeUploadWithId: jest.Mock;
   completeUpload: jest.Mock;
   getTraceWithPort: jest.Mock;
+  getAllTraces: jest.Mock;
   deleteTrace: jest.Mock;
 };
 
@@ -86,6 +88,7 @@ function readTraceAsset(traceId: string): TraceAssetRow | null {
 function readTraceProcessorLeases(traceId: string): Array<{
   id: string;
   state: string;
+  rss_bytes: number | null;
   holder_type: string;
   holder_ref: string;
 }> {
@@ -94,10 +97,11 @@ function readTraceProcessorLeases(traceId: string): Array<{
     return db.prepare<unknown[], {
       id: string;
       state: string;
+      rss_bytes: number | null;
       holder_type: string;
       holder_ref: string;
     }>(`
-      SELECT l.id, l.state, h.holder_type, h.holder_ref
+      SELECT l.id, l.state, l.rss_bytes, h.holder_type, h.holder_ref
       FROM trace_processor_leases l
       JOIN trace_processor_holders h ON h.lease_id = l.id
       WHERE l.trace_id = ?
@@ -126,6 +130,7 @@ beforeEach(async () => {
     initializeUploadWithId: jest.fn(async () => undefined),
     completeUpload: jest.fn(async () => undefined),
     getTraceWithPort: jest.fn(() => undefined),
+    getAllTraces: jest.fn(() => []),
     deleteTrace: jest.fn(async () => undefined),
   };
   setTraceProcessorServiceForTests(fakeTraceProcessorService as any);
@@ -201,6 +206,114 @@ describe('enterprise trace metadata routes', () => {
       'workspace-b',
     );
     expect(otherWorkspaceRes.status).toBe(404);
+  });
+
+  it('records observed processor RSS on the frontend lease and exposes RAM budget stats', async () => {
+    const app = makeApp();
+    const sourceTracePath = path.join(tmpDir, 'rss.trace');
+    await fs.writeFile(sourceTracePath, 'rss-trace-content');
+    let currentTraceId: string | null = null;
+
+    fakeTraceProcessorService.getTraceWithPort.mockImplementation((...args: unknown[]) => {
+      const traceId = String(args[0]);
+      currentTraceId = traceId;
+      return {
+        id: traceId,
+        filename: 'rss.trace',
+        size: 'rss-trace-content'.length,
+        uploadTime: new Date('2026-05-08T00:00:00.000Z'),
+        status: 'ready',
+        port: 9123,
+        processor: { status: 'ready' },
+      };
+    });
+    fakeTraceProcessorService.getAllTraces.mockImplementation(() => currentTraceId ? [{
+      id: currentTraceId,
+      filename: 'rss.trace',
+      size: 'rss-trace-content'.length,
+      uploadTime: new Date('2026-05-08T00:00:00.000Z'),
+      status: 'ready',
+    }] : []);
+    jest.spyOn(TraceProcessorFactory, 'getStats').mockImplementation(() => ({
+      count: currentTraceId ? 1 : 0,
+      traceIds: currentTraceId ? [currentTraceId] : [],
+      processors: currentTraceId ? [{
+        kind: 'owned_process',
+        processorId: 'processor-a',
+        traceId: currentTraceId,
+        status: 'ready',
+        activeQueries: 0,
+        httpPort: 9123,
+        pid: 123,
+        rssBytes: 64 * 1024 * 1024,
+        startupRssBytes: 48 * 1024 * 1024,
+        peakRssBytes: 80 * 1024 * 1024,
+        lastRssSampleAt: 1_777_777_777_000,
+        rssSampleSource: 'ps',
+        sqlWorker: {
+          running: true,
+          queuedP0: 1,
+          queuedP1: 2,
+          queuedP2: 3,
+          usesWorkerThread: true,
+        },
+      }] : [],
+      ramBudget: {
+        enabled: true,
+        totalMemoryBytes: 8 * 1024 * 1024 * 1024,
+        nodeRssBytes: 128 * 1024 * 1024,
+        osSafetyReserveBytes: 1024 * 1024 * 1024,
+        uploadReserveBytes: 0,
+        machineFactor: 0.60,
+        budgetBytes: 2 * 1024 * 1024 * 1024,
+        observedProcessorRssBytes: 64 * 1024 * 1024,
+        availableForNewLeaseBytes: 1984 * 1024 * 1024,
+        activeProcessorCount: currentTraceId ? 1 : 0,
+        unknownRssProcessorCount: 0,
+        estimateMultiplier: 1.5,
+        minEstimateBytes: 128 * 1024 * 1024,
+      },
+    }));
+
+    const uploadRes = await ssoHeaders(
+      request(app)
+        .post('/api/traces/upload')
+        .attach('file', sourceTracePath),
+    );
+
+    expect(uploadRes.status).toBe(200);
+    const traceId = uploadRes.body.trace.id as string;
+    expect(readTraceProcessorLeases(traceId)).toEqual([
+      expect.objectContaining({
+        state: 'active',
+        rss_bytes: 64 * 1024 * 1024,
+        holder_type: 'frontend_http_rpc',
+      }),
+    ]);
+
+    const statsRes = await ssoHeaders(request(app).get('/api/traces/stats'));
+
+    expect(statsRes.status).toBe(200);
+    expect(statsRes.body.stats.ramBudget).toEqual(expect.objectContaining({
+      enabled: true,
+      observedProcessorRssBytes: 64 * 1024 * 1024,
+    }));
+    expect(statsRes.body.stats.processors).toEqual(expect.objectContaining({
+      count: 1,
+      queueLength: 6,
+      traceIds: [traceId],
+    }));
+    expect(statsRes.body.stats.leases).toEqual(expect.objectContaining({
+      count: 1,
+      activeCount: 1,
+      crashCount: 0,
+      holderCount: 1,
+    }));
+    expect(statsRes.body.stats.leases.items[0]).toEqual(expect.objectContaining({
+      traceId,
+      rssBytes: 64 * 1024 * 1024,
+      holderCount: 1,
+    }));
   });
 
   it('streams URL uploads into scoped trace storage without buffering the response body', async () => {
