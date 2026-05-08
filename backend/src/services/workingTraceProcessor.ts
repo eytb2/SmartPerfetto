@@ -182,7 +182,10 @@ export interface TraceProcessor {
 export interface TraceProcessorRuntimeStats {
   kind: 'owned_process' | 'external_rpc';
   processorId: string;
+  processorKey?: string;
   traceId: string;
+  leaseId?: string;
+  leaseMode?: 'shared' | 'isolated' | string;
   status: 'initializing' | 'ready' | 'busy' | 'error';
   activeQueries: number;
   httpPort: number;
@@ -202,6 +205,12 @@ export interface TraceProcessorRuntimeStats {
   };
 }
 
+export interface TraceProcessorCreateOptions {
+  processorKey?: string;
+  leaseId?: string;
+  leaseMode?: 'shared' | 'isolated' | string;
+}
+
 /**
  * A working Trace Processor that uses trace_processor_shell in HTTP mode.
  *
@@ -218,6 +227,9 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
 
   private process: ChildProcess | null = null;
   private tracePath: string;
+  private readonly processorKey: string;
+  private readonly leaseId?: string;
+  private readonly leaseMode: 'shared' | 'isolated' | string;
   private _httpPort: number;
 
   /** Get the HTTP port this processor is listening on */
@@ -249,7 +261,10 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
     return {
       kind: 'owned_process',
       processorId: this.id,
+      processorKey: this.processorKey,
       traceId: this.traceId,
+      ...(this.leaseId ? { leaseId: this.leaseId } : {}),
+      leaseMode: this.leaseMode,
       status: this.status,
       activeQueries: this.activeQueries,
       httpPort: this.httpPort,
@@ -282,14 +297,17 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
     };
   }
 
-  constructor(traceId: string, tracePath: string) {
+  constructor(traceId: string, tracePath: string, options: TraceProcessorCreateOptions = {}) {
     super();
     this.id = uuidv4();
     this.traceId = traceId;
     this.tracePath = tracePath;
+    this.processorKey = options.processorKey ?? traceId;
+    this.leaseId = options.leaseId;
+    this.leaseMode = options.leaseMode ?? 'shared';
 
     // Allocate port from pool
-    this._httpPort = getPortPool().allocate(traceId);
+    this._httpPort = getPortPool().allocate(this.processorKey);
     this.sqlWorker = new TraceProcessorSqlWorker({
       processorId: this.id,
       traceId: this.traceId,
@@ -673,13 +691,13 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
 
     if (this.process) {
       try {
-        const traceId = this.traceId;
+        const processorKey = this.processorKey;
         const proc = this.process;
         let released = false;
         const releasePortOnce = (): void => {
           if (released) return;
           released = true;
-          getPortPool().release(traceId);
+          getPortPool().release(processorKey);
         };
 
         // Force kill after timeout (fallback).
@@ -711,12 +729,12 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
         proc.kill('SIGTERM');
       } catch (e) {
         // Process may already be dead, still release port
-        getPortPool().release(this.traceId);
+        getPortPool().release(this.processorKey);
       }
       this.process = null;
     } else {
       // No process, but still release port
-      getPortPool().release(this.traceId);
+      getPortPool().release(this.processorKey);
     }
 
     this.removeAllListeners();
@@ -733,18 +751,23 @@ export class TraceProcessorFactory {
   private static externalProcessorsByPort: Map<number, ExternalRpcProcessor> = new Map();
   private static maxProcessors = 5;
 
-  static async create(traceId: string, tracePath: string): Promise<WorkingTraceProcessor> {
+  static async create(
+    traceId: string,
+    tracePath: string,
+    options: TraceProcessorCreateOptions = {},
+  ): Promise<WorkingTraceProcessor> {
+    const processorKey = options.processorKey ?? traceId;
     // Check if processor already exists and is ready
-    const existing = this.processors.get(traceId);
+    const existing = this.processors.get(processorKey);
     if (existing instanceof WorkingTraceProcessor && existing.status === 'ready') {
-      console.log(`[TraceProcessorFactory] Reusing existing processor for trace ${traceId}`);
+      console.log(`[TraceProcessorFactory] Reusing existing processor for trace ${traceId} (${processorKey})`);
       return existing;
     }
 
     // Clean up failed processor if exists
     if (existing) {
-      console.log(`[TraceProcessorFactory] Cleaning up existing processor for trace ${traceId}`);
-      this.remove(traceId);
+      console.log(`[TraceProcessorFactory] Cleaning up existing processor for trace ${traceId} (${processorKey})`);
+      this.remove(processorKey);
     }
 
     // Clean up oldest owned idle processors if too many (skip busy/external ones).
@@ -774,14 +797,17 @@ export class TraceProcessorFactory {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       // Create new processor (allocates a port from the pool)
-      console.log(`[TraceProcessorFactory] Creating new HTTP-mode processor for trace ${traceId} (attempt ${attempt}/${maxAttempts})`);
-      const processor = new WorkingTraceProcessor(traceId, tracePath);
-
-      processor.on('error', () => {
-        this.processors.delete(traceId);
+      console.log(`[TraceProcessorFactory] Creating new HTTP-mode processor for trace ${traceId} (${processorKey}) (attempt ${attempt}/${maxAttempts})`);
+      const processor = new WorkingTraceProcessor(traceId, tracePath, {
+        ...options,
+        processorKey,
       });
 
-      this.processors.set(traceId, processor);
+      processor.on('error', () => {
+        this.processors.delete(processorKey);
+      });
+
+      this.processors.set(processorKey, processor);
 
       try {
         await processor.initialize();
@@ -795,7 +821,7 @@ export class TraceProcessorFactory {
         } catch {
           // ignore
         }
-        this.processors.delete(traceId);
+        this.processors.delete(processorKey);
 
         // Retry with a different port if the chosen port is already in use by another process.
         const msg = String(error?.message || '');
@@ -805,8 +831,8 @@ export class TraceProcessorFactory {
           if (Number.isFinite(port)) {
             getPortPool().blockPort(port);
           } else {
-            // Fallback: release any allocation for this traceId so next attempt can allocate again.
-            getPortPool().release(traceId);
+            // Fallback: release any allocation for this processor key so next attempt can allocate again.
+            getPortPool().release(processorKey);
           }
           continue;
         }
@@ -818,15 +844,15 @@ export class TraceProcessorFactory {
     throw lastError || new Error('Failed to create trace processor');
   }
 
-  static get(traceId: string): ManagedTraceProcessor | undefined {
-    return this.processors.get(traceId);
+  static get(processorKey: string): ManagedTraceProcessor | undefined {
+    return this.processors.get(processorKey);
   }
 
-  static remove(traceId: string): boolean {
-    const processor = this.processors.get(traceId);
+  static remove(processorKey: string): boolean {
+    const processor = this.processors.get(processorKey);
     if (processor) {
-      console.log(`[TraceProcessorFactory] Removing processor for trace ${traceId}`);
-      this.processors.delete(traceId);
+      console.log(`[TraceProcessorFactory] Removing processor ${processorKey}`);
+      this.processors.delete(processorKey);
       if (processor instanceof ExternalRpcProcessor) {
         const stillReferenced = Array.from(this.processors.values()).some(p => p === processor);
         if (!stillReferenced) {
@@ -853,13 +879,15 @@ export class TraceProcessorFactory {
   static getStats(): {
     count: number;
     traceIds: string[];
+    processorKeys: string[];
     processors: TraceProcessorRuntimeStats[];
     ramBudget: TraceProcessorRamBudgetStats;
   } {
     const processors = Array.from(this.processors.values()).map(processor => processor.getRuntimeStats());
     return {
       count: this.processors.size,
-      traceIds: Array.from(this.processors.keys()),
+      traceIds: Array.from(new Set(processors.map(processor => processor.traceId))),
+      processorKeys: Array.from(this.processors.keys()),
       processors,
       ramBudget: getTraceProcessorRamBudgetStats(processors),
     };

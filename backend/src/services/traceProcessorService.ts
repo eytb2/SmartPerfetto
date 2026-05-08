@@ -3,11 +3,13 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import { EventEmitter } from 'events';
+import { AsyncLocalStorage } from 'async_hooks';
 import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { WorkingTraceProcessor, TraceProcessorFactory } from './workingTraceProcessor';
 import type { TraceProcessorQueryOptions } from './traceProcessorSqlWorker';
+import type { TraceProcessorLeaseMode } from './traceProcessorLeaseStore';
 
 export interface TraceInfo {
   id: string;
@@ -45,6 +47,17 @@ export interface TraceProcessor {
   destroy(): void;
 }
 
+export interface TraceProcessorLeaseQueryContext {
+  traceId: string;
+  leaseId: string;
+  mode: TraceProcessorLeaseMode | string;
+}
+
+export type TraceProcessorServiceQueryOptions = TraceProcessorQueryOptions & {
+  leaseId?: string;
+  leaseMode?: TraceProcessorLeaseMode | string;
+};
+
 /**
  * Manages trace files and processors using the actual Perfetto Trace Processor WASM
  */
@@ -55,6 +68,7 @@ export class TraceProcessorService extends EventEmitter {
   private uploadDir: string;
   /** Guards against concurrent auto-recovery for the same trace. */
   private recoveryInProgress: Map<string, Promise<TraceProcessor>> = new Map();
+  private readonly queryLeaseContext = new AsyncLocalStorage<TraceProcessorLeaseQueryContext>();
 
   constructor(uploadDir = './uploads/traces') {
     super();
@@ -66,6 +80,37 @@ export class TraceProcessorService extends EventEmitter {
     if (!fs.existsSync(this.uploadDir)) {
       fs.mkdirSync(this.uploadDir, { recursive: true });
     }
+  }
+
+  private processorKeyForLease(
+    traceId: string,
+    leaseId?: string,
+    mode: TraceProcessorLeaseMode | string = 'shared',
+  ): string {
+    return mode === 'isolated' && leaseId ? `${traceId}:lease:${leaseId}` : traceId;
+  }
+
+  public runWithLease<T>(
+    context: TraceProcessorLeaseQueryContext | null | undefined,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (!context) return fn();
+    return this.queryLeaseContext.run(context, fn);
+  }
+
+  private resolveLeaseQueryContext(
+    traceId: string,
+    options: TraceProcessorServiceQueryOptions = {},
+  ): TraceProcessorLeaseQueryContext | undefined {
+    if (options.leaseId) {
+      return {
+        traceId,
+        leaseId: options.leaseId,
+        mode: options.leaseMode ?? 'shared',
+      };
+    }
+    const stored = this.queryLeaseContext.getStore();
+    return stored?.traceId === traceId ? stored : undefined;
   }
 
   /**
@@ -197,14 +242,22 @@ export class TraceProcessorService extends EventEmitter {
   /**
    * Create a new Trace Processor instance
    */
-  private async createProcessor(traceId: string): Promise<TraceProcessor> {
+  private async createProcessor(
+    traceId: string,
+    leaseContext?: Pick<TraceProcessorLeaseQueryContext, 'leaseId' | 'mode'>,
+  ): Promise<TraceProcessor> {
     const filePath = this.getTraceFilePath(traceId);
+    const processorKey = this.processorKeyForLease(traceId, leaseContext?.leaseId, leaseContext?.mode);
 
     // Use the working trace processor
-    const processor = await TraceProcessorFactory.create(traceId, filePath);
+    const processor = await TraceProcessorFactory.create(traceId, filePath, {
+      processorKey,
+      leaseId: leaseContext?.leaseId,
+      leaseMode: leaseContext?.mode ?? 'shared',
+    });
 
     // Store reference
-    this.processors.set(traceId, processor);
+    this.processors.set(processorKey, processor);
 
     return processor;
   }
@@ -257,8 +310,16 @@ export class TraceProcessorService extends EventEmitter {
    * by re-creating the processor from the on-disk trace file.
    * Concurrent callers share the same recovery promise to avoid thundering herd.
    */
-  private async processorForQuery(traceId: string): Promise<TraceProcessor> {
-    let processor = this.processors.get(traceId);
+  private async processorForQuery(
+    traceId: string,
+    options: TraceProcessorServiceQueryOptions = {},
+  ): Promise<TraceProcessor> {
+    const leaseContext = this.resolveLeaseQueryContext(traceId, options);
+    const processorKey = this.processorKeyForLease(traceId, leaseContext?.leaseId, leaseContext?.mode);
+    let processor = this.processors.get(processorKey);
+    if (!processor && leaseContext) {
+      processor = await this.ensureProcessorForLease(traceId, leaseContext.leaseId, leaseContext.mode);
+    }
     if (!processor) {
       throw new Error(`No processor for trace ${traceId}`);
     }
@@ -269,24 +330,24 @@ export class TraceProcessorService extends EventEmitter {
     // Auto-recover dead processor
     if (processor.status === 'error') {
       // Serialize concurrent recovery attempts for the same trace
-      let recovery = this.recoveryInProgress.get(traceId);
+      let recovery = this.recoveryInProgress.get(processorKey);
       if (!recovery) {
-        console.log(`[TraceProcessorService] Processor for ${traceId} is dead, attempting auto-recovery...`);
-        recovery = this.createProcessor(traceId).then(
+        console.log(`[TraceProcessorService] Processor for ${traceId} (${processorKey}) is dead, attempting auto-recovery...`);
+        recovery = this.createProcessor(traceId, leaseContext).then(
           (p) => {
-            console.log(`[TraceProcessorService] Auto-recovery succeeded for ${traceId}`);
-            this.recoveryInProgress.delete(traceId);
+            console.log(`[TraceProcessorService] Auto-recovery succeeded for ${traceId} (${processorKey})`);
+            this.recoveryInProgress.delete(processorKey);
             return p;
           },
           (err) => {
-            console.error(`[TraceProcessorService] Auto-recovery failed for ${traceId}:`, err.message);
-            this.recoveryInProgress.delete(traceId);
+            console.error(`[TraceProcessorService] Auto-recovery failed for ${traceId} (${processorKey}):`, err.message);
+            this.recoveryInProgress.delete(processorKey);
             throw err;
           },
         );
-        this.recoveryInProgress.set(traceId, recovery);
+        this.recoveryInProgress.set(processorKey, recovery);
       } else {
-        console.log(`[TraceProcessorService] Waiting for in-progress recovery of ${traceId}...`);
+        console.log(`[TraceProcessorService] Waiting for in-progress recovery of ${traceId} (${processorKey})...`);
       }
 
       try {
@@ -302,19 +363,21 @@ export class TraceProcessorService extends EventEmitter {
   public async query(
     traceId: string,
     sql: string,
-    options: TraceProcessorQueryOptions = {},
+    options: TraceProcessorServiceQueryOptions = {},
   ): Promise<QueryResult> {
-    const processor = await this.processorForQuery(traceId);
-    return await processor.query(sql, options);
+    const processor = await this.processorForQuery(traceId, options);
+    const { leaseId: _leaseId, leaseMode: _leaseMode, ...queryOptions } = options;
+    return await processor.query(sql, queryOptions);
   }
 
   public async queryRaw(
     traceId: string,
     body: Buffer,
-    options: TraceProcessorQueryOptions = {},
+    options: TraceProcessorServiceQueryOptions = {},
   ): Promise<Buffer> {
-    const processor = await this.processorForQuery(traceId);
-    return await processor.queryRaw(body, options);
+    const processor = await this.processorForQuery(traceId, options);
+    const { leaseId: _leaseId, leaseMode: _leaseMode, ...queryOptions } = options;
+    return await processor.queryRaw(body, queryOptions);
   }
 
   /**
@@ -364,6 +427,29 @@ export class TraceProcessorService extends EventEmitter {
     const port = (processor?.status === 'ready') ? processor.httpPort : undefined;
 
     // Touch trace to prevent cleanup while frontend is accessing it
+    if (port) {
+      this.touchTrace(traceId);
+    }
+
+    return {
+      ...trace,
+      port,
+      processor: processor ? { status: processor.status } : undefined,
+    };
+  }
+
+  public getTraceWithLeasePort(
+    traceId: string,
+    leaseId: string,
+    mode: TraceProcessorLeaseMode | string,
+  ): (TraceInfo & { port?: number; processor?: { status: string } }) | undefined {
+    const trace = this.traces.get(traceId);
+    if (!trace) return undefined;
+
+    const processorKey = this.processorKeyForLease(traceId, leaseId, mode);
+    const processor = this.processors.get(processorKey) as WorkingTraceProcessor | undefined;
+    const port = (processor?.status === 'ready') ? processor.httpPort : undefined;
+
     if (port) {
       this.touchTrace(traceId);
     }
@@ -480,6 +566,31 @@ export class TraceProcessorService extends EventEmitter {
     return this.loadTraceFromDisk(traceId);
   }
 
+  public async ensureProcessorForLease(
+    traceId: string,
+    leaseId: string,
+    mode: TraceProcessorLeaseMode | string,
+  ): Promise<TraceProcessor> {
+    const key = this.processorKeyForLease(traceId, leaseId, mode);
+    const existing = this.processors.get(key);
+    if (existing && existing.status === 'ready') {
+      this.touchTrace(traceId);
+      return existing;
+    }
+
+    const trace = this.traces.get(traceId);
+    if (!trace) {
+      throw new Error(`Trace ${traceId} not found`);
+    }
+
+    const filePath = this.getTraceFilePath(traceId);
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`Trace file not found for lease ${leaseId}: ${filePath}`);
+    }
+
+    return this.createProcessor(traceId, { leaseId, mode });
+  }
+
   /**
    * Get all traces
    */
@@ -494,11 +605,11 @@ export class TraceProcessorService extends EventEmitter {
     const trace = this.traces.get(traceId);
     if (!trace) return;
 
-    // Destroy processor
-    const processor = this.processors.get(traceId);
-    if (processor) {
-      processor.destroy();
-      this.processors.delete(traceId);
+    // Destroy all processors for this trace, including isolated lease processors.
+    for (const [processorKey, processor] of Array.from(this.processors.entries())) {
+      if (processor.traceId !== traceId) continue;
+      TraceProcessorFactory.remove(processorKey);
+      this.processors.delete(processorKey);
     }
 
     // Delete file

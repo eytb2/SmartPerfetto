@@ -108,6 +108,40 @@ describe('TraceProcessorLeaseStore', () => {
     ]);
   });
 
+  it('reuses shared leases but creates distinct isolated leases for the same trace', () => {
+    const sharedA = store.acquireHolder(scope, 'trace-a', {
+      holderType: 'frontend_http_rpc',
+      holderRef: 'window-a',
+      windowId: 'window-a',
+    }, { mode: 'shared', now: 1000 });
+    const sharedB = store.acquireHolder(scope, 'trace-a', {
+      holderType: 'agent_run',
+      holderRef: 'run-a',
+      runId: 'run-a',
+    }, { mode: 'shared', now: 2000 });
+    const isolatedA = store.acquireHolder(scope, 'trace-a', {
+      holderType: 'agent_run',
+      holderRef: 'run-isolated-a',
+      runId: 'run-isolated-a',
+    }, { mode: 'isolated', now: 3000 });
+    const isolatedB = store.acquireHolder(scope, 'trace-a', {
+      holderType: 'report_generation',
+      holderRef: 'report-isolated-b',
+      reportId: 'report-isolated-b',
+    }, { mode: 'isolated', now: 4000 });
+
+    expect(sharedB.id).toBe(sharedA.id);
+    expect(sharedB.mode).toBe('shared');
+    expect(isolatedA.id).not.toBe(sharedA.id);
+    expect(isolatedB.id).not.toBe(sharedA.id);
+    expect(isolatedB.id).not.toBe(isolatedA.id);
+    expect(store.listLeases(scope, { traceId: 'trace-a' }).map(lease => lease.mode).sort()).toEqual([
+      'isolated',
+      'isolated',
+      'shared',
+    ]);
+  });
+
   it('follows pending -> starting -> active -> idle -> released through the state machine', () => {
     let lease = store.acquireHolder(scope, 'trace-a', {
       holderType: 'agent_run',

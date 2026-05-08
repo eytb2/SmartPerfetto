@@ -184,6 +184,16 @@ beforeEach(async () => {
       uploadTime: new Date(),
       status: 'ready',
     })),
+    ensureProcessorForLease: jest.fn(async () => undefined),
+    getTraceWithLeasePort: jest.fn(() => ({
+      id: 'trace-a',
+      filename: 'trace-a.perfetto',
+      size: 16,
+      uploadTime: new Date(),
+      status: 'ready',
+      port: upstreamPort,
+      processor: {status: 'ready'},
+    })),
     getTraceWithPort: jest.fn(() => ({
       id: 'trace-a',
       filename: 'trace-a.perfetto',
@@ -239,7 +249,7 @@ describe('trace processor lease proxy routes', () => {
     expect(queryRawMock).toHaveBeenCalledWith(
       'trace-a',
       queryBody,
-      { priority: 'p0' },
+      { priority: 'p0', leaseId: lease.id, leaseMode: 'shared' },
     );
   });
 

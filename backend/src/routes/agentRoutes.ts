@@ -60,8 +60,15 @@ import { probeTraceDuration } from '../agent/scene/sceneTraceDurationProbe';
 import { resolveFeatureConfig, sceneStoryConfig } from '../config';
 import {
   getTraceProcessorLeaseStore,
+  type TraceProcessorHolderType,
   type TraceProcessorLeaseRecord,
 } from '../services/traceProcessorLeaseStore';
+import {
+  buildTraceProcessorLeaseModeDecision,
+  type TraceProcessorLeaseModeDecision,
+} from '../services/traceProcessorLeaseModeDecision';
+import { estimateTraceProcessorRssBytes } from '../services/traceProcessorRamBudget';
+import { TraceProcessorFactory } from '../services/workingTraceProcessor';
 import { registerAgentLogsRoutes } from './agentLogsRoutes';
 import { registerAgentQuickSceneRoutes } from './agentQuickSceneRoutes';
 import { registerAgentReportRoutes } from './agentReportRoutes';
@@ -175,6 +182,36 @@ function markLeaseReadyIfNew(
   const store = getTraceProcessorLeaseStore();
   const starting = store.markStarting(scope, lease.id);
   return store.markReady(scope, starting.id);
+}
+
+function buildLeaseModeDecisionForTrace(
+  scope: { tenantId: string; workspaceId: string; userId?: string },
+  traceId: string,
+  holderType: TraceProcessorHolderType,
+  options: {
+    analysisMode?: unknown;
+    estimatedSqlMs?: unknown;
+    heavySkill?: boolean;
+    longTask?: boolean;
+    traceSizeBytes?: number;
+  } = {},
+): TraceProcessorLeaseModeDecision {
+  const store = getTraceProcessorLeaseStore();
+  const processorStats = TraceProcessorFactory.getStats();
+  return buildTraceProcessorLeaseModeDecision({
+    traceId,
+    holderType,
+    analysisMode: options.analysisMode,
+    estimatedSqlMs: options.estimatedSqlMs,
+    heavySkill: options.heavySkill,
+    longTask: options.longTask,
+    estimatedNewLeaseRssBytes: typeof options.traceSizeBytes === 'number'
+      ? estimateTraceProcessorRssBytes(options.traceSizeBytes)
+      : undefined,
+    leases: store.listLeases(scope, { traceId }),
+    processors: processorStats.processors,
+    ramBudget: processorStats.ramBudget,
+  });
 }
 
 function buildSessionObservability(
@@ -967,9 +1004,19 @@ async function handleAnalyzeRequest(
     });
 
     let agentRunLease: TraceProcessorLeaseRecord | null = null;
+    let agentRunLeaseDecision: TraceProcessorLeaseModeDecision | null = null;
     if (enterpriseLeasesEnabled()) {
       try {
         const scope = leaseScopeFromRequestContext(requestContext);
+        agentRunLeaseDecision = buildLeaseModeDecisionForTrace(
+          scope,
+          traceId,
+          'agent_run',
+          {
+            analysisMode: options.analysisMode,
+            traceSizeBytes: trace.size,
+          },
+        );
         agentRunLease = getTraceProcessorLeaseStore().acquireHolder(
           scope,
           traceId,
@@ -981,11 +1028,22 @@ async function handleAnalyzeRequest(
             metadata: {
               requestId: runContext.requestId,
               runSequence: runContext.sequence,
+              leaseModeReason: agentRunLeaseDecision.reason,
+              leaseModeSignals: agentRunLeaseDecision.signals,
             },
           },
+          { mode: agentRunLeaseDecision.mode },
         );
         agentRunLease = markLeaseReadyIfNew(agentRunLease, scope);
+        await traceProcessorService.ensureProcessorForLease(traceId, agentRunLease.id, agentRunLease.mode);
       } catch (leaseError: any) {
+        if (agentRunLease) {
+          try {
+            getTraceProcessorLeaseStore().markFailed(leaseScopeFromRequestContext(requestContext), agentRunLease.id);
+          } catch (markFailedError: any) {
+            console.warn(`[AgentRoutes] Failed to mark agent_run lease ${agentRunLease.id} failed: ${markFailedError.message}`);
+          }
+        }
         sessionForRun.status = 'failed';
         sessionForRun.error = leaseError.message;
         markSessionRunStatus(sessionForRun, 'failed', leaseError.message);
@@ -1014,6 +1072,9 @@ async function handleAnalyzeRequest(
       referenceTraceId,
       traceContext: traceContext && traceContext.length > 0 ? traceContext : undefined,
       providerId: sessionForRun.providerId !== undefined ? sessionForRun.providerId : providerId,
+      traceProcessorLease: agentRunLease
+        ? { traceId, leaseId: agentRunLease.id, mode: agentRunLease.mode }
+        : undefined,
     }).catch((error) => {
       const session = assistantAppService.getSession(sessionId);
       if (session) {
@@ -1055,6 +1116,9 @@ async function handleAnalyzeRequest(
       runId: runContext.runId,
       leaseId: agentRunLease?.id,
       leaseState: agentRunLease?.state,
+      leaseMode: agentRunLease?.mode,
+      leaseModeReason: agentRunLeaseDecision?.reason,
+      leaseQueueLength: agentRunLeaseDecision?.signals.sharedQueueLength,
       requestId: runContext.requestId,
       runSequence: runContext.sequence,
       observability: {
@@ -2408,6 +2472,13 @@ async function runAgentDrivenAnalysis(
   };
   modelRouter.on('llmTelemetry', onLlmTelemetry);
 
+  const runWithTraceProcessorLease = <T>(fn: () => Promise<T>): Promise<T> => {
+    if (options.traceProcessorLease && options.traceProcessorService?.runWithLease) {
+      return options.traceProcessorService.runWithLease(options.traceProcessorLease, fn);
+    }
+    return fn();
+  };
+
   // Set up streaming via event listener on orchestrator
   const handleUpdate = (update: StreamingUpdate) => {
     session.lastActivityAt = Date.now();
@@ -2491,7 +2562,7 @@ async function runAgentDrivenAnalysis(
   // Only execute when explicitly requested (e.g. scene reconstruction flow),
   // NOT on every analyze call — raw state lane data needs LLM reasoning before display.
   if (options.executeStateTimeline && options.traceProcessorService) {
-    executeStateTimelineSkill(options.traceProcessorService, traceId)
+    runWithTraceProcessorLease(() => executeStateTimelineSkill(options.traceProcessorService, traceId))
       .then((envelopes) => {
         if (envelopes.length === 0) return;
         // Process envelopes through the same pipeline as Agent-produced data
@@ -2528,7 +2599,7 @@ async function runAgentDrivenAnalysis(
   try {
     console.log('[AgentRoutes.AgentDriven] Starting orchestrator.analyze...');
     const result = await logger.timed('AgentDrivenAnalysis', 'analyze', async () => {
-      return session.orchestrator.analyze(query, sessionId, traceId, {
+      const analyze = () => session.orchestrator.analyze(query, sessionId, traceId, {
         traceProcessorService: options.traceProcessorService,
         packageName: options.packageName,
         timeRange: options.timeRange,
@@ -2545,6 +2616,7 @@ async function runAgentDrivenAnalysis(
         userId: session.userId,
         runId: session.activeRun?.runId,
       });
+      return runWithTraceProcessorLease(analyze);
     });
     console.log('[AgentRoutes.AgentDriven] analyze completed, success:', result.success);
 
@@ -4130,6 +4202,15 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
     if (enterpriseLeasesEnabled()) {
       const scope = leaseScopeFromSession(session);
       if (scope) {
+        const traceInfo = getTraceProcessorService().getTrace(session.traceId);
+        const reportLeaseDecision = buildLeaseModeDecisionForTrace(
+          scope,
+          session.traceId,
+          'report_generation',
+          {
+            traceSizeBytes: traceInfo?.size,
+          },
+        );
         reportLease = getTraceProcessorLeaseStore().acquireHolder(
           scope,
           session.traceId,
@@ -4139,7 +4220,12 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
             reportId,
             sessionId: session.sessionId,
             runId: session.lastRun?.runId || session.activeRun?.runId,
+            metadata: {
+              leaseModeReason: reportLeaseDecision.reason,
+              leaseModeSignals: reportLeaseDecision.signals,
+            },
           },
+          { mode: reportLeaseDecision.mode },
         );
         reportLease = markLeaseReadyIfNew(reportLease, scope);
       }

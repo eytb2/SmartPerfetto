@@ -87,6 +87,7 @@ function readTraceAsset(traceId: string): TraceAssetRow | null {
 
 function readTraceProcessorLeases(traceId: string): Array<{
   id: string;
+  mode: string;
   state: string;
   rss_bytes: number | null;
   holder_type: string;
@@ -96,12 +97,13 @@ function readTraceProcessorLeases(traceId: string): Array<{
   try {
     return db.prepare<unknown[], {
       id: string;
+      mode: string;
       state: string;
       rss_bytes: number | null;
       holder_type: string;
       holder_ref: string;
     }>(`
-      SELECT l.id, l.state, l.rss_bytes, h.holder_type, h.holder_ref
+      SELECT l.id, l.mode, l.state, l.rss_bytes, h.holder_type, h.holder_ref
       FROM trace_processor_leases l
       JOIN trace_processor_holders h ON h.lease_id = l.id
       WHERE l.trace_id = ?
@@ -164,6 +166,9 @@ describe('enterprise trace metadata routes', () => {
     const traceId = uploadRes.body.trace.id as string;
     expect(uploadRes.body.trace.leaseId).toEqual(expect.any(String));
     expect(uploadRes.body.trace.leaseState).toBe('active');
+    expect(uploadRes.body.trace.leaseMode).toBe('shared');
+    expect(uploadRes.body.trace.leaseModeReason).toBe('frontend_interactive');
+    expect(uploadRes.body.trace.leaseQueueLength).toBe(0);
     const expectedTracePath = path.join(dataDir, 'tenant-a', 'workspace-a', 'traces', `${traceId}.trace`);
     await expect(fs.access(expectedTracePath)).resolves.toBeUndefined();
     await expect(fs.access(path.join(uploadDir, 'traces', `${traceId}.json`))).rejects.toThrow();
@@ -192,6 +197,7 @@ describe('enterprise trace metadata routes', () => {
     }));
     expect(readTraceProcessorLeases(traceId)).toEqual([
       expect.objectContaining({
+        mode: 'shared',
         state: 'active',
         holder_type: 'frontend_http_rpc',
       }),
@@ -237,6 +243,7 @@ describe('enterprise trace metadata routes', () => {
     jest.spyOn(TraceProcessorFactory, 'getStats').mockImplementation(() => ({
       count: currentTraceId ? 1 : 0,
       traceIds: currentTraceId ? [currentTraceId] : [],
+      processorKeys: currentTraceId ? [currentTraceId] : [],
       processors: currentTraceId ? [{
         kind: 'owned_process',
         processorId: 'processor-a',
@@ -311,7 +318,9 @@ describe('enterprise trace metadata routes', () => {
     }));
     expect(statsRes.body.stats.leases.items[0]).toEqual(expect.objectContaining({
       traceId,
+      mode: 'shared',
       rssBytes: 64 * 1024 * 1024,
+      queueLength: 6,
       holderCount: 1,
     }));
   });

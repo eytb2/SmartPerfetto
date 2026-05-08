@@ -146,4 +146,80 @@ describe('agent route RBAC', () => {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it('selects an isolated lease for full analysis runs', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-agent-lease-mode-'));
+    let leaseStore: ReturnType<typeof getTraceProcessorLeaseStore> | null = null;
+    try {
+      const traceId = 'trace-full-analysis';
+      const tracePath = path.join(tmpDir, `${traceId}.trace`);
+      await fs.writeFile(tracePath, 'trace bytes');
+      delete process.env.SMARTPERFETTO_API_KEY;
+      process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+      process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+      process.env[ENTERPRISE_DB_PATH_ENV] = path.join(tmpDir, 'enterprise.sqlite');
+      process.env[ENTERPRISE_DATA_DIR_ENV] = path.join(tmpDir, 'data');
+      process.env.UPLOAD_DIR = path.join(tmpDir, 'uploads');
+
+      await writeTraceMetadata({
+        id: traceId,
+        filename: `${traceId}.trace`,
+        size: 11,
+        uploadedAt: new Date().toISOString(),
+        status: 'ready',
+        path: tracePath,
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-a',
+        userId: 'analyst-user',
+      });
+      setTraceProcessorServiceForTests({
+        getOrLoadTrace: jest.fn(async () => ({
+          id: traceId,
+          filename: `${traceId}.trace`,
+          size: 11,
+          filePath: tracePath,
+          uploadTime: new Date(),
+          status: 'ready',
+        })),
+        getTrace: jest.fn(() => ({
+          id: traceId,
+          filename: `${traceId}.trace`,
+          size: 11,
+          filePath: tracePath,
+          uploadTime: new Date(),
+          status: 'ready',
+        })),
+        ensureProcessorForLease: jest.fn(async () => undefined),
+        runWithLease: jest.fn(async (_lease, fn: () => Promise<unknown>) => fn()),
+        query: jest.fn(async () => ({ columns: [], rows: [], durationMs: 1 })),
+      } as any);
+
+      const res = await analystHeaders(request(makeApp()).post('/api/agent/v1/analyze'))
+        .send({
+          traceId,
+          query: 'analyze this trace',
+          options: { analysisMode: 'full' },
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.leaseState).toBe('active');
+      expect(res.body.leaseMode).toBe('isolated');
+      expect(res.body.leaseModeReason).toBe('full_analysis');
+      expect(res.body.leaseQueueLength).toBe(0);
+
+      const scope = { tenantId: 'tenant-a', workspaceId: 'workspace-a', userId: 'analyst-user' };
+      leaseStore = getTraceProcessorLeaseStore();
+      const leases = leaseStore.listLeases(scope, { traceId });
+      expect(leases).toHaveLength(1);
+      expect(leases[0]).toMatchObject({
+        id: res.body.leaseId,
+        mode: 'isolated',
+      });
+      expect(['active', 'idle']).toContain(leases[0].state);
+    } finally {
+      leaseStore?.close();
+      setTraceProcessorLeaseStoreForTests(null);
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

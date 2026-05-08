@@ -213,7 +213,10 @@ export class TraceProcessorLeaseStore {
         throw new Error(`Trace processor lease ${blockingLease.id} is draining`);
       }
 
-      let lease = this.findAcquirableTraceLease(scope, traceId);
+      const requestedMode = options.mode ?? 'shared';
+      let lease = requestedMode === 'isolated'
+        ? null
+        : this.findAcquirableTraceLease(scope, traceId, requestedMode);
       if (!lease) {
         const leaseId = uuidv4();
         const ttl = resolveHolderTtlPolicy(holder);
@@ -227,7 +230,7 @@ export class TraceProcessorLeaseStore {
           scope.tenantId,
           scope.workspaceId,
           traceId,
-          options.mode ?? 'shared',
+          requestedMode,
           now,
           now + ttl.idleTtlMs,
         );
@@ -521,13 +524,18 @@ export class TraceProcessorLeaseStore {
     }
   }
 
-  private findAcquirableTraceLease(scope: EnterpriseRepositoryScope, traceId: string): LeaseRow | null {
+  private findAcquirableTraceLease(
+    scope: EnterpriseRepositoryScope,
+    traceId: string,
+    mode: TraceProcessorLeaseMode,
+  ): LeaseRow | null {
     const rows = this.db.prepare(`
       SELECT *
       FROM trace_processor_leases
       WHERE tenant_id = ? AND workspace_id = ? AND trace_id = ?
+        AND mode = ?
       ORDER BY heartbeat_at DESC, id ASC
-    `).all(scope.tenantId, scope.workspaceId, traceId) as LeaseRow[];
+    `).all(scope.tenantId, scope.workspaceId, traceId, mode) as LeaseRow[];
     return rows.find(row => ACQUIRABLE_STATES.has(row.state as TraceProcessorLeaseState)) ?? null;
   }
 

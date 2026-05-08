@@ -20,7 +20,13 @@ import { TraceProcessorFactory } from '../services/workingTraceProcessor';
 import {
   getTraceProcessorLeaseStore,
   type TraceProcessorLeaseRecord,
+  type TraceProcessorHolderType,
 } from '../services/traceProcessorLeaseStore';
+import {
+  buildTraceProcessorLeaseModeDecision,
+  sharedQueueLengthForTrace,
+  type TraceProcessorLeaseModeDecision,
+} from '../services/traceProcessorLeaseModeDecision';
 import {
   buildTraceOwnerMetadata,
   deleteTraceMetadata,
@@ -61,9 +67,17 @@ interface FinalizedTraceUploadInfo {
   port?: number;
   leaseId?: string;
   leaseState?: string;
+  leaseMode?: string;
+  leaseModeReason?: string;
+  leaseQueueLength?: number;
   processor?: {
     status: string;
   };
+}
+
+interface TraceProcessorLeaseAcquisition {
+  lease: TraceProcessorLeaseRecord;
+  decision: TraceProcessorLeaseModeDecision;
 }
 
 function parsePositiveInteger(value: string | undefined): number | null {
@@ -120,7 +134,11 @@ function recordLeaseRssFromProcessor(
   context: RequestContext,
 ): TraceProcessorLeaseRecord {
   const processor = TraceProcessorFactory.getStats().processors
-    .find(item => item.traceId === lease.traceId);
+    .find(item => item.traceId === lease.traceId && (
+      lease.mode === 'isolated'
+        ? item.leaseId === lease.id
+        : (item.leaseMode ?? 'shared') === 'shared'
+    ));
   const rssBytes = processor?.rssBytes
     ?? processor?.peakRssBytes
     ?? processor?.startupRssBytes
@@ -129,13 +147,60 @@ function recordLeaseRssFromProcessor(
   return getTraceProcessorLeaseStore().recordRss(leaseScopeFromContext(context), lease.id, rssBytes);
 }
 
+function queueLengthForTrace(traceId: string): number {
+  return sharedQueueLengthForTrace(traceId, TraceProcessorFactory.getStats().processors);
+}
+
+function ownedTraceIdForProcessorKey(processorKey: string, ownedTraceIds: Set<string>): string | null {
+  if (ownedTraceIds.has(processorKey)) return processorKey;
+  for (const traceId of ownedTraceIds) {
+    if (processorKey.startsWith(`${traceId}:lease:`)) return traceId;
+  }
+  return null;
+}
+
+function decideLeaseModeForTrace(
+  context: RequestContext,
+  traceId: string,
+  holderType: TraceProcessorHolderType,
+): TraceProcessorLeaseModeDecision {
+  const scope = leaseScopeFromContext(context);
+  const store = getTraceProcessorLeaseStore();
+  const processorStats = TraceProcessorFactory.getStats();
+  return buildTraceProcessorLeaseModeDecision({
+    traceId,
+    holderType,
+    leases: store.listLeases(scope, { traceId }),
+    processors: processorStats.processors,
+    ramBudget: processorStats.ramBudget,
+  });
+}
+
+function leaseResponseFields(acquisition: TraceProcessorLeaseAcquisition | null | undefined): {
+  leaseId?: string;
+  leaseState?: string;
+  leaseMode?: string;
+  leaseModeReason?: string;
+  leaseQueueLength?: number;
+} {
+  if (!acquisition) return {};
+  return {
+    leaseId: acquisition.lease.id,
+    leaseState: acquisition.lease.state,
+    leaseMode: acquisition.lease.mode,
+    leaseModeReason: acquisition.decision.reason,
+    leaseQueueLength: acquisition.decision.signals.sharedQueueLength,
+  };
+}
+
 function acquireFrontendTraceLease(
   context: RequestContext,
   traceId: string,
   sessionId?: string,
-): TraceProcessorLeaseRecord | null {
+): TraceProcessorLeaseAcquisition | null {
   if (!enterpriseLeasesEnabled()) return null;
   const holderRef = context.windowId || sessionId || context.requestId || context.userId;
+  const decision = decideLeaseModeForTrace(context, traceId, 'frontend_http_rpc');
   const lease = getTraceProcessorLeaseStore().acquireHolder(
     leaseScopeFromContext(context),
     traceId,
@@ -146,18 +211,25 @@ function acquireFrontendTraceLease(
       sessionId,
       metadata: {
         requestId: context.requestId,
+        leaseModeReason: decision.reason,
+        leaseModeSignals: decision.signals,
       },
     },
+    { mode: decision.mode },
   );
-  return recordLeaseRssFromProcessor(markLeaseReadyIfNew(lease, context), context);
+  return {
+    lease: recordLeaseRssFromProcessor(markLeaseReadyIfNew(lease, context), context),
+    decision,
+  };
 }
 
 function acquireManualRegisterLease(
   context: RequestContext,
   traceId: string,
   port: number,
-): TraceProcessorLeaseRecord | null {
+): TraceProcessorLeaseAcquisition | null {
   if (!enterpriseLeasesEnabled()) return null;
+  const decision = decideLeaseModeForTrace(context, traceId, 'manual_register');
   const lease = getTraceProcessorLeaseStore().acquireHolder(
     leaseScopeFromContext(context),
     traceId,
@@ -167,10 +239,16 @@ function acquireManualRegisterLease(
       metadata: {
         port,
         requestId: context.requestId,
+        leaseModeReason: decision.reason,
+        leaseModeSignals: decision.signals,
       },
     },
+    { mode: decision.mode },
   );
-  return recordLeaseRssFromProcessor(markLeaseReadyIfNew(lease, context), context);
+  return {
+    lease: recordLeaseRssFromProcessor(markLeaseReadyIfNew(lease, context), context),
+    decision,
+  };
 }
 
 async function finalizeTraceUpload(
@@ -209,8 +287,8 @@ async function finalizeTraceUpload(
   }
 
   const traceWithPort = tps?.getTraceWithPort(traceId);
-  const lease = acquireFrontendTraceLease(context, traceId);
-  return lease ? { ...(traceWithPort ?? {}), leaseId: lease.id, leaseState: lease.state } : traceWithPort;
+  const acquisition = acquireFrontendTraceLease(context, traceId);
+  return acquisition ? { ...(traceWithPort ?? {}), ...leaseResponseFields(acquisition) } : traceWithPort;
 }
 
 function getFilenameFromUrl(rawUrl: string, fallback = 'trace.perfetto'): string {
@@ -383,6 +461,9 @@ router.post(
           port: traceInfo?.port,
           leaseId: traceInfo?.leaseId,
           leaseState: traceInfo?.leaseState,
+          leaseMode: traceInfo?.leaseMode,
+          leaseModeReason: traceInfo?.leaseModeReason,
+          leaseQueueLength: traceInfo?.leaseQueueLength,
           processorStatus: traceInfo?.processor?.status,
         }
       });
@@ -478,6 +559,9 @@ router.post('/upload-url', async (req, res) => {
         port: traceInfo?.port,
         leaseId: traceInfo?.leaseId,
         leaseState: traceInfo?.leaseState,
+        leaseMode: traceInfo?.leaseMode,
+        leaseModeReason: traceInfo?.leaseModeReason,
+        leaseQueueLength: traceInfo?.leaseQueueLength,
         processorStatus: traceInfo?.processor?.status,
       }
     });
@@ -535,7 +619,12 @@ router.get('/stats', async (req, res) => {
     const processorStats = TraceProcessorFactory.getStats();
     const traceService = getTraceProcessorService();
     const traces = traceService.getAllTraces().filter(t => ownedTraceIds.has(t.id));
-    const allocations = portPoolStats.allocations.filter(a => ownedTraceIds.has(a.traceId));
+    const allocations = portPoolStats.allocations
+      .map(allocation => ({
+        ...allocation,
+        ownerTraceId: ownedTraceIdForProcessorKey(allocation.traceId, ownedTraceIds),
+      }))
+      .filter(allocation => allocation.ownerTraceId !== null);
     const processors = processorStats.processors.filter(processor => ownedTraceIds.has(processor.traceId));
     const queueLength = processors.reduce((sum, processor) => {
       const worker = processor.sqlWorker;
@@ -557,7 +646,8 @@ router.get('/stats', async (req, res) => {
           allocated: allocations.length,
           allocations: allocations.map(a => ({
             port: a.port,
-            traceId: a.traceId,
+            traceId: a.ownerTraceId,
+            processorKey: a.traceId,
             allocatedAt: a.allocatedAt,
           })),
         },
@@ -578,6 +668,7 @@ router.get('/stats', async (req, res) => {
             mode: lease.mode,
             state: lease.state,
             rssBytes: lease.rssBytes,
+            queueLength: queueLengthForTrace(lease.traceId),
             holderCount: lease.holderCount,
             holders: lease.holders.map(holder => ({
               holderType: holder.holderType,
@@ -691,8 +782,7 @@ router.post('/register-rpc', async (req, res) => {
       success: true,
       traceId,
       port,
-      leaseId: lease?.id,
-      leaseState: lease?.state,
+      ...leaseResponseFields(lease),
       message: `External RPC connection registered successfully`,
     });
 
@@ -733,8 +823,7 @@ router.get('/:id', async (req, res) => {
         processorStatus: traceInfo?.status || 'unknown',
         hasProcessor: !!traceInfo?.processor,
         port: traceInfo?.port ?? metadata.port,
-        leaseId: lease?.id,
-        leaseState: lease?.state,
+        ...leaseResponseFields(lease),
       }
     });
   } catch (error: any) {

@@ -214,7 +214,10 @@ function leaseScopeFromContext(context: RequestContext) {
   };
 }
 
-function frontendHolderForContext(context: RequestContext): TraceProcessorHolderInput {
+function frontendHolderForContext(
+  context: RequestContext,
+  metadata: Record<string, unknown> = {},
+): TraceProcessorHolderInput {
   const holderRef = context.windowId || context.requestId || context.userId;
   return {
     holderType: 'frontend_http_rpc',
@@ -223,6 +226,7 @@ function frontendHolderForContext(context: RequestContext): TraceProcessorHolder
     metadata: {
       requestId: context.requestId,
       proxy: 'trace_processor',
+      ...metadata,
     },
   };
 }
@@ -236,6 +240,7 @@ function ensureTraceRead(context: RequestContext): void {
 async function resolveProxyTargetForContext(
   context: RequestContext,
   leaseId: string,
+  holderMetadata: Record<string, unknown> = {},
 ): Promise<ProxyTarget> {
   ensureTraceRead(context);
 
@@ -249,7 +254,7 @@ async function resolveProxyTargetForContext(
     throw new TraceProcessorProxyError(409, `Trace processor lease is ${lease.state}`);
   }
 
-  lease = store.acquireHolderForLease(scope, lease.id, frontendHolderForContext(context));
+  lease = store.acquireHolderForLease(scope, lease.id, frontendHolderForContext(context, holderMetadata));
 
   if (!READY_STATES.has(lease.state)) {
     throw new TraceProcessorProxyError(503, `Trace processor lease is not ready (${lease.state})`);
@@ -261,7 +266,8 @@ async function resolveProxyTargetForContext(
     throw new TraceProcessorProxyError(404, 'Trace not found for trace processor lease');
   }
 
-  const traceWithPort = traceProcessorService.getTraceWithPort(lease.traceId);
+  await traceProcessorService.ensureProcessorForLease(lease.traceId, lease.id, lease.mode);
+  const traceWithPort = traceProcessorService.getTraceWithLeasePort(lease.traceId, lease.id, lease.mode);
   if (!traceWithPort?.port) {
     throw new TraceProcessorProxyError(503, 'Trace processor HTTP RPC port is not ready');
   }
@@ -327,7 +333,6 @@ async function forwardQueryRpc(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  const target = await resolveProxyTarget(req, leaseId);
   const body = requestBody(req);
   if (!body) {
     res.status(400).json({ success: false, error: 'query protobuf body is required' });
@@ -338,7 +343,15 @@ async function forwardQueryRpc(req: Request, res: Response): Promise<void> {
     req.get('x-smartperfetto-query-priority') || req.query.priority,
     'p0',
   );
-  const responseBody = await getTraceProcessorService().queryRaw(target.lease.traceId, body, { priority });
+  const target = await resolveProxyTargetForContext(requireRequestContext(req), leaseId, {
+    lastQueryAt: Date.now(),
+    queryPriority: priority,
+  });
+  const responseBody = await getTraceProcessorService().queryRaw(target.lease.traceId, body, {
+    priority,
+    leaseId: target.lease.id,
+    leaseMode: target.lease.mode,
+  });
   res.setHeader('content-type', 'application/x-protobuf');
   res.status(200).send(responseBody);
 }
@@ -406,7 +419,9 @@ async function proxyWebSocket(
     throw new TraceProcessorProxyError(401, 'Trace processor WebSocket requires authentication');
   }
 
-  const target = await resolveProxyTargetForContext(context, leaseId);
+  const target = await resolveProxyTargetForContext(context, leaseId, {
+    websocketConnectedAt: Date.now(),
+  });
   const upstream = net.connect({
     host: '127.0.0.1',
     port: target.port,
