@@ -29,6 +29,7 @@ import {
   sendResourceNotFound,
   type ResourceOwnerFields,
 } from '../services/resourceOwnership';
+import { hasRbacPermission, sendForbidden } from '../services/rbac';
 import { readTraceMetadataForContext } from '../services/traceMetadataStore';
 import {
   sessionContextManager,
@@ -746,6 +747,9 @@ router.post('/analyze', async (req, res) => {
     const requestId = getRequestId(req);
     const requestContext = requireRequestContext(req);
     const { traceId, query, sessionId: requestedSessionId, options = {}, selectionContext: rawSelectionContext, referenceTraceId, traceContext: rawTraceContext, providerId } = req.body;
+    if (!hasRbacPermission(requestContext, 'agent:run')) {
+      return sendForbidden(res, 'Starting analysis requires agent:run permission');
+    }
 
     if (!traceId) {
       return res.status(400).json({

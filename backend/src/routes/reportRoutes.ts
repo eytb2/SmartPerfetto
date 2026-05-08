@@ -16,10 +16,15 @@ import { attachRequestContext, requireRequestContext } from '../middleware/auth'
 import { REPORT_CAUSAL_MAP_CSS, REPORT_CAUSAL_MAP_SCRIPT } from '../services/reportCausalMapAssets';
 import { localize, parseOutputLanguage } from '../agentv3/outputLanguage';
 import {
-  isOwnedByContext,
   sendResourceNotFound,
   type ResourceOwnerFields,
 } from '../services/resourceOwnership';
+import {
+  canDeleteReportResource,
+  canReadReportResource,
+  sendForbidden,
+  sharesWorkspaceWithContext,
+} from '../services/rbac';
 
 const router = express.Router();
 
@@ -120,7 +125,7 @@ function loadReportFromDisk(reportId: string): PersistedReport | null {
 function getReportForContext(reportId: string, req: express.Request): PersistedReport | null {
   const context = requireRequestContext(req);
   const report = reportStore.get(reportId) || loadReportFromDisk(reportId);
-  if (!report || !isOwnedByContext(report, context)) {
+  if (!report || !canReadReportResource(report, context)) {
     return null;
   }
   return report;
@@ -254,9 +259,13 @@ router.delete('/:reportId', (req, res) => {
   try {
     const { reportId } = req.params;
 
-    const report = getReportForContext(reportId, req);
-    if (!report) {
+    const context = requireRequestContext(req);
+    const report = reportStore.get(reportId) || loadReportFromDisk(reportId);
+    if (!report || !sharesWorkspaceWithContext(report, context)) {
       return sendResourceNotFound(res, 'Report not found');
+    }
+    if (!canDeleteReportResource(report, context)) {
+      return sendForbidden(res, 'Deleting this report requires report delete permission');
     }
 
     const deleted = reportStore.delete(reportId);

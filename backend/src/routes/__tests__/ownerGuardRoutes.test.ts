@@ -17,6 +17,7 @@ import traceRoutes from '../simpleTraceRoutes';
 
 const originalApiKey = process.env.SMARTPERFETTO_API_KEY;
 const originalUploadDir = process.env.UPLOAD_DIR;
+const originalSsoTrustedHeaders = process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS;
 const API_KEY = 'owner-test-secret';
 const API_USER_ID = `api-key-${crypto.createHash('sha256').update(API_KEY).digest('hex').slice(0, 8)}`;
 
@@ -27,6 +28,21 @@ function authHeaders(req: request.Test, tenantId = 'tenant-a', workspaceId = 'wo
     .set('Authorization', `Bearer ${API_KEY}`)
     .set('x-tenant-id', tenantId)
     .set('x-workspace-id', workspaceId);
+}
+
+function ssoHeaders(
+  req: request.Test,
+  userId: string,
+  role: string,
+  scopes = 'trace:read,report:read',
+): request.Test {
+  return req
+    .set('X-SmartPerfetto-SSO-User-Id', userId)
+    .set('X-SmartPerfetto-SSO-Email', `${userId}@example.test`)
+    .set('X-SmartPerfetto-SSO-Tenant-Id', 'tenant-a')
+    .set('X-SmartPerfetto-SSO-Workspace-Id', 'workspace-a')
+    .set('X-SmartPerfetto-SSO-Roles', role)
+    .set('X-SmartPerfetto-SSO-Scopes', scopes);
 }
 
 function makeResourceApp(): express.Express {
@@ -80,6 +96,11 @@ afterEach(async () => {
   } else {
     process.env.UPLOAD_DIR = originalUploadDir;
   }
+  if (originalSsoTrustedHeaders === undefined) {
+    delete process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS;
+  } else {
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = originalSsoTrustedHeaders;
+  }
   await fs.rm(uploadDir, { recursive: true, force: true });
 });
 
@@ -130,6 +151,53 @@ describe('owner guard for trace and report routes', () => {
     expect(res.body.success).toBe(false);
   });
 
+  it('allows viewer to read same-workspace traces but blocks trace writes and deletes', async () => {
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+    await writeTraceMetadata('peer-trace', {
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'peer-user',
+    });
+    await writeTraceMetadata('viewer-trace', {
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'viewer-user',
+    });
+    const app = makeResourceApp();
+
+    const readRes = await ssoHeaders(request(app).get('/api/traces/peer-trace'), 'viewer-user', 'viewer');
+    expect(readRes.status).toBe(200);
+    expect(readRes.body.trace.id).toBe('peer-trace');
+
+    const writeRes = await ssoHeaders(
+      request(app).post('/api/traces/register-rpc').send({ port: 12345, traceName: 'Viewer RPC' }),
+      'viewer-user',
+      'viewer',
+    );
+    expect(writeRes.status).toBe(403);
+
+    const deleteRes = await ssoHeaders(request(app).delete('/api/traces/viewer-trace'), 'viewer-user', 'viewer');
+    expect(deleteRes.status).toBe(403);
+  });
+
+  it('allows workspace admin to delete another user trace in the same workspace', async () => {
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+    await writeTraceMetadata('peer-owned-trace', {
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'peer-user',
+    });
+    const app = makeResourceApp();
+
+    const deleteRes = await ssoHeaders(
+      request(app).delete('/api/traces/peer-owned-trace'),
+      'admin-user',
+      'workspace_admin',
+      'trace:read,trace:write,trace:delete:any',
+    );
+    expect(deleteRes.status).toBe(200);
+  });
+
   it('guards persisted report access and delete by owner fields', async () => {
     reportStore.set('own-report', {
       html: '<html><body>own report</body></html>',
@@ -160,6 +228,28 @@ describe('owner guard for trace and report routes', () => {
     const otherDelete = await authHeaders(request(app).delete('/api/reports/other-report'));
     expect(otherDelete.status).toBe(404);
     expect(reportStore.has('other-report')).toBe(true);
+  });
+
+  it('allows workspace admin to delete another user report in the same workspace', async () => {
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+    reportStore.set('peer-report', {
+      html: '<html><body>peer report</body></html>',
+      generatedAt: Date.now(),
+      sessionId: 'peer-session',
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'peer-user',
+    });
+    const app = makeResourceApp();
+
+    const deleteRes = await ssoHeaders(
+      request(app).delete('/api/reports/peer-report'),
+      'admin-user',
+      'workspace_admin',
+      'report:read,report:delete',
+    );
+    expect(deleteRes.status).toBe(200);
+    expect(reportStore.has('peer-report')).toBe(false);
   });
 });
 

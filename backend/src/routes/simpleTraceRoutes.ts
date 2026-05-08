@@ -2,7 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-import { Router } from 'express';
+import { Router, type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs/promises';
@@ -17,15 +17,34 @@ import {
   getTraceFilePath,
   getTracesDir,
   listTraceMetadata,
+  readTraceMetadata,
   readTraceMetadataForContext,
   type TraceMetadata,
   writeTraceMetadata,
 } from '../services/traceMetadataStore';
 import { isPrivilegedRequestContext, sendResourceNotFound } from '../services/resourceOwnership';
+import {
+  canDeleteTraceResource,
+  canDownloadTraceResource,
+  hasRbacPermission,
+  sendForbidden,
+  sharesWorkspaceWithContext,
+} from '../services/rbac';
 
 const router = Router();
 const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 const URL_UPLOAD_TIMEOUT_MS = 300000;
+
+function requireTracePermission(permission: 'trace:read' | 'trace:write', details: string) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const context = requireRequestContext(req);
+    if (!hasRbacPermission(context, permission)) {
+      sendForbidden(res, details);
+      return;
+    }
+    next();
+  };
+}
 
 async function finalizeTraceUpload(
   traceId: string,
@@ -126,60 +145,68 @@ const upload = multer({
 });
 
 // POST /api/traces/upload - Simple upload with RequestContext ownership
-router.post('/upload', upload.single('file'), async (req, res) => {
-  try {
-    const context = requireRequestContext(req);
-    if (!req.file) {
-      return res.status(400).json({
-        error: 'No file uploaded'
+router.post(
+  '/upload',
+  requireTracePermission('trace:write', 'Uploading traces requires trace:write permission'),
+  upload.single('file'),
+  async (req, res) => {
+    try {
+      const context = requireRequestContext(req);
+      if (!req.file) {
+        return res.status(400).json({
+          error: 'No file uploaded'
+        });
+      }
+
+      const file = req.file;
+
+      // Store trace info (in a real app, this would go to a database)
+      const tracesDir = getTracesDir();
+      await fs.mkdir(tracesDir, { recursive: true });
+
+      // Generate trace ID upfront for consistency
+      const traceId = uuidv4();
+
+      // Move file to traces directory with proper name
+      const finalPath = path.join(tracesDir, `${traceId}.trace`);
+      await fs.rename(file.path, finalPath);
+
+      console.log(`File uploaded successfully: ${file.originalname} -> ${traceId}`);
+
+      // Get trace status and processor port from service
+      const traceInfo = await finalizeTraceUpload(traceId, file.originalname, file.size, finalPath, context);
+
+      res.json({
+        success: true,
+        trace: {
+          id: traceId,
+          filename: file.originalname,
+          size: file.size,
+          uploadedAt: traceInfo?.uploadTime || new Date().toISOString(),
+          status: traceInfo?.status || 'ready',
+          // Port for HTTP RPC mode - frontend can connect to trace_processor directly
+          port: traceInfo?.port,
+          processorStatus: traceInfo?.processor?.status,
+        }
+      });
+
+    } catch (error: any) {
+      console.error('Upload error:', error);
+      res.status(500).json({
+        error: 'Upload failed',
+        details: error.message
       });
     }
-
-    const file = req.file;
-
-    // Store trace info (in a real app, this would go to a database)
-    const tracesDir = getTracesDir();
-    await fs.mkdir(tracesDir, { recursive: true });
-
-    // Generate trace ID upfront for consistency
-    const traceId = uuidv4();
-
-    // Move file to traces directory with proper name
-    const finalPath = path.join(tracesDir, `${traceId}.trace`);
-    await fs.rename(file.path, finalPath);
-
-    console.log(`File uploaded successfully: ${file.originalname} -> ${traceId}`);
-
-    // Get trace status and processor port from service
-    const traceInfo = await finalizeTraceUpload(traceId, file.originalname, file.size, finalPath, context);
-
-    res.json({
-      success: true,
-      trace: {
-        id: traceId,
-        filename: file.originalname,
-        size: file.size,
-        uploadedAt: traceInfo?.uploadTime || new Date().toISOString(),
-        status: traceInfo?.status || 'ready',
-        // Port for HTTP RPC mode - frontend can connect to trace_processor directly
-        port: traceInfo?.port,
-        processorStatus: traceInfo?.processor?.status,
-      }
-    });
-
-  } catch (error: any) {
-    console.error('Upload error:', error);
-    res.status(500).json({
-      error: 'Upload failed',
-      details: error.message
-    });
-  }
-});
+  },
+);
 
 // POST /api/traces/upload-url - Fetch a remote trace from the backend side.
 router.post('/upload-url', async (req, res) => {
   try {
     const context = requireRequestContext(req);
+    if (!hasRbacPermission(context, 'trace:write')) {
+      return sendForbidden(res, 'Uploading traces requires trace:write permission');
+    }
     const rawUrl = typeof req.body?.url === 'string' ? req.body.url : '';
     if (!rawUrl) {
       return res.status(400).json({
@@ -267,6 +294,9 @@ router.post('/upload-url', async (req, res) => {
 router.get('/', async (req, res) => {
   try {
     const context = requireRequestContext(req);
+    if (!hasRbacPermission(context, 'trace:read')) {
+      return sendForbidden(res, 'Listing traces requires trace:read permission');
+    }
     const ownedTraces: TraceMetadata[] = [];
     for (const trace of await listTraceMetadata()) {
       const owned = await readTraceMetadataForContext(trace.id, context);
@@ -291,6 +321,9 @@ router.get('/', async (req, res) => {
 router.get('/stats', async (req, res) => {
   try {
     const context = requireRequestContext(req);
+    if (!hasRbacPermission(context, 'trace:read')) {
+      return sendForbidden(res, 'Trace stats require trace:read permission');
+    }
     const ownedTraceIds = new Set<string>();
     for (const metadata of await listTraceMetadata()) {
       if (await readTraceMetadataForContext(metadata.id, context)) {
@@ -380,6 +413,9 @@ router.post('/cleanup', async (req, res) => {
 router.post('/register-rpc', async (req, res) => {
   try {
     const context = requireRequestContext(req);
+    if (!hasRbacPermission(context, 'trace:write')) {
+      return sendForbidden(res, 'Registering traces requires trace:write permission');
+    }
     const { port, traceName } = req.body;
 
     if (!port) {
@@ -471,12 +507,21 @@ router.delete('/:id', async (req, res) => {
   try {
     const context = requireRequestContext(req);
     const { id } = req.params;
-    const metadata = await readTraceMetadataForContext(id, context);
+    const metadata = await readTraceMetadata(id);
     if (!metadata) {
       return res.status(404).json({
         error: 'Trace not found',
         id
       });
+    }
+    if (!sharesWorkspaceWithContext(metadata, context)) {
+      return res.status(404).json({
+        error: 'Trace not found',
+        id
+      });
+    }
+    if (!canDeleteTraceResource(metadata, context)) {
+      return sendForbidden(res, 'Deleting this trace requires trace delete permission');
     }
     const tracesDir = getTracesDir();
 
@@ -532,6 +577,9 @@ router.get('/:id/file', async (req, res) => {
         error: 'Trace file not found',
         id
       });
+    }
+    if (!canDownloadTraceResource(metadata, context)) {
+      return sendForbidden(res, 'Downloading traces requires trace download permission');
     }
     const tracePath = metadata.path || getTraceFilePath(id);
     if (!tracePath) {

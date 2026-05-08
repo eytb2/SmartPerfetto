@@ -6,10 +6,10 @@ import path from 'path';
 import fs from 'fs/promises';
 import type { RequestContext } from '../middleware/auth';
 import {
-  isOwnedByContext,
   ownerFieldsFromContext,
   type ResourceOwnerFields,
 } from './resourceOwnership';
+import { canReadTraceResource } from './rbac';
 
 export interface TraceMetadata extends ResourceOwnerFields {
   id: string;
@@ -101,7 +101,7 @@ export function isTraceMetadataOwnedByContext(
   metadata: TraceMetadata | null | undefined,
   context: RequestContext,
 ): metadata is TraceMetadata {
-  return Boolean(metadata && isOwnedByContext(metadata, context));
+  return Boolean(metadata && canReadTraceResource(metadata, context));
 }
 
 export async function readTraceMetadataForContext(
