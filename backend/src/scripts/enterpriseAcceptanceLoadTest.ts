@@ -379,6 +379,10 @@ export function evaluateAcceptance(
   }
   if (summary.analysis.started < requestedRuns) missing.push('started analysis runs < requested target');
   if (summary.analysis.startFailures > 0) missing.push('analysis start failures observed');
+  const terminalFailures = (summary.analysis.terminal.failed ?? 0)
+    + (summary.analysis.terminal.error ?? 0)
+    + (summary.analysis.terminal.quota_exceeded ?? 0);
+  if (terminalFailures > 0) missing.push('terminal analysis failures observed');
   if (summary.analysis.maxRunning < 5) missing.push('observed max running runs < 5');
   else if (summary.analysis.maxRunning > 15) missing.push('observed max running runs > 15');
   else if (summary.analysis.runningInRangeSnapshots < 2) {

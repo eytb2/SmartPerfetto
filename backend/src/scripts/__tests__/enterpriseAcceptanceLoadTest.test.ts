@@ -413,8 +413,96 @@ describe('enterprise acceptance load test helpers', () => {
       missing: [
         'started analysis runs < requested target',
         'analysis start failures observed',
+        'terminal analysis failures observed',
         'LLM call count did not increase',
       ],
+    });
+  });
+
+  it('rejects terminal failed, error, or quota_exceeded analysis runs', () => {
+    const opts = options({ onlineUsers: 50 });
+    const runtimeSamples: RuntimeSample[] = [
+      {
+        timestamp: '2026-05-09T00:00:01.000Z',
+        queueLength: 1,
+        workerRssBytes: 256,
+        leaseRssBytes: null,
+        llmCostUsd: 0.1,
+        llmCalls: 1,
+      },
+    ];
+    const summary = summarizeLoadTest({
+      options: opts,
+      httpSamples: onlineUserSamples(50),
+      runs: [
+        ...Array.from({ length: 12 }, (_unused, index) => ({
+          userId: `load-user-${String(index + 1).padStart(3, '0')}`,
+          traceId: 'trace-a',
+          startStatus: 200,
+          startOk: true,
+          lastStatus: 'running' as const,
+        })),
+        {
+          userId: 'load-user-013',
+          traceId: 'trace-a',
+          startStatus: 200,
+          startOk: true,
+          lastStatus: 'failed' as const,
+        },
+        {
+          userId: 'load-user-014',
+          traceId: 'trace-a',
+          startStatus: 200,
+          startOk: true,
+          lastStatus: 'error' as const,
+        },
+        {
+          userId: 'load-user-015',
+          traceId: 'trace-a',
+          startStatus: 200,
+          startOk: true,
+          lastStatus: 'quota_exceeded' as const,
+        },
+      ],
+      statusSnapshots: [
+        {
+          timestamp: '2026-05-09T00:00:01.000Z',
+          counts: {
+            queued: 1,
+            pending: 1,
+            running: 5,
+            completed: 0,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
+        {
+          timestamp: '2026-05-09T00:00:02.000Z',
+          counts: {
+            queued: 0,
+            pending: 1,
+            running: 5,
+            completed: 1,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
+      ],
+      runtimeSamples,
+    });
+
+    expect(summary.analysis.terminal).toEqual({
+      failed: 1,
+      error: 1,
+      quota_exceeded: 1,
+    });
+    expect(evaluateAcceptance(opts, summary, runtimeSamples)).toEqual({
+      passed: false,
+      missing: ['terminal analysis failures observed'],
     });
   });
 
