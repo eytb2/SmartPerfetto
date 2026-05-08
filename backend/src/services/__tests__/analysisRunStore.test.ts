@@ -12,6 +12,7 @@ import {
 } from '../enterpriseDb';
 import {
   getAnalysisRunLifecycle,
+  failInterruptedAnalysisRunsOnStartup,
   heartbeatAnalysisRun,
   isAnalysisRunHeartbeatFresh,
   persistAnalysisRunState,
@@ -100,5 +101,48 @@ describe('analysis run store', () => {
       errorJson: JSON.stringify({ message: 'cancelled by user' }),
     }));
     expect(isAnalysisRunHeartbeatFresh(runScope, 'run-failed', 1_777_000_011_000, 60_000)).toBe(false);
+  });
+
+  it('fails interrupted nonterminal runs on backend startup while preserving terminal runs', () => {
+    const pendingScope = scope({ sessionId: 'session-pending', runId: 'run-pending' });
+    const runningScope = scope({ sessionId: 'session-running', runId: 'run-running' });
+    const awaitingScope = scope({ sessionId: 'session-awaiting', runId: 'run-awaiting' });
+    const completedScope = scope({ sessionId: 'session-completed', runId: 'run-completed' });
+
+    persistAnalysisRunState(pendingScope, 'pending', { now: 1_777_000_000_000 });
+    persistAnalysisRunState(runningScope, 'running', { now: 1_777_000_001_000 });
+    persistAnalysisRunState(awaitingScope, 'awaiting_user', { now: 1_777_000_002_000 });
+    persistAnalysisRunState(completedScope, 'completed', { now: 1_777_000_003_000 });
+
+    const recovered = failInterruptedAnalysisRunsOnStartup({
+      now: 1_777_000_100_000,
+      error: 'test restart',
+    });
+
+    expect(recovered.map(run => [run.id, run.previousStatus])).toEqual([
+      ['run-pending', 'pending'],
+      ['run-running', 'running'],
+      ['run-awaiting', 'awaiting_user'],
+    ]);
+    expect(getAnalysisRunLifecycle(pendingScope, 'run-pending')).toEqual(expect.objectContaining({
+      status: 'failed',
+      completedAt: 1_777_000_100_000,
+      errorJson: JSON.stringify({ message: 'test restart', source: 'backend_startup_recovery' }),
+    }));
+    expect(getAnalysisRunLifecycle(runningScope, 'run-running')?.status).toBe('failed');
+    expect(getAnalysisRunLifecycle(awaitingScope, 'run-awaiting')?.status).toBe('failed');
+    expect(getAnalysisRunLifecycle(completedScope, 'run-completed')?.status).toBe('completed');
+
+    const db = openEnterpriseDb();
+    try {
+      expect(db.prepare('SELECT status FROM analysis_sessions WHERE id = ?').get('session-running')).toEqual({
+        status: 'failed',
+      });
+      expect(db.prepare('SELECT status FROM analysis_sessions WHERE id = ?').get('session-completed')).toEqual({
+        status: 'completed',
+      });
+    } finally {
+      db.close();
+    }
   });
 });

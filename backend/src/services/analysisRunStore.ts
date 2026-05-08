@@ -32,6 +32,14 @@ export interface AnalysisRunLifecycle {
   errorJson: string | null;
 }
 
+export interface InterruptedAnalysisRunRecovery {
+  id: string;
+  tenantId: string;
+  workspaceId: string;
+  sessionId: string;
+  previousStatus: PersistedAnalysisRunStatus | string;
+}
+
 interface AnalysisRunRow extends Record<string, unknown> {
   id: string;
   status: string;
@@ -40,6 +48,14 @@ interface AnalysisRunRow extends Record<string, unknown> {
   heartbeat_at: number | null;
   updated_at: number | null;
   error_json: string | null;
+}
+
+interface InterruptedAnalysisRunRow extends Record<string, unknown> {
+  id: string;
+  tenant_id: string;
+  workspace_id: string;
+  session_id: string;
+  status: string;
 }
 
 let singletonDb: Database.Database | null = null;
@@ -260,4 +276,64 @@ export function isAnalysisRunHeartbeatFresh(
   if (!lifecycle || isTerminalStatus(lifecycle.status)) return false;
   const heartbeatAt = lifecycle.heartbeatAt ?? lifecycle.updatedAt ?? lifecycle.startedAt;
   return now - heartbeatAt <= maxStaleMs;
+}
+
+export function failInterruptedAnalysisRunsOnStartup(
+  options: { now?: number; error?: string } = {},
+): InterruptedAnalysisRunRecovery[] {
+  const now = options.now ?? Date.now();
+  const errorJson = JSON.stringify({
+    message: options.error ?? 'Backend restarted before analysis completed',
+    source: 'backend_startup_recovery',
+  });
+  const db = getAnalysisRunDb();
+  return db.transaction(() => {
+    const interrupted = db.prepare<unknown[], InterruptedAnalysisRunRow>(`
+      SELECT id, tenant_id, workspace_id, session_id, status
+      FROM analysis_runs
+      WHERE status IN ('pending', 'running', 'awaiting_user')
+      ORDER BY updated_at ASC, started_at ASC, id ASC
+    `).all();
+
+    for (const run of interrupted) {
+      db.prepare(`
+        UPDATE analysis_runs
+        SET status = 'failed',
+            heartbeat_at = ?,
+            updated_at = ?,
+            completed_at = COALESCE(completed_at, ?),
+            error_json = COALESCE(error_json, ?)
+        WHERE tenant_id = ?
+          AND workspace_id = ?
+          AND id = ?
+          AND status = ?
+      `).run(
+        now,
+        now,
+        now,
+        errorJson,
+        run.tenant_id,
+        run.workspace_id,
+        run.id,
+        run.status,
+      );
+      db.prepare(`
+        UPDATE analysis_sessions
+        SET status = 'failed',
+            updated_at = ?
+        WHERE tenant_id = ?
+          AND workspace_id = ?
+          AND id = ?
+          AND status IN ('pending', 'running', 'awaiting_user')
+      `).run(now, run.tenant_id, run.workspace_id, run.session_id);
+    }
+
+    return interrupted.map(run => ({
+      id: run.id,
+      tenantId: run.tenant_id,
+      workspaceId: run.workspace_id,
+      sessionId: run.session_id,
+      previousStatus: run.status,
+    }));
+  })();
 }

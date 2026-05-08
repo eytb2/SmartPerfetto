@@ -9,7 +9,7 @@ import cors from 'cors';
 import path from 'path';
 
 // Import configuration
-import { serverConfig } from './config';
+import { resolveFeatureConfig, serverConfig } from './config';
 
 // Import routes (now after dotenv.config())
 import sqlRoutes from './routes/sql';
@@ -71,6 +71,7 @@ import {
 // Import cleanup utilities
 import { TraceProcessorFactory, killOrphanProcessors } from './services/workingTraceProcessor';
 import { getPortPool, resetPortPool } from './services/portPool';
+import { failInterruptedAnalysisRunsOnStartup } from './services/analysisRunStore';
 
 const app = express();
 const PORT = serverConfig.port;
@@ -271,6 +272,22 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 });
 
 // Initialize services
+function recoverInterruptedEnterpriseRuns(): void {
+  if (!resolveFeatureConfig().enterprise) return;
+  try {
+    const recovered = failInterruptedAnalysisRunsOnStartup();
+    if (recovered.length > 0) {
+      console.warn(
+        `[EnterpriseRecovery] Marked ${recovered.length} interrupted analysis run(s) failed after backend startup`,
+      );
+    }
+  } catch (error: any) {
+    console.warn('[EnterpriseRecovery] Failed to recover interrupted analysis runs:', error?.message || error);
+  }
+}
+
+recoverInterruptedEnterpriseRuns();
+
 // Kill orphan trace_processor processes from previous runs
 killOrphanProcessors();
 

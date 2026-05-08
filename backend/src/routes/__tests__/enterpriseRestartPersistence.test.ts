@@ -14,6 +14,12 @@ import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../../services/enterpr
 import { ENTERPRISE_MIGRATION_PHASE_ENV } from '../../services/enterpriseMigration';
 import { SessionPersistenceService } from '../../services/sessionPersistenceService';
 import {
+  failInterruptedAnalysisRunsOnStartup,
+  getAnalysisRunLifecycle,
+  persistAnalysisRunState,
+  resetAnalysisRunStoreForTests,
+} from '../../services/analysisRunStore';
+import {
   ENTERPRISE_DATA_DIR_ENV,
   writeTraceMetadata,
 } from '../../services/traceMetadataStore';
@@ -37,6 +43,8 @@ const USER_ID = 'user-a';
 const TRACE_ID = 'trace-restart-a';
 const SESSION_ID = 'session-restart-a';
 const RUN_ID = 'run-restart-a';
+const INTERRUPTED_SESSION_ID = 'session-restart-interrupted';
+const INTERRUPTED_RUN_ID = 'run-restart-interrupted';
 const REPORT_ID = 'report-restart-a';
 const GENERATED_AT = 1_700_000_000_000;
 
@@ -75,7 +83,7 @@ function ssoHeaders(req: request.Test, workspaceId = WORKSPACE_ID): request.Test
     );
 }
 
-function readCount(table: 'trace_assets' | 'report_artifacts' | 'sessions'): number {
+function readCount(table: 'trace_assets' | 'report_artifacts' | 'sessions' | 'analysis_runs'): number {
   const db = openEnterpriseDb(dbPath);
   try {
     const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number };
@@ -142,6 +150,17 @@ async function seedRestartState(): Promise<void> {
     jank_type: 'App Deadline Missed',
   });
   persistence.saveSessionContext(SESSION_ID, context);
+
+  persistAnalysisRunState({
+    tenantId: TENANT_ID,
+    workspaceId: WORKSPACE_ID,
+    userId: USER_ID,
+    sessionId: INTERRUPTED_SESSION_ID,
+    runId: INTERRUPTED_RUN_ID,
+    traceId: TRACE_ID,
+    query: 'restart interrupted running run',
+    mode: 'agent',
+  }, 'running', { now: GENERATED_AT + 2000 });
 }
 
 beforeEach(async () => {
@@ -159,12 +178,14 @@ beforeEach(async () => {
   delete process.env.SMARTPERFETTO_API_KEY;
 
   SessionPersistenceService.resetForTests();
+  resetAnalysisRunStoreForTests();
   reportStore.clear();
   sessionContextManager.remove(SESSION_ID);
 });
 
 afterEach(async () => {
   SessionPersistenceService.resetForTests();
+  resetAnalysisRunStoreForTests();
   reportStore.clear();
   sessionContextManager.remove(SESSION_ID);
   restoreEnvValue(ENTERPRISE_FEATURE_FLAG_ENV, originalEnv.enterprise);
@@ -183,10 +204,16 @@ describe('enterprise restart persistence', () => {
     expect(readCount('trace_assets')).toBe(1);
     expect(readCount('report_artifacts')).toBe(1);
     expect(readCount('sessions')).toBe(1);
+    expect(readCount('analysis_runs')).toBe(2);
 
     reportStore.clear();
     sessionContextManager.remove(SESSION_ID);
     SessionPersistenceService.resetForTests();
+    resetAnalysisRunStoreForTests();
+    const recoveredRuns = failInterruptedAnalysisRunsOnStartup({
+      now: GENERATED_AT + 3000,
+      error: 'backend restart during active analysis',
+    });
 
     const app = makeApp();
 
@@ -232,6 +259,29 @@ describe('enterprise restart persistence', () => {
     }));
     expect(turnsRes.body.turns[0]).toEqual(expect.objectContaining({
       query: '分析 restart 后是否可恢复',
+    }));
+
+    expect(recoveredRuns).toEqual([
+      expect.objectContaining({
+        id: INTERRUPTED_RUN_ID,
+        previousStatus: 'running',
+      }),
+    ]);
+    expect(getAnalysisRunLifecycle({
+      tenantId: TENANT_ID,
+      workspaceId: WORKSPACE_ID,
+      userId: USER_ID,
+    }, INTERRUPTED_RUN_ID)).toEqual(expect.objectContaining({
+      status: 'failed',
+      completedAt: GENERATED_AT + 3000,
+    }));
+    expect(getAnalysisRunLifecycle({
+      tenantId: TENANT_ID,
+      workspaceId: WORKSPACE_ID,
+      userId: USER_ID,
+    }, RUN_ID)).toEqual(expect.objectContaining({
+      status: 'completed',
+      completedAt: GENERATED_AT,
     }));
   });
 });
