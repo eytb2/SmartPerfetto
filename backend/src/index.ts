@@ -251,6 +251,12 @@ app.get('/assistant-shell', (_req, res) => {
 });
 app.use('/assistant-shell', express.static(assistantShellDir));
 
+const adminControlPlaneDir = path.resolve(__dirname, '../public/admin-control-plane');
+app.get('/admin-control-plane', (_req, res) => {
+  res.sendFile(path.join(adminControlPlaneDir, 'index.html'));
+});
+app.use('/admin-control-plane', express.static(adminControlPlaneDir));
+
 // Serve uploaded files in development
 if (NODE_ENV === 'development') {
   app.use('/uploads', express.static(path.join(__dirname, '../uploads')));

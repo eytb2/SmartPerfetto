@@ -7,6 +7,17 @@ import { Router, type Response } from 'express';
 import { authenticate, requireRequestContext, type RequestContext } from '../middleware/auth';
 import { openEnterpriseDb } from '../services/enterpriseDb';
 import {
+  createEnterpriseWorkspace,
+  deleteEnterpriseWorkspaceMember,
+  EnterpriseAdminControlPlaneError,
+  getEnterpriseAdminControlPlaneSummary,
+  listEnterpriseWorkspaceMembers,
+  listEnterpriseWorkspaces,
+  updateEnterpriseWorkspace,
+  upsertEnterpriseWorkspaceMember,
+  type WorkspaceUpsertInput,
+} from '../services/enterpriseAdminControlPlaneService';
+import {
   createTenantTombstone,
   getTenantTombstone,
   purgeTenantNow,
@@ -36,10 +47,48 @@ function canDeleteTenant(context: RequestContext): boolean {
     || context.roles.includes('org_admin');
 }
 
+function canManageTenant(context: RequestContext): boolean {
+  return context.scopes.includes('*')
+    || context.scopes.includes('tenant:manage')
+    || context.roles.includes('org_admin');
+}
+
+function canManageWorkspace(context: RequestContext, workspaceId: string): boolean {
+  return canManageTenant(context)
+    || context.scopes.includes('workspace:manage')
+    || context.scopes.includes('quota:manage')
+    || (context.roles.includes('workspace_admin') && context.workspaceId === workspaceId);
+}
+
 function requireTenantDeletePermission(context: RequestContext, res: Response): boolean {
   if (canDeleteTenant(context)) return true;
   sendForbidden(res, 'Tenant deletion requires org_admin or tenant:delete scope');
   return false;
+}
+
+function requireTenantManagePermission(context: RequestContext, res: Response): boolean {
+  if (canManageTenant(context)) return true;
+  sendForbidden(res, 'Tenant management requires org_admin or tenant:manage scope');
+  return false;
+}
+
+function requireWorkspaceManagePermission(
+  context: RequestContext,
+  workspaceId: string,
+  res: Response,
+): boolean {
+  if (canManageWorkspace(context, workspaceId)) return true;
+  sendForbidden(res, 'Workspace management requires workspace_admin, workspace:manage, quota:manage, or tenant:manage');
+  return false;
+}
+
+function sendControlPlaneError(res: Response, error: unknown): void {
+  if (error instanceof EnterpriseAdminControlPlaneError) {
+    res.status(error.status).json({ success: false, error: error.message });
+    return;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  res.status(500).json({ success: false, error: message || 'Enterprise admin control plane failed' });
 }
 
 function requireTenantConfirmation(body: unknown, tenantId: string): string | null {
@@ -48,6 +97,123 @@ function requireTenantConfirmation(body: unknown, tenantId: string): string | nu
 }
 
 router.use(authenticate);
+
+router.get('/admin/summary', (req, res) => {
+  const context = requireRequestContext(req);
+  if (!requireTenantManagePermission(context, res)) return;
+  const db = openEnterpriseDb();
+  try {
+    res.json(getEnterpriseAdminControlPlaneSummary(db, context));
+  } catch (error) {
+    sendControlPlaneError(res, error);
+  } finally {
+    db.close();
+  }
+});
+
+router.get('/workspaces', (req, res) => {
+  const context = requireRequestContext(req);
+  if (!requireTenantManagePermission(context, res)) return;
+  const db = openEnterpriseDb();
+  try {
+    res.json(listEnterpriseWorkspaces(db, context));
+  } catch (error) {
+    sendControlPlaneError(res, error);
+  } finally {
+    db.close();
+  }
+});
+
+router.post('/workspaces', (req, res) => {
+  const context = requireRequestContext(req);
+  if (!requireTenantManagePermission(context, res)) return;
+  const db = openEnterpriseDb();
+  try {
+    res.status(201).json(createEnterpriseWorkspace(db, context, req.body as WorkspaceUpsertInput));
+  } catch (error) {
+    sendControlPlaneError(res, error);
+  } finally {
+    db.close();
+  }
+});
+
+router.patch('/workspaces/:workspaceId', (req, res) => {
+  const context = requireRequestContext(req);
+  if (!requireWorkspaceManagePermission(context, req.params.workspaceId, res)) return;
+  const db = openEnterpriseDb();
+  try {
+    res.json(updateEnterpriseWorkspace(db, context, req.params.workspaceId, req.body as WorkspaceUpsertInput));
+  } catch (error) {
+    sendControlPlaneError(res, error);
+  } finally {
+    db.close();
+  }
+});
+
+router.patch('/workspaces/:workspaceId/policies', (req, res) => {
+  const context = requireRequestContext(req);
+  if (!requireWorkspaceManagePermission(context, req.params.workspaceId, res)) return;
+  const db = openEnterpriseDb();
+  try {
+    res.json(updateEnterpriseWorkspace(
+      db,
+      context,
+      req.params.workspaceId,
+      req.body as WorkspaceUpsertInput,
+      Date.now(),
+      'tenant.workspace.policy_updated',
+    ));
+  } catch (error) {
+    sendControlPlaneError(res, error);
+  } finally {
+    db.close();
+  }
+});
+
+router.get('/workspaces/:workspaceId/members', (req, res) => {
+  const context = requireRequestContext(req);
+  if (!requireWorkspaceManagePermission(context, req.params.workspaceId, res)) return;
+  const db = openEnterpriseDb();
+  try {
+    res.json(listEnterpriseWorkspaceMembers(db, context, req.params.workspaceId));
+  } catch (error) {
+    sendControlPlaneError(res, error);
+  } finally {
+    db.close();
+  }
+});
+
+router.put('/workspaces/:workspaceId/members/:userId', (req, res) => {
+  const context = requireRequestContext(req);
+  if (!requireWorkspaceManagePermission(context, req.params.workspaceId, res)) return;
+  const db = openEnterpriseDb();
+  try {
+    res.json(upsertEnterpriseWorkspaceMember(
+      db,
+      context,
+      req.params.workspaceId,
+      req.params.userId,
+      req.body ?? {},
+    ));
+  } catch (error) {
+    sendControlPlaneError(res, error);
+  } finally {
+    db.close();
+  }
+});
+
+router.delete('/workspaces/:workspaceId/members/:userId', (req, res) => {
+  const context = requireRequestContext(req);
+  if (!requireWorkspaceManagePermission(context, req.params.workspaceId, res)) return;
+  const db = openEnterpriseDb();
+  try {
+    res.json(deleteEnterpriseWorkspaceMember(db, context, req.params.workspaceId, req.params.userId));
+  } catch (error) {
+    sendControlPlaneError(res, error);
+  } finally {
+    db.close();
+  }
+});
 
 router.post('/tombstone', (req, res) => {
   const context = requireRequestContext(req);

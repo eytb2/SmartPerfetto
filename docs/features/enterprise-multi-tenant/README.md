@@ -75,7 +75,7 @@
 - [x] 4.12 §11.11 漏洞清单：每行设计验收都打勾验证
 
 ### 0.5 主线 D：控制面与合规（§18）
-- [ ] 5.1 tenant / workspace / member / provider / quota 管理 UI 与后端 API
+- [x] 5.1 tenant / workspace / member / provider / quota 管理 UI 与后端 API
 - [x] 5.2 `audit_events` 表 + 关键操作埋点（trace / report / provider / memory / cleanup / delete / promote）
 - [x] 5.3 配额 / 预算 / retention policy（§16.1，含 quota_exceeded 终态）
 - [x] 5.4 Tenant export bundle（§16.2，含 SHA256 + tenant identity proof）
@@ -142,6 +142,7 @@
 - [x] `docs/features/enterprise-multi-tenant/runtime-isolation-checklist.md`（§0.4.12 §11.11 漏洞清单设计验收证据）
 - [x] `docs/features/enterprise-multi-tenant/security-audit.md`（§0.5.9 安全审计证据）
 - [x] `docs/features/enterprise-multi-tenant/runtime-dashboard.md`（§0.5.8 管理员运行时 dashboard API 契约与验证）
+- [x] `docs/features/enterprise-multi-tenant/admin-control-plane.md`（§0.5.1 tenant/workspace/member/provider/quota 管理面契约与验证）
 
 ### 0.10 PR / 提交收尾（每次 PR 都要走）
 - [ ] 每个主线 / 子主线一个独立 PR；不跨主线串改动

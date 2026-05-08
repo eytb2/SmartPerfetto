@@ -63,6 +63,16 @@ function analystHeaders(req: request.Test): request.Test {
     .set('X-SmartPerfetto-SSO-Scopes', 'trace:read,agent:run');
 }
 
+function workspaceAdminHeaders(req: request.Test, workspaceId = 'workspace-a'): request.Test {
+  return req
+    .set('X-SmartPerfetto-SSO-User-Id', 'workspace-admin-a')
+    .set('X-SmartPerfetto-SSO-Email', 'workspace-admin-a@example.test')
+    .set('X-SmartPerfetto-SSO-Tenant-Id', 'tenant-a')
+    .set('X-SmartPerfetto-SSO-Workspace-Id', workspaceId)
+    .set('X-SmartPerfetto-SSO-Roles', 'workspace_admin')
+    .set('X-SmartPerfetto-SSO-Scopes', 'trace:read,trace:write');
+}
+
 function readTenantRow(): { status: string } | null {
   const db = openEnterpriseDb(dbPath);
   try {
@@ -106,6 +116,20 @@ function readCount(table: string, where = "tenant_id = 'tenant-a'"): number {
       WHERE ${where}
     `).get();
     return row?.count ?? 0;
+  } finally {
+    db.close();
+  }
+}
+
+function readAuditActions(): string[] {
+  const db = openEnterpriseDb(dbPath);
+  try {
+    return db.prepare<unknown[], { action: string }>(`
+      SELECT action
+      FROM audit_events
+      WHERE tenant_id = 'tenant-a'
+      ORDER BY created_at ASC, id ASC
+    `).all().map(row => row.action);
   } finally {
     db.close();
   }
@@ -202,6 +226,127 @@ afterEach(async () => {
 });
 
 describe('enterprise tenant lifecycle routes', () => {
+  it('manages workspaces, members, and quota policies through the admin control plane', async () => {
+    const app = makeApp();
+
+    const createRes = await adminHeaders(request(app).post('/api/tenant/workspaces')).send({
+      workspaceId: 'workspace-admin',
+      name: 'Workspace Admin',
+      quotaPolicy: {
+        maxTraceBytes: 1024,
+      },
+      retentionPolicy: {
+        traceRetentionDays: 7,
+      },
+    });
+
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.workspace).toEqual(expect.objectContaining({
+      id: 'workspace-admin',
+      name: 'Workspace Admin',
+      quotaPolicy: { maxTraceBytes: 1024 },
+      retentionPolicy: { traceRetentionDays: 7 },
+    }));
+
+    const policyRes = await adminHeaders(
+      request(app).patch('/api/tenant/workspaces/workspace-admin/policies'),
+    ).send({
+      quotaPolicy: {
+        maxTraceBytes: 2048,
+        maxConcurrentRuns: 3,
+      },
+      retentionPolicy: {
+        reportRetentionDays: 30,
+      },
+    });
+    expect(policyRes.status).toBe(200);
+    expect(policyRes.body.workspace).toEqual(expect.objectContaining({
+      quotaPolicy: {
+        maxTraceBytes: 2048,
+        maxConcurrentRuns: 3,
+      },
+      retentionPolicy: {
+        reportRetentionDays: 30,
+      },
+    }));
+
+    const memberRes = await adminHeaders(
+      request(app).put('/api/tenant/workspaces/workspace-admin/members/user-b'),
+    ).send({
+      email: 'user-b@example.test',
+      displayName: 'User B',
+      role: 'analyst',
+    });
+    expect(memberRes.status).toBe(200);
+    expect(memberRes.body.member).toEqual(expect.objectContaining({
+      userId: 'user-b',
+      email: 'user-b@example.test',
+      displayName: 'User B',
+      role: 'analyst',
+    }));
+
+    const membersRes = await adminHeaders(
+      request(app).get('/api/tenant/workspaces/workspace-admin/members'),
+    );
+    expect(membersRes.status).toBe(200);
+    expect(membersRes.body.members).toEqual([
+      expect.objectContaining({
+        userId: 'user-b',
+        role: 'analyst',
+      }),
+    ]);
+
+    const summaryRes = await adminHeaders(request(app).get('/api/tenant/admin/summary'));
+    expect(summaryRes.status).toBe(200);
+    expect(summaryRes.body.counts).toEqual(expect.objectContaining({
+      workspaces: 2,
+      users: 2,
+      memberships: 1,
+      providers: 0,
+    }));
+    expect(summaryRes.body.providerManagement).toEqual(expect.objectContaining({
+      workspaceEndpointTemplate: '/api/workspaces/:workspaceId/providers',
+    }));
+
+    const deleteMemberRes = await adminHeaders(
+      request(app).delete('/api/tenant/workspaces/workspace-admin/members/user-b'),
+    );
+    expect(deleteMemberRes.status).toBe(200);
+    expect(readCount('memberships')).toBe(0);
+    expect(readAuditActions()).toEqual(expect.arrayContaining([
+      'tenant.workspace.created',
+      'tenant.workspace.policy_updated',
+      'tenant.member.upserted',
+      'tenant.member.deleted',
+    ]));
+  });
+
+  it('limits admin control plane access by tenant and workspace management permission', async () => {
+    await seedTenantData();
+    const app = makeApp();
+
+    const tenantListDenied = await analystHeaders(request(app).get('/api/tenant/workspaces'));
+    expect(tenantListDenied.status).toBe(403);
+    expect(tenantListDenied.body.details).toContain('Tenant management requires');
+
+    const ownWorkspaceUpdate = await workspaceAdminHeaders(
+      request(app).patch('/api/tenant/workspaces/workspace-a/policies'),
+    ).send({
+      quotaPolicy: { maxConcurrentRuns: 2 },
+    });
+    expect(ownWorkspaceUpdate.status).toBe(200);
+    expect(ownWorkspaceUpdate.body.workspace.quotaPolicy).toEqual({ maxConcurrentRuns: 2 });
+
+    const otherWorkspaceDenied = await workspaceAdminHeaders(
+      request(app).patch('/api/tenant/workspaces/workspace-b/policies'),
+      'workspace-a',
+    ).send({
+      quotaPolicy: { maxConcurrentRuns: 3 },
+    });
+    expect(otherWorkspaceDenied.status).toBe(403);
+    expect(otherWorkspaceDenied.body.details).toContain('Workspace management requires');
+  });
+
   it('creates a tenant tombstone, records audit state, and blocks new work', async () => {
     const app = makeApp();
 

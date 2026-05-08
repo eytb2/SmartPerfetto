@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SmartPerfetto Admin Control Plane</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Admin Control Plane</h1>
+          <p id="tenantLine">Loading tenant scope</p>
+        </div>
+        <button id="refreshButton" type="button">Refresh</button>
+      </header>
+
+      <section class="metrics" aria-label="Tenant summary">
+        <div><span id="workspaceCount">0</span><small>Workspaces</small></div>
+        <div><span id="userCount">0</span><small>Users</small></div>
+        <div><span id="membershipCount">0</span><small>Memberships</small></div>
+        <div><span id="providerCount">0</span><small>Providers</small></div>
+      </section>
+
+      <section class="panel">
+        <div class="panelHeader">
+          <h2>Workspaces</h2>
+          <form id="workspaceForm" class="inlineForm">
+            <input name="workspaceId" placeholder="workspace-id" required />
+            <input name="name" placeholder="Display name" />
+            <button type="submit">Create</button>
+          </form>
+        </div>
+        <div class="tableWrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Members</th>
+                <th>Traces</th>
+                <th>Providers</th>
+                <th>Quota</th>
+                <th>Retention</th>
+              </tr>
+            </thead>
+            <tbody id="workspaceRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="grid">
+        <form id="policyForm" class="panel">
+          <h2>Quota And Retention</h2>
+          <label>
+            Workspace
+            <input name="workspaceId" placeholder="workspace-id" required />
+          </label>
+          <label>
+            Quota JSON
+            <textarea name="quotaPolicy" spellcheck="false" rows="5">{}</textarea>
+          </label>
+          <label>
+            Retention JSON
+            <textarea name="retentionPolicy" spellcheck="false" rows="5">{}</textarea>
+          </label>
+          <button type="submit">Save Policies</button>
+        </form>
+
+        <form id="memberForm" class="panel">
+          <h2>Members</h2>
+          <label>
+            Workspace
+            <input name="workspaceId" placeholder="workspace-id" required />
+          </label>
+          <label>
+            User ID
+            <input name="userId" placeholder="user-id" required />
+          </label>
+          <label>
+            Email
+            <input name="email" type="email" placeholder="user@example.com" />
+          </label>
+          <label>
+            Role
+            <select name="role">
+              <option value="viewer">viewer</option>
+              <option value="analyst" selected>analyst</option>
+              <option value="workspace_admin">workspace_admin</option>
+              <option value="org_admin">org_admin</option>
+            </select>
+          </label>
+          <button type="submit">Upsert Member</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>Provider Management</h2>
+        <p id="providerLine">Workspace provider API: /api/workspaces/:workspaceId/providers</p>
+      </section>
+
+      <pre id="statusLog" class="statusLog" aria-live="polite"></pre>
+    </main>
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>
