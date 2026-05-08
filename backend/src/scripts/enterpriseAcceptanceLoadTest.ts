@@ -92,8 +92,10 @@ export interface EnterpriseLoadTestSummary {
     maxQueueLength: number | null;
     maxWorkerRssBytes: number | null;
     maxLeaseRssBytes: number | null;
+    initialLlmCalls: number | null;
     finalLlmCostUsd: number | null;
     finalLlmCalls: number | null;
+    llmCallDelta: number | null;
   };
 }
 
@@ -297,6 +299,10 @@ function maxNullable(values: Array<number | null | undefined>): number | null {
   return present.length > 0 ? Math.max(...present) : null;
 }
 
+function numberSamples(values: Array<number | null | undefined>): number[] {
+  return values.filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+}
+
 export function summarizeLoadTest(input: {
   options: EnterpriseLoadTestOptions;
   httpSamples: HttpSample[];
@@ -329,6 +335,9 @@ export function summarizeLoadTest(input: {
   const lastRuntimeSample = input.runtimeSamples.length > 0
     ? input.runtimeSamples[input.runtimeSamples.length - 1]
     : undefined;
+  const llmCallSamples = numberSamples(input.runtimeSamples.map(sample => sample.llmCalls));
+  const initialLlmCalls = llmCallSamples[0] ?? null;
+  const finalLlmCalls = llmCallSamples.length > 0 ? llmCallSamples[llmCallSamples.length - 1] : null;
   const observedOnlineUsers = new Set(
     input.httpSamples
       .filter(sample => sample.ok && sample.operation === 'trace_list' && sample.userId.startsWith('online-user-'))
@@ -359,8 +368,10 @@ export function summarizeLoadTest(input: {
       maxQueueLength: maxNullable(input.runtimeSamples.map(sample => sample.queueLength)),
       maxWorkerRssBytes: maxNullable(input.runtimeSamples.map(sample => sample.workerRssBytes)),
       maxLeaseRssBytes: maxNullable(input.runtimeSamples.map(sample => sample.leaseRssBytes)),
+      initialLlmCalls,
       finalLlmCostUsd: lastRuntimeSample?.llmCostUsd ?? null,
-      finalLlmCalls: lastRuntimeSample?.llmCalls ?? null,
+      finalLlmCalls,
+      llmCallDelta: initialLlmCalls !== null && finalLlmCalls !== null ? finalLlmCalls - initialLlmCalls : null,
     },
   };
 }
@@ -401,7 +412,9 @@ export function evaluateAcceptance(
   if (summary.runtime.maxQueueLength === null) missing.push('missing queue length samples');
   if (summary.runtime.finalLlmCostUsd === null) missing.push('missing LLM cost sample');
   if (summary.runtime.finalLlmCalls === null) missing.push('missing LLM call sample');
-  else if (summary.runtime.finalLlmCalls <= 0) missing.push('LLM call count did not increase');
+  else if (summary.runtime.llmCallDelta === null || summary.runtime.llmCallDelta <= 0) {
+    missing.push('LLM call count did not increase');
+  }
   if (runtimeSamples.length === 0) missing.push('runtime dashboard was not sampled');
   return {
     passed: missing.length === 0,
@@ -591,16 +604,24 @@ async function pollRuntimeDashboard(
   endAt: number,
 ): Promise<void> {
   while (Date.now() < endAt) {
-    const response = await requestJson<any>(options, samples, {
-      operation: 'runtime_dashboard',
-      userId: 'load-runtime-admin',
-      path: '/api/admin/runtime',
-      runtimeAdmin: true,
-    });
-    if (response.ok && response.body) {
-      runtimeSamples.push(readRuntimeSample(response.body));
-    }
+    await sampleRuntimeDashboard(options, samples, runtimeSamples);
     await sleep(options.pollIntervalMs);
+  }
+}
+
+async function sampleRuntimeDashboard(
+  options: EnterpriseLoadTestOptions,
+  samples: HttpSample[],
+  runtimeSamples: RuntimeSample[],
+): Promise<void> {
+  const response = await requestJson<any>(options, samples, {
+    operation: 'runtime_dashboard',
+    userId: 'load-runtime-admin',
+    path: '/api/admin/runtime',
+    runtimeAdmin: true,
+  });
+  if (response.ok && response.body) {
+    runtimeSamples.push(readRuntimeSample(response.body));
   }
 }
 
@@ -700,8 +721,10 @@ export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): s
   lines.push(`| Max queue length | ${report.summary.runtime.maxQueueLength ?? 'n/a'} |`);
   lines.push(`| Max worker RSS | ${formatBytes(report.summary.runtime.maxWorkerRssBytes)} |`);
   lines.push(`| Max lease RSS | ${formatBytes(report.summary.runtime.maxLeaseRssBytes)} |`);
+  lines.push(`| Initial LLM calls | ${report.summary.runtime.initialLlmCalls ?? 'n/a'} |`);
   lines.push(`| Final LLM cost | ${report.summary.runtime.finalLlmCostUsd ?? 'n/a'} |`);
   lines.push(`| Final LLM calls | ${report.summary.runtime.finalLlmCalls ?? 'n/a'} |`);
+  lines.push(`| LLM call delta | ${report.summary.runtime.llmCallDelta ?? 'n/a'} |`);
   lines.push('');
   lines.push('## Latency By Operation');
   lines.push('');
@@ -731,6 +754,9 @@ export async function runEnterpriseAcceptanceLoadTest(options: EnterpriseLoadTes
   const runtimeSamples: RuntimeSample[] = [];
   const statusSnapshots: AnalysisStatusSnapshot[] = [];
   const runCount = options.targetRunningRuns + options.targetPendingRuns;
+
+  await sampleRuntimeDashboard(options, httpSamples, runtimeSamples);
+
   const runs = await Promise.all(
     Array.from({ length: runCount }, (_unused, index) => startAnalysisRun(options, httpSamples, index)),
   );

@@ -20,7 +20,7 @@ The final report must cover:
 - Error rate within the configured threshold.
 - worker / lease RSS.
 - queue length.
-- LLM cost and a positive LLM call count.
+- LLM cost and an LLM call-count increase from the pre-run runtime baseline.
 
 ## Command
 
@@ -65,5 +65,7 @@ If the backend requires `SMARTPERFETTO_API_KEY`, add:
 - `acceptance.passed` also requires at least two status samples with 5-15
   running runs and at least two status samples with queued/pending runs, so a
   single transient spike cannot satisfy the "stable pending queue" requirement.
-- The runtime dashboard must provide LLM cost and a positive LLM call count;
-  cost alone is not enough evidence that the agent path exercised a real LLM.
+- The harness samples the runtime dashboard once before starting analysis runs
+  and then during the test window. Runtime evidence must include LLM cost plus
+  an increased LLM call count; a historical positive call total is not enough
+  evidence that this run exercised a real LLM.
