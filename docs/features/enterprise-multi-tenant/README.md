@@ -40,7 +40,7 @@
 
 ### 0.3 主线 B：存储与持久化（§18）
 - [x] 3.1 选 SQLite WAL 还是单 Postgres，落地 ADR；建立 repository 抽象（默认追加 tenantId/workspaceId filter）
-- [ ] 3.2 实现 §10.2 全部核心表 + 索引 + migration（含 audit / tombstone）
+- [x] 3.2 实现 §10.2 全部核心表 + 索引 + migration（含 audit / tombstone）
 - [ ] 3.3 trace metadata 入 DB；trace 文件迁到 `data/{tenantId}/{workspaceId}/traces/`
 - [ ] 3.4 report metadata 入 DB；report 内容迁到 `data/{tenantId}/{workspaceId}/reports/`（§14.2）
 - [ ] 3.5 `logs/claude_session_map.json` 迁到 `runtime_snapshots`

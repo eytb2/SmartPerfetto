@@ -9,21 +9,35 @@ interface MigrationStep {
   up: (db: Database.Database) => void;
 }
 
-export const ENTERPRISE_MINIMAL_SCHEMA_TABLES = [
+export const ENTERPRISE_CORE_SCHEMA_TABLES = [
   'organizations',
   'workspaces',
   'users',
   'memberships',
   'api_keys',
   'trace_assets',
+  'trace_processor_leases',
+  'trace_processor_holders',
   'analysis_sessions',
   'analysis_runs',
+  'conversation_turns',
   'agent_events',
+  'runtime_snapshots',
+  'provider_credentials',
   'provider_snapshots',
+  'report_artifacts',
+  'memory_entries',
+  'skill_registry_entries',
+  'tenant_tombstones',
   'audit_events',
+] as const;
+
+export const ENTERPRISE_MINIMAL_SCHEMA_TABLES = [
+  ...ENTERPRISE_CORE_SCHEMA_TABLES,
   'sso_sessions',
 ] as const;
 
+export type EnterpriseCoreSchemaTable = typeof ENTERPRISE_CORE_SCHEMA_TABLES[number];
 export type EnterpriseMinimalSchemaTable = typeof ENTERPRISE_MINIMAL_SCHEMA_TABLES[number];
 
 const MIGRATIONS: MigrationStep[] = [
@@ -263,6 +277,202 @@ const MIGRATIONS: MigrationStep[] = [
           ON api_keys(tenant_id, owner_user_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_api_keys_expiry
           ON api_keys(expires_at, revoked_at);
+      `);
+    },
+  },
+  {
+    version: 4,
+    up: (db) => {
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_tenant_id_unique
+          ON workspaces(tenant_id, id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_tenant_id_unique
+          ON users(tenant_id, id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_trace_assets_tenant_workspace_id_unique
+          ON trace_assets(tenant_id, workspace_id, id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_sessions_tenant_workspace_id_unique
+          ON analysis_sessions(tenant_id, workspace_id, id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_runs_tenant_workspace_id_unique
+          ON analysis_runs(tenant_id, workspace_id, id);
+
+        CREATE TABLE IF NOT EXISTS trace_processor_leases (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          trace_id TEXT NOT NULL,
+          mode TEXT NOT NULL,
+          state TEXT NOT NULL,
+          rss_bytes INTEGER,
+          heartbeat_at INTEGER,
+          expires_at INTEGER,
+          FOREIGN KEY (tenant_id) REFERENCES organizations(id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id) REFERENCES workspaces(tenant_id, id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id, trace_id) REFERENCES trace_assets(tenant_id, workspace_id, id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_trace_processor_leases_owner_guard
+          ON trace_processor_leases(tenant_id, workspace_id, id);
+        CREATE INDEX IF NOT EXISTS idx_trace_processor_leases_trace
+          ON trace_processor_leases(tenant_id, workspace_id, trace_id, state);
+        CREATE INDEX IF NOT EXISTS idx_trace_processor_leases_state
+          ON trace_processor_leases(tenant_id, workspace_id, state, heartbeat_at);
+        CREATE INDEX IF NOT EXISTS idx_trace_processor_leases_expiry
+          ON trace_processor_leases(expires_at, heartbeat_at);
+
+        CREATE TABLE IF NOT EXISTS trace_processor_holders (
+          id TEXT PRIMARY KEY,
+          lease_id TEXT NOT NULL,
+          holder_type TEXT NOT NULL,
+          holder_ref TEXT NOT NULL,
+          window_id TEXT,
+          heartbeat_at INTEGER,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY (lease_id) REFERENCES trace_processor_leases(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_trace_processor_holders_lease
+          ON trace_processor_holders(lease_id, holder_type, holder_ref);
+        CREATE INDEX IF NOT EXISTS idx_trace_processor_holders_window
+          ON trace_processor_holders(window_id, heartbeat_at);
+
+        CREATE TABLE IF NOT EXISTS conversation_turns (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          role TEXT NOT NULL,
+          content_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY (tenant_id) REFERENCES organizations(id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id) REFERENCES workspaces(tenant_id, id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id, session_id) REFERENCES analysis_sessions(tenant_id, workspace_id, id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id, run_id) REFERENCES analysis_runs(tenant_id, workspace_id, id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_conversation_turns_session
+          ON conversation_turns(tenant_id, workspace_id, session_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_conversation_turns_run
+          ON conversation_turns(tenant_id, workspace_id, run_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS runtime_snapshots (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          runtime_type TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY (tenant_id) REFERENCES organizations(id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id) REFERENCES workspaces(tenant_id, id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id, session_id) REFERENCES analysis_sessions(tenant_id, workspace_id, id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id, run_id) REFERENCES analysis_runs(tenant_id, workspace_id, id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_snapshots_session
+          ON runtime_snapshots(tenant_id, workspace_id, session_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_runtime_snapshots_run
+          ON runtime_snapshots(tenant_id, workspace_id, run_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS provider_credentials (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT,
+          owner_user_id TEXT,
+          scope TEXT NOT NULL,
+          name TEXT NOT NULL,
+          type TEXT NOT NULL,
+          models_json TEXT NOT NULL,
+          secret_ref TEXT NOT NULL,
+          policy_json TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY (tenant_id) REFERENCES organizations(id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id) REFERENCES workspaces(tenant_id, id) ON DELETE CASCADE,
+          FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_provider_credentials_scope
+          ON provider_credentials(tenant_id, workspace_id, scope, created_at);
+        CREATE INDEX IF NOT EXISTS idx_provider_credentials_owner
+          ON provider_credentials(tenant_id, owner_user_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_provider_credentials_name
+          ON provider_credentials(tenant_id, workspace_id, name);
+
+        CREATE TABLE IF NOT EXISTS report_artifacts (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          local_path TEXT NOT NULL,
+          content_hash TEXT,
+          visibility TEXT NOT NULL,
+          created_by TEXT,
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER,
+          FOREIGN KEY (tenant_id) REFERENCES organizations(id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id) REFERENCES workspaces(tenant_id, id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id, session_id) REFERENCES analysis_sessions(tenant_id, workspace_id, id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id, run_id) REFERENCES analysis_runs(tenant_id, workspace_id, id) ON DELETE CASCADE,
+          FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_report_artifacts_owner_guard
+          ON report_artifacts(tenant_id, workspace_id, id);
+        CREATE INDEX IF NOT EXISTS idx_report_artifacts_session
+          ON report_artifacts(tenant_id, workspace_id, session_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_report_artifacts_run
+          ON report_artifacts(tenant_id, workspace_id, run_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_report_artifacts_expiry
+          ON report_artifacts(expires_at, created_at);
+
+        CREATE TABLE IF NOT EXISTS memory_entries (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          source_run_id TEXT,
+          content_json TEXT NOT NULL,
+          embedding_ref TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY (tenant_id) REFERENCES organizations(id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id) REFERENCES workspaces(tenant_id, id) ON DELETE CASCADE,
+          FOREIGN KEY (source_run_id) REFERENCES analysis_runs(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_entries_scope
+          ON memory_entries(tenant_id, workspace_id, scope, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_memory_entries_source_run
+          ON memory_entries(tenant_id, workspace_id, source_run_id);
+
+        CREATE TABLE IF NOT EXISTS skill_registry_entries (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          version TEXT NOT NULL,
+          enabled INTEGER NOT NULL,
+          source_path TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY (tenant_id) REFERENCES organizations(id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id) REFERENCES workspaces(tenant_id, id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_skill_registry_entries_scope
+          ON skill_registry_entries(tenant_id, workspace_id, scope, enabled, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_skill_registry_entries_source
+          ON skill_registry_entries(tenant_id, workspace_id, source_path, version);
+
+        CREATE TABLE IF NOT EXISTS tenant_tombstones (
+          tenant_id TEXT PRIMARY KEY,
+          requested_by TEXT,
+          requested_at INTEGER NOT NULL,
+          purge_after INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          proof_hash TEXT,
+          FOREIGN KEY (tenant_id) REFERENCES organizations(id) ON DELETE CASCADE,
+          FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tenant_tombstones_status
+          ON tenant_tombstones(status, purge_after);
+        CREATE INDEX IF NOT EXISTS idx_tenant_tombstones_requested_by
+          ON tenant_tombstones(tenant_id, requested_by, requested_at);
       `);
     },
   },
