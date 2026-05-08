@@ -20,7 +20,7 @@ import { TraceProcessorLeaseStore } from '../services/traceProcessorLeaseStore';
 import { ownerFieldsFromContext } from '../services/resourceOwnership';
 import type { RequestContext } from '../middleware/auth';
 
-type ScenarioName = 'D1' | 'D2' | 'D4' | 'D5' | 'D6' | 'D7' | 'D8';
+type ScenarioName = 'D1' | 'D2' | 'D4' | 'D5' | 'D6' | 'D7' | 'D8' | 'D9';
 
 interface VerifyOptions {
   tracePath?: string;
@@ -1182,6 +1182,185 @@ async function scenarioD8(
   };
 }
 
+async function scenarioD9(
+  tracePath: string,
+  userAWindow1: WindowContext,
+): Promise<ScenarioReport> {
+  const restartDbPath = path.join(path.dirname(getTracesDir()), `d9-restart-${crypto.randomUUID()}.sqlite`);
+  let restartDb = new Database(restartDbPath);
+  try {
+    applyEnterpriseMinimalSchema(restartDb);
+    const upload = await simulateUpload(restartDb, userAWindow1, tracePath, 'd9-backend-restart.pftrace');
+    const pendingRun = createAnalysisRun(restartDb, userAWindow1, upload, 'pending');
+    const runningRun = createAnalysisRun(restartDb, userAWindow1, upload, 'running');
+    const completedRun = createAnalysisRun(restartDb, userAWindow1, upload, 'completed');
+    const recoveryAt = 1_777_200_100_000;
+    const recoveryErrorJson = JSON.stringify({
+      message: 'backend restart during D9 regression',
+      source: 'backend_startup_recovery',
+    });
+
+    appendAgentEvent(restartDb, userAWindow1, pendingRun.runId, 1, 'progress', {
+      type: 'progress',
+      data: { phase: 'queued-before-restart' },
+    });
+    appendAgentEvent(restartDb, userAWindow1, runningRun.runId, 1, 'progress', {
+      type: 'progress',
+      data: { phase: 'running-before-restart' },
+    });
+    appendAgentEvent(restartDb, userAWindow1, runningRun.runId, 2, 'thought', {
+      type: 'thought',
+      data: { summary: 'partial thought before restart' },
+    });
+    appendAgentEvent(restartDb, userAWindow1, completedRun.runId, 1, 'conclusion', {
+      type: 'conclusion',
+      data: { summary: 'completed before restart' },
+    });
+    appendAgentEvent(restartDb, userAWindow1, completedRun.runId, 2, 'analysis_completed', {
+      type: 'analysis_completed',
+      data: { reportUrl: '/api/reports/d9-terminal-report' },
+    });
+    restartDb.prepare(`
+      UPDATE analysis_runs
+      SET completed_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(recoveryAt - 1_000, recoveryAt - 1_000, completedRun.runId);
+    restartDb.prepare(`
+      UPDATE analysis_sessions
+      SET status = 'completed', updated_at = ?
+      WHERE id = ?
+    `).run(recoveryAt - 1_000, completedRun.sessionId);
+
+    restartDb.close();
+    restartDb = new Database(restartDbPath);
+    applyEnterpriseMinimalSchema(restartDb);
+
+    const interrupted = restartDb.prepare<unknown[], {
+      id: string;
+      tenant_id: string;
+      workspace_id: string;
+      session_id: string;
+      status: string;
+    }>(`
+      SELECT id, tenant_id, workspace_id, session_id, status
+      FROM analysis_runs
+      WHERE status IN ('pending', 'running', 'awaiting_user')
+      ORDER BY updated_at ASC, started_at ASC, id ASC
+    `).all();
+    const recoverInterrupted = restartDb.transaction(() => {
+      for (const run of interrupted) {
+        restartDb.prepare(`
+          UPDATE analysis_runs
+          SET status = 'failed',
+              heartbeat_at = ?,
+              updated_at = ?,
+              completed_at = COALESCE(completed_at, ?),
+              error_json = COALESCE(error_json, ?)
+          WHERE tenant_id = ?
+            AND workspace_id = ?
+            AND id = ?
+            AND status = ?
+        `).run(
+          recoveryAt,
+          recoveryAt,
+          recoveryAt,
+          recoveryErrorJson,
+          run.tenant_id,
+          run.workspace_id,
+          run.id,
+          run.status,
+        );
+        restartDb.prepare(`
+          UPDATE analysis_sessions
+          SET status = 'failed',
+              updated_at = ?
+          WHERE tenant_id = ?
+            AND workspace_id = ?
+            AND id = ?
+            AND status IN ('pending', 'running', 'awaiting_user')
+        `).run(recoveryAt, run.tenant_id, run.workspace_id, run.session_id);
+      }
+    });
+    recoverInterrupted();
+
+    const lifecycleRows = restartDb.prepare<unknown[], {
+      id: string;
+      status: string;
+      completed_at: number | null;
+      error_json: string | null;
+    }>(`
+      SELECT id, status, completed_at, error_json
+      FROM analysis_runs
+      WHERE id IN (?, ?, ?)
+      ORDER BY id ASC
+    `).all(pendingRun.runId, runningRun.runId, completedRun.runId);
+    const lifecycleById = Object.fromEntries(lifecycleRows.map(row => [row.id, row]));
+    const pendingEvents = listAgentEventsAfter(restartDb, userAWindow1, pendingRun.runId, 0);
+    const runningEvents = listAgentEventsAfter(restartDb, userAWindow1, runningRun.runId, 0);
+    const completedEvents = listAgentEventsAfter(restartDb, userAWindow1, completedRun.runId, 0);
+    const traceMetadata = await readTraceMetadataForContext(upload.traceId, userAWindow1.context);
+    const traceAssetRow = restartDb.prepare<unknown[], { id: string; local_path: string; status: string }>(`
+      SELECT id, local_path, status
+      FROM trace_assets
+      WHERE tenant_id = ? AND workspace_id = ? AND id = ?
+    `).get(userAWindow1.context.tenantId, userAWindow1.context.workspaceId, upload.traceId);
+    const sessionStatuses = restartDb.prepare<unknown[], { id: string; status: string }>(`
+      SELECT id, status
+      FROM analysis_sessions
+      WHERE id IN (?, ?, ?)
+      ORDER BY id ASC
+    `).all(pendingRun.sessionId, runningRun.sessionId, completedRun.sessionId);
+    const sessionStatusById = Object.fromEntries(sessionStatuses.map(row => [row.id, row.status]));
+    const recoveredPreviousStatuses = interrupted.map(run => [run.id, run.status]);
+
+    const checks = {
+      fileBackedDbReopensWithTraceAsset: traceAssetRow?.id === upload.traceId
+        && traceAssetRow.status === 'ready'
+        && fs.existsSync(upload.localPath),
+      traceMetadataReadableAfterRestart: traceMetadata?.id === upload.traceId
+        && traceMetadata.tenantId === userAWindow1.context.tenantId
+        && traceMetadata.workspaceId === userAWindow1.context.workspaceId,
+      startupRecoveryFindsOnlyNonterminalRuns: recoveredPreviousStatuses.length === 2
+        && recoveredPreviousStatuses.some(([id, status]) => id === pendingRun.runId && status === 'pending')
+        && recoveredPreviousStatuses.some(([id, status]) => id === runningRun.runId && status === 'running')
+        && !recoveredPreviousStatuses.some(([id]) => id === completedRun.runId),
+      pendingAndRunningRunsBecomeFailed: lifecycleById[pendingRun.runId]?.status === 'failed'
+        && lifecycleById[runningRun.runId]?.status === 'failed'
+        && lifecycleById[pendingRun.runId]?.completed_at === recoveryAt
+        && lifecycleById[runningRun.runId]?.completed_at === recoveryAt,
+      terminalRunRemainsCompleted: lifecycleById[completedRun.runId]?.status === 'completed'
+        && lifecycleById[completedRun.runId]?.completed_at === recoveryAt - 1_000,
+      persistedEventsReplayAfterRestart: pendingEvents.map(event => event.cursor).join(',') === '1'
+        && runningEvents.map(event => event.cursor).join(',') === '1,2'
+        && completedEvents.map(event => `${event.cursor}:${event.eventType}`).join(',') === '1:conclusion,2:analysis_completed',
+      failedSessionsMarkedWithoutTouchingTerminalSession: sessionStatusById[pendingRun.sessionId] === 'failed'
+        && sessionStatusById[runningRun.sessionId] === 'failed'
+        && sessionStatusById[completedRun.sessionId] === 'completed',
+      recoveryErrorIsAuditable: lifecycleById[pendingRun.runId]?.error_json === recoveryErrorJson
+        && lifecycleById[runningRun.runId]?.error_json === recoveryErrorJson
+        && lifecycleById[completedRun.runId]?.error_json === null,
+    };
+
+    return {
+      checks,
+      details: {
+        traceId: upload.traceId,
+        restartDbPath,
+        pendingRun,
+        runningRun,
+        completedRun,
+        recoveredPreviousStatuses,
+        pendingEvents,
+        runningEvents,
+        completedEvents,
+        sessionStatusById,
+      },
+    };
+  } finally {
+    restartDb.close();
+  }
+}
+
 function allChecksPassed(report: EnterpriseWindowRegressionReport): boolean {
   return Object.values(report.scenarios).every(scenario =>
     Object.values(scenario.checks).every(Boolean),
@@ -1248,6 +1427,7 @@ export async function runEnterpriseWindowRegression(
       D6: await scenarioD6(db, tracePath, windows.userAWindow1, windows.userCWindow1),
       D7: await scenarioD7(db, tracePath, windows.userAWindow1),
       D8: await scenarioD8(db, tracePath, windows.userAWindow1),
+      D9: await scenarioD9(tracePath, windows.userAWindow1),
     };
     const report: EnterpriseWindowRegressionReport = {
       timestamp: new Date().toISOString(),
@@ -1260,6 +1440,7 @@ export async function runEnterpriseWindowRegression(
         D6: scenarioPassed(scenarios.D6),
         D7: scenarioPassed(scenarios.D7),
         D8: scenarioPassed(scenarios.D8),
+        D9: scenarioPassed(scenarios.D9),
       },
       uploadRoot,
       tracePath,
@@ -1272,7 +1453,8 @@ export async function runEnterpriseWindowRegression(
         'D6 covers the persisted AgentEvent replay contract after a conclusion cursor; the live stream route path is covered by agentRoutesRbac tests.',
         'D7 covers running run, active lease, report_generation holder, and draining rejection invariants; actual route blocking is covered by enterpriseTraceMetadataRoutes tests.',
         'D8 covers the DB ProviderSnapshot pin/hash-mismatch invariant in the enterprise window regression; AgentAnalyzeSessionService tests cover actual in-memory and persisted SDK session non-reuse.',
-        'Production backend proxy and queue behavior remain future §0.7 D1/D2/D4/D5/D6/D7/D8 final-acceptance work against a live browser and trace_processor_shell.',
+        'D9 covers file-backed DB close/reopen recovery for trace metadata, run states, and AgentEvent replay; enterpriseRestartPersistence tests cover the route-level restart recovery path.',
+        'Production backend proxy and queue behavior remain future §0.7 D1/D2/D4/D5/D6/D7/D8/D9 final-acceptance work against a live browser and trace_processor_shell.',
       ],
     };
     report.passed = allChecksPassed(report);

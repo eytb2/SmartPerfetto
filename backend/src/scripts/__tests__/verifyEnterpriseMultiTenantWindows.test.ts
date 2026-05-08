@@ -31,7 +31,7 @@ describe('verifyEnterpriseMultiTenantWindows script', () => {
     await fs.rm(tempRoot, { recursive: true, force: true });
   });
 
-  test('covers current D1/D2/D4/D5/D6/D7/D8 isolation invariants without invoking a real provider', async () => {
+  test('covers current D1/D2/D4/D5/D6/D7/D8/D9 isolation invariants without invoking a real provider', async () => {
     const tracePath = path.join(tempRoot, 'fixture.pftrace');
     const uploadRoot = path.join(tempRoot, 'uploads');
     const outputPath = path.join(tempRoot, 'report.json');
@@ -53,6 +53,7 @@ describe('verifyEnterpriseMultiTenantWindows script', () => {
       D6: true,
       D7: true,
       D8: true,
+      D9: true,
     });
     expect(Object.values(report.scenarios.D1.checks)).toEqual(expect.arrayContaining([true]));
     expect(Object.values(report.scenarios.D1.checks).every(Boolean)).toBe(true);
@@ -62,6 +63,7 @@ describe('verifyEnterpriseMultiTenantWindows script', () => {
     expect(Object.values(report.scenarios.D6.checks).every(Boolean)).toBe(true);
     expect(Object.values(report.scenarios.D7.checks).every(Boolean)).toBe(true);
     expect(Object.values(report.scenarios.D8.checks).every(Boolean)).toBe(true);
+    expect(Object.values(report.scenarios.D9.checks).every(Boolean)).toBe(true);
     expect(report.coverageLimitations.join('\n')).toContain('TraceProcessorLease');
     expect(report.scenarios.D6.details).toEqual(expect.objectContaining({
       reportUrl: expect.stringMatching(/^\/api\/reports\//),
@@ -71,6 +73,12 @@ describe('verifyEnterpriseMultiTenantWindows script', () => {
       providerSnapshotChanged: true,
       sdkSessionReusable: false,
     }));
+    expect(report.scenarios.D9.details).toEqual(expect.objectContaining({
+      recoveredPreviousStatuses: expect.arrayContaining([
+        expect.arrayContaining([expect.stringMatching(/^run-/), 'pending']),
+        expect.arrayContaining([expect.stringMatching(/^run-/), 'running']),
+      ]),
+    }));
     expect(process.env.UPLOAD_DIR).toBe(previousUploadDir);
 
     const written = JSON.parse(await fs.readFile(outputPath, 'utf8')) as EnterpriseWindowRegressionReport;
@@ -79,6 +87,6 @@ describe('verifyEnterpriseMultiTenantWindows script', () => {
 
     const traceFiles = (await fs.readdir(path.join(uploadRoot, 'traces')))
       .filter(file => file.endsWith('.trace'));
-    expect(traceFiles).toHaveLength(11);
+    expect(traceFiles).toHaveLength(12);
   });
 });

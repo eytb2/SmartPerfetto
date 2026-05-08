@@ -113,7 +113,7 @@
 - [x] D6 SSE 在 conclusion 后、analysis_completed 前断开 → AgentEvent replay 能补回 reportUrl
 - [x] D7 手动 cleanup / delete → running run / active lease / 正在生成的 report 被 draining 保护
 - [x] D8 Provider 配置在 session 中途变更 → resume 校验 ProviderSnapshot hash，不复用错误 SDK session
-- [ ] D9 后端进程重启 → pending/running/terminal run 状态、events、trace metadata 可恢复或转 failed
+- [x] D9 后端进程重启 → pending/running/terminal run 状态、events、trace metadata 可恢复或转 failed
 - [ ] D10 机器内存接近上限 → admission 拒绝新 lease，不通过 OOM 杀已有窗口
 
 ### 0.8 §19 总验收
