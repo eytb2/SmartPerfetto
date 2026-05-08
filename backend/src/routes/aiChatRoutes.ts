@@ -5,6 +5,7 @@
 import express from 'express';
 import OpenAI from 'openai';
 import { authenticate, checkUsage } from '../middleware/auth';
+import { rejectLegacyAiInEnterpriseMode } from '../middleware/enterpriseLegacyAiGuard';
 
 const router = express.Router();
 
@@ -48,6 +49,7 @@ function ensureApiKeyConfigured(_req: express.Request, res: express.Response, ne
 }
 
 // Align with other backend APIs: enforce auth + usage checks.
+router.use(rejectLegacyAiInEnterpriseMode('/api/agent/v1/llm'));
 router.use(ensureApiKeyConfigured);
 router.use(authenticate);
 router.use(checkUsage(false));

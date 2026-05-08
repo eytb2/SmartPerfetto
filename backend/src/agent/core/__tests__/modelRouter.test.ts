@@ -106,8 +106,10 @@ const createTestModels = (): ModelProfile[] => [
 describe('ModelRouter', () => {
   let router: ModelRouter;
   let testModels: ModelProfile[];
+  const originalEnterprise = process.env.SMARTPERFETTO_ENTERPRISE;
 
   beforeEach(() => {
+    delete process.env.SMARTPERFETTO_ENTERPRISE;
     testModels = createTestModels();
     router = new ModelRouter({
       models: testModels,
@@ -121,6 +123,11 @@ describe('ModelRouter', () => {
 
   afterEach(() => {
     router.resetStats();
+    if (originalEnterprise === undefined) {
+      delete process.env.SMARTPERFETTO_ENTERPRISE;
+    } else {
+      process.env.SMARTPERFETTO_ENTERPRISE = originalEnterprise;
+    }
   });
 
   // ===========================================================================
@@ -819,6 +826,26 @@ describe('ModelRouter', () => {
       // Note: Actual API call will fail without key, but client creation succeeds
       const model = deepseekRouter.getModel('deepseek-test');
       expect(model!.provider).toBe('deepseek');
+    });
+
+    it('should disable the global DeepSeek provider path in enterprise mode', async () => {
+      process.env.SMARTPERFETTO_ENTERPRISE = 'true';
+      const deepseekModel = createMockModel({
+        id: 'deepseek-test',
+        provider: 'deepseek',
+        model: 'deepseek-chat',
+      });
+
+      const deepseekRouter = new ModelRouter({
+        models: [deepseekModel],
+        defaultModel: 'deepseek-test',
+        fallbackChain: ['deepseek-test'],
+      });
+
+      const result = await deepseekRouter.callModel(deepseekModel, 'hello');
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('disabled in enterprise mode');
     });
 
     it('should create Anthropic client for anthropic provider', () => {

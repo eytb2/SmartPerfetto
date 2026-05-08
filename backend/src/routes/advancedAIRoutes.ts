@@ -18,10 +18,12 @@ import {
   triggerLearning,
 } from '../controllers/advancedAIController';
 import { authenticate } from '../middleware/auth';
+import { rejectLegacyAiInEnterpriseMode } from '../middleware/enterpriseLegacyAiGuard';
 
 const router = Router();
 
 // Apply authentication to all routes
+router.use(rejectLegacyAiInEnterpriseMode('/api/advanced-ai'));
 router.use(authenticate);
 
 // Session management

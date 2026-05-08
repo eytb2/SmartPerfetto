@@ -5,9 +5,12 @@
 import { Router } from 'express';
 import AutoAnalysisController from '../controllers/autoAnalysisController';
 import { body } from 'express-validator';
+import { rejectLegacyAiInEnterpriseMode } from '../middleware/enterpriseLegacyAiGuard';
 
 const router = Router();
 const controller = new AutoAnalysisController();
+
+router.use(rejectLegacyAiInEnterpriseMode('/api/auto-analysis'));
 
 // POST /api/auto-analysis/analyze - 分析 trace
 router.post(

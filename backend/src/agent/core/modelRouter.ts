@@ -13,6 +13,7 @@
  */
 
 import { EventEmitter } from 'events';
+import { resolveFeatureConfig } from '../../config';
 import { LLM_REDACTION_VERSION, hashSha256, redactTextForLLM } from '../../utils/llmPrivacy';
 import {
   ModelProvider,
@@ -452,6 +453,12 @@ export class ModelRouter extends EventEmitter {
       (jsonMode ? 'llm_contract_json_only@1.0.0' : 'llm_contract_text@1.0.0');
 
     try {
+      if (model.provider === 'deepseek' && resolveFeatureConfig().enterprise) {
+        throw new Error(
+          'Legacy ModelRouter DeepSeek provider is disabled in enterprise mode; use ProviderSnapshot-backed agent runtime APIs instead.'
+        );
+      }
+
       // 获取或创建 LLM 客户端
       const client = this.getOrCreateClient(model);
 

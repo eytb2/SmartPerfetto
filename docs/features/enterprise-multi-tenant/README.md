@@ -81,13 +81,13 @@
 - [x] 5.4 Tenant export bundle（§16.2，含 SHA256 + tenant identity proof）
 - [x] 5.5 Tenant tombstone + 7 天硬删窗口 + async purge + audit proof（§16.3）
 - [x] 5.6 Custom skill v1 处置（§14.3）：禁用 write endpoint 或修 loader 闭环
-- [ ] 5.7 Legacy AI route 处置（§14.4 表）
-  - [ ] 5.7.1 `/api/agent/v1/llm` DeepSeek proxy
-  - [ ] 5.7.2 `/api/advanced-ai`
-  - [ ] 5.7.3 `/api/auto-analysis`
-  - [ ] 5.7.4 `/api/agent/v1/aiChat`
-  - [ ] 5.7.5 `agent/core/ModelRouter` DeepSeek 全局 provider 路径
-  - [ ] 5.7.6 `agentv2` fallback
+- [x] 5.7 Legacy AI route 处置（§14.4 表）
+  - [x] 5.7.1 `/api/agent/v1/llm` DeepSeek proxy
+  - [x] 5.7.2 `/api/advanced-ai`
+  - [x] 5.7.3 `/api/auto-analysis`
+  - [x] 5.7.4 `/api/agent/v1/aiChat`
+  - [x] 5.7.5 `agent/core/ModelRouter` DeepSeek 全局 provider 路径
+  - [x] 5.7.6 `agentv2` fallback
 - [ ] 5.8 管理员运行时 dashboard：active leases / RSS / queue length / events / LLM cost
 - [ ] 5.9 安全审计：ID 枚举、跨 tenant、无权限 provider/report/memory 访问
 
@@ -929,6 +929,13 @@ v1 要求：
 | `/api/agent/v1/aiChat` | `backend/src/routes/aiChatRoutes.ts` | 接入 ProviderSnapshot 和 RequestContext，否则禁用 |
 | `agent/core/ModelRouter` DeepSeek 路径 | `backend/src/agent/core/` | 接入 ProviderSnapshot，禁止全局 provider config |
 | `agentv2` fallback | `backend/src/agentv2` 已处于 legacy/deprecated 方向 | 企业模式禁用 |
+
+当前实现：
+
+- `/api/agent/v1/llm/*`、`/api/advanced-ai/*`、`/api/auto-analysis/*` 在 `SMARTPERFETTO_ENTERPRISE=true` 时返回 `404` + `disabled_in_enterprise_mode`，不再进入 legacy DeepSeek proxy / advanced AI / auto analysis controller。
+- `backend/src/routes/aiChatRoutes.ts` 是当前 `/api/agent/v1/llm` 的实际挂载实现；代码库中没有独立 `/api/agent/v1/aiChat` 挂载，按同一 legacy chat proxy surface 处置。
+- `ModelRouter` 在企业模式下拒绝 `deepseek` provider 调用，避免走 `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` 这类全局 provider config；企业路径必须走 ProviderSnapshot-backed runtime。
+- 当前源码树无 `backend/src/agentv2` 文件可挂载，保留为已退役状态。
 
 ## 15. Onboarding Flow
 
