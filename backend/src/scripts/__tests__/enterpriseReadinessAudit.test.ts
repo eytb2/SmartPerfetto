@@ -32,6 +32,8 @@ function completeReadme(): string {
     section08Rows,
     '### 0.9 新增 / 引用文档登记',
     '- [x] docs',
+    '### 0.10 PR / 提交收尾',
+    '- [x] PR gate',
     '## 1. 文档定位',
     '',
   ].join('\n');
@@ -92,6 +94,9 @@ describe('enterprise readiness audit', () => {
       ]);
       expect(determineEnterpriseReadinessAuditExitCode(report, { requireReady: true })).toBe(2);
       expect(buildMarkdownEnterpriseReadinessAudit(report)).toContain('Overall status: blocked');
+      expect(report.checks.find(check => check.id === 'pr-closeout-checklist')).toMatchObject({
+        status: 'passed',
+      });
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }
@@ -144,6 +149,44 @@ describe('enterprise readiness audit', () => {
       expect(report.ready).toBe(false);
       expect(report.checks.find(check => check.id === 'd1-d10-automated-regression')).toMatchObject({
         status: 'blocked',
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports PR closeout blockers separately from measured-evidence blockers', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
+    try {
+      const readmePath = await writeFixture(
+        tmpDir,
+        'README.md',
+        completeReadme()
+          .replace('- [x] §19 item 1', '- [ ] 50 online users')
+          .replace('- [x] PR gate', '- [ ] PR Gate `npm run verify:pr` 通过'),
+      );
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Open | pending |\n');
+      const loadTestReportPath = await writeFixture(tmpDir, 'load.md', 'Status: pending real 50-user run.\n');
+      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', 'Coverage status: blocked_missing_required_traces\nMissing required matrix cells:\n- scroll:100MB\n');
+      const releaseNotesPath = await writeFixture(tmpDir, 'release.md', 'Status: draft, pending final RSS matrix and 50-user load-test evidence.\n');
+
+      const report = buildEnterpriseReadinessAuditReport({
+        readmePath,
+        acceptanceEvidencePath,
+        loadTestReportPath,
+        rssBenchmarkPath,
+        releaseNotesPath,
+        requireReady: true,
+      });
+
+      expect(report.checks.find(check => check.id === 'readme-section-0-todos')).toMatchObject({
+        status: 'blocked',
+      });
+      expect(report.checks.find(check => check.id === 'pr-closeout-checklist')).toMatchObject({
+        status: 'blocked',
+        evidence: expect.arrayContaining([
+          expect.stringContaining('PR Gate `npm run verify:pr` 通过'),
+        ]),
       });
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });

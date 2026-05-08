@@ -39,6 +39,11 @@ interface TodoItem {
   line: number;
 }
 
+interface MarkdownSection {
+  content: string;
+  startLine: number;
+}
+
 function printUsage(): void {
   console.log('Usage: npx tsx src/scripts/enterpriseReadinessAudit.ts [options]');
   console.log('');
@@ -63,14 +68,22 @@ function readFile(filePath: string): string {
 }
 
 function sectionBetween(markdown: string, startHeading: string, endHeading?: string): string {
-  const startIndex = markdown.indexOf(startHeading);
-  if (startIndex < 0) return '';
-  if (!endHeading) return markdown.slice(startIndex);
-  const endIndex = markdown.indexOf(endHeading, startIndex + startHeading.length);
-  return endIndex < 0 ? markdown.slice(startIndex) : markdown.slice(startIndex, endIndex);
+  return sectionSlice(markdown, startHeading, endHeading).content;
 }
 
-function parseTodos(markdown: string): TodoItem[] {
+function sectionSlice(markdown: string, startHeading: string, endHeading?: string): MarkdownSection {
+  const startIndex = markdown.indexOf(startHeading);
+  if (startIndex < 0) return { content: '', startLine: 1 };
+  const startLine = markdown.slice(0, startIndex).split(/\r?\n/).length;
+  if (!endHeading) return { content: markdown.slice(startIndex), startLine };
+  const endIndex = markdown.indexOf(endHeading, startIndex + startHeading.length);
+  return {
+    content: endIndex < 0 ? markdown.slice(startIndex) : markdown.slice(startIndex, endIndex),
+    startLine,
+  };
+}
+
+function parseTodos(markdown: string, lineOffset = 0): TodoItem[] {
   const items: TodoItem[] = [];
   const lines = markdown.split(/\r?\n/);
   lines.forEach((line, index) => {
@@ -79,7 +92,7 @@ function parseTodos(markdown: string): TodoItem[] {
     items.push({
       checked: match[1].toLowerCase() === 'x',
       text: match[2],
-      line: index + 1,
+      line: lineOffset + index + 1,
     });
   });
   return items;
@@ -94,28 +107,29 @@ function passed(id: string, message: string, evidence: string[]): ReadinessCheck
 }
 
 function auditReadmeTodos(readme: string, readmePath: string): ReadinessCheck {
-  const section0 = sectionBetween(readme, '## 0. 开发执行 TODO', '## 1. 文档定位');
-  const todos = parseTodos(section0);
+  const section0 = sectionSlice(readme, '## 0. 开发执行 TODO', '### 0.10 PR / 提交收尾');
+  const todos = parseTodos(section0.content, section0.startLine - 1);
   const unchecked = todos.filter(item => !item.checked);
 
   if (unchecked.length > 0) {
     return blocked(
       'readme-section-0-todos',
-      `README §0 still has ${unchecked.length} unchecked item(s).`,
+      `README §0 before the PR closeout checklist still has ${unchecked.length} unchecked item(s).`,
       unchecked.map(item => `${path.basename(readmePath)}:${item.line} ${item.text}`),
     );
   }
 
   return passed(
     'readme-section-0-todos',
-    `README §0 has ${todos.length} checked item(s) and no unchecked TODOs.`,
+    `README §0 before the PR closeout checklist has ${todos.length} checked item(s) and no unchecked TODOs.`,
     [`${path.basename(readmePath)} §0`],
   );
 }
 
 function auditD1D10(readme: string): ReadinessCheck {
-  const section = sectionBetween(readme, '### 0.7', '### 0.8');
-  const items = parseTodos(section).filter(item => /^D(?:10|[1-9])\b/.test(item.text));
+  const section = sectionSlice(readme, '### 0.7', '### 0.8');
+  const items = parseTodos(section.content, section.startLine - 1)
+    .filter(item => /^D(?:10|[1-9])\b/.test(item.text));
   const missingIds = Array.from({ length: 10 }, (_unused, index) => `D${index + 1}`)
     .filter(id => !items.some(item => item.text.startsWith(id)));
   const unchecked = items.filter(item => !item.checked);
@@ -140,8 +154,8 @@ function auditD1D10(readme: string): ReadinessCheck {
 }
 
 function auditSection08(readme: string): ReadinessCheck {
-  const section = sectionBetween(readme, '### 0.8', '### 0.9');
-  const items = parseTodos(section);
+  const section = sectionSlice(readme, '### 0.8', '### 0.9');
+  const items = parseTodos(section.content, section.startLine - 1);
   const unchecked = items.filter(item => !item.checked);
 
   if (items.length !== 11 || unchecked.length > 0) {
@@ -158,6 +172,29 @@ function auditSection08(readme: string): ReadinessCheck {
   return passed(
     'section-19-acceptance',
     'README §0.8 has all 11 total-acceptance rows checked.',
+    items.map(item => item.text),
+  );
+}
+
+function auditPrCloseout(readme: string): ReadinessCheck {
+  const section = sectionSlice(readme, '### 0.10', '## 1.');
+  const items = parseTodos(section.content, section.startLine - 1);
+  const unchecked = items.filter(item => !item.checked);
+
+  if (items.length === 0 || unchecked.length > 0) {
+    return blocked(
+      'pr-closeout-checklist',
+      'README §0.10 PR closeout checklist is not fully checked.',
+      [
+        `found=${items.length}`,
+        ...unchecked.map(item => `unchecked README.md:${item.line} ${item.text}`),
+      ],
+    );
+  }
+
+  return passed(
+    'pr-closeout-checklist',
+    'README §0.10 PR closeout checklist is fully checked.',
     items.map(item => item.text),
   );
 }
@@ -334,6 +371,7 @@ export function buildEnterpriseReadinessAuditReport(
     auditReadmeTodos(readme, options.readmePath),
     auditD1D10(readme),
     auditSection08(readme),
+    auditPrCloseout(readme),
     auditAcceptanceEvidence(acceptanceEvidence, options.acceptanceEvidencePath),
     auditLoadReport(loadTestReport, options.loadTestReportPath),
     auditRssBenchmark(rssBenchmark, options.rssBenchmarkPath),
