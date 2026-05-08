@@ -10,6 +10,7 @@ import {
   parseLoadTestArgs,
   percentile,
   summarizeLoadTest,
+  type AnalysisRunRecord,
   type AnalysisStatusSnapshot,
   type EnterpriseLoadTestOptions,
   type HttpSample,
@@ -68,6 +69,24 @@ function passingRuntimeSamples(): RuntimeSample[] {
     runtimeSample({ timestamp: '2026-05-09T00:00:00.000Z', llmCalls: 0 }),
     runtimeSample({ timestamp: '2026-05-09T00:00:01.000Z', llmCalls: 1 }),
   ];
+}
+
+function analysisRun(index: number, overrides: Partial<AnalysisRunRecord> = {}): AnalysisRunRecord {
+  const ordinal = index + 1;
+  return {
+    userId: `load-user-${String(ordinal).padStart(3, '0')}`,
+    traceId: 'trace-a',
+    sessionId: `session-${ordinal}`,
+    runId: `run-${ordinal}`,
+    startStatus: 200,
+    startOk: true,
+    lastStatus: 'running',
+    ...overrides,
+  };
+}
+
+function analysisRuns(count: number, overrides: Partial<AnalysisRunRecord> = {}): AnalysisRunRecord[] {
+  return Array.from({ length: count }, (_unused, index) => analysisRun(index, overrides));
 }
 
 describe('enterprise acceptance load test helpers', () => {
@@ -172,7 +191,7 @@ describe('enterprise acceptance load test helpers', () => {
         sample('runtime_dashboard', 80, false),
       ],
       runs: [
-        { userId: 'user-a', traceId: 'trace-a', startStatus: 200, startOk: true, lastStatus: 'completed' },
+        analysisRun(0, { userId: 'user-a', lastStatus: 'completed' }),
         { userId: 'user-b', traceId: 'trace-a', startStatus: 500, startOk: false, lastStatus: 'error' },
       ],
       statusSnapshots,
@@ -190,6 +209,7 @@ describe('enterprise acceptance load test helpers', () => {
     expect(summary.analysis).toEqual(expect.objectContaining({
       started: 1,
       startFailures: 1,
+      missingStartIdentifiers: 0,
       maxRunning: 10,
       maxPending: 5,
       runningInRangeSnapshots: 2,
@@ -244,13 +264,7 @@ describe('enterprise acceptance load test helpers', () => {
         ...onlineUserSamples(49),
         sample('trace_list', 10, false, 'online-user-050'),
       ],
-      runs: Array.from({ length: 15 }, (_unused, index) => ({
-        userId: `load-user-${String(index + 1).padStart(3, '0')}`,
-        traceId: 'trace-a',
-        startStatus: 200,
-        startOk: true,
-        lastStatus: 'running' as const,
-      })),
+      runs: analysisRuns(15),
       statusSnapshots: [
         {
           timestamp: '2026-05-09T00:00:01.000Z',
@@ -295,13 +309,7 @@ describe('enterprise acceptance load test helpers', () => {
     const summary = summarizeLoadTest({
       options: opts,
       httpSamples: onlineUserSamples(50),
-      runs: Array.from({ length: 15 }, (_unused, index) => ({
-        userId: `load-user-${String(index + 1).padStart(3, '0')}`,
-        traceId: 'trace-a',
-        startStatus: 200,
-        startOk: true,
-        lastStatus: 'running' as const,
-      })),
+      runs: analysisRuns(15),
       statusSnapshots: [
         {
           timestamp: '2026-05-09T00:00:01.000Z',
@@ -345,13 +353,7 @@ describe('enterprise acceptance load test helpers', () => {
       options: opts,
       httpSamples: onlineUserSamples(50),
       runs: [
-        ...Array.from({ length: 14 }, (_unused, index) => ({
-          userId: `load-user-${String(index + 1).padStart(3, '0')}`,
-          traceId: 'trace-a',
-          startStatus: 200,
-          startOk: true,
-          lastStatus: 'running' as const,
-        })),
+        ...analysisRuns(14),
         {
           userId: 'load-user-015',
           traceId: 'trace-a',
@@ -402,6 +404,57 @@ describe('enterprise acceptance load test helpers', () => {
     });
   });
 
+  it('requires started analysis runs to include session and run ids', () => {
+    const opts = options({ onlineUsers: 50 });
+    const missingIdRun = analysisRun(14);
+    delete missingIdRun.sessionId;
+    delete missingIdRun.runId;
+    const runtimeSamples = passingRuntimeSamples();
+    const summary = summarizeLoadTest({
+      options: opts,
+      httpSamples: onlineUserSamples(50),
+      runs: [
+        ...analysisRuns(14),
+        missingIdRun,
+      ],
+      statusSnapshots: [
+        {
+          timestamp: '2026-05-09T00:00:01.000Z',
+          counts: {
+            queued: 1,
+            pending: 1,
+            running: 5,
+            completed: 0,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
+        {
+          timestamp: '2026-05-09T00:00:02.000Z',
+          counts: {
+            queued: 0,
+            pending: 1,
+            running: 5,
+            completed: 1,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
+      ],
+      runtimeSamples,
+    });
+
+    expect(summary.analysis.missingStartIdentifiers).toBe(1);
+    expect(evaluateAcceptance(opts, summary, runtimeSamples)).toEqual({
+      passed: false,
+      missing: ['started analysis runs missing session or run id'],
+    });
+  });
+
   it('rejects terminal failed, error, or quota_exceeded analysis runs', () => {
     const opts = options({ onlineUsers: 50 });
     const runtimeSamples = passingRuntimeSamples();
@@ -409,34 +462,10 @@ describe('enterprise acceptance load test helpers', () => {
       options: opts,
       httpSamples: onlineUserSamples(50),
       runs: [
-        ...Array.from({ length: 12 }, (_unused, index) => ({
-          userId: `load-user-${String(index + 1).padStart(3, '0')}`,
-          traceId: 'trace-a',
-          startStatus: 200,
-          startOk: true,
-          lastStatus: 'running' as const,
-        })),
-        {
-          userId: 'load-user-013',
-          traceId: 'trace-a',
-          startStatus: 200,
-          startOk: true,
-          lastStatus: 'failed' as const,
-        },
-        {
-          userId: 'load-user-014',
-          traceId: 'trace-a',
-          startStatus: 200,
-          startOk: true,
-          lastStatus: 'error' as const,
-        },
-        {
-          userId: 'load-user-015',
-          traceId: 'trace-a',
-          startStatus: 200,
-          startOk: true,
-          lastStatus: 'quota_exceeded' as const,
-        },
+        ...analysisRuns(12),
+        analysisRun(12, { lastStatus: 'failed' }),
+        analysisRun(13, { lastStatus: 'error' }),
+        analysisRun(14, { lastStatus: 'quota_exceeded' }),
       ],
       statusSnapshots: [
         {
@@ -489,13 +518,7 @@ describe('enterprise acceptance load test helpers', () => {
         ...onlineUserSamples(50),
         sample('analysis_status', 30, false, 'load-user-001'),
       ],
-      runs: Array.from({ length: 15 }, (_unused, index) => ({
-        userId: `load-user-${String(index + 1).padStart(3, '0')}`,
-        traceId: 'trace-a',
-        startStatus: 200,
-        startOk: true,
-        lastStatus: 'running' as const,
-      })),
+      runs: analysisRuns(15),
       statusSnapshots: [
         {
           timestamp: '2026-05-09T00:00:01.000Z',
@@ -542,13 +565,7 @@ describe('enterprise acceptance load test helpers', () => {
     const summary = summarizeLoadTest({
       options: opts,
       httpSamples: onlineUserSamples(50),
-      runs: Array.from({ length: 15 }, (_unused, index) => ({
-        userId: `load-user-${String(index + 1).padStart(3, '0')}`,
-        traceId: 'trace-a',
-        startStatus: 200,
-        startOk: true,
-        lastStatus: 'running' as const,
-      })),
+      runs: analysisRuns(15),
       statusSnapshots: [
         {
           timestamp: '2026-05-09T00:00:01.000Z',
@@ -600,13 +617,7 @@ describe('enterprise acceptance load test helpers', () => {
     const summary = summarizeLoadTest({
       options: opts,
       httpSamples: onlineUserSamples(50),
-      runs: Array.from({ length: 15 }, (_unused, index) => ({
-        userId: `load-user-${String(index + 1).padStart(3, '0')}`,
-        traceId: 'trace-a',
-        startStatus: 200,
-        startOk: true,
-        lastStatus: 'running' as const,
-      })),
+      runs: analysisRuns(15),
       statusSnapshots: [
         {
           timestamp: '2026-05-09T00:00:01.000Z',
@@ -657,17 +668,7 @@ describe('enterprise acceptance load test helpers', () => {
     const report = buildLoadTestReport({
       options: opts,
       httpSamples: [...onlineUserSamples(50), sample('analyze_start', 30)],
-      runs: [
-        ...Array.from({ length: 15 }, (_unused, index) => ({
-          userId: `load-user-${String(index + 1).padStart(3, '0')}`,
-          traceId: 'trace-a',
-          sessionId: `session-${index + 1}`,
-          runId: `run-${index + 1}`,
-          startStatus: 200,
-          startOk: true,
-          lastStatus: 'running',
-        } as const)),
-      ],
+      runs: analysisRuns(15),
       statusSnapshots: [
         {
           timestamp: '2026-05-09T00:00:01.000Z',
@@ -722,6 +723,7 @@ describe('enterprise acceptance load test helpers', () => {
     expect(markdown).toContain('| Observed online users | 50 |');
     expect(markdown).toContain('| Max error rate | 1.00% |');
     expect(markdown).toContain('| Overall p50 | 10ms |');
+    expect(markdown).toContain('| Started runs missing ids | 0 |');
     expect(markdown).toContain('| Running-in-range samples | 2 |');
     expect(markdown).toContain('| Queued/pending samples | 2 |');
     expect(markdown).toContain('| Max worker RSS | 256.0 MiB |');

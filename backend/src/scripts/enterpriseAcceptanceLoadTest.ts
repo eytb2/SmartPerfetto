@@ -82,6 +82,7 @@ export interface EnterpriseLoadTestSummary {
   analysis: {
     started: number;
     startFailures: number;
+    missingStartIdentifiers: number;
     maxRunning: number;
     maxPending: number;
     runningInRangeSnapshots: number;
@@ -360,6 +361,7 @@ export function summarizeLoadTest(input: {
     analysis: {
       started: input.runs.filter(run => run.startOk).length,
       startFailures: input.runs.filter(run => !run.startOk).length,
+      missingStartIdentifiers: input.runs.filter(run => run.startOk && (!run.sessionId || !run.runId)).length,
       maxRunning,
       maxPending,
       runningInRangeSnapshots,
@@ -396,6 +398,9 @@ export function evaluateAcceptance(
   }
   if (summary.analysis.started < requestedRuns) missing.push('started analysis runs < requested target');
   if (summary.analysis.startFailures > 0) missing.push('analysis start failures observed');
+  if (summary.analysis.missingStartIdentifiers > 0) {
+    missing.push('started analysis runs missing session or run id');
+  }
   const terminalFailures = (summary.analysis.terminal.failed ?? 0)
     + (summary.analysis.terminal.error ?? 0)
     + (summary.analysis.terminal.quota_exceeded ?? 0);
@@ -724,6 +729,7 @@ export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): s
   lines.push(`| Overall p95 | ${formatMs(report.summary.latency.overall.p95Ms)} |`);
   lines.push(`| Started analysis runs | ${report.summary.analysis.started} |`);
   lines.push(`| Start failures | ${report.summary.analysis.startFailures} |`);
+  lines.push(`| Started runs missing ids | ${report.summary.analysis.missingStartIdentifiers} |`);
   lines.push(`| Max running runs observed | ${report.summary.analysis.maxRunning} |`);
   lines.push(`| Max queued/pending runs observed | ${report.summary.analysis.maxPending} |`);
   lines.push(`| Running-in-range samples | ${report.summary.analysis.runningInRangeSnapshots} |`);

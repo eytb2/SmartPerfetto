@@ -11,7 +11,8 @@ executed in this environment.
 The final report must cover:
 
 - 50 distinct online users with successful sampled requests.
-- All requested analysis runs start successfully without start failures.
+- All requested analysis runs start successfully with `sessionId` / `runId`
+  evidence and without start failures.
 - No analysis run ends in `failed`, `error`, or `quota_exceeded`.
 - 5 to 15 simultaneously running analysis runs, observed in at least two
   polling samples.
@@ -60,7 +61,8 @@ If the backend requires `SMARTPERFETTO_API_KEY`, add:
   `online-user-*` clients; the configured `--users` value alone is not enough.
 - HTTP error rate must be at or below `--max-error-rate` (default `0.01`).
 - All requested `target-running + target-pending` analysis runs must start
-  successfully; any start failure keeps the report open.
+  successfully and return `sessionId` / `runId`; any start failure or missing
+  identifier keeps the report open.
 - Any terminal `failed`, `error`, or `quota_exceeded` analysis run keeps the
   report open, even when HTTP, queue, and cost samples are otherwise present.
 - `acceptance.passed` also requires at least two status samples with 5-15
