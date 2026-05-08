@@ -152,6 +152,7 @@
 - [x] `docs/features/enterprise-multi-tenant/sse-coverage-matrix.md`（§0.6.8 fetch-stream reconnect/cursor replay/terminal event 落库覆盖证据）
 - [x] `docs/features/enterprise-multi-tenant/pr-gate-regression-evidence.md`（§0.6.10/§0.6.11 scene trace regression 与 PR gate 证据）
 - [ ] `docs/features/enterprise-multi-tenant/acceptance-evidence.md`（§0.8 §19 总验收证据；50 用户压测 / load metrics 仍未完成）
+- [ ] `docs/features/enterprise-multi-tenant/load-test-report.md`（§0.8 50 在线用户压测报告；等待真实企业压测环境实测）
 
 ### 0.10 PR / 提交收尾（每次 PR 都要走）
 - [ ] 每个主线 / 子主线一个独立 PR；不跨主线串改动

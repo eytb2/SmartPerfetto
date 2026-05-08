@@ -1,0 +1,247 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
+import path from 'path';
+import {
+  buildLoadTestReport,
+  buildMarkdownLoadTestReport,
+  evaluateAcceptance,
+  parseLoadTestArgs,
+  percentile,
+  summarizeLoadTest,
+  type AnalysisStatusSnapshot,
+  type EnterpriseLoadTestOptions,
+  type HttpSample,
+  type RuntimeSample,
+} from '../enterpriseAcceptanceLoadTest';
+
+function options(overrides: Partial<EnterpriseLoadTestOptions> = {}): EnterpriseLoadTestOptions {
+  return {
+    baseUrl: 'http://localhost:3000',
+    tenantId: 'tenant-a',
+    workspaceId: 'workspace-a',
+    onlineUsers: 50,
+    targetRunningRuns: 10,
+    targetPendingRuns: 5,
+    durationMs: 60_000,
+    pollIntervalMs: 1000,
+    traceIds: ['trace-a'],
+    query: 'load test',
+    outputPath: '/tmp/load-test.json',
+    ...overrides,
+  };
+}
+
+function sample(operation: string, durationMs: number, ok = true): HttpSample {
+  return {
+    operation,
+    userId: 'user-a',
+    status: ok ? 200 : 500,
+    ok,
+    durationMs,
+    timestamp: '2026-05-09T00:00:00.000Z',
+  };
+}
+
+describe('enterprise acceptance load test helpers', () => {
+  it('parses repeatable trace ids and report paths', () => {
+    const cwd = '/tmp/smartperfetto';
+    const parsed = parseLoadTestArgs([
+      '--base-url', 'http://127.0.0.1:3000/',
+      '--tenant-id', 'tenant-z',
+      '--workspace-id', 'workspace-z',
+      '--users', '55',
+      '--target-running', '12',
+      '--target-pending', '7',
+      '--duration-ms', '120000',
+      '--poll-interval-ms', '2000',
+      '--trace-id', 'trace-a',
+      '--trace-id', 'trace-b',
+      '--query', '验收压测',
+      '--output', 'out/load.json',
+      '--markdown', 'out/load.md',
+    ], cwd);
+
+    expect(parsed).toEqual(expect.objectContaining({
+      baseUrl: 'http://127.0.0.1:3000',
+      tenantId: 'tenant-z',
+      workspaceId: 'workspace-z',
+      onlineUsers: 55,
+      targetRunningRuns: 12,
+      targetPendingRuns: 7,
+      durationMs: 120000,
+      pollIntervalMs: 2000,
+      traceIds: ['trace-a', 'trace-b'],
+      query: '验收压测',
+      outputPath: path.resolve(cwd, 'out/load.json'),
+      markdownPath: path.resolve(cwd, 'out/load.md'),
+    }));
+  });
+
+  it('computes nearest-rank percentiles', () => {
+    expect(percentile([], 0.95)).toBeNull();
+    expect(percentile([10], 0.95)).toBe(10);
+    expect(percentile([100, 10, 30, 20], 0.5)).toBe(20);
+    expect(percentile([100, 10, 30, 20], 0.95)).toBe(100);
+  });
+
+  it('summarizes latency, error rate, run counts, queue, RSS, and LLM cost', () => {
+    const statusSnapshots: AnalysisStatusSnapshot[] = [
+      {
+        timestamp: '2026-05-09T00:00:01.000Z',
+        counts: {
+          queued: 2,
+          pending: 3,
+          running: 8,
+          completed: 0,
+          failed: 0,
+          error: 0,
+          quota_exceeded: 0,
+          unknown: 0,
+        },
+      },
+      {
+        timestamp: '2026-05-09T00:00:02.000Z',
+        counts: {
+          queued: 1,
+          pending: 2,
+          running: 10,
+          completed: 2,
+          failed: 0,
+          error: 0,
+          quota_exceeded: 0,
+          unknown: 0,
+        },
+      },
+    ];
+    const runtimeSamples: RuntimeSample[] = [
+      {
+        timestamp: '2026-05-09T00:00:01.000Z',
+        queueLength: 4,
+        workerRssBytes: 100,
+        leaseRssBytes: 200,
+        llmCostUsd: 0.1,
+        llmCalls: 1,
+      },
+      {
+        timestamp: '2026-05-09T00:00:02.000Z',
+        queueLength: 9,
+        workerRssBytes: 300,
+        leaseRssBytes: 250,
+        llmCostUsd: 0.4,
+        llmCalls: 3,
+      },
+    ];
+
+    const summary = summarizeLoadTest({
+      options: options(),
+      httpSamples: [
+        sample('trace_list', 10),
+        sample('trace_list', 20),
+        sample('analyze_start', 100),
+        sample('analysis_status', 50),
+        sample('runtime_dashboard', 80, false),
+      ],
+      runs: [
+        { userId: 'user-a', traceId: 'trace-a', startStatus: 200, startOk: true, lastStatus: 'completed' },
+        { userId: 'user-b', traceId: 'trace-a', startStatus: 500, startOk: false, lastStatus: 'error' },
+      ],
+      statusSnapshots,
+      runtimeSamples,
+    });
+
+    expect(summary.errorRate).toBe(0.2);
+    expect(summary.latency.overall.p50Ms).toBe(50);
+    expect(summary.latency.overall.p95Ms).toBe(100);
+    expect(summary.latency.byOperation.trace_list.p95Ms).toBe(20);
+    expect(summary.analysis).toEqual(expect.objectContaining({
+      started: 1,
+      startFailures: 1,
+      maxRunning: 10,
+      maxPending: 5,
+    }));
+    expect(summary.runtime).toEqual({
+      maxQueueLength: 9,
+      maxWorkerRssBytes: 300,
+      maxLeaseRssBytes: 250,
+      finalLlmCostUsd: 0.4,
+      finalLlmCalls: 3,
+    });
+  });
+
+  it('requires direct load metrics before acceptance can pass', () => {
+    const opts = options({ onlineUsers: 49 });
+    const summary = summarizeLoadTest({
+      options: opts,
+      httpSamples: [sample('trace_list', 10)],
+      runs: [],
+      statusSnapshots: [],
+      runtimeSamples: [],
+    });
+
+    expect(evaluateAcceptance(opts, summary, [])).toEqual({
+      passed: false,
+      missing: expect.arrayContaining([
+        'onlineUsers < 50',
+        'observed max running runs < 5',
+        'no queued/pending runs observed',
+        'missing worker/lease RSS samples',
+        'missing queue length samples',
+        'missing LLM cost sample',
+        'runtime dashboard was not sampled',
+      ]),
+    });
+  });
+
+  it('renders the required load-test report fields', () => {
+    const opts = options();
+    const report = buildLoadTestReport({
+      options: opts,
+      httpSamples: [sample('trace_list', 10), sample('analyze_start', 30)],
+      runs: [
+        {
+          userId: 'load-user-001',
+          traceId: 'trace-a',
+          sessionId: 'session-a',
+          runId: 'run-a',
+          startStatus: 200,
+          startOk: true,
+          lastStatus: 'running',
+        },
+      ],
+      statusSnapshots: [
+        {
+          timestamp: '2026-05-09T00:00:01.000Z',
+          counts: {
+            queued: 1,
+            pending: 1,
+            running: 5,
+            completed: 0,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
+      ],
+      runtimeSamples: [
+        {
+          timestamp: '2026-05-09T00:00:01.000Z',
+          queueLength: 3,
+          workerRssBytes: 256 * 1024 * 1024,
+          leaseRssBytes: 128 * 1024 * 1024,
+          llmCostUsd: 1.23,
+          llmCalls: 4,
+        },
+      ],
+    });
+
+    const markdown = buildMarkdownLoadTestReport(report);
+    expect(markdown).toContain('Acceptance status: passed');
+    expect(markdown).toContain('| Online users | 50 |');
+    expect(markdown).toContain('| Overall p50 | 10ms |');
+    expect(markdown).toContain('| Max worker RSS | 256.0 MiB |');
+    expect(markdown).toContain('| Final LLM cost | 1.23 |');
+  });
+});
