@@ -7,6 +7,7 @@ import {
   buildMarkdownReport,
   classifyRequiredSizeBucket,
   computeBenchmarkCoverage,
+  determineBenchmarkExitCode,
   parseBenchmarkArgs,
   REQUIRED_RSS_BENCHMARK_SCENES,
   REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS,
@@ -59,6 +60,7 @@ describe('trace processor RSS benchmark helpers', () => {
       '--markdown', 'out/report.md',
       '--sample-interval-ms', '100',
       '--query', 'slice_names=SELECT name FROM slice LIMIT 1',
+      '--require-complete-matrix',
     ], cwd);
 
     expect(options.traces).toEqual([
@@ -76,6 +78,7 @@ describe('trace processor RSS benchmark helpers', () => {
     expect(options.outputPath).toBe(path.resolve(cwd, 'out/report.json'));
     expect(options.markdownPath).toBe(path.resolve(cwd, 'out/report.md'));
     expect(options.sampleIntervalMs).toBe(100);
+    expect(options.requireCompleteMatrix).toBe(true);
     expect(options.queries.map(query => query.name)).toContain('slice_names');
   });
 
@@ -134,5 +137,42 @@ describe('trace processor RSS benchmark helpers', () => {
     expect(markdown).toContain('Coverage status: blocked_missing_required_traces');
     expect(markdown).toContain('- startup:100MB');
     expect(markdown).toContain('| scroll-100MB | scroll | 100MB |');
+  });
+
+  it('requires the complete matrix only when requested', () => {
+    const incompleteReport: BenchmarkReport = {
+      generatedAt: '2026-05-08T00:00:00.000Z',
+      traceProcessorPath: '/tmp/trace_processor_shell',
+      host: {
+        platform: 'darwin',
+        arch: 'arm64',
+        node: 'v24.15.0',
+        totalMemoryBytes: 64 * GIB,
+        freeMemoryBytesAtStart: 32 * GIB,
+        cpuCount: 12,
+      },
+      sampleIntervalMs: 250,
+      requiredMatrix: {
+        scenes: REQUIRED_RSS_BENCHMARK_SCENES,
+        sizeBuckets: REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS,
+      },
+      coverage: computeBenchmarkCoverage([result('scroll', '100MB')]),
+      traces: [result('scroll', '100MB')],
+    };
+    const completeReport: BenchmarkReport = {
+      ...incompleteReport,
+      coverage: computeBenchmarkCoverage(REQUIRED_RSS_BENCHMARK_SCENES.flatMap(scene =>
+        REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS.map(sizeBucket => result(scene, sizeBucket))
+      )),
+    };
+    const failedReport: BenchmarkReport = {
+      ...completeReport,
+      traces: [{ ...result('scroll', '100MB'), status: 'failed', error: 'init failed' }],
+    };
+
+    expect(determineBenchmarkExitCode(incompleteReport, { requireCompleteMatrix: false })).toBe(0);
+    expect(determineBenchmarkExitCode(incompleteReport, { requireCompleteMatrix: true })).toBe(2);
+    expect(determineBenchmarkExitCode(completeReport, { requireCompleteMatrix: true })).toBe(0);
+    expect(determineBenchmarkExitCode(failedReport, { requireCompleteMatrix: true })).toBe(1);
   });
 });

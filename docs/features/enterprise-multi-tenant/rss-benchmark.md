@@ -36,8 +36,14 @@ PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
   npm run benchmark:trace-rss -- \
   --manifest ../docs/features/enterprise-multi-tenant/rss-benchmark-manifest.local.json \
   --output test-output/trace-processor-rss-benchmark.json \
-  --markdown test-output/trace-processor-rss-benchmark.md
+  --markdown test-output/trace-processor-rss-benchmark.md \
+  --require-complete-matrix
 ```
+
+The `--require-complete-matrix` flag is required for final §0.4.3 evidence. It
+exits non-zero when any scene/size cell is missing, so smoke runs cannot be
+mistaken for an acceptance run. Omit it only when validating the harness with
+partial local traces.
 
 The script also supports ad-hoc traces:
 

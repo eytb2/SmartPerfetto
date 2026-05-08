@@ -56,6 +56,7 @@ export interface BenchmarkOptions {
   markdownPath?: string;
   sampleIntervalMs: number;
   queries: QuerySpec[];
+  requireCompleteMatrix: boolean;
 }
 
 interface TimelineSample {
@@ -199,6 +200,7 @@ function printUsage(): void {
   console.log('  --markdown <path>             Optional Markdown report path.');
   console.log('  --sample-interval-ms <ms>     RSS sample interval. Default: 250.');
   console.log('  --query <name=sql>            Extra query to run. Repeatable.');
+  console.log('  --require-complete-matrix     Exit non-zero if any §0.4.3 scene/size cell is missing.');
   console.log('  --help                        Show this help.');
 }
 
@@ -297,6 +299,7 @@ export function parseBenchmarkArgs(argv: string[], cwd = process.cwd()): Benchma
   let outputPath: string | undefined;
   let markdownPath: string | undefined;
   let sampleIntervalMs = DEFAULT_SAMPLE_INTERVAL_MS;
+  let requireCompleteMatrix = false;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -345,6 +348,10 @@ export function parseBenchmarkArgs(argv: string[], cwd = process.cwd()): Benchma
       i += 1;
       continue;
     }
+    if (arg === '--require-complete-matrix') {
+      requireCompleteMatrix = true;
+      continue;
+    }
     throw new Error(`Unknown argument: ${arg}`);
   }
 
@@ -354,6 +361,7 @@ export function parseBenchmarkArgs(argv: string[], cwd = process.cwd()): Benchma
     markdownPath,
     sampleIntervalMs,
     queries,
+    requireCompleteMatrix,
   };
 }
 
@@ -598,6 +606,12 @@ export async function runBenchmarkReport(options: BenchmarkOptions): Promise<Ben
   };
 }
 
+export function determineBenchmarkExitCode(report: BenchmarkReport, options: Pick<BenchmarkOptions, 'requireCompleteMatrix'>): number {
+  if (report.traces.some(trace => trace.status === 'failed')) return 1;
+  if (options.requireCompleteMatrix && !report.coverage.complete) return 2;
+  return 0;
+}
+
 function formatBytes(value: number | null): string {
   if (value === null) return 'n/a';
   if (value >= GIB) return `${(value / GIB).toFixed(2)} GiB`;
@@ -666,9 +680,7 @@ async function main(): Promise<void> {
     console.warn(`[RSS Benchmark] Required §0.4.3 matrix is incomplete: ${report.coverage.missingCells.join(', ')}`);
   }
 
-  if (report.traces.some(trace => trace.status === 'failed')) {
-    process.exitCode = 1;
-  }
+  process.exitCode = determineBenchmarkExitCode(report, options) || undefined;
 }
 
 if (require.main === module) {
