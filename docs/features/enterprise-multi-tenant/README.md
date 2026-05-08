@@ -61,7 +61,7 @@
 - [x] 4.2 上传链路 stream 化（§11.1）：URL 上传不再 `arrayBuffer()` 全量进内存；本地上传与 RAM/磁盘策略联动；temp file 用 traceId/uuid + 原子 rename
 - [ ] 4.3 RSS benchmark：scroll/startup/ANR/memory/heapprofd/vendor 大 trace × 100MB/500MB/1GB，记录启动 RSS、load peak、query headroom
 - [x] 4.4 `TraceProcessorLease` 4 类 holder（frontend_http_rpc / agent_run / report_generation / manual_register）+ 状态机（§11.4）+ 分级 TTL
-- [x] 4.5 Backend proxy `/api/tp/:leaseId/{status,websocket,query}`（§11.3）
+- [x] 4.5 Backend proxy `/api/tp/:leaseId/{status,websocket,query,heartbeat}`（§11.3）
   - [x] 4.5.1 同时支持 `/status` HTTP / `/websocket` 二进制双向 / `/query` HTTP
   - [x] 4.5.2 前端 `HttpRpcEngine` 抽象成 `HttpRpcTarget`（direct-port + backend-lease-proxy）
   - [x] 4.5.3 同一 frontend WebSocket holder 内严格 FIFO，不做乱序返回
@@ -533,6 +533,7 @@ trace_processor_shell 需要本地文件路径，不支持直接从对象存储 
 ```text
 Browser -> Backend proxy /api/tp/{leaseId}/status
 Browser -> Backend proxy /api/tp/{leaseId}/websocket
+Browser -> Backend proxy /api/tp/{leaseId}/heartbeat
 Agent   -> Backend proxy /api/tp/{leaseId}/query
              -> lease lookup
              -> SQL Worker
@@ -550,6 +551,7 @@ Agent   -> Backend proxy /api/tp/{leaseId}/query
 
 - `/status` 代理，用于 UI 检测 trace_processor 可用性。
 - `/websocket` 二进制双向代理，用于 Perfetto UI 的 streaming query 和 timeline 查询。
+- `/heartbeat` 前端 holder 心跳，用于窗口 visible/hidden/offline TTL 与休眠恢复后的 lease reacquire。
 - `/query` HTTP 代理，用于 backend agent/MCP tool 的 SQL。
 
 不能只做 `/query`。如果前端 WebSocket 仍然直连裸 port，那么 lease、crash recovery、限流和 holder/ref-count 都绕不过前端主查询路径，双窗口问题仍然可能复现。
@@ -564,6 +566,7 @@ interface HttpRpcTarget {
   leaseId?: string;
   statusUrl: string;
   websocketUrl: string;
+  heartbeatUrl?: string;
 }
 ```
 
@@ -592,14 +595,14 @@ pending -> starting -> ready -> idle <-> active
 - `ref_count > 0` 的 lease 不可被 cleanup 删除。
 - running run、active lease、report generation artifact 都不可被 cleanup 删除。
 - 删除 trace/workspace/tenant 必须先进入 draining：拒绝新 run，等待 running run 结束或显式 cancel，等待 active lease 释放，再 tombstone + async purge。
-- holder heartbeat 默认 30s，但不同 holder 类型有不同 TTL。
+- holder heartbeat 按 holder 类型和前端可见性分级，默认只用于判定 holder stale，不是用户可见的 trace 保留时长。
 
 分级 TTL：
 
 | Holder | TTL 策略 |
 |---|---|
-| frontend visible | 心跳 30s，idle TTL 4h |
-| frontend hidden | 心跳 5min，idle TTL 8h |
+| frontend visible | 心跳 90s，idle TTL 4h |
+| frontend hidden | 心跳 10min，idle TTL 8h |
 | frontend offline | 心跳停止后保留 30min 重连窗口，再转 stale |
 | agent_run | 跟随 run lifecycle，run complete/cancel 后释放 |
 | report_generation | 跟随 job lifecycle，complete/fail 后释放 |

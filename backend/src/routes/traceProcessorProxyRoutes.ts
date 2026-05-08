@@ -19,6 +19,7 @@ import {
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import {
   getTraceProcessorLeaseStore,
+  type FrontendHolderVisibility,
   type TraceProcessorHolderInput,
   type TraceProcessorLeaseRecord,
   type TraceProcessorLeaseState,
@@ -32,6 +33,7 @@ import type { EnterpriseRepositoryScope } from '../services/enterpriseRepository
 const router = Router();
 const READY_STATES = new Set<TraceProcessorLeaseState>(['ready', 'idle', 'active']);
 const CONFLICT_STATES = new Set<TraceProcessorLeaseState>(['draining', 'released', 'failed']);
+const FRONTEND_VISIBILITIES = new Set<FrontendHolderVisibility>(['visible', 'hidden', 'offline']);
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
   'host',
@@ -219,18 +221,32 @@ function leaseScopeFromContext(context: RequestContext) {
 function frontendHolderForContext(
   context: RequestContext,
   metadata: Record<string, unknown> = {},
+  frontendVisibility?: FrontendHolderVisibility,
 ): TraceProcessorHolderInput {
   const holderRef = context.windowId || context.requestId || context.userId;
   return {
     holderType: 'frontend_http_rpc',
     holderRef,
     windowId: context.windowId,
+    ...(frontendVisibility ? { frontendVisibility } : {}),
     metadata: {
       requestId: context.requestId,
       proxy: 'trace_processor',
       ...metadata,
     },
   };
+}
+
+function parseFrontendVisibility(value: unknown): FrontendHolderVisibility {
+  if (value === undefined || value === null || value === '') return 'visible';
+  if (typeof value !== 'string') {
+    throw new TraceProcessorProxyError(400, 'frontend visibility must be visible, hidden, or offline');
+  }
+  const normalized = value.trim().toLowerCase();
+  if (FRONTEND_VISIBILITIES.has(normalized as FrontendHolderVisibility)) {
+    return normalized as FrontendHolderVisibility;
+  }
+  throw new TraceProcessorProxyError(400, 'frontend visibility must be visible, hidden, or offline');
 }
 
 function ensureTraceRead(context: RequestContext): void {
@@ -369,6 +385,56 @@ async function forwardQueryRpc(req: Request, res: Response): Promise<void> {
   });
   res.setHeader('content-type', 'application/x-protobuf');
   res.status(200).send(responseBody);
+}
+
+async function heartbeatLease(req: Request, res: Response): Promise<void> {
+  const leaseId = sanitizeContextId(req.params.leaseId);
+  if (!leaseId) {
+    res.status(400).json({ success: false, error: 'leaseId is required' });
+    return;
+  }
+
+  const context = requireRequestContext(req);
+  ensureTraceRead(context);
+  const visibility = parseFrontendVisibility(req.body?.visibility);
+  const scope = leaseScopeFromContext(context);
+  const store = getTraceProcessorLeaseStore();
+  let lease = store.getLeaseById(scope, leaseId);
+  if (!lease) {
+    throw new TraceProcessorProxyError(404, 'Trace processor lease not found');
+  }
+  if (CONFLICT_STATES.has(lease.state)) {
+    throw new TraceProcessorProxyError(409, `Trace processor lease is ${lease.state}`);
+  }
+
+  const holder = frontendHolderForContext(context, {
+    heartbeat: 'frontend',
+    lastHeartbeatAt: Date.now(),
+  }, visibility);
+  try {
+    lease = store.acquireHolderForLease(scope, lease.id, holder);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('not acquirable')) {
+      throw new TraceProcessorProxyError(409, message);
+    }
+    if (message.includes('not found')) {
+      throw new TraceProcessorProxyError(404, 'Trace processor lease not found');
+    }
+    throw error;
+  }
+
+  res.json({
+    success: true,
+    action: 'heartbeat',
+    lease,
+    holder: {
+      holderType: holder.holderType,
+      holderRef: holder.holderRef,
+      windowId: holder.windowId ?? null,
+      frontendVisibility: visibility,
+    },
+  });
 }
 
 async function drainLease(req: Request, res: Response): Promise<void> {
@@ -541,6 +607,14 @@ router.post('/:leaseId/status', express.raw({ type: '*/*', limit: serverConfig.b
 router.post('/:leaseId/query', express.raw({ type: '*/*', limit: serverConfig.bodyLimit }), async (req, res) => {
   try {
     await forwardQueryRpc(req, res);
+  } catch (error) {
+    sendProxyError(res, error);
+  }
+});
+
+router.post('/:leaseId/heartbeat', express.json({ limit: '32kb' }), async (req, res) => {
+  try {
+    await heartbeatLease(req, res);
   } catch (error) {
     sendProxyError(res, error);
   }

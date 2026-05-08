@@ -298,6 +298,96 @@ describe('trace processor lease proxy routes', () => {
     expect(res.status).toBe(404);
   });
 
+  it('refreshes frontend holder heartbeat with hidden visibility TTL', async () => {
+    const app = makeApp();
+    const before = Date.now();
+
+    const res = await ssoHeaders(
+      request(app)
+        .post(`/api/tp/${lease.id}/heartbeat`)
+        .send({ visibility: 'hidden' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      success: true,
+      action: 'heartbeat',
+      lease: {
+        id: lease.id,
+        state: 'active',
+      },
+      holder: {
+        holderType: 'frontend_http_rpc',
+        holderRef: 'window-a',
+        windowId: 'window-a',
+        frontendVisibility: 'hidden',
+      },
+    });
+    const updated = getTraceProcessorLeaseStore().getLeaseById(scope, lease.id);
+    const holder = updated?.holders.find(item => item.holderRef === 'window-a');
+    expect(holder).toBeDefined();
+    expect(holder?.metadata).toEqual(expect.objectContaining({
+      frontendVisibility: 'hidden',
+      heartbeat: 'frontend',
+      proxy: 'trace_processor',
+    }));
+    expect(holder?.expiresAt ?? 0).toBeGreaterThanOrEqual(before + 10 * 60 * 1000 - 1000);
+  });
+
+  it('reacquires the frontend holder on heartbeat after the window holder disappeared', async () => {
+    const app = makeApp();
+    const store = getTraceProcessorLeaseStore();
+    store.releaseHolder(scope, lease.id, 'frontend_http_rpc', 'window-a');
+    expect(store.getLeaseById(scope, lease.id)?.holderCount).toBe(0);
+    const before = Date.now();
+
+    const res = await ssoHeaders(
+      request(app)
+        .post(`/api/tp/${lease.id}/heartbeat`)
+        .send({ visibility: 'offline' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      success: true,
+      action: 'heartbeat',
+      lease: {
+        id: lease.id,
+        state: 'active',
+        holderCount: 1,
+      },
+      holder: {
+        holderType: 'frontend_http_rpc',
+        holderRef: 'window-a',
+        frontendVisibility: 'offline',
+      },
+    });
+    const reacquired = store.getLeaseById(scope, lease.id);
+    const holder = reacquired?.holders.find(item => item.holderRef === 'window-a');
+    expect(holder).toBeDefined();
+    expect(holder?.metadata).toEqual(expect.objectContaining({
+      frontendVisibility: 'offline',
+      heartbeat: 'frontend',
+    }));
+    expect(holder?.expiresAt ?? 0).toBeGreaterThanOrEqual(before + 30 * 60 * 1000 - 1000);
+  });
+
+  it('rejects invalid frontend heartbeat visibility', async () => {
+    const app = makeApp();
+
+    const res = await ssoHeaders(
+      request(app)
+        .post(`/api/tp/${lease.id}/heartbeat`)
+        .send({ visibility: 'minimized' }),
+    );
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      success: false,
+      error: 'frontend visibility must be visible, hidden, or offline',
+    });
+  });
+
   it('requires runtime manage permission for lease admin actions', async () => {
     const app = makeApp();
 
