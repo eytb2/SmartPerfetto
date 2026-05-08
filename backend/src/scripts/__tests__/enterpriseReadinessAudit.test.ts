@@ -167,6 +167,46 @@ describe('enterprise readiness audit', () => {
     }
   });
 
+  it('rejects RSS candidate audit output even if it contains a complete marker', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
+    try {
+      const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', '| item | Status | Evidence |\n| load | Covered | measured |\n');
+      const loadTestReportPath = await writeFixture(tmpDir, 'load.md', 'Acceptance status: passed\n');
+      const rssBenchmarkPath = await writeFixture(
+        tmpDir,
+        'rss.md',
+        [
+          '# Trace Processor RSS Matrix Candidate Audit',
+          'This audit only checks candidate trace availability. It is not RSS benchmark evidence.',
+          'Coverage status: complete',
+          'Missing required matrix cells:',
+          '- none',
+        ].join('\n'),
+      );
+      const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
+
+      const report = buildEnterpriseReadinessAuditReport({
+        readmePath,
+        acceptanceEvidencePath,
+        loadTestReportPath,
+        rssBenchmarkPath,
+        releaseNotesPath,
+        requireReady: true,
+      });
+
+      expect(report.ready).toBe(false);
+      expect(report.checks.find(check => check.id === 'rss-benchmark-final')).toMatchObject({
+        status: 'blocked',
+        evidence: expect.arrayContaining([
+          'contains candidate-audit marker',
+        ]),
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('requires all ten D1-D10 rows, not just a checked §0 summary', async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
     try {

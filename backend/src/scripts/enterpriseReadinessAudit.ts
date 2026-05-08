@@ -247,14 +247,18 @@ function auditRssBenchmark(markdown: string, filePath: string): ReadinessCheck {
   const lower = markdown.toLowerCase();
   const hasBlockedLanguage = lower.includes('blocked') || lower.includes('missing required matrix cells');
   const hasCompleteMarker = markdown.includes('Coverage status: complete');
+  const hasCandidateAuditMarker = lower.includes('candidate audit')
+    || lower.includes('candidate_matrix_ready')
+    || lower.includes('not rss benchmark evidence');
 
-  if (hasBlockedLanguage || !hasCompleteMarker) {
+  if (hasBlockedLanguage || !hasCompleteMarker || hasCandidateAuditMarker) {
     return blocked(
       'rss-benchmark-final',
       `${path.basename(filePath)} does not contain complete §0.4.3 RSS matrix evidence.`,
       [
         hasBlockedLanguage ? 'contains blocked/missing language' : 'no blocked/missing language found',
         hasCompleteMarker ? 'contains complete coverage marker' : 'missing complete coverage marker',
+        hasCandidateAuditMarker ? 'contains candidate-audit marker' : 'does not contain candidate-audit marker',
       ],
     );
   }
