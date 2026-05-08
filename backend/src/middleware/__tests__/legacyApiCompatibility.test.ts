@@ -8,7 +8,7 @@ import {
   getLegacyApiUsageSnapshot,
   resetLegacyApiUsageTelemetryForTests,
 } from '../../services/legacyApiTelemetry';
-import { LEGACY_AGENT_API_SUNSET, markLegacyApi } from '../legacyAgentApi';
+import { LEGACY_AGENT_API_SUNSET, markLegacyApi, rejectLegacyAgentApi } from '../legacyAgentApi';
 
 describe('legacy API compatibility headers', () => {
   afterEach(() => {
@@ -42,5 +42,49 @@ describe('legacy API compatibility headers', () => {
     const telemetry = getLegacyApiUsageSnapshot();
     expect(telemetry.totalLegacyRequests).toBe(1);
     expect(telemetry.topPaths[0].key).toBe('GET /api/traces');
+  });
+
+  test('rejects removed legacy agent paths with mapped successors and telemetry', async () => {
+    const app = express();
+    app.use('/api/agent', rejectLegacyAgentApi);
+
+    const res = await request(app)
+      .post('/api/agent/llm/completions?debug=1')
+      .set('Authorization', 'Bearer legacy-token')
+      .send({ prompt: 'hello' })
+      .expect(410);
+
+    expect(res.headers.deprecation).toBe('true');
+    expect(res.headers.sunset).toBe(LEGACY_AGENT_API_SUNSET);
+    expect(res.headers.link).toBe('</api/agent/v1>; rel="successor-version"');
+    expect(res.headers.warning).toContain('Legacy agent API has been removed');
+    expect(res.body).toMatchObject({
+      success: false,
+      error: 'Legacy agent API has been removed',
+      migration: {
+        successor: '/api/agent/v1/llm/completions',
+        root: '/api/agent/v1',
+        llm: '/api/agent/v1/llm',
+      },
+    });
+
+    const telemetry = getLegacyApiUsageSnapshot();
+    expect(telemetry.totalLegacyRequests).toBe(1);
+    expect(telemetry.topPaths[0].key).toBe('POST /api/agent/llm/completions');
+    expect(telemetry.topAuthSubjects[0]?.authSubject).toMatch(/^bearer:/);
+  });
+
+  test('passes through the current /api/agent/v1 subtree when mounted at the legacy root', async () => {
+    const app = express();
+    app.use('/api/agent', rejectLegacyAgentApi);
+    app.get('/api/agent/v1/status', (_req, res) => res.json({ ok: true }));
+
+    const res = await request(app)
+      .get('/api/agent/v1/status')
+      .expect(200);
+
+    expect(res.headers.deprecation).toBeUndefined();
+    expect(res.body).toEqual({ ok: true });
+    expect(getLegacyApiUsageSnapshot().totalLegacyRequests).toBe(0);
   });
 });

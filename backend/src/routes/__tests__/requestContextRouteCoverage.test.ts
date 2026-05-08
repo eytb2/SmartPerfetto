@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from '@jest/globals';
 import express from 'express';
 import request from 'supertest';
 import { markLegacyApi } from '../../middleware/legacyAgentApi';
+import agentRoutes from '../agentRoutes';
+import providerRoutes from '../providerRoutes';
 import reportRoutes from '../reportRoutes';
 import traceRoutes from '../simpleTraceRoutes';
 
@@ -29,6 +31,22 @@ function makeApp(): express.Express {
       'Legacy report API is deprecated. Migrate to workspace-scoped report APIs',
     ),
     reportRoutes,
+  );
+  app.use(
+    '/api/agent/v1',
+    markLegacyApi(
+      '/api/workspaces/:workspaceId/agent',
+      'Legacy agent API is deprecated. Migrate to workspace-scoped agent APIs',
+    ),
+    agentRoutes,
+  );
+  app.use(
+    '/api/v1/providers',
+    markLegacyApi(
+      '/api/workspaces/:workspaceId/providers',
+      'Legacy provider API is deprecated. Migrate to workspace-scoped provider APIs',
+    ),
+    providerRoutes,
   );
   return app;
 }
@@ -75,6 +93,30 @@ describe('RequestContext route coverage', () => {
     process.env.SMARTPERFETTO_API_KEY = 'test-secret';
 
     const res = await request(makeApp()).get('/api/reports/missing-report');
+
+    expect(res.status).toBe(401);
+    expect(res.headers.deprecation).toBe('true');
+    expect(res.headers.sunset).toBeDefined();
+    expect(res.body.error).toBe('Unauthorized');
+  });
+
+  it('applies RequestContext auth middleware to legacy agent routes before analysis starts', async () => {
+    process.env.SMARTPERFETTO_API_KEY = 'test-secret';
+
+    const res = await request(makeApp())
+      .post('/api/agent/v1/analyze')
+      .send({ traceId: 'trace-a', query: 'analyze this trace' });
+
+    expect(res.status).toBe(401);
+    expect(res.headers.deprecation).toBe('true');
+    expect(res.headers.sunset).toBeDefined();
+    expect(res.body.error).toBe('Unauthorized');
+  });
+
+  it('applies RequestContext auth middleware to legacy provider routes', async () => {
+    process.env.SMARTPERFETTO_API_KEY = 'test-secret';
+
+    const res = await request(makeApp()).get('/api/v1/providers');
 
     expect(res.status).toBe(401);
     expect(res.headers.deprecation).toBe('true');

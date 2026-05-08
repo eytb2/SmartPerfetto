@@ -36,7 +36,7 @@
 - [x] 2.5 旧 API 兼容 wrapper：返回 `Deprecation: true` + `Sunset` header；统一走 RequestContext
 - [x] 2.6 Resource-oriented API 切到 `/api/workspaces/:workspaceId/*`（§8.3）
 - [x] 2.7 前端 workspace selection UI + workspace/window 上下文持久化分层（§9.2 表格）
-- [ ] 2.8 单元测试覆盖：RequestContext 解析 / RBAC / owner guard / 旧路径包装
+- [x] 2.8 单元测试覆盖：RequestContext 解析 / RBAC / owner guard / 旧路径包装
 
 ### 0.3 主线 B：存储与持久化（§18）
 - [ ] 3.1 选 SQLite WAL 还是单 Postgres，落地 ADR；建立 repository 抽象（默认追加 tenantId/workspaceId filter）
