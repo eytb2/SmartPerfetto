@@ -4068,9 +4068,12 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       html,
       generatedAt: Date.now(),
       sessionId: session.sessionId,
+      runId: session.lastRun?.runId || session.activeRun?.runId,
+      traceId: session.traceId,
       tenantId: session.tenantId,
       workspaceId: session.workspaceId,
       userId: session.userId,
+      visibility: 'private',
     });
 
     reportUrl = `/api/reports/${reportId}`;

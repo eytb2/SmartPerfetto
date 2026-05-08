@@ -42,7 +42,7 @@
 - [x] 3.1 选 SQLite WAL 还是单 Postgres，落地 ADR；建立 repository 抽象（默认追加 tenantId/workspaceId filter）
 - [x] 3.2 实现 §10.2 全部核心表 + 索引 + migration（含 audit / tombstone）
 - [x] 3.3 trace metadata 入 DB；trace 文件迁到 `data/{tenantId}/{workspaceId}/traces/`
-- [ ] 3.4 report metadata 入 DB；report 内容迁到 `data/{tenantId}/{workspaceId}/reports/`（§14.2）
+- [x] 3.4 report metadata 入 DB；report 内容迁到 `data/{tenantId}/{workspaceId}/reports/`（§14.2）
 - [ ] 3.5 `logs/claude_session_map.json` 迁到 `runtime_snapshots`
 - [ ] 3.6 provider 从 `data/providers.json` 迁到 DB metadata + encrypted SecretStore
 - [ ] 3.7 Memory / RAG / Case / Baseline 表加 scope（§14.1，先 filter 后语义召回）

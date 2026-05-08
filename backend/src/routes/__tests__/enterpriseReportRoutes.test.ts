@@ -1,0 +1,182 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
+import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import express from 'express';
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
+import request from 'supertest';
+import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../config';
+import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../../services/enterpriseDb';
+import { ENTERPRISE_DATA_DIR_ENV } from '../../services/traceMetadataStore';
+import reportRoutes, { persistReport, reportStore } from '../reportRoutes';
+
+const originalEnv = {
+  enterprise: process.env[ENTERPRISE_FEATURE_FLAG_ENV],
+  trustedHeaders: process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS,
+  enterpriseDbPath: process.env[ENTERPRISE_DB_PATH_ENV],
+  enterpriseDataDir: process.env[ENTERPRISE_DATA_DIR_ENV],
+  apiKey: process.env.SMARTPERFETTO_API_KEY,
+};
+
+interface ReportArtifactRow {
+  id: string;
+  tenant_id: string;
+  workspace_id: string;
+  session_id: string;
+  run_id: string;
+  local_path: string;
+  content_hash: string;
+  visibility: string;
+  created_by: string | null;
+}
+
+let tmpDir: string;
+let dbPath: string;
+let dataDir: string;
+
+function makeApp(): express.Express {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/reports', reportRoutes);
+  return app;
+}
+
+function restoreEnvValue(key: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+}
+
+function ssoHeaders(req: request.Test, workspaceId = 'workspace-a'): request.Test {
+  return req
+    .set('X-SmartPerfetto-SSO-User-Id', 'user-a')
+    .set('X-SmartPerfetto-SSO-Email', 'user-a@example.test')
+    .set('X-SmartPerfetto-SSO-Tenant-Id', 'tenant-a')
+    .set('X-SmartPerfetto-SSO-Workspace-Id', workspaceId)
+    .set('X-SmartPerfetto-SSO-Roles', 'workspace_admin')
+    .set('X-SmartPerfetto-SSO-Scopes', 'report:read,report:delete');
+}
+
+function readReportArtifact(reportId: string): ReportArtifactRow | null {
+  const db = openEnterpriseDb(dbPath);
+  try {
+    return db.prepare<unknown[], ReportArtifactRow>(`
+      SELECT *
+      FROM report_artifacts
+      WHERE id = ?
+    `).get(reportId) || null;
+  } finally {
+    db.close();
+  }
+}
+
+beforeEach(async () => {
+  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-enterprise-report-routes-'));
+  dbPath = path.join(tmpDir, 'enterprise.sqlite');
+  dataDir = path.join(tmpDir, 'data');
+
+  process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+  process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+  process.env[ENTERPRISE_DB_PATH_ENV] = dbPath;
+  process.env[ENTERPRISE_DATA_DIR_ENV] = dataDir;
+  delete process.env.SMARTPERFETTO_API_KEY;
+  reportStore.clear();
+});
+
+afterEach(async () => {
+  reportStore.clear();
+  restoreEnvValue(ENTERPRISE_FEATURE_FLAG_ENV, originalEnv.enterprise);
+  restoreEnvValue('SMARTPERFETTO_SSO_TRUSTED_HEADERS', originalEnv.trustedHeaders);
+  restoreEnvValue(ENTERPRISE_DB_PATH_ENV, originalEnv.enterpriseDbPath);
+  restoreEnvValue(ENTERPRISE_DATA_DIR_ENV, originalEnv.enterpriseDataDir);
+  restoreEnvValue('SMARTPERFETTO_API_KEY', originalEnv.apiKey);
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
+describe('enterprise report routes', () => {
+  it('stores reports in report_artifacts and reloads them from scoped data storage', async () => {
+    const app = makeApp();
+    const reportId = 'report-a';
+
+    persistReport(reportId, {
+      html: '<html><body>enterprise report</body></html>',
+      generatedAt: 1_700_000_000_000,
+      sessionId: 'session-a',
+      runId: 'run-a',
+      traceId: 'trace-a',
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'user-a',
+      visibility: 'private',
+    });
+
+    const expectedHtmlPath = path.join(
+      dataDir,
+      'tenant-a',
+      'workspace-a',
+      'reports',
+      reportId,
+      'report.html',
+    );
+    const expectedJsonPath = path.join(path.dirname(expectedHtmlPath), 'report.json');
+    await expect(fs.access(expectedHtmlPath)).resolves.toBeUndefined();
+    await expect(fs.access(expectedJsonPath)).resolves.toBeUndefined();
+
+    const row = readReportArtifact(reportId);
+    expect(row).toEqual(expect.objectContaining({
+      id: reportId,
+      tenant_id: 'tenant-a',
+      workspace_id: 'workspace-a',
+      session_id: 'session-a',
+      run_id: 'run-a',
+      local_path: expectedHtmlPath,
+      visibility: 'private',
+      created_by: 'user-a',
+    }));
+    expect(row!.content_hash).toHaveLength(64);
+
+    reportStore.clear();
+    const getRes = await ssoHeaders(request(app).get(`/api/reports/${reportId}`));
+    expect(getRes.status).toBe(200);
+    expect(getRes.text).toContain('enterprise report');
+
+    const otherWorkspaceRes = await ssoHeaders(
+      request(app).get(`/api/reports/${reportId}`),
+      'workspace-b',
+    );
+    expect(otherWorkspaceRes.status).toBe(404);
+  });
+
+  it('deletes enterprise report_artifacts metadata and scoped report files', async () => {
+    const app = makeApp();
+    const reportId = 'report-delete';
+
+    persistReport(reportId, {
+      html: '<html><body>delete report</body></html>',
+      generatedAt: 1_700_000_000_000,
+      sessionId: 'session-delete',
+      runId: 'run-delete',
+      traceId: 'trace-delete',
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'user-a',
+      visibility: 'private',
+    });
+    const row = readReportArtifact(reportId);
+    expect(row).not.toBeNull();
+
+    reportStore.clear();
+    const deleteRes = await ssoHeaders(request(app).delete(`/api/reports/${reportId}`));
+
+    expect(deleteRes.status).toBe(200);
+    expect(deleteRes.body.success).toBe(true);
+    expect(readReportArtifact(reportId)).toBeNull();
+    await expect(fs.access(row!.local_path)).rejects.toThrow();
+    await expect(fs.access(path.dirname(row!.local_path))).rejects.toThrow();
+  });
+});

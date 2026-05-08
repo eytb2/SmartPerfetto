@@ -10,11 +10,16 @@
  */
 
 import express from 'express';
+import crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import type Database from 'better-sqlite3';
 import { attachRequestContext, requireRequestContext } from '../middleware/auth';
+import { resolveFeatureConfig } from '../config';
+import { openEnterpriseDb } from '../services/enterpriseDb';
 import { REPORT_CAUSAL_MAP_CSS, REPORT_CAUSAL_MAP_SCRIPT } from '../services/reportCausalMapAssets';
 import { localize, parseOutputLanguage } from '../agentv3/outputLanguage';
+import { resolveEnterpriseDataRoot } from '../services/traceMetadataStore';
 import {
   sendResourceNotFound,
   type ResourceOwnerFields,
@@ -42,9 +47,246 @@ type PersistedReport = ResourceOwnerFields & {
   html: string;
   generatedAt: number;
   sessionId: string;
+  runId?: string;
+  traceId?: string;
+  visibility?: string;
 };
 
 export const reportStore = new Map<string, PersistedReport>();
+
+interface ReportArtifactRow {
+  id: string;
+  tenant_id: string;
+  workspace_id: string;
+  session_id: string;
+  run_id: string;
+  local_path: string;
+  content_hash: string | null;
+  visibility: string;
+  created_by: string | null;
+  created_at: number;
+  expires_at: number | null;
+}
+
+const SAFE_REPORT_ID_RE = /^[a-zA-Z0-9._:-]+$/;
+
+function enterpriseReportStoreEnabled(): boolean {
+  return resolveFeatureConfig(process.env).enterprise;
+}
+
+function assertSafeReportSegment(value: string, label: string): string {
+  if (!SAFE_REPORT_ID_RE.test(value) || value === '.' || value === '..') {
+    throw new Error(`Unsafe ${label}: ${value}`);
+  }
+  return value;
+}
+
+function reportContentHash(html: string): string {
+  return crypto.createHash('sha256').update(html).digest('hex');
+}
+
+function withEnterpriseReportDb<T>(fn: (db: Database.Database) => T): T {
+  const db = openEnterpriseDb();
+  try {
+    return fn(db);
+  } finally {
+    db.close();
+  }
+}
+
+function enterpriseReportDir(reportId: string, entry: PersistedReport): string {
+  if (!entry.tenantId || !entry.workspaceId) {
+    throw new Error('Enterprise report persistence requires tenantId and workspaceId');
+  }
+  return path.join(
+    resolveEnterpriseDataRoot(),
+    assertSafeReportSegment(entry.tenantId, 'tenant id'),
+    assertSafeReportSegment(entry.workspaceId, 'workspace id'),
+    'reports',
+    assertSafeReportSegment(reportId, 'report id'),
+  );
+}
+
+function fallbackTraceId(entry: PersistedReport): string {
+  return entry.traceId || `trace-${entry.sessionId}-report`;
+}
+
+function fallbackRunId(entry: PersistedReport): string {
+  return entry.runId || `run-${entry.sessionId}-report`;
+}
+
+function ensureEnterpriseReportGraph(
+  db: Database.Database,
+  reportId: string,
+  entry: PersistedReport,
+): { traceId: string; runId: string } {
+  if (!entry.tenantId || !entry.workspaceId) {
+    throw new Error('Enterprise report persistence requires tenantId and workspaceId');
+  }
+  const tenantId = assertSafeReportSegment(entry.tenantId, 'tenant id');
+  const workspaceId = assertSafeReportSegment(entry.workspaceId, 'workspace id');
+  const userId = entry.userId ? assertSafeReportSegment(entry.userId, 'user id') : null;
+  const traceId = fallbackTraceId(entry);
+  const runId = fallbackRunId(entry);
+  const now = Date.now();
+
+  db.prepare(`
+    INSERT OR IGNORE INTO organizations (id, name, status, plan, created_at, updated_at)
+    VALUES (?, ?, 'active', 'enterprise', ?, ?)
+  `).run(tenantId, tenantId, now, now);
+  db.prepare(`
+    INSERT OR IGNORE INTO workspaces (id, tenant_id, name, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(workspaceId, tenantId, workspaceId, now, now);
+  if (userId) {
+    db.prepare(`
+      INSERT INTO users (id, tenant_id, email, display_name, idp_subject, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        email = excluded.email,
+        display_name = excluded.display_name,
+        updated_at = excluded.updated_at
+    `).run(
+      userId,
+      tenantId,
+      `${userId}@report.local`,
+      userId,
+      `report:${userId}`,
+      now,
+      now,
+    );
+  }
+  db.prepare(`
+    INSERT OR IGNORE INTO trace_assets
+      (id, tenant_id, workspace_id, owner_user_id, local_path, size_bytes, status, metadata_json, created_at)
+    VALUES
+      (?, ?, ?, ?, ?, 0, 'metadata_only', ?, ?)
+  `).run(
+    traceId,
+    tenantId,
+    workspaceId,
+    userId,
+    `metadata-only:${traceId}`,
+    JSON.stringify({ source: 'report_artifact', reportId }),
+    entry.generatedAt || now,
+  );
+  db.prepare(`
+    INSERT OR IGNORE INTO analysis_sessions
+      (id, tenant_id, workspace_id, trace_id, created_by, title, visibility, status, created_at, updated_at)
+    VALUES
+      (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)
+  `).run(
+    entry.sessionId,
+    tenantId,
+    workspaceId,
+    traceId,
+    userId,
+    `Report ${reportId}`,
+    entry.visibility || 'private',
+    entry.generatedAt || now,
+    now,
+  );
+  db.prepare(`
+    INSERT OR IGNORE INTO analysis_runs
+      (id, tenant_id, workspace_id, session_id, mode, status, question, started_at, completed_at)
+    VALUES
+      (?, ?, ?, ?, 'report', 'completed', '', ?, ?)
+  `).run(
+    runId,
+    tenantId,
+    workspaceId,
+    entry.sessionId,
+    entry.generatedAt || now,
+    entry.generatedAt || now,
+  );
+
+  return { traceId, runId };
+}
+
+function persistEnterpriseReport(reportId: string, entry: PersistedReport): void {
+  const reportDir = enterpriseReportDir(reportId, entry);
+  const htmlPath = path.join(reportDir, 'report.html');
+  const metadataPath = path.join(reportDir, 'report.json');
+  fs.mkdirSync(reportDir, { recursive: true });
+  fs.writeFileSync(htmlPath, entry.html, 'utf-8');
+
+  withEnterpriseReportDb((db) => {
+    const { runId } = ensureEnterpriseReportGraph(db, reportId, entry);
+    const createdAt = entry.generatedAt || Date.now();
+    const visibility = entry.visibility || 'private';
+    const contentHash = reportContentHash(entry.html);
+    db.prepare(`
+      INSERT INTO report_artifacts
+        (id, tenant_id, workspace_id, session_id, run_id, local_path, content_hash, visibility, created_by, created_at, expires_at)
+      VALUES
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        tenant_id = excluded.tenant_id,
+        workspace_id = excluded.workspace_id,
+        session_id = excluded.session_id,
+        run_id = excluded.run_id,
+        local_path = excluded.local_path,
+        content_hash = excluded.content_hash,
+        visibility = excluded.visibility,
+        created_by = excluded.created_by,
+        expires_at = excluded.expires_at
+    `).run(
+      reportId,
+      entry.tenantId,
+      entry.workspaceId,
+      entry.sessionId,
+      runId,
+      htmlPath,
+      contentHash,
+      visibility,
+      entry.userId ?? null,
+      createdAt,
+      null,
+    );
+
+    fs.writeFileSync(metadataPath, JSON.stringify({
+      reportId,
+      generatedAt: createdAt,
+      sessionId: entry.sessionId,
+      runId,
+      traceId: fallbackTraceId(entry),
+      tenantId: entry.tenantId,
+      workspaceId: entry.workspaceId,
+      userId: entry.userId,
+      visibility,
+      contentHash,
+    }, null, 2));
+  });
+}
+
+function loadEnterpriseReport(reportId: string): PersistedReport | null {
+  if (!SAFE_REPORT_ID_RE.test(reportId)) return null;
+  try {
+    return withEnterpriseReportDb((db) => {
+      const row = db.prepare<unknown[], ReportArtifactRow>(`
+        SELECT *
+        FROM report_artifacts
+        WHERE id = ?
+      `).get(reportId);
+      if (!row || !fs.existsSync(row.local_path)) return null;
+      const html = fs.readFileSync(row.local_path, 'utf-8');
+      const entry: PersistedReport = {
+        html: upgradeLegacyReportHtml(html),
+        generatedAt: row.created_at,
+        sessionId: row.session_id,
+        runId: row.run_id,
+        tenantId: row.tenant_id,
+        workspaceId: row.workspace_id,
+        ...(row.created_by ? { userId: row.created_by } : {}),
+        visibility: row.visibility,
+      };
+      reportStore.set(reportId, entry);
+      return entry;
+    });
+  } catch {
+    return null;
+  }
+}
 
 const LEGACY_MERMAID_UPGRADE_CSS = REPORT_CAUSAL_MAP_CSS;
 
@@ -74,6 +316,10 @@ export function upgradeLegacyReportHtml(html: string): string {
 export function persistReport(reportId: string, entry: PersistedReport): void {
   reportStore.set(reportId, entry);
   try {
+    if (enterpriseReportStoreEnabled()) {
+      persistEnterpriseReport(reportId, entry);
+      return;
+    }
     const filePath = path.join(REPORTS_DIR, `${reportId}.html`);
     fs.writeFileSync(filePath, entry.html, 'utf-8');
     // Write metadata alongside
@@ -81,9 +327,12 @@ export function persistReport(reportId: string, entry: PersistedReport): void {
     fs.writeFileSync(metaPath, JSON.stringify({
       generatedAt: entry.generatedAt,
       sessionId: entry.sessionId,
+      runId: entry.runId,
+      traceId: entry.traceId,
       tenantId: entry.tenantId,
       workspaceId: entry.workspaceId,
       userId: entry.userId,
+      visibility: entry.visibility,
     }));
   } catch (err) {
     console.warn('[ReportRoutes] Failed to persist report to disk:', (err as Error).message);
@@ -92,6 +341,9 @@ export function persistReport(reportId: string, entry: PersistedReport): void {
 
 /** Load a report from disk if not in memory cache. */
 function loadReportFromDisk(reportId: string): PersistedReport | null {
+  if (enterpriseReportStoreEnabled()) {
+    return loadEnterpriseReport(reportId);
+  }
   try {
     const filePath = path.join(REPORTS_DIR, `${reportId}.html`);
     if (!fs.existsSync(filePath)) return null;
@@ -100,11 +352,17 @@ function loadReportFromDisk(reportId: string): PersistedReport | null {
     const metaPath = path.join(REPORTS_DIR, `${reportId}.meta.json`);
     let generatedAt = Date.now();
     let sessionId = '';
+    let runId: string | undefined;
+    let traceId: string | undefined;
+    let visibility: string | undefined;
     let owner: ResourceOwnerFields = {};
     if (fs.existsSync(metaPath)) {
       const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
       generatedAt = meta.generatedAt || generatedAt;
       sessionId = meta.sessionId || '';
+      runId = meta.runId;
+      traceId = meta.traceId;
+      visibility = meta.visibility;
       owner = {
         tenantId: meta.tenantId,
         workspaceId: meta.workspaceId,
@@ -113,12 +371,56 @@ function loadReportFromDisk(reportId: string): PersistedReport | null {
       };
     }
 
-    const entry = { html: upgradeLegacyReportHtml(html), generatedAt, sessionId, ...owner };
+    const entry = {
+      html: upgradeLegacyReportHtml(html),
+      generatedAt,
+      sessionId,
+      ...(runId ? { runId } : {}),
+      ...(traceId ? { traceId } : {}),
+      ...(visibility ? { visibility } : {}),
+      ...owner,
+    };
     // Cache in memory for subsequent access
     reportStore.set(reportId, entry);
     return entry;
   } catch {
     return null;
+  }
+}
+
+function deletePersistedReport(reportId: string): boolean {
+  if (enterpriseReportStoreEnabled()) {
+    if (!SAFE_REPORT_ID_RE.test(reportId)) return false;
+    try {
+      return withEnterpriseReportDb((db) => {
+        const row = db.prepare<unknown[], ReportArtifactRow>(
+          'SELECT * FROM report_artifacts WHERE id = ?',
+        ).get(reportId);
+        if (!row) return false;
+        db.prepare('DELETE FROM report_artifacts WHERE id = ?').run(reportId);
+        try {
+          const reportDir = path.dirname(row.local_path);
+          const metadataPath = path.join(reportDir, 'report.json');
+          if (fs.existsSync(row.local_path)) fs.unlinkSync(row.local_path);
+          if (fs.existsSync(metadataPath)) fs.unlinkSync(metadataPath);
+          fs.rmSync(reportDir, { recursive: true, force: true });
+        } catch { /* non-fatal */ }
+        return true;
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  try {
+    const htmlPath = path.join(REPORTS_DIR, `${reportId}.html`);
+    const metaPath = path.join(REPORTS_DIR, `${reportId}.meta.json`);
+    const existed = fs.existsSync(htmlPath) || fs.existsSync(metaPath);
+    if (fs.existsSync(htmlPath)) fs.unlinkSync(htmlPath);
+    if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
+    return existed;
+  } catch {
+    return false;
   }
 }
 
@@ -268,15 +570,9 @@ router.delete('/:reportId', (req, res) => {
       return sendForbidden(res, 'Deleting this report requires report delete permission');
     }
 
-    const deleted = reportStore.delete(reportId);
-
-    // Also clean disk files
-    try {
-      const htmlPath = path.join(REPORTS_DIR, `${reportId}.html`);
-      const metaPath = path.join(REPORTS_DIR, `${reportId}.meta.json`);
-      if (fs.existsSync(htmlPath)) fs.unlinkSync(htmlPath);
-      if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
-    } catch { /* non-fatal */ }
+    const deletedFromCache = reportStore.delete(reportId);
+    const deletedFromPersistence = deletePersistedReport(reportId);
+    const deleted = deletedFromCache || deletedFromPersistence;
 
     res.json({
       success: deleted,
