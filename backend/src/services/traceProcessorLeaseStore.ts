@@ -251,6 +251,38 @@ export class TraceProcessorLeaseStore {
     })();
   }
 
+  acquireHolderForLease(
+    scope: EnterpriseRepositoryScope,
+    leaseId: string,
+    holder: TraceProcessorHolderInput,
+    options: { now?: number } = {},
+  ): TraceProcessorLeaseRecord {
+    assertNonEmpty(scope.tenantId, 'tenantId');
+    assertNonEmpty(scope.workspaceId, 'workspaceId');
+    assertNonEmpty(leaseId, 'leaseId');
+    assertNonEmpty(holder.holderRef, 'holderRef');
+
+    return this.db.transaction(() => {
+      const now = options.now ?? Date.now();
+      const lease = this.mustGetLease(scope, leaseId);
+      const state = lease.state as TraceProcessorLeaseState;
+      if (!ACQUIRABLE_STATES.has(state)) {
+        throw new Error(`Trace processor lease ${lease.id} is not acquirable (${state})`);
+      }
+
+      this.upsertHolder(lease.id, holder, now);
+      const ttl = resolveHolderTtlPolicy(holder);
+      const expiresAt = Math.max(lease.expires_at ?? 0, now + ttl.idleTtlMs);
+      this.db.prepare(`
+        UPDATE trace_processor_leases
+        SET heartbeat_at = ?, expires_at = ?
+        WHERE id = ?
+      `).run(now, expiresAt, lease.id);
+      this.refreshLeaseActivityState(scope, lease.id);
+      return this.getLeaseById(scope, lease.id)!;
+    })();
+  }
+
   heartbeatHolder(
     scope: EnterpriseRepositoryScope,
     leaseId: string,

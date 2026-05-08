@@ -37,6 +37,7 @@ import caseRoutes from './routes/caseRoutes';
 import ragAdminRoutes from './routes/ragAdminRoutes';
 import enterpriseAuthRoutes from './routes/enterpriseAuthRoutes';
 import enterpriseApiKeyRoutes from './routes/enterpriseApiKeyRoutes';
+import traceProcessorProxyRoutes, { handleTraceProcessorProxyUpgrade } from './routes/traceProcessorProxyRoutes';
 import {authenticate} from './middleware/auth';
 import {
   assertTraceAnalysisConfiguredForStartup,
@@ -233,6 +234,7 @@ app.use('/api/flamegraph', flamegraphRoutes);
 app.use('/api/critical-path', criticalPathRoutes);
 app.use('/api/baselines', baselineRoutes);
 app.use('/api/ci', authenticate, ciGateRoutes);
+app.use('/api/tp', traceProcessorProxyRoutes);
 app.use('/api/memory', memoryRoutes);
 app.use('/api/cases', caseRoutes);
 app.use('/api/rag', ragAdminRoutes);
@@ -310,6 +312,11 @@ const server = app.listen(PORT, () => {
   console.log(`🔗 API URL: http://localhost:${PORT}/api`);
   console.log(`❤️  Health check: http://localhost:${PORT}/health`);
   console.log(`📈 Stats: http://localhost:${PORT}/api/traces/stats`);
+});
+
+server.on('upgrade', (req, socket, head) => {
+  if (handleTraceProcessorProxyUpgrade(req, socket, head)) return;
+  socket.destroy();
 });
 
 // Handle server close

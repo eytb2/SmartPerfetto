@@ -157,6 +157,8 @@ describe('enterprise trace metadata routes', () => {
 
     expect(uploadRes.status).toBe(200);
     const traceId = uploadRes.body.trace.id as string;
+    expect(uploadRes.body.trace.leaseId).toEqual(expect.any(String));
+    expect(uploadRes.body.trace.leaseState).toBe('active');
     const expectedTracePath = path.join(dataDir, 'tenant-a', 'workspace-a', 'traces', `${traceId}.trace`);
     await expect(fs.access(expectedTracePath)).resolves.toBeUndefined();
     await expect(fs.access(path.join(uploadDir, 'traces', `${traceId}.json`))).rejects.toThrow();

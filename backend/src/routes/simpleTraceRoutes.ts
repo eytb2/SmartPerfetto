@@ -55,6 +55,17 @@ class TraceUploadTooLargeError extends Error {
   }
 }
 
+interface FinalizedTraceUploadInfo {
+  uploadTime?: Date;
+  status?: string;
+  port?: number;
+  leaseId?: string;
+  leaseState?: string;
+  processor?: {
+    status: string;
+  };
+}
+
 function parsePositiveInteger(value: string | undefined): number | null {
   if (!value) return null;
   const parsed = Number.parseInt(value, 10);
@@ -154,7 +165,7 @@ async function finalizeTraceUpload(
   size: number,
   finalPath: string,
   context: RequestContext,
-) {
+): Promise<FinalizedTraceUploadInfo | undefined> {
   const tps = getTraceProcessorService();
 
   if (tps) {
@@ -356,6 +367,8 @@ router.post(
           status: traceInfo?.status || 'ready',
           // Port for HTTP RPC mode - frontend can connect to trace_processor directly
           port: traceInfo?.port,
+          leaseId: traceInfo?.leaseId,
+          leaseState: traceInfo?.leaseState,
           processorStatus: traceInfo?.processor?.status,
         }
       });
@@ -449,6 +462,8 @@ router.post('/upload-url', async (req, res) => {
         uploadedAt: traceInfo?.uploadTime || new Date().toISOString(),
         status: traceInfo?.status || 'ready',
         port: traceInfo?.port,
+        leaseId: traceInfo?.leaseId,
+        leaseState: traceInfo?.leaseState,
         processorStatus: traceInfo?.processor?.status,
       }
     });

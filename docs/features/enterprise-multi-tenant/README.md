@@ -61,11 +61,11 @@
 - [x] 4.2 上传链路 stream 化（§11.1）：URL 上传不再 `arrayBuffer()` 全量进内存；本地上传与 RAM/磁盘策略联动；temp file 用 traceId/uuid + 原子 rename
 - [ ] 4.3 RSS benchmark：scroll/startup/ANR/memory/heapprofd/vendor 大 trace × 100MB/500MB/1GB，记录启动 RSS、load peak、query headroom
 - [x] 4.4 `TraceProcessorLease` 4 类 holder（frontend_http_rpc / agent_run / report_generation / manual_register）+ 状态机（§11.4）+ 分级 TTL
-- [ ] 4.5 Backend proxy `/api/tp/:leaseId/{status,websocket,query}`（§11.3）
-  - [ ] 4.5.1 同时支持 `/status` HTTP / `/websocket` 二进制双向 / `/query` HTTP
-  - [ ] 4.5.2 前端 `HttpRpcEngine` 抽象成 `HttpRpcTarget`（direct-port + backend-lease-proxy）
-  - [ ] 4.5.3 同一 frontend WebSocket holder 内严格 FIFO，不做乱序返回
-  - [ ] 4.5.4 企业模式禁用浏览器直连裸 `127.0.0.1:9100-9900`
+- [x] 4.5 Backend proxy `/api/tp/:leaseId/{status,websocket,query}`（§11.3）
+  - [x] 4.5.1 同时支持 `/status` HTTP / `/websocket` 二进制双向 / `/query` HTTP
+  - [x] 4.5.2 前端 `HttpRpcEngine` 抽象成 `HttpRpcTarget`（direct-port + backend-lease-proxy）
+  - [x] 4.5.3 同一 frontend WebSocket holder 内严格 FIFO，不做乱序返回
+  - [x] 4.5.4 企业模式禁用浏览器直连裸 `127.0.0.1:9100-9900`
 - [ ] 4.6 SQL Worker（worker_thread / child process）+ non-preemptive priority queue P0/P1/P2（§11.7）
 - [ ] 4.7 RAM budget + 启动后实测 RSS + admission control（§11.5），暴露 stats endpoint
 - [ ] 4.8 Shared / isolated 自动判定（§11.6），UI 明确展示队列/共享/独立状态
