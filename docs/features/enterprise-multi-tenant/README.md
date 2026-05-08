@@ -72,7 +72,7 @@
 - [x] 4.9 24h query timeout 覆盖 WorkingTraceProcessor 与 ExternalRpcProcessor 双路径；独立 health channel `SELECT 1`（§11.8）
 - [x] 4.10 crash recovery + backoff（1s/5s/15s + jitter）+ 稳定 leaseId；单 supervisor 重启，holder 不各自重试
 - [x] 4.11 `/api/traces/cleanup` 企业模式禁用或 admin-only + draining + audit
-- [ ] 4.12 §11.11 漏洞清单：每行设计验收都打勾验证
+- [x] 4.12 §11.11 漏洞清单：每行设计验收都打勾验证
 
 ### 0.5 主线 D：控制面与合规（§18）
 - [ ] 5.1 tenant / workspace / member / provider / quota 管理 UI 与后端 API
@@ -139,6 +139,7 @@
 - [ ] （新增 ADR / 设计 / runbook 在此追加，例如：`docs/adr/0001-enterprise-db-choice.md` …）
 - [x] `docs/features/enterprise-multi-tenant/adr-0001-sqlite-wal-repository.md`（§0.3.1 SQLite WAL + repository abstraction 决策）
 - [ ] `docs/features/enterprise-multi-tenant/rss-benchmark.md`（§0.4.3 RSS benchmark runbook；等待 100MB/500MB/1GB 大 trace 实测）
+- [x] `docs/features/enterprise-multi-tenant/runtime-isolation-checklist.md`（§0.4.12 §11.11 漏洞清单设计验收证据）
 
 ### 0.10 PR / 提交收尾（每次 PR 都要走）
 - [ ] 每个主线 / 子主线一个独立 PR；不跨主线串改动
