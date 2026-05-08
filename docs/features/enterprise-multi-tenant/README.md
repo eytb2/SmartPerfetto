@@ -39,7 +39,7 @@
 - [x] 2.8 单元测试覆盖：RequestContext 解析 / RBAC / owner guard / 旧路径包装
 
 ### 0.3 主线 B：存储与持久化（§18）
-- [ ] 3.1 选 SQLite WAL 还是单 Postgres，落地 ADR；建立 repository 抽象（默认追加 tenantId/workspaceId filter）
+- [x] 3.1 选 SQLite WAL 还是单 Postgres，落地 ADR；建立 repository 抽象（默认追加 tenantId/workspaceId filter）
 - [ ] 3.2 实现 §10.2 全部核心表 + 索引 + migration（含 audit / tombstone）
 - [ ] 3.3 trace metadata 入 DB；trace 文件迁到 `data/{tenantId}/{workspaceId}/traces/`
 - [ ] 3.4 report metadata 入 DB；report 内容迁到 `data/{tenantId}/{workspaceId}/reports/`（§14.2）
@@ -137,6 +137,7 @@
 - [x] `docs/features/enterprise-multi-tenant/agent-goal.md`（AI 接手用 self-contained goal prompt）
 - [x] `docs/features/enterprise-multi-tenant/baseline.md`（0.0 baseline 命令与实测结果）
 - [ ] （新增 ADR / 设计 / runbook 在此追加，例如：`docs/adr/0001-enterprise-db-choice.md` …）
+- [x] `docs/features/enterprise-multi-tenant/adr-0001-sqlite-wal-repository.md`（§0.3.1 SQLite WAL + repository abstraction 决策）
 
 ### 0.10 PR / 提交收尾（每次 PR 都要走）
 - [ ] 每个主线 / 子主线一个独立 PR；不跨主线串改动
