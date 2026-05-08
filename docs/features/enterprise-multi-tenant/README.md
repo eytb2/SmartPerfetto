@@ -47,7 +47,7 @@
 - [x] 3.6 provider 从 `data/providers.json` 迁到 DB metadata + encrypted SecretStore
 - [x] 3.7 Memory / RAG / Case / Baseline 表加 scope（§14.1，先 filter 后语义召回）
 - [x] 3.8 双写 → 切读 → 退役 三阶段（§17），每阶段都能回滚；准备 filesystem + DB snapshot
-- [ ] 3.9 SecretStore：libsodium 加密 + OS keyring 解 master key + secret rotation + 读取审计
+- [x] 3.9 SecretStore：libsodium 加密 + OS keyring 解 master key + secret rotation + 读取审计
 - [ ] 3.10 集成测试：backend restart 后 session/report/trace metadata 可恢复
 
 ### 0.4 主线 C：运行时隔离（§18 + §11）
@@ -837,6 +837,13 @@ user override
 - secret 读取写审计日志。
 - 支持 secret rotation。
 - 未来可把 `SecretStore` 实现替换为 Vault/KMS。
+
+当前实现：
+
+- secret file 使用 libsodium `crypto_secretbox` 加密，文件只保存 nonce/ciphertext/version。
+- master key 优先来自 OS keyring；CI/headless 环境可用 `SMARTPERFETTO_SECRET_STORE_MASTER_KEY` 注入，测试/dev 可显式打开本地 fallback。
+- provider secret 的 create/write/read/delete/rotate 写入 `audit_events`，metadata 只记录 `secretRef` hash、version 和 SecretStore 非敏感信息。
+- rotation 入口为 `POST /api/v1/providers/:id/rotate-secret`。
 
 ## 14. Memory、Report、Skill 与 Legacy AI
 

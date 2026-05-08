@@ -189,6 +189,16 @@ export class ProviderService {
     this.store.delete(id, scope);
   }
 
+  rotateSecret(id: string, scope?: ProviderScope): number {
+    const existing = this.store.get(id, scope);
+    if (!existing) throw new Error(`Provider not found: ${id}`);
+    const version = this.store.rotateSecret(id, scope);
+    if (version === undefined) {
+      throw new Error('Secret rotation is only available for the enterprise provider store');
+    }
+    return version;
+  }
+
   activate(id: string, scope?: ProviderScope): void {
     const target = this.store.get(id, scope);
     if (!target) throw new Error(`Provider not found: ${id}`);

@@ -7,7 +7,11 @@ import os from 'os';
 import path from 'path';
 import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../../config';
 import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../../enterpriseDb';
-import { SECRET_STORE_DIR_ENV } from '../localSecretStore';
+import { listEnterpriseAuditEvents } from '../../enterpriseAuditService';
+import {
+  SECRET_STORE_DIR_ENV,
+  SECRET_STORE_MASTER_KEY_ENV,
+} from '../localSecretStore';
 import { ProviderService } from '../providerService';
 import type { ProviderCreateInput, ProviderScope } from '../types';
 
@@ -15,6 +19,7 @@ const originalEnv = {
   enterprise: process.env[ENTERPRISE_FEATURE_FLAG_ENV],
   enterpriseDbPath: process.env[ENTERPRISE_DB_PATH_ENV],
   secretStoreDir: process.env[SECRET_STORE_DIR_ENV],
+  secretStoreMasterKey: process.env[SECRET_STORE_MASTER_KEY_ENV],
 };
 
 interface ProviderCredentialRow {
@@ -80,6 +85,7 @@ beforeEach(async () => {
   process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
   process.env[ENTERPRISE_DB_PATH_ENV] = dbPath;
   process.env[SECRET_STORE_DIR_ENV] = secretDir;
+  process.env[SECRET_STORE_MASTER_KEY_ENV] = Buffer.alloc(32, 3).toString('base64');
   svc = new ProviderService(path.join(tmpDir, 'providers.json'));
 });
 
@@ -87,6 +93,7 @@ afterEach(async () => {
   restoreEnvValue(ENTERPRISE_FEATURE_FLAG_ENV, originalEnv.enterprise);
   restoreEnvValue(ENTERPRISE_DB_PATH_ENV, originalEnv.enterpriseDbPath);
   restoreEnvValue(SECRET_STORE_DIR_ENV, originalEnv.secretStoreDir);
+  restoreEnvValue(SECRET_STORE_MASTER_KEY_ENV, originalEnv.secretStoreMasterKey);
   if (tmpDir) {
     await fs.rm(tmpDir, { recursive: true, force: true });
     tmpDir = undefined;
@@ -110,11 +117,13 @@ describe('enterprise provider store', () => {
     expect(row.policy_json).toContain('openaiBaseUrl');
     expect(row.policy_json).not.toContain('sk-enterprise-secret-a');
     expect(row.secret_ref).toMatch(/^secret:provider:/);
+    expect(JSON.parse(row.policy_json).secretVersion).toBe(2);
 
     const providerJsonPath = path.join(tmpDir!, 'providers.json');
     await expect(fs.access(providerJsonPath)).rejects.toBeTruthy();
 
     const secretFile = await fs.readFile(path.join(secretDir, 'provider-secrets.enc.json'), 'utf-8');
+    expect(secretFile).toContain('libsodium-secretbox');
     expect(secretFile).not.toContain('sk-enterprise-secret-a');
     expect(svc.getEnvForProvider(provider.id, scope('user-a'))!.OPENAI_API_KEY)
       .toBe('sk-enterprise-secret-a');
@@ -139,5 +148,32 @@ describe('enterprise provider store', () => {
     expect(svc.list(scope('user-b')).map(provider => provider.id)).toEqual([providerB.id]);
     expect(svc.getEffectiveEnv(scope('user-a'))!.OPENAI_API_KEY).toBe('sk-user-a');
     expect(svc.getEffectiveEnv(scope('user-b'))!.OPENAI_API_KEY).toBe('sk-user-b');
+  });
+
+  it('rotates provider secrets and audits secret lifecycle operations', () => {
+    const provider = svc.create(input, scope('user-a'));
+    expect(svc.getEnvForProvider(provider.id, scope('user-a'))!.OPENAI_API_KEY)
+      .toBe('sk-enterprise-secret-a');
+
+    expect(svc.rotateSecret(provider.id, scope('user-a'))).toBe(2);
+    expect(svc.getEnvForProvider(provider.id, scope('user-a'))!.OPENAI_API_KEY)
+      .toBe('sk-enterprise-secret-a');
+
+    const row = readProviderRows()[0];
+    expect(JSON.parse(row.policy_json).secretVersion).toBe(2);
+
+    const db = openEnterpriseDb(dbPath);
+    try {
+      const actions = listEnterpriseAuditEvents(db)
+        .filter(event => event.resource_type === 'provider_secret')
+        .map(event => event.action);
+      expect(actions).toEqual(expect.arrayContaining([
+        'provider.secret.create',
+        'provider.secret.read',
+        'provider.secret.rotate',
+      ]));
+    } finally {
+      db.close();
+    }
   });
 });

@@ -117,6 +117,18 @@ router.post('/:id/runtime', (req, res) => {
   }
 });
 
+router.post('/:id/rotate-secret', (req, res) => {
+  try {
+    const svc = getProviderService();
+    const scope = providerScopeForRequest(req);
+    const secretVersion = svc.rotateSecret(req.params.id, scope);
+    res.json({ success: true, secretVersion, provider: svc.get(req.params.id, scope) });
+  } catch (err: any) {
+    const status = err.message.includes('not found') ? 404 : 400;
+    res.status(status).json({ success: false, error: err.message });
+  }
+});
+
 router.post('/:id/test', async (req, res) => {
   const svc = getProviderService();
   const provider = svc.getRaw(req.params.id, providerScopeForRequest(req));

@@ -1,0 +1,123 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
+import fs from 'fs/promises';
+import crypto from 'crypto';
+import os from 'os';
+import path from 'path';
+import {
+  LocalEncryptedSecretStore,
+  SECRET_STORE_MASTER_KEY_ENV,
+} from '../localSecretStore';
+
+const originalMasterKey = process.env[SECRET_STORE_MASTER_KEY_ENV];
+
+function restoreEnvValue(key: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+}
+
+describe('LocalEncryptedSecretStore', () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-secret-store-'));
+    process.env[SECRET_STORE_MASTER_KEY_ENV] = Buffer.alloc(32, 7).toString('base64');
+  });
+
+  afterEach(async () => {
+    restoreEnvValue(SECRET_STORE_MASTER_KEY_ENV, originalMasterKey);
+    await fs.rm(tmpDir, {recursive: true, force: true});
+  });
+
+  it('encrypts provider secrets with libsodium secretbox and never writes plaintext', async () => {
+    const store = new LocalEncryptedSecretStore(tmpDir);
+    expect(store.info()).toEqual(expect.objectContaining({
+      algorithm: 'libsodium-secretbox',
+      masterKeySource: 'env',
+    }));
+
+    expect(store.put('secret:provider:test', {
+      openaiApiKey: 'sk-secret-value',
+      openaiBaseUrl: 'not-sensitive-but-ignored-by-caller',
+      empty: '',
+    })).toBe(1);
+
+    const raw = await fs.readFile(path.join(tmpDir, 'provider-secrets.enc.json'), 'utf-8');
+    expect(raw).toContain('libsodium-secretbox');
+    expect(raw).not.toContain('sk-secret-value');
+    expect(raw).not.toContain('not-sensitive-but-ignored-by-caller');
+    await expect(fs.access(path.join(tmpDir, '.master-key'))).rejects.toBeTruthy();
+
+    expect(store.get('secret:provider:test')).toEqual({
+      openaiApiKey: 'sk-secret-value',
+      openaiBaseUrl: 'not-sensitive-but-ignored-by-caller',
+    });
+  });
+
+  it('rotates ciphertext and version without changing the decrypted secret', async () => {
+    const store = new LocalEncryptedSecretStore(tmpDir);
+    store.put('secret:provider:test', {openaiApiKey: 'sk-secret-value'});
+    const before = await fs.readFile(path.join(tmpDir, 'provider-secrets.enc.json'), 'utf-8');
+
+    expect(store.rotate('secret:provider:test')).toBe(2);
+    const after = await fs.readFile(path.join(tmpDir, 'provider-secrets.enc.json'), 'utf-8');
+
+    expect(after).not.toEqual(before);
+    expect(store.getVersion('secret:provider:test')).toBe(2);
+    expect(store.get('secret:provider:test')).toEqual({
+      openaiApiKey: 'sk-secret-value',
+    });
+  });
+
+  it('migrates legacy AES-GCM secret files to libsodium on read', async () => {
+    const key = Buffer.alloc(32, 7);
+    const iv = Buffer.alloc(12, 4);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const ciphertext = Buffer.concat([
+      cipher.update(JSON.stringify({openaiApiKey: 'sk-legacy-secret'}), 'utf-8'),
+      cipher.final(),
+    ]);
+    await fs.mkdir(tmpDir, {recursive: true});
+    await fs.writeFile(path.join(tmpDir, 'provider-secrets.enc.json'), JSON.stringify({
+      version: 1,
+      entries: {
+        'secret:provider:legacy': {
+          version: 3,
+          algorithm: 'aes-256-gcm',
+          iv: iv.toString('base64'),
+          tag: cipher.getAuthTag().toString('base64'),
+          ciphertext: ciphertext.toString('base64'),
+          updatedAt: 123,
+        },
+      },
+    }), 'utf-8');
+
+    const store = new LocalEncryptedSecretStore(tmpDir);
+
+    expect(store.get('secret:provider:legacy')).toEqual({
+      openaiApiKey: 'sk-legacy-secret',
+    });
+    expect(store.getVersion('secret:provider:legacy')).toBe(3);
+    const migratedRaw = await fs.readFile(path.join(tmpDir, 'provider-secrets.enc.json'), 'utf-8');
+    expect(JSON.parse(migratedRaw).version).toBe(2);
+    expect(migratedRaw).toContain('libsodium-secretbox');
+    expect(migratedRaw).not.toContain('sk-legacy-secret');
+  });
+
+  it('fails closed when the configured master key changes', () => {
+    const store = new LocalEncryptedSecretStore(tmpDir);
+    store.put('secret:provider:test', {openaiApiKey: 'sk-secret-value'});
+
+    process.env[SECRET_STORE_MASTER_KEY_ENV] = Buffer.alloc(32, 9).toString('base64');
+    const wrongKeyStore = new LocalEncryptedSecretStore(tmpDir);
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    expect(wrongKeyStore.get('secret:provider:test')).toEqual({});
+    warnSpy.mockRestore();
+  });
+});

@@ -3,12 +3,14 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import crypto from 'crypto';
 import { openEnterpriseDb } from '../enterpriseDb';
 import {
   enterpriseDbReadAuthorityEnabled,
   enterpriseDbWritesEnabled,
   legacyFilesystemWritesEnabled,
 } from '../enterpriseMigration';
+import { recordEnterpriseAuditEvent } from '../enterpriseAuditService';
 import type { ProviderConfig, ProviderConnection, ProviderScope } from './types';
 import { LocalEncryptedSecretStore } from './localSecretStore';
 
@@ -246,6 +248,11 @@ export class ProviderStore {
     return deleted;
   }
 
+  rotateSecret(id: string, scope?: ProviderScope): number | undefined {
+    if (!enterpriseProviderDbWritesEnabled()) return undefined;
+    return this.rotateEnterpriseSecret(id, scope);
+  }
+
   private getSecretStore(): LocalEncryptedSecretStore {
     if (!this.secretStore) {
       this.secretStore = new LocalEncryptedSecretStore();
@@ -344,6 +351,17 @@ export class ProviderStore {
         existing?.created_at ?? toEpochMs(provider.createdAt),
         toEpochMs(provider.updatedAt),
       );
+      this.recordProviderSecretAudit(db, {
+        action: existing ? 'provider.secret.write' : 'provider.secret.create',
+        row: {
+          id: provider.id,
+          tenant_id: resolved.tenantId,
+          workspace_id: workspaceId,
+          owner_user_id: ownerUserId,
+          secret_ref: secretRef,
+        },
+        secretVersion,
+      });
     } finally {
       db.close();
     }
@@ -361,8 +379,45 @@ export class ProviderStore {
       `).run({ ...resolved, id });
       if (result.changes > 0) {
         this.getSecretStore().delete(row.secret_ref);
+        this.recordProviderSecretAudit(db, {
+          action: 'provider.secret.delete',
+          row,
+          secretVersion: this.readSecretVersionFromPolicy(row),
+        });
       }
       return result.changes > 0;
+    } finally {
+      db.close();
+    }
+  }
+
+  private rotateEnterpriseSecret(id: string, scope?: ProviderScope): number | undefined {
+    const resolved = resolveProviderScope(scope);
+    const row = this.getEnterpriseRowById(id, resolved);
+    if (!row) return undefined;
+    const secretVersion = this.getSecretStore().rotate(row.secret_ref);
+    const policy = {
+      ...parseJsonObject(row.policy_json),
+      secretVersion,
+    };
+    const db = openEnterpriseDb();
+    try {
+      db.prepare(`
+        UPDATE provider_credentials
+        SET policy_json = @policyJson, updated_at = @updatedAt
+        WHERE id = @id AND ${accessibleProviderWhere()}
+      `).run({
+        ...resolved,
+        id,
+        policyJson: JSON.stringify(policy),
+        updatedAt: Date.now(),
+      });
+      this.recordProviderSecretAudit(db, {
+        action: 'provider.secret.rotate',
+        row,
+        secretVersion,
+      });
+      return secretVersion;
     } finally {
       db.close();
     }
@@ -388,6 +443,11 @@ export class ProviderStore {
     if (typeof models.primary !== 'string' || typeof models.light !== 'string') {
       return null;
     }
+    this.recordProviderSecretAudit(undefined, {
+      action: 'provider.secret.read',
+      row,
+      secretVersion: policy.secretVersion,
+    });
     const secretConnection = this.getSecretStore().get(row.secret_ref);
     const connection = mergeConnectionSecrets(policy.connection, secretConnection);
     return {
@@ -418,4 +478,52 @@ export class ProviderStore {
     fs.renameSync(tmp, this.filePath);
     try { fs.chmodSync(this.filePath, 0o600); } catch { /* Windows */ }
   }
+
+  private readSecretVersionFromPolicy(row: ProviderCredentialRow): number | undefined {
+    const policy = parseJsonObject(row.policy_json) as ProviderPolicyJson;
+    return policy.secretVersion;
+  }
+
+  private recordProviderSecretAudit(
+    db: ReturnType<typeof openEnterpriseDb> | undefined,
+    input: {
+      action: string;
+      row: Pick<ProviderCredentialRow, 'id' | 'tenant_id' | 'workspace_id' | 'owner_user_id' | 'secret_ref'>;
+      secretVersion?: number;
+    },
+  ): void {
+    const record = (targetDb: ReturnType<typeof openEnterpriseDb>) => {
+      recordEnterpriseAuditEvent(targetDb, {
+        tenantId: input.row.tenant_id,
+        workspaceId: input.row.workspace_id ?? undefined,
+        actorUserId: input.row.owner_user_id ?? undefined,
+        action: input.action,
+        resourceType: 'provider_secret',
+        resourceId: input.row.id,
+        metadata: {
+          secretRefHash: hashSecretRef(input.row.secret_ref),
+          secretVersion: input.secretVersion,
+          secretStore: this.getSecretStore().info(),
+        },
+      });
+    };
+    try {
+      if (db) {
+        record(db);
+        return;
+      }
+      const auditDb = openEnterpriseDb();
+      try {
+        record(auditDb);
+      } finally {
+        auditDb.close();
+      }
+    } catch (err) {
+      console.warn('[ProviderStore] Failed to record provider secret audit:', (err as Error).message);
+    }
+  }
+}
+
+function hashSecretRef(secretRef: string): string {
+  return `sha256:${crypto.createHash('sha256').update(secretRef).digest('hex')}`;
 }
