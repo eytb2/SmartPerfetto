@@ -70,6 +70,10 @@ export interface EnterpriseLoadTestSummary {
   totalRequests: number;
   failedRequests: number;
   errorRate: number;
+  onlineUsers: {
+    configured: number;
+    observed: number;
+  };
   latency: {
     overall: LatencySummary;
     byOperation: Record<string, LatencySummary>;
@@ -300,10 +304,19 @@ export function summarizeLoadTest(input: {
   const lastRuntimeSample = input.runtimeSamples.length > 0
     ? input.runtimeSamples[input.runtimeSamples.length - 1]
     : undefined;
+  const observedOnlineUsers = new Set(
+    input.httpSamples
+      .filter(sample => sample.ok && sample.operation === 'trace_list' && sample.userId.startsWith('online-user-'))
+      .map(sample => sample.userId),
+  ).size;
   return {
     totalRequests: input.httpSamples.length,
     failedRequests,
     errorRate: input.httpSamples.length > 0 ? failedRequests / input.httpSamples.length : 0,
+    onlineUsers: {
+      configured: input.options.onlineUsers,
+      observed: observedOnlineUsers,
+    },
     latency: {
       overall: latencySummary(input.httpSamples),
       byOperation,
@@ -332,6 +345,7 @@ export function evaluateAcceptance(
 ): EnterpriseLoadTestReport['acceptance'] {
   const missing: string[] = [];
   if (options.onlineUsers < 50) missing.push('onlineUsers < 50');
+  if (summary.onlineUsers.observed < 50) missing.push('observed online users < 50');
   if (summary.analysis.maxRunning < 5) missing.push('observed max running runs < 5');
   if (summary.analysis.maxRunning > 15) missing.push('observed max running runs > 15');
   if (summary.analysis.maxPending < 1) missing.push('no queued/pending runs observed');
@@ -611,6 +625,7 @@ export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): s
   lines.push('| Metric | Value |');
   lines.push('| --- | ---: |');
   lines.push(`| Online users | ${report.config.onlineUsers} |`);
+  lines.push(`| Observed online users | ${report.summary.onlineUsers.observed} |`);
   lines.push(`| Target running runs | ${report.config.targetRunningRuns} |`);
   lines.push(`| Target pending runs | ${report.config.targetPendingRuns} |`);
   lines.push(`| Duration | ${formatMs(report.config.durationMs)} |`);

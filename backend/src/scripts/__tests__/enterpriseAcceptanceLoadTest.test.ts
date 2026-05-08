@@ -33,15 +33,21 @@ function options(overrides: Partial<EnterpriseLoadTestOptions> = {}): Enterprise
   };
 }
 
-function sample(operation: string, durationMs: number, ok = true): HttpSample {
+function sample(operation: string, durationMs: number, ok = true, userId = 'user-a'): HttpSample {
   return {
     operation,
-    userId: 'user-a',
+    userId,
     status: ok ? 200 : 500,
     ok,
     durationMs,
     timestamp: '2026-05-09T00:00:00.000Z',
   };
+}
+
+function onlineUserSamples(count: number): HttpSample[] {
+  return Array.from({ length: count }, (_unused, index) =>
+    sample('trace_list', 10, true, `online-user-${String(index + 1).padStart(3, '0')}`)
+  );
 }
 
 describe('enterprise acceptance load test helpers', () => {
@@ -152,6 +158,10 @@ describe('enterprise acceptance load test helpers', () => {
     });
 
     expect(summary.errorRate).toBe(0.2);
+    expect(summary.onlineUsers).toEqual({
+      configured: 50,
+      observed: 0,
+    });
     expect(summary.latency.overall.p50Ms).toBe(50);
     expect(summary.latency.overall.p95Ms).toBe(100);
     expect(summary.latency.byOperation.trace_list.p95Ms).toBe(20);
@@ -184,6 +194,7 @@ describe('enterprise acceptance load test helpers', () => {
       passed: false,
       missing: expect.arrayContaining([
         'onlineUsers < 50',
+        'observed online users < 50',
         'observed max running runs < 5',
         'no queued/pending runs observed',
         'missing worker/lease RSS samples',
@@ -194,11 +205,63 @@ describe('enterprise acceptance load test helpers', () => {
     });
   });
 
+  it('requires successful samples from 50 distinct online users', () => {
+    const opts = options({ onlineUsers: 50 });
+    const summary = summarizeLoadTest({
+      options: opts,
+      httpSamples: [
+        ...onlineUserSamples(49),
+        sample('trace_list', 10, false, 'online-user-050'),
+      ],
+      runs: [],
+      statusSnapshots: [
+        {
+          timestamp: '2026-05-09T00:00:01.000Z',
+          counts: {
+            queued: 1,
+            pending: 1,
+            running: 5,
+            completed: 0,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
+      ],
+      runtimeSamples: [
+        {
+          timestamp: '2026-05-09T00:00:01.000Z',
+          queueLength: 1,
+          workerRssBytes: 256,
+          leaseRssBytes: null,
+          llmCostUsd: 0.1,
+          llmCalls: 1,
+        },
+      ],
+    });
+
+    expect(summary.onlineUsers.observed).toBe(49);
+    expect(evaluateAcceptance(opts, summary, [
+      {
+        timestamp: '2026-05-09T00:00:01.000Z',
+        queueLength: 1,
+        workerRssBytes: 256,
+        leaseRssBytes: null,
+        llmCostUsd: 0.1,
+        llmCalls: 1,
+      },
+    ])).toEqual({
+      passed: false,
+      missing: ['observed online users < 50'],
+    });
+  });
+
   it('renders the required load-test report fields', () => {
     const opts = options();
     const report = buildLoadTestReport({
       options: opts,
-      httpSamples: [sample('trace_list', 10), sample('analyze_start', 30)],
+      httpSamples: [...onlineUserSamples(50), sample('analyze_start', 30)],
       runs: [
         {
           userId: 'load-user-001',
@@ -240,6 +303,7 @@ describe('enterprise acceptance load test helpers', () => {
     const markdown = buildMarkdownLoadTestReport(report);
     expect(markdown).toContain('Acceptance status: passed');
     expect(markdown).toContain('| Online users | 50 |');
+    expect(markdown).toContain('| Observed online users | 50 |');
     expect(markdown).toContain('| Overall p50 | 10ms |');
     expect(markdown).toContain('| Max worker RSS | 256.0 MiB |');
     expect(markdown).toContain('| Final LLM cost | 1.23 |');

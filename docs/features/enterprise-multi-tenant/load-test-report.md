@@ -10,7 +10,7 @@ executed in this environment.
 
 The final report must cover:
 
-- 50 online users.
+- 50 distinct online users with successful sampled requests.
 - 5 to 15 simultaneously running analysis runs.
 - Additional queued or pending runs.
 - p50 and p95 HTTP latency.
@@ -51,3 +51,5 @@ If the backend requires `SMARTPERFETTO_API_KEY`, add:
 - Unit coverage: `backend/src/scripts/__tests__/enterpriseAcceptanceLoadTest.test.ts`
 - README §0.8 load-test rows remain open until a real run overwrites this file
   with measured output and `acceptance.passed = true` in the JSON report.
+- `acceptance.passed` requires observing successful requests from 50 distinct
+  `online-user-*` clients; the configured `--users` value alone is not enough.
