@@ -14,6 +14,7 @@ import { getPortPool } from './portPool';
 import { traceProcessorConfig } from '../config';
 import logger from '../utils/logger';
 import { getPerfettoStdlibModules, groupModulesByNamespace } from './perfettoStdlibScanner';
+import { readProcessRssBytes } from './processRss';
 
 const IS_TEST_ENV = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
 
@@ -158,8 +159,22 @@ export interface TraceProcessor {
   traceId: string;
   status: 'initializing' | 'ready' | 'busy' | 'error';
   activeQueries: number;
+  getRuntimeStats(): TraceProcessorRuntimeStats;
   query(sql: string): Promise<QueryResult>;
   destroy(): void;
+}
+
+export interface TraceProcessorRuntimeStats {
+  kind: 'owned_process' | 'external_rpc';
+  processorId: string;
+  traceId: string;
+  status: 'initializing' | 'ready' | 'busy' | 'error';
+  activeQueries: number;
+  httpPort: number;
+  pid?: number;
+  rssBytes: number | null;
+  rssSampleSource: 'procfs' | 'ps' | 'unavailable' | 'external';
+  rssSampleError?: string;
 }
 
 /**
@@ -196,6 +211,23 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
   /** Number of in-flight queries. Factory uses this to avoid evicting busy processors. */
   public get activeQueries(): number {
     return this._activeQueries;
+  }
+
+  public getRuntimeStats(): TraceProcessorRuntimeStats {
+    const pid = this.process?.pid;
+    const rssSample = pid ? readProcessRssBytes(pid) : null;
+    return {
+      kind: 'owned_process',
+      processorId: this.id,
+      traceId: this.traceId,
+      status: this.status,
+      activeQueries: this.activeQueries,
+      httpPort: this.httpPort,
+      ...(pid ? { pid } : {}),
+      rssBytes: rssSample?.rssBytes ?? null,
+      rssSampleSource: rssSample?.source ?? 'unavailable',
+      ...(rssSample?.error ? { rssSampleError: rssSample.error } : {}),
+    };
   }
 
   constructor(traceId: string, tracePath: string) {
@@ -838,10 +870,11 @@ export class TraceProcessorFactory {
     this.externalProcessorsByPort.clear();
   }
 
-  static getStats(): { count: number; traceIds: string[] } {
+  static getStats(): { count: number; traceIds: string[]; processors: TraceProcessorRuntimeStats[] } {
     return {
       count: this.processors.size,
       traceIds: Array.from(this.processors.keys()),
+      processors: Array.from(this.processors.values()).map(processor => processor.getRuntimeStats()),
     };
   }
 
@@ -916,6 +949,19 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
   /** Number of in-flight or queued queries. Factory uses this to avoid unsafe eviction. */
   public get activeQueries(): number {
     return this._activeQueries;
+  }
+
+  public getRuntimeStats(): TraceProcessorRuntimeStats {
+    return {
+      kind: 'external_rpc',
+      processorId: this.id,
+      traceId: this.traceId,
+      status: this.status,
+      activeQueries: this.activeQueries,
+      httpPort: this.httpPort,
+      rssBytes: null,
+      rssSampleSource: 'external',
+    };
   }
 
   constructor(traceId: string, port: number) {

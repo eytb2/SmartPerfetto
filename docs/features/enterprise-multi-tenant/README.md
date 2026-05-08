@@ -138,6 +138,7 @@
 - [x] `docs/features/enterprise-multi-tenant/baseline.md`（0.0 baseline 命令与实测结果）
 - [ ] （新增 ADR / 设计 / runbook 在此追加，例如：`docs/adr/0001-enterprise-db-choice.md` …）
 - [x] `docs/features/enterprise-multi-tenant/adr-0001-sqlite-wal-repository.md`（§0.3.1 SQLite WAL + repository abstraction 决策）
+- [ ] `docs/features/enterprise-multi-tenant/rss-benchmark.md`（§0.4.3 RSS benchmark runbook；等待 100MB/500MB/1GB 大 trace 实测）
 
 ### 0.10 PR / 提交收尾（每次 PR 都要走）
 - [ ] 每个主线 / 子主线一个独立 PR；不跨主线串改动
