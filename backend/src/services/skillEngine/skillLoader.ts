@@ -544,7 +544,7 @@ export interface VendorOverride {
 // Skill Registry
 // =============================================================================
 
-class SkillRegistry {
+export class SkillRegistry {
   private skills: Map<string, SkillDefinition> = new Map();
   private moduleSkills: Map<string, SkillDefinition> = new Map();  // Skills with module metadata
   private fragmentCache: Map<string, string> = new Map();  // SQL fragment path → content
@@ -573,6 +573,13 @@ class SkillRegistry {
     const compositeDir = path.join(skillsDir, 'composite');
     if (fs.existsSync(compositeDir)) {
       await this.loadSkillsFromDir(compositeDir);
+    }
+
+    // 加载本地 custom skills. Enterprise v1 disables write endpoints, but
+    // non-enterprise admin writes must be readable after reload.
+    const customDir = path.join(skillsDir, 'custom');
+    if (fs.existsSync(customDir)) {
+      await this.loadSkillsFromDir(customDir);
     }
 
     // 加载深度分析 skills (Phase 6)

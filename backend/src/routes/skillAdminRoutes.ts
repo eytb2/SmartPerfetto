@@ -10,10 +10,28 @@
 
 import express from 'express';
 import SkillAdminController from '../controllers/skillAdminController';
+import { resolveFeatureConfig } from '../config';
 import { authenticate } from '../middleware/auth';
 
 const router = express.Router();
 const skillAdminController = new SkillAdminController();
+
+const CUSTOM_SKILL_DISABLED_PAYLOAD = {
+  error: 'disabled_in_enterprise_mode',
+  details: 'Custom skill write endpoints are disabled in enterprise mode.',
+} as const;
+
+function disableCustomSkillWritesInEnterpriseMode(
+  _req: express.Request,
+  res: express.Response,
+  next: express.NextFunction,
+): void {
+  if (resolveFeatureConfig().enterprise) {
+    res.status(404).json(CUSTOM_SKILL_DISABLED_PAYLOAD);
+    return;
+  }
+  next();
+}
 
 // Admin endpoints must always be authenticated.
 router.use(authenticate);
@@ -42,7 +60,7 @@ router.get('/skills/:skillId', skillAdminController.getSkill);
  * Create a new custom skill
  * Body: { yaml: string } or { definition: SkillDefinition }
  */
-router.post('/skills', skillAdminController.createSkill);
+router.post('/skills', disableCustomSkillWritesInEnterpriseMode, skillAdminController.createSkill);
 
 /**
  * PUT /api/admin/skills/:skillId
@@ -50,14 +68,14 @@ router.post('/skills', skillAdminController.createSkill);
  * Update an existing custom skill
  * Body: { yaml: string } or { definition: SkillDefinition }
  */
-router.put('/skills/:skillId', skillAdminController.updateSkill);
+router.put('/skills/:skillId', disableCustomSkillWritesInEnterpriseMode, skillAdminController.updateSkill);
 
 /**
  * DELETE /api/admin/skills/:skillId
  *
  * Delete a custom skill
  */
-router.delete('/skills/:skillId', skillAdminController.deleteSkill);
+router.delete('/skills/:skillId', disableCustomSkillWritesInEnterpriseMode, skillAdminController.deleteSkill);
 
 // =============================================================================
 // Validation

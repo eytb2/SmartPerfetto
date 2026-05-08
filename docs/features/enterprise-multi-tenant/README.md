@@ -80,7 +80,7 @@
 - [x] 5.3 配额 / 预算 / retention policy（§16.1，含 quota_exceeded 终态）
 - [x] 5.4 Tenant export bundle（§16.2，含 SHA256 + tenant identity proof）
 - [x] 5.5 Tenant tombstone + 7 天硬删窗口 + async purge + audit proof（§16.3）
-- [ ] 5.6 Custom skill v1 处置（§14.3）：禁用 write endpoint 或修 loader 闭环
+- [x] 5.6 Custom skill v1 处置（§14.3）：禁用 write endpoint 或修 loader 闭环
 - [ ] 5.7 Legacy AI route 处置（§14.4 表）
   - [ ] 5.7.1 `/api/agent/v1/llm` DeepSeek proxy
   - [ ] 5.7.2 `/api/advanced-ai`
@@ -908,6 +908,12 @@ v1 要求：
 - 企业模式下关闭 custom skill 写 endpoint，或返回明确 `404/disabled_in_enterprise_mode`。
 - 清理或修复 custom skill loader 的读写闭环，避免“写得进、读不出”。
 - system skill 执行仍然必须带 RequestContext，并确保 SQL/MCP tool 不越过 trace owner guard。
+
+当前实现：
+
+- `POST/PUT/DELETE /api/admin/skills` 在 `SMARTPERFETTO_ENTERPRISE=true` 时返回 `404` + `disabled_in_enterprise_mode`，避免 v1 开放 workspace custom skill 写面。
+- `SkillRegistry` 继续读取 `backend/skills/custom/`，让非企业本地 admin 写入后 reload 能读回，不再出现写入悬挂。
+- `POST /api/admin/skills/validate`、`POST /api/admin/skills/reload` 和只读 skill/vendor 查询保持可用。
 
 后续 feature 可做路 B：workspace-scoped skill registry。
 
