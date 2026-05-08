@@ -34,7 +34,7 @@
 - [x] 2.3 API key 管理（创建 / 撤销 / scope / 过期 / 审计）
 - [x] 2.4 Membership / Role / RBAC 权限矩阵（§8.2）+ owner guard 全 route 覆盖
 - [x] 2.5 旧 API 兼容 wrapper：返回 `Deprecation: true` + `Sunset` header；统一走 RequestContext
-- [ ] 2.6 Resource-oriented API 切到 `/api/workspaces/:workspaceId/*`（§8.3）
+- [x] 2.6 Resource-oriented API 切到 `/api/workspaces/:workspaceId/*`（§8.3）
 - [ ] 2.7 前端 workspace selection UI + workspace/window 上下文持久化分层（§9.2 表格）
 - [ ] 2.8 单元测试覆盖：RequestContext 解析 / RBAC / owner guard / 旧路径包装
 

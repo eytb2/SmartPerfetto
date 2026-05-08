@@ -408,6 +408,22 @@ function getAuthorizedSession(req: express.Request, res: express.Response, sessi
   return session;
 }
 
+function getAuthorizedSessionByRunId(
+  req: express.Request,
+  res: express.Response,
+  runId: string,
+): AnalysisSession | null {
+  const context = requireRequestContext(req);
+  for (const [, session] of assistantAppService.entries()) {
+    const isRequestedRun = session.activeRun?.runId === runId || session.lastRun?.runId === runId;
+    if (isRequestedRun && isOwnedByContext(session, context)) {
+      return session;
+    }
+  }
+  sendResourceNotFound(res, 'Run not found');
+  return null;
+}
+
 function isResolvedSessionAccessible(req: express.Request, resolved: ResolvedSessionContext): boolean {
   return isOwnedByContext(resolved, requireRequestContext(req));
 }
@@ -742,40 +758,59 @@ function isDedicatedSceneReplayRequest(query: string): boolean {
  *   }
  * }
  */
-router.post('/analyze', async (req, res) => {
+async function handleAnalyzeRequest(
+  req: express.Request,
+  res: express.Response,
+  requestedSessionIdOverride?: string,
+): Promise<void> {
   try {
     const requestId = getRequestId(req);
     const requestContext = requireRequestContext(req);
-    const { traceId, query, sessionId: requestedSessionId, options = {}, selectionContext: rawSelectionContext, referenceTraceId, traceContext: rawTraceContext, providerId } = req.body;
+    const {
+      traceId,
+      query,
+      sessionId: bodyRequestedSessionId,
+      options = {},
+      selectionContext: rawSelectionContext,
+      referenceTraceId,
+      traceContext: rawTraceContext,
+      providerId,
+    } = req.body;
+    const requestedSessionId = requestedSessionIdOverride || bodyRequestedSessionId;
     if (!hasRbacPermission(requestContext, 'agent:run')) {
-      return sendForbidden(res, 'Starting analysis requires agent:run permission');
+      sendForbidden(res, 'Starting analysis requires agent:run permission');
+      return;
     }
 
     if (!traceId) {
-      return res.status(400).json({
+      res.status(400).json({
         success: false,
         error: 'traceId is required',
       });
+      return;
     }
 
     if (!query) {
-      return res.status(400).json({
+      res.status(400).json({
         success: false,
         error: 'query is required',
       });
+      return;
     }
 
     if (isDedicatedSceneReplayRequest(query)) {
-      return res.status(400).json({
+      res.status(400).json({
         success: false,
         code: 'SCENE_REPLAY_SEPARATED',
         error: '场景还原已独立为专用功能',
         hint: '请使用 /scene 命令（前端）或 POST /api/agent/v1/scene-reconstruct（后端）',
       });
+      return;
     }
 
     if (requestedSessionId && !requestedSessionIsVisible(requestedSessionId, requestContext)) {
-      return sendResourceNotFound(res, 'Session not found');
+      sendResourceNotFound(res, 'Session not found');
+      return;
     }
 
     // Validate selectionContext — strip invalid payloads silently instead of rejecting
@@ -797,34 +832,37 @@ router.post('/analyze', async (req, res) => {
     }
     const trace = await traceProcessorService.getOrLoadTrace(traceId);
     if (!trace) {
-      return res.status(404).json({
+      res.status(404).json({
         success: false,
         error: 'Trace not found in backend',
         hint: 'Please upload the trace to the backend first',
         code: 'TRACE_NOT_UPLOADED',
       });
+      return;
     }
 
     // Comparison mode: validate reference trace if provided
     if (referenceTraceId) {
       if (referenceTraceId === traceId) {
-        return res.status(400).json({
+        res.status(400).json({
           success: false,
           error: 'referenceTraceId must be different from traceId',
           code: 'SAME_TRACE_COMPARISON',
         });
+        return;
       }
       if (!await ensureTraceAccessible(req, res, referenceTraceId)) {
         return;
       }
       const refTrace = await traceProcessorService.getOrLoadTrace(referenceTraceId);
       if (!refTrace) {
-        return res.status(404).json({
+        res.status(404).json({
           success: false,
           error: 'Reference trace not found in backend',
           hint: 'Please upload the reference trace to the backend first',
           code: 'REFERENCE_TRACE_NOT_UPLOADED',
         });
+        return;
       }
       console.log(`[AgentRoutes] Comparison mode: current=${traceId}, reference=${referenceTraceId}`);
     }
@@ -856,16 +894,18 @@ router.post('/analyze', async (req, res) => {
       if (isNewSession) {
         assignSessionOwner(preparedSession, requestContext);
       } else if (!isOwnedByContext(preparedSession, requestContext)) {
-        return sendResourceNotFound(res, 'Session not found');
+        sendResourceNotFound(res, 'Session not found');
+        return;
       }
     } catch (error: any) {
       if (error instanceof AnalyzeSessionPreparationError) {
-        return res.status(error.httpStatus).json({
+        res.status(error.httpStatus).json({
           success: false,
           error: error.message,
           code: error.code,
           ...(error.hint ? { hint: error.hint } : {}),
         });
+        return;
       }
       throw error;
     }
@@ -944,6 +984,14 @@ router.post('/analyze', async (req, res) => {
       error: error.message || 'Agent analysis failed',
     });
   }
+}
+
+router.post('/analyze', async (req, res) => {
+  await handleAnalyzeRequest(req, res);
+});
+
+router.post('/sessions/:sessionId/runs', async (req, res) => {
+  await handleAnalyzeRequest(req, res, req.params.sessionId);
 });
 
 /**
@@ -964,9 +1012,7 @@ router.post('/analyze', async (req, res) => {
  * - error: Error occurred
  * - end: Stream ended
  */
-router.get('/:sessionId/stream', (req, res) => {
-  const { sessionId } = req.params;
-
+function handleSessionStream(req: express.Request, res: express.Response, sessionId: string): void {
   const session = getAuthorizedSession(req, res, sessionId);
   if (!session) return;
 
@@ -1070,6 +1116,16 @@ router.get('/:sessionId/stream', (req, res) => {
   });
 
   streamProjector.bindKeepAlive(req, res);
+}
+
+router.get('/:sessionId/stream', (req, res) => {
+  handleSessionStream(req, res, req.params.sessionId);
+});
+
+router.get('/runs/:runId/stream', (req, res) => {
+  const session = getAuthorizedSessionByRunId(req, res, req.params.runId);
+  if (!session) return;
+  handleSessionStream(req, res, session.sessionId);
 });
 
 /**
@@ -1355,8 +1411,7 @@ router.post('/:sessionId/feedback', async (req, res) => {
  * Note: AgentRuntime currently does not pause for user input in v2;
  * this endpoint mainly exists for API compatibility and future multi-turn UX.
  */
-router.post('/:sessionId/respond', async (req, res) => {
-  const { sessionId } = req.params;
+function handleSessionRespond(req: express.Request, res: express.Response, sessionId: string): void {
   const session = getAuthorizedSession(req, res, sessionId);
   if (!session) return;
 
@@ -1364,28 +1419,39 @@ router.post('/:sessionId/respond', async (req, res) => {
   const allowedActions = new Set(['continue', 'abort']);
 
   if (!action || typeof action !== 'string' || !allowedActions.has(action)) {
-    return res.status(400).json({
+    res.status(400).json({
       success: false,
       error: `Invalid action: ${String(action)}. Allowed: continue, abort`,
     });
+    return;
   }
 
   if (action === 'abort') {
     session.status = 'failed';
     session.error = 'Aborted by user';
-    return res.json({ success: true, sessionId, status: session.status });
+    res.json({ success: true, sessionId, status: session.status });
+    return;
   }
 
   // continue
   if (session.status !== 'awaiting_user') {
-    return res.status(400).json({
+    res.status(400).json({
       success: false,
       error: `Session is not awaiting user input (current status: ${session.status})`,
     });
+    return;
   }
 
   session.status = 'running';
-  return res.json({ success: true, sessionId, status: session.status });
+  res.json({ success: true, sessionId, status: session.status });
+}
+
+router.post('/:sessionId/respond', (req, res) => {
+  handleSessionRespond(req, res, req.params.sessionId);
+});
+
+router.post('/sessions/:sessionId/respond', (req, res) => {
+  handleSessionRespond(req, res, req.params.sessionId);
 });
 
 // =============================================================================

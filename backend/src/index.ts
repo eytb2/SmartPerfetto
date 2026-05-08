@@ -62,6 +62,10 @@ import {
   markLegacyApi,
   rejectLegacyAgentApi,
 } from './middleware/legacyAgentApi';
+import {
+  bindWorkspaceRouteContext,
+  requireWorkspaceRouteContext,
+} from './middleware/workspaceRouteContext';
 
 // Import cleanup utilities
 import { TraceProcessorFactory, killOrphanProcessors } from './services/workingTraceProcessor';
@@ -70,6 +74,11 @@ import { getPortPool, resetPortPool } from './services/portPool';
 const app = express();
 const PORT = serverConfig.port;
 const NODE_ENV = serverConfig.nodeEnv;
+const workspaceRouteContextMiddleware: express.RequestHandler[] = [
+  bindWorkspaceRouteContext,
+  authenticate,
+  requireWorkspaceRouteContext,
+];
 
 // Fail fast for trace-analysis-specific credentials when strict startup validation is enabled.
 assertTraceAnalysisConfiguredForStartup();
@@ -150,6 +159,26 @@ app.get('/debug', (req, res) => {
 app.use('/api/sql', sqlRoutes);
 app.use('/api/auth', enterpriseAuthRoutes);
 app.use('/api/auth', enterpriseApiKeyRoutes);
+app.use(
+  '/api/workspaces/:workspaceId/traces',
+  ...workspaceRouteContextMiddleware,
+  simpleTraceRoutes,
+);
+app.use(
+  '/api/workspaces/:workspaceId/reports',
+  ...workspaceRouteContextMiddleware,
+  reportRoutes,
+);
+app.use(
+  '/api/workspaces/:workspaceId/agent',
+  ...workspaceRouteContextMiddleware,
+  agentRoutes,
+);
+app.use(
+  '/api/workspaces/:workspaceId/providers',
+  ...workspaceRouteContextMiddleware,
+  providerRoutes,
+);
 app.use(
   '/api/traces',
   markLegacyApi(
