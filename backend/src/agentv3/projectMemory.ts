@@ -48,7 +48,9 @@ import {
   type MemoryScope,
 } from '../types/sparkContracts';
 import {
+  enterpriseKnowledgeDbWritesEnabled,
   enterpriseKnowledgeStoreEnabled,
+  legacyKnowledgeFilesystemWritesEnabled,
   type KnowledgeScope,
   getScopedKnowledgeRecord,
   listScopedKnowledgeRecords,
@@ -155,7 +157,11 @@ export class ProjectMemory {
   ): void {
     this.load();
     this.assertSaveInvariants(entry);
-    if (enterpriseKnowledgeStoreEnabled()) {
+    if (legacyKnowledgeFilesystemWritesEnabled()) {
+      this.entries.set(entry.entryId, entry);
+      this.persist();
+    }
+    if (enterpriseKnowledgeDbWritesEnabled()) {
       upsertScopedKnowledgeRecord(
         KNOWLEDGE_KIND,
         entry.entryId,
@@ -168,10 +174,7 @@ export class ProjectMemory {
           sourceRunId: storageScope?.sourceRunId ?? storageScope?.runId,
         },
       );
-      return;
     }
-    this.entries.set(entry.entryId, entry);
-    this.persist();
   }
 
   /** Get an entry by id. */
@@ -196,13 +199,17 @@ export class ProjectMemory {
     entryId: string,
     storageScope?: KnowledgeScope,
   ): boolean {
-    if (enterpriseKnowledgeStoreEnabled()) {
-      return removeScopedKnowledgeRecord(KNOWLEDGE_KIND, entryId, storageScope);
+    let removed = false;
+    if (enterpriseKnowledgeDbWritesEnabled()) {
+      removed = removeScopedKnowledgeRecord(KNOWLEDGE_KIND, entryId, storageScope) || removed;
     }
-    this.load();
-    const had = this.entries.delete(entryId);
-    if (had) this.persist();
-    return had;
+    if (legacyKnowledgeFilesystemWritesEnabled()) {
+      this.load();
+      const had = this.entries.delete(entryId);
+      if (had) this.persist();
+      removed = had || removed;
+    }
+    return removed;
   }
 
   /** Filtered list, deterministically ordered by entryId. */
@@ -329,7 +336,15 @@ export class ProjectMemory {
       promotionLevel: (entry.promotionLevel ?? 0) + 1,
       promotionPolicy: policy,
     };
-    if (enterpriseKnowledgeStoreEnabled()) {
+    const auditEntry = {entryId, policy, auditedAt: Date.now()};
+    let auditRecorded = false;
+    if (legacyKnowledgeFilesystemWritesEnabled()) {
+      this.entries.set(entryId, promoted);
+      this.auditLog.push(auditEntry);
+      this.persist();
+      auditRecorded = true;
+    }
+    if (enterpriseKnowledgeDbWritesEnabled()) {
       upsertScopedKnowledgeRecord(
         KNOWLEDGE_KIND,
         entryId,
@@ -342,13 +357,8 @@ export class ProjectMemory {
           sourceRunId: storageScope?.sourceRunId ?? storageScope?.runId,
         },
       );
-      this.auditLog.push({entryId, policy, auditedAt: Date.now()});
-      this.persist();
-      return;
+      if (!auditRecorded) this.auditLog.push(auditEntry);
     }
-    this.entries.set(entryId, promoted);
-    this.auditLog.push({entryId, policy, auditedAt: Date.now()});
-    this.persist();
   }
 
   /** Read-only view of the audit log, sorted by audit time ascending. */

@@ -5,9 +5,13 @@
 import path from 'path';
 import fs from 'fs/promises';
 import type Database from 'better-sqlite3';
-import { resolveFeatureConfig } from '../config';
 import type { RequestContext } from '../middleware/auth';
 import { openEnterpriseDb } from './enterpriseDb';
+import {
+  enterpriseDbReadAuthorityEnabled,
+  enterpriseDbWritesEnabled,
+  legacyFilesystemWritesEnabled,
+} from './enterpriseMigration';
 import {
   ownerFieldsFromContext,
   type ResourceOwnerFields,
@@ -55,7 +59,15 @@ export function getTracesDir(): string {
 }
 
 function enterpriseTraceStoreEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return resolveFeatureConfig(env).enterprise;
+  return enterpriseDbReadAuthorityEnabled(env);
+}
+
+function enterpriseTraceDbWritesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return enterpriseDbWritesEnabled(env);
+}
+
+function legacyTraceMetadataWritesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return legacyFilesystemWritesEnabled(env);
 }
 
 function assertSafePathSegment(value: string, label: string): string {
@@ -198,6 +210,19 @@ function enterpriseLocalPathForMetadata(metadata: TraceMetadata): string {
   if (metadata.externalRpc && typeof metadata.port === 'number') {
     return `external-rpc:${metadata.port}`;
   }
+  if (
+    enterpriseTraceStoreEnabled() &&
+    metadata.tenantId &&
+    metadata.workspaceId
+  ) {
+    return path.join(
+      resolveEnterpriseDataRoot(),
+      assertSafePathSegment(metadata.tenantId, 'tenant id'),
+      assertSafePathSegment(metadata.workspaceId, 'workspace id'),
+      'traces',
+      `${assertSafePathSegment(metadata.id, 'trace id')}.trace`,
+    );
+  }
   const fallbackPath = getTraceFilePath(metadata.id);
   if (!fallbackPath) throw new Error(`Unsafe trace id: ${metadata.id}`);
   return fallbackPath;
@@ -249,10 +274,10 @@ export async function writeTraceMetadata(metadata: TraceMetadata): Promise<void>
   if (!isSafeTraceId(metadata.id)) {
     throw new Error(`Unsafe trace id: ${metadata.id}`);
   }
-  if (enterpriseTraceStoreEnabled()) {
+  if (enterpriseTraceDbWritesEnabled()) {
     writeEnterpriseTraceMetadata(metadata);
-    return;
   }
+  if (!legacyTraceMetadataWritesEnabled()) return;
   const tracesDir = getTracesDir();
   await fs.mkdir(tracesDir, { recursive: true });
   await fs.writeFile(
@@ -351,12 +376,12 @@ export async function listTraceMetadataForContext(context: RequestContext): Prom
 
 export async function deleteTraceMetadata(traceId: string): Promise<void> {
   if (!isSafeTraceId(traceId)) return;
-  if (enterpriseTraceStoreEnabled()) {
+  if (enterpriseTraceDbWritesEnabled()) {
     withEnterpriseTraceDb((db) => {
       db.prepare('DELETE FROM trace_assets WHERE id = ?').run(traceId);
     });
-    return;
   }
+  if (!legacyTraceMetadataWritesEnabled()) return;
   const metadataPath = getTraceMetadataPath(traceId);
   if (!metadataPath) return;
   try {

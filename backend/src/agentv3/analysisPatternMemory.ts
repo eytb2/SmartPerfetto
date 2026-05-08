@@ -265,7 +265,7 @@ function patternMatchesKnowledgeScope(
   pattern: {provenance?: PatternProvenance},
   scope: KnowledgeScope | undefined,
 ): boolean {
-  if (!enterpriseKnowledgeStoreEnabled()) return true;
+  if (!enterpriseKnowledgeStoreEnabled() && !scope) return true;
   const resolved = resolveKnowledgeScope(scope);
   return (
     pattern.provenance?.sourceTenantId === resolved.tenantId &&

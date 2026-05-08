@@ -3,8 +3,12 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { resolveFeatureConfig } from '../../config';
 import { openEnterpriseDb } from '../enterpriseDb';
+import {
+  enterpriseDbReadAuthorityEnabled,
+  enterpriseDbWritesEnabled,
+  legacyFilesystemWritesEnabled,
+} from '../enterpriseMigration';
 import type { ProviderConfig, ProviderConnection, ProviderScope } from './types';
 import { LocalEncryptedSecretStore } from './localSecretStore';
 
@@ -53,7 +57,15 @@ const SENSITIVE_CONNECTION_FIELDS: Array<keyof ProviderConnection> = [
 ];
 
 function enterpriseProviderStoreEnabled(): boolean {
-  return resolveFeatureConfig(process.env).enterprise;
+  return enterpriseDbReadAuthorityEnabled();
+}
+
+function enterpriseProviderDbWritesEnabled(): boolean {
+  return enterpriseDbWritesEnabled();
+}
+
+function legacyProviderWritesEnabled(): boolean {
+  return legacyFilesystemWritesEnabled();
 }
 
 function assertSafeScopeSegment(value: string, label: string): string {
@@ -213,20 +225,24 @@ export class ProviderStore {
   }
 
   set(provider: ProviderConfig, scope?: ProviderScope): void {
-    if (enterpriseProviderStoreEnabled()) {
-      this.setEnterprise(provider, scope);
-      return;
+    if (!enterpriseProviderStoreEnabled()) {
+      this.providers.set(provider.id, provider);
+      this.persist();
     }
-    this.providers.set(provider.id, provider);
-    this.persist();
+    if (enterpriseProviderDbWritesEnabled()) {
+      this.setEnterprise(provider, scope);
+    }
   }
 
   delete(id: string, scope?: ProviderScope): boolean {
-    if (enterpriseProviderStoreEnabled()) {
-      return this.deleteEnterprise(id, scope);
+    let deleted = false;
+    if (!enterpriseProviderStoreEnabled()) {
+      deleted = this.providers.delete(id);
+      if (deleted) this.persist();
     }
-    const deleted = this.providers.delete(id);
-    if (deleted) this.persist();
+    if (enterpriseProviderDbWritesEnabled()) {
+      deleted = this.deleteEnterprise(id, scope) || deleted;
+    }
     return deleted;
   }
 
@@ -394,7 +410,7 @@ export class ProviderStore {
   }
 
   private persist(): void {
-    if (enterpriseProviderStoreEnabled()) return;
+    if (!legacyProviderWritesEnabled()) return;
     const dir = path.dirname(this.filePath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const tmp = `${this.filePath}.tmp`;

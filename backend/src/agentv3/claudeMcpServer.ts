@@ -179,7 +179,7 @@ const REASONING_NUDGE_EN = '\n\n[REFLECT] Before the next action: what is the ke
 export const MIN_PHASE_SUMMARY_CHARS = 15;
 
 function sqlErrorLogFile(scope?: KnowledgeScope): string {
-  if (!enterpriseKnowledgeStoreEnabled()) {
+  if (!enterpriseKnowledgeStoreEnabled() && !scope) {
     return path.join(SQL_ERROR_LOG_DIR, 'error_fix_pairs.json');
   }
   const resolved = resolveKnowledgeScope(scope);

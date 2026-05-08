@@ -5,10 +5,14 @@
 import crypto from 'crypto';
 import type Database from 'better-sqlite3';
 
-import { resolveFeatureConfig } from '../config';
 import type { RequestContext } from '../middleware/auth';
 import { openEnterpriseDb } from './enterpriseDb';
 import { createEnterpriseWorkspaceRepository } from './enterpriseRepository';
+import {
+  enterpriseDbReadAuthorityEnabled,
+  enterpriseDbWritesEnabled,
+  legacyFilesystemWritesEnabled,
+} from './enterpriseMigration';
 
 const DEFAULT_TENANT_ID = 'default-dev-tenant';
 const DEFAULT_WORKSPACE_ID = 'default-workspace';
@@ -77,7 +81,19 @@ interface UpsertOptions {
 export function enterpriseKnowledgeStoreEnabled(
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  return resolveFeatureConfig(env).enterprise;
+  return enterpriseDbReadAuthorityEnabled(env);
+}
+
+export function enterpriseKnowledgeDbWritesEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return enterpriseDbWritesEnabled(env);
+}
+
+export function legacyKnowledgeFilesystemWritesEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return legacyFilesystemWritesEnabled(env);
 }
 
 export function knowledgeScopeFromRequestContext(

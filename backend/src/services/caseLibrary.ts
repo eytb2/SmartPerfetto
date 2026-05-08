@@ -36,7 +36,9 @@ import {
   makeSparkProvenance,
 } from '../types/sparkContracts';
 import {
+  enterpriseKnowledgeDbWritesEnabled,
   enterpriseKnowledgeStoreEnabled,
+  legacyKnowledgeFilesystemWritesEnabled,
   type KnowledgeScope,
   getScopedKnowledgeRecord,
   listScopedKnowledgeRecords,
@@ -109,7 +111,11 @@ export class CaseLibrary {
         `Use publishCase() to advance a case to 'published'; saveCase() rejects published records to keep the gate auditable`,
       );
     }
-    if (enterpriseKnowledgeStoreEnabled()) {
+    if (legacyKnowledgeFilesystemWritesEnabled()) {
+      this.cases.set(record.caseId, record);
+      this.persist();
+    }
+    if (enterpriseKnowledgeDbWritesEnabled()) {
       upsertScopedKnowledgeRecord(
         KNOWLEDGE_KIND,
         record.caseId,
@@ -118,10 +124,7 @@ export class CaseLibrary {
         scope,
         {createdAt: record.createdAt, updatedAt: Date.now()},
       );
-      return;
     }
-    this.cases.set(record.caseId, record);
-    this.persist();
   }
 
   getCase(caseId: string, scope?: KnowledgeScope): CaseNode | undefined {
@@ -137,13 +140,17 @@ export class CaseLibrary {
   }
 
   removeCase(caseId: string, scope?: KnowledgeScope): boolean {
-    if (enterpriseKnowledgeStoreEnabled()) {
-      return removeScopedKnowledgeRecord(KNOWLEDGE_KIND, caseId, scope);
+    let removed = false;
+    if (enterpriseKnowledgeDbWritesEnabled()) {
+      removed = removeScopedKnowledgeRecord(KNOWLEDGE_KIND, caseId, scope) || removed;
     }
-    this.load();
-    const had = this.cases.delete(caseId);
-    if (had) this.persist();
-    return had;
+    if (legacyKnowledgeFilesystemWritesEnabled()) {
+      this.load();
+      const had = this.cases.delete(caseId);
+      if (had) this.persist();
+      removed = had || removed;
+    }
+    return removed;
   }
 
   listCases(opts: ListOptions = {}, scope?: KnowledgeScope): CaseNode[] {
@@ -213,7 +220,11 @@ export class CaseLibrary {
       curatedBy: trimmedReviewer,
       curatedAt: Date.now(),
     };
-    if (enterpriseKnowledgeStoreEnabled()) {
+    if (legacyKnowledgeFilesystemWritesEnabled()) {
+      this.cases.set(caseId, published);
+      this.persist();
+    }
+    if (enterpriseKnowledgeDbWritesEnabled()) {
       upsertScopedKnowledgeRecord(
         KNOWLEDGE_KIND,
         caseId,
@@ -222,10 +233,7 @@ export class CaseLibrary {
         scope,
         {createdAt: published.createdAt, updatedAt: published.curatedAt},
       );
-      return published;
     }
-    this.cases.set(caseId, published);
-    this.persist();
     return published;
   }
 
@@ -265,7 +273,11 @@ export class CaseLibrary {
       traceArtifactId: undefined,
       traceUnavailableReason: reason,
     };
-    if (enterpriseKnowledgeStoreEnabled()) {
+    if (legacyKnowledgeFilesystemWritesEnabled()) {
+      this.cases.set(caseId, archived);
+      this.persist();
+    }
+    if (enterpriseKnowledgeDbWritesEnabled()) {
       upsertScopedKnowledgeRecord(
         KNOWLEDGE_KIND,
         caseId,
@@ -274,10 +286,7 @@ export class CaseLibrary {
         scope,
         {createdAt: archived.createdAt, updatedAt: Date.now()},
       );
-      return archived;
     }
-    this.cases.set(caseId, archived);
-    this.persist();
     return archived;
   }
 

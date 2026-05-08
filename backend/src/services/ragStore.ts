@@ -33,7 +33,9 @@ import {
   makeSparkProvenance,
 } from '../types/sparkContracts';
 import {
+  enterpriseKnowledgeDbWritesEnabled,
   enterpriseKnowledgeStoreEnabled,
+  legacyKnowledgeFilesystemWritesEnabled,
   type KnowledgeScope,
   getScopedKnowledgeRecord,
   listScopedKnowledgeRecords,
@@ -154,7 +156,11 @@ export class RagStore {
         `License required for source kind '${chunk.kind}' but missing on chunk '${chunk.chunkId}'`,
       );
     }
-    if (enterpriseKnowledgeStoreEnabled()) {
+    if (legacyKnowledgeFilesystemWritesEnabled()) {
+      this.chunks.set(chunk.chunkId, chunk);
+      this.persist();
+    }
+    if (enterpriseKnowledgeDbWritesEnabled()) {
       upsertScopedKnowledgeRecord(
         KNOWLEDGE_KIND,
         chunk.chunkId,
@@ -163,21 +169,22 @@ export class RagStore {
         scope,
         {createdAt: chunk.indexedAt, updatedAt: chunk.indexedAt},
       );
-      return;
     }
-    this.chunks.set(chunk.chunkId, chunk);
-    this.persist();
   }
 
   /** Remove a chunk. Returns whether anything was actually removed. */
   removeChunk(chunkId: string, scope?: KnowledgeScope): boolean {
-    if (enterpriseKnowledgeStoreEnabled()) {
-      return removeScopedKnowledgeRecord(KNOWLEDGE_KIND, chunkId, scope);
+    let removed = false;
+    if (enterpriseKnowledgeDbWritesEnabled()) {
+      removed = removeScopedKnowledgeRecord(KNOWLEDGE_KIND, chunkId, scope) || removed;
     }
-    this.load();
-    const had = this.chunks.delete(chunkId);
-    if (had) this.persist();
-    return had;
+    if (legacyKnowledgeFilesystemWritesEnabled()) {
+      this.load();
+      const had = this.chunks.delete(chunkId);
+      if (had) this.persist();
+      removed = had || removed;
+    }
+    return removed;
   }
 
   /** Get a chunk by id, or undefined when absent. */

@@ -34,7 +34,9 @@ import {
   type PerfBaselineKey,
 } from '../types/sparkContracts';
 import {
+  enterpriseKnowledgeDbWritesEnabled,
   enterpriseKnowledgeStoreEnabled,
+  legacyKnowledgeFilesystemWritesEnabled,
   type KnowledgeScope,
   getScopedKnowledgeRecord,
   listScopedKnowledgeRecords,
@@ -132,7 +134,11 @@ export class BaselineStore {
   addBaseline(record: BaselineRecord, scope?: KnowledgeScope): void {
     this.load();
     this.assertPublishInvariants(record);
-    if (enterpriseKnowledgeStoreEnabled()) {
+    if (legacyKnowledgeFilesystemWritesEnabled()) {
+      this.baselines.set(record.baselineId, record);
+      this.persist();
+    }
+    if (enterpriseKnowledgeDbWritesEnabled()) {
       upsertScopedKnowledgeRecord(
         KNOWLEDGE_KIND,
         record.baselineId,
@@ -141,10 +147,7 @@ export class BaselineStore {
         scope,
         {createdAt: record.capturedAt, updatedAt: Date.now()},
       );
-      return;
     }
-    this.baselines.set(record.baselineId, record);
-    this.persist();
   }
 
   /** Get a baseline by id. */
@@ -165,13 +168,17 @@ export class BaselineStore {
 
   /** Remove a baseline. Returns whether anything was actually removed. */
   removeBaseline(baselineId: string, scope?: KnowledgeScope): boolean {
-    if (enterpriseKnowledgeStoreEnabled()) {
-      return removeScopedKnowledgeRecord(KNOWLEDGE_KIND, baselineId, scope);
+    let removed = false;
+    if (enterpriseKnowledgeDbWritesEnabled()) {
+      removed = removeScopedKnowledgeRecord(KNOWLEDGE_KIND, baselineId, scope) || removed;
     }
-    this.load();
-    const had = this.baselines.delete(baselineId);
-    if (had) this.persist();
-    return had;
+    if (legacyKnowledgeFilesystemWritesEnabled()) {
+      this.load();
+      const had = this.baselines.delete(baselineId);
+      if (had) this.persist();
+      removed = had || removed;
+    }
+    return removed;
   }
 
   /**

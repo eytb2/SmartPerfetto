@@ -39,7 +39,9 @@ import * as path from 'path';
 
 import {type CaseEdge} from '../types/sparkContracts';
 import {
+  enterpriseKnowledgeDbWritesEnabled,
   enterpriseKnowledgeStoreEnabled,
+  legacyKnowledgeFilesystemWritesEnabled,
   type KnowledgeScope,
   listScopedKnowledgeRecords,
   removeScopedKnowledgeRecord,
@@ -111,7 +113,11 @@ export class CaseGraph {
         `Self-loops are not permitted: edge '${edge.edgeId}' has fromCaseId === toCaseId === '${edge.fromCaseId}'`,
       );
     }
-    if (enterpriseKnowledgeStoreEnabled()) {
+    if (legacyKnowledgeFilesystemWritesEnabled()) {
+      this.edges.set(edgeKey(edge), edge);
+      this.persist();
+    }
+    if (enterpriseKnowledgeDbWritesEnabled()) {
       for (const existing of this.listEnterpriseEdges(scope)) {
         if (
           edgeKey(existing.record) === edgeKey(edge) &&
@@ -131,29 +137,31 @@ export class CaseGraph {
         edge,
         scope,
       );
-      return;
     }
-    this.edges.set(edgeKey(edge), edge);
-    this.persist();
   }
 
   /** Remove an edge by canonical id. Returns whether it was present. */
   removeEdge(edgeId: string, scope?: KnowledgeScope): boolean {
-    if (enterpriseKnowledgeStoreEnabled()) {
-      return removeScopedKnowledgeRecord(KNOWLEDGE_KIND, edgeId, scope);
+    let removed = false;
+    if (enterpriseKnowledgeDbWritesEnabled()) {
+      removed = removeScopedKnowledgeRecord(KNOWLEDGE_KIND, edgeId, scope) || removed;
     }
-    this.load();
-    let foundKey: string | undefined;
-    for (const [k, e] of this.edges) {
-      if (e.edgeId === edgeId) {
-        foundKey = k;
-        break;
+    if (legacyKnowledgeFilesystemWritesEnabled()) {
+      this.load();
+      let foundKey: string | undefined;
+      for (const [k, e] of this.edges) {
+        if (e.edgeId === edgeId) {
+          foundKey = k;
+          break;
+        }
+      }
+      if (foundKey) {
+        this.edges.delete(foundKey);
+        this.persist();
+        removed = true;
       }
     }
-    if (!foundKey) return false;
-    this.edges.delete(foundKey);
-    this.persist();
-    return true;
+    return removed;
   }
 
   /** Get all edges originating at the case. */

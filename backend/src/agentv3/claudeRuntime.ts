@@ -83,13 +83,17 @@ import {
   applyCapturedEntities,
 } from '../agent/core/entityCapture';
 import { DEFAULT_OUTPUT_LANGUAGE, localize } from './outputLanguage';
-import { resolveFeatureConfig } from '../config';
 import {
   deleteClaudeSessionMapRuntimeSnapshots,
   loadClaudeSessionMapFromRuntimeSnapshots,
   saveClaudeSessionMapToRuntimeSnapshots,
   type ClaudeSessionMapRuntimeEntry,
 } from '../services/runtimeSnapshotStore';
+import {
+  enterpriseDbWritesEnabled,
+  legacyFilesystemReadAuthorityEnabled,
+  legacyFilesystemWritesEnabled,
+} from '../services/enterpriseMigration';
 import type { ProviderScope } from '../services/providerManager';
 import type { KnowledgeScope } from '../services/scopedKnowledgeStore';
 
@@ -104,8 +108,12 @@ interface SessionMapEntry {
   updatedAt: number;
 }
 
-function enterpriseSessionMapStoreEnabled(): boolean {
-  return resolveFeatureConfig(process.env).enterprise;
+function enterpriseSessionMapDbWritesEnabled(): boolean {
+  return enterpriseDbWritesEnabled();
+}
+
+function legacySessionMapWritesEnabled(): boolean {
+  return legacyFilesystemWritesEnabled();
 }
 
 function loadPersistedSessionMap(): Map<string, SessionMapEntry> {
@@ -130,22 +138,16 @@ function loadPersistedSessionMap(): Map<string, SessionMapEntry> {
 }
 
 function loadSessionMapForCurrentMode(): Map<string, SessionMapEntry> {
-  if (!enterpriseSessionMapStoreEnabled()) {
+  if (legacyFilesystemReadAuthorityEnabled()) {
     return loadPersistedSessionMap();
   }
 
   try {
-    const dbMap = loadClaudeSessionMapFromRuntimeSnapshots(SESSION_MAP_MAX_AGE_MS);
-    if (dbMap.size > 0) return dbMap;
+    return loadClaudeSessionMapFromRuntimeSnapshots(SESSION_MAP_MAX_AGE_MS);
   } catch (err) {
     console.warn('[ClaudeRuntime] Failed to load runtime_snapshots session map:', (err as Error).message);
   }
-
-  const legacyMap = loadPersistedSessionMap();
-  if (legacyMap.size > 0) {
-    console.warn('[ClaudeRuntime] Loaded legacy logs/claude_session_map.json for migration; future enterprise writes use runtime_snapshots');
-  }
-  return legacyMap;
+  return new Map();
 }
 
 function providerScopeFromOptions(options: AnalysisOptions): ProviderScope | undefined {
@@ -420,10 +422,11 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     entry: ClaudeSessionMapRuntimeEntry,
     options: AnalysisOptions,
   ): void {
-    if (!enterpriseSessionMapStoreEnabled()) {
+    if (legacySessionMapWritesEnabled()) {
       savePersistedSessionMap(this.sessionMap);
-      return;
     }
+
+    if (!enterpriseSessionMapDbWritesEnabled()) return;
 
     if (!options.tenantId || !options.workspaceId) {
       console.warn('[ClaudeRuntime] Enterprise session map persistence skipped: missing tenant/workspace scope');
@@ -600,7 +603,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         && (Date.now() - (existingSessionMapEntry.updatedAt || 0) < SDK_SESSION_FRESHNESS_MS)
         ? existingSessionMapEntry.sdkSessionId
         : undefined;
-      if (existingSessionMapEntry && existingSdkSessionId && enterpriseSessionMapStoreEnabled()) {
+      if (existingSessionMapEntry && existingSdkSessionId && enterpriseSessionMapDbWritesEnabled()) {
         this.persistSessionMapEntry(sessionId, traceId, ctx.sessionMapKey, existingSessionMapEntry, options);
       }
 
@@ -1716,7 +1719,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         && (Date.now() - (sessionMapEntry.updatedAt || 0) < SDK_SESSION_FRESHNESS_MS)
         ? sessionMapEntry.sdkSessionId
         : undefined;
-      if (sessionMapEntry && existingSdkSessionId && enterpriseSessionMapStoreEnabled()) {
+      if (sessionMapEntry && existingSdkSessionId && enterpriseSessionMapDbWritesEnabled()) {
         this.persistSessionMapEntry(sessionId, traceId, sessionMapKey, sessionMapEntry, options);
       }
       const sdkEnv = createSdkEnv(options.providerId, providerScope);
@@ -1965,13 +1968,14 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     this.sessionHypotheses.delete(sessionId);
     this.sessionUncertaintyFlags.delete(sessionId);
     this.activeAnalyses.delete(sessionId);
-    if (enterpriseSessionMapStoreEnabled()) {
+    if (enterpriseSessionMapDbWritesEnabled()) {
       try {
         deleteClaudeSessionMapRuntimeSnapshots(sessionId);
       } catch (err) {
         console.warn('[ClaudeRuntime] Failed to delete runtime_snapshots session map:', (err as Error).message);
       }
-    } else {
+    }
+    if (legacySessionMapWritesEnabled()) {
       // Use immediate save — session is being removed, must persist before cleanup completes
       savePersistedSessionMapSync(this.sessionMap);
     }

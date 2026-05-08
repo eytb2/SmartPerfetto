@@ -46,7 +46,7 @@
 - [x] 3.5 `logs/claude_session_map.json` 迁到 `runtime_snapshots`
 - [x] 3.6 provider 从 `data/providers.json` 迁到 DB metadata + encrypted SecretStore
 - [x] 3.7 Memory / RAG / Case / Baseline 表加 scope（§14.1，先 filter 后语义召回）
-- [ ] 3.8 双写 → 切读 → 退役 三阶段（§17），每阶段都能回滚；准备 filesystem + DB snapshot
+- [x] 3.8 双写 → 切读 → 退役 三阶段（§17），每阶段都能回滚；准备 filesystem + DB snapshot
 - [ ] 3.9 SecretStore：libsodium 加密 + OS keyring 解 master key + secret rotation + 读取审计
 - [ ] 3.10 集成测试：backend restart 后 session/report/trace metadata 可恢复
 
@@ -100,7 +100,7 @@
 - [ ] 6.6 Runtime：lease acquire / release / heartbeat / stale / crash recovery
 - [ ] 6.7 Persistence：backend restart / queue shadow 恢复 / DB reconnect / SecretStore failure
 - [ ] 6.8 SSE：fetch-stream reconnect / cursor replay / terminal event 落库
-- [ ] 6.9 Migration：dry-run / 双写 / 切读 / 退役 / snapshot restore
+- [x] 6.9 Migration：dry-run / 双写 / 切读 / 退役 / snapshot restore
 - [ ] 6.10 Regression：每次 PR 跑 `cd backend && npm run test:scene-trace-regression`
 - [ ] 6.11 PR Gate：合入前 `npm run verify:pr` 通过
 
@@ -990,6 +990,12 @@ request delete
 - audit log 记录迁移开始时间、版本、数据指纹。
 
 旧数据默认迁移到 `default-dev-tenant/default-workspace` 或管理员指定 tenant/workspace。
+
+当前实现入口：
+
+- 阶段开关：`SMARTPERFETTO_ENTERPRISE_MIGRATION_PHASE=dual-write|cutover|retired`。企业模式关闭时仍走 legacy filesystem；企业模式开启但未显式设置阶段时默认 `cutover`，保持 DB 权威路径。
+- dry-run / snapshot / restore：`cd backend && npm run enterprise:migration -- --dry-run`、`--snapshot`、`--restore <snapshot-dir>`。
+- P-A `dual-write`：trace/report/provider/runtime snapshot/RAG-baseline-case-project-memory 写旧文件与 DB，读取旧文件；P-B/P-C 读取 DB，旧文件不再写入。
 
 ## 18. 四条并行开发主线
 
