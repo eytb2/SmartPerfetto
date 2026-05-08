@@ -43,7 +43,7 @@ describe('enterprise SQLite WAL database', () => {
       const rows = db.prepare<unknown[], { version: number }>(
         'SELECT version FROM enterprise_schema_migrations ORDER BY version',
       ).all();
-      expect(rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
+      expect(rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }]);
     } finally {
       db.close();
     }

@@ -386,6 +386,8 @@ async function scenarioD1(db: Database.Database, tracePath: string, windows: {
   const cOwned = await ownedTraceIds(windows.userCWindow1.context);
   const a1VisibleToB = await readTraceMetadataForContext(uploads[0].traceId, windows.userBWindow1.context);
   const bVisibleToA = await readTraceMetadataForContext(uploads[2].traceId, windows.userAWindow1.context);
+  const a1VisibleToC = await readTraceMetadataForContext(uploads[0].traceId, windows.userCWindow1.context);
+  const cVisibleToA = await readTraceMetadataForContext(uploads[3].traceId, windows.userAWindow1.context);
 
   const checks = {
     sameFilenameUsesDistinctTraceIds: new Set(traceIds).size === uploads.length,
@@ -397,8 +399,9 @@ async function scenarioD1(db: Database.Database, tracePath: string, windows: {
     ) === uploads.length,
     ownerGuardAllowsOwnTwoWindowUploads: aOwned.includes(uploads[0].traceId)
       && aOwned.includes(uploads[1].traceId),
-    ownerGuardBlocksCrossUserTraces: !a1VisibleToB && !bVisibleToA,
-    threeUsersHaveScopedTraceLists: aOwned.length === 2 && bOwned.length === 1 && cOwned.length === 1,
+    workspaceRbacAllowsSameWorkspacePeerTraces: Boolean(a1VisibleToB) && Boolean(bVisibleToA),
+    workspaceGuardBlocksCrossTenantTraces: !a1VisibleToC && !cVisibleToA,
+    threeUsersHaveScopedTraceLists: aOwned.length === 3 && bOwned.length === 3 && cOwned.length === 1,
     twoWindowsHaveSeparateSessions: userAWindow1Run.sessionId !== userAWindow2Run.sessionId
       && userAWindow1Run.runId !== userAWindow2Run.runId,
   };
@@ -478,7 +481,7 @@ async function scenarioD2(
   const checks = {
     bCanStartWhileALongSqlPending: bStartedBeforeALongSqlDone && Boolean(bRun.runId),
     aTraceReadableDuringBStart: Boolean(aReadableDuringBStart) && aFileStillExists,
-    ownerGuardBlocksCrossUserDuringLongSql: !aVisibleToB && !bVisibleToA,
+    workspaceRbacAllowsPeerTraceReadsDuringLongSql: Boolean(aVisibleToB) && Boolean(bVisibleToA),
     aEventStreamContinuesAfterBStart: aRunEventCursors.join(',') === '1,2,3,4',
     bRunCanQueueOrRun: bRunStatus === 'pending' || bRunStatus === 'running',
     runEventsDoNotMix: bRunEventCursors.join(',') === '1',
@@ -572,9 +575,9 @@ export async function runEnterpriseWindowRegression(
       tracePath,
       scenarios,
       coverageLimitations: [
-        'D1 covers same-name trace isolation across three users and two windows at the trace metadata, TraceAsset, and analysis session/run schema layers.',
+        'D1 covers same-name trace isolation across three users and two windows at the trace metadata, TraceAsset, workspace RBAC, and analysis session/run schema layers.',
         'D2 covers a deterministic long-SQL window at the run/event metadata layer without invoking a real LLM provider.',
-        'Production TraceProcessorLease assertions remain a future hardening target for section 0.4.4 and section 0.7 D1/D2 final acceptance.',
+        'Production TraceProcessorLease holder/state assertions are covered by the §0.4.4 lease store and route tests; backend proxy and queue behavior remain future §0.7 D1/D2 final-acceptance work.',
       ],
     };
     report.passed = allChecksPassed(report);

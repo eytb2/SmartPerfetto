@@ -83,6 +83,31 @@ function readTraceAsset(traceId: string): TraceAssetRow | null {
   }
 }
 
+function readTraceProcessorLeases(traceId: string): Array<{
+  id: string;
+  state: string;
+  holder_type: string;
+  holder_ref: string;
+}> {
+  const db = openEnterpriseDb(dbPath);
+  try {
+    return db.prepare<unknown[], {
+      id: string;
+      state: string;
+      holder_type: string;
+      holder_ref: string;
+    }>(`
+      SELECT l.id, l.state, h.holder_type, h.holder_ref
+      FROM trace_processor_leases l
+      JOIN trace_processor_holders h ON h.lease_id = l.id
+      WHERE l.trace_id = ?
+      ORDER BY h.holder_type
+    `).all(traceId);
+  } finally {
+    db.close();
+  }
+}
+
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-enterprise-trace-routes-'));
   dbPath = path.join(tmpDir, 'enterprise.sqlite');
@@ -158,6 +183,12 @@ describe('enterprise trace metadata routes', () => {
     expect(JSON.parse(row!.metadata_json)).toEqual(expect.objectContaining({
       filename: 'fixture.trace',
     }));
+    expect(readTraceProcessorLeases(traceId)).toEqual([
+      expect.objectContaining({
+        state: 'active',
+        holder_type: 'frontend_http_rpc',
+      }),
+    ]);
 
     const listRes = await ssoHeaders(request(app).get('/api/traces'));
     expect(listRes.status).toBe(200);

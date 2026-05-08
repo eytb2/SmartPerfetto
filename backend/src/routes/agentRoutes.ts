@@ -57,7 +57,11 @@ import { FileSystemSceneReportStore } from '../services/sceneReport/sceneReportS
 import { SceneReportMemoryCache } from '../services/sceneReport/sceneReportMemoryCache';
 import { computeTraceContentHash } from '../agent/scene/traceHash';
 import { probeTraceDuration } from '../agent/scene/sceneTraceDurationProbe';
-import { sceneStoryConfig } from '../config';
+import { resolveFeatureConfig, sceneStoryConfig } from '../config';
+import {
+  getTraceProcessorLeaseStore,
+  type TraceProcessorLeaseRecord,
+} from '../services/traceProcessorLeaseStore';
 import { registerAgentLogsRoutes } from './agentLogsRoutes';
 import { registerAgentQuickSceneRoutes } from './agentQuickSceneRoutes';
 import { registerAgentReportRoutes } from './agentReportRoutes';
@@ -140,6 +144,37 @@ function normalizeRunSequence(value: unknown): number {
 
 function buildRunId(sessionId: string, sequence: number): string {
   return `run-${sessionId}-${sequence}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function enterpriseLeasesEnabled(): boolean {
+  return resolveFeatureConfig().enterprise;
+}
+
+function leaseScopeFromRequestContext(context: RequestContext) {
+  return {
+    tenantId: context.tenantId,
+    workspaceId: context.workspaceId,
+    userId: context.userId,
+  };
+}
+
+function leaseScopeFromSession(session: AnalysisSession) {
+  if (!session.tenantId || !session.workspaceId) return null;
+  return {
+    tenantId: session.tenantId,
+    workspaceId: session.workspaceId,
+    userId: session.userId,
+  };
+}
+
+function markLeaseReadyIfNew(
+  lease: TraceProcessorLeaseRecord,
+  scope: { tenantId: string; workspaceId: string; userId?: string },
+): TraceProcessorLeaseRecord {
+  if (lease.state !== 'pending') return lease;
+  const store = getTraceProcessorLeaseStore();
+  const starting = store.markStarting(scope, lease.id);
+  return store.markReady(scope, starting.id);
 }
 
 function buildSessionObservability(
@@ -931,6 +966,38 @@ async function handleAnalyzeRequest(
       runSequence: runContext.sequence,
     });
 
+    let agentRunLease: TraceProcessorLeaseRecord | null = null;
+    if (enterpriseLeasesEnabled()) {
+      try {
+        const scope = leaseScopeFromRequestContext(requestContext);
+        agentRunLease = getTraceProcessorLeaseStore().acquireHolder(
+          scope,
+          traceId,
+          {
+            holderType: 'agent_run',
+            holderRef: runContext.runId,
+            runId: runContext.runId,
+            sessionId,
+            metadata: {
+              requestId: runContext.requestId,
+              runSequence: runContext.sequence,
+            },
+          },
+        );
+        agentRunLease = markLeaseReadyIfNew(agentRunLease, scope);
+      } catch (leaseError: any) {
+        sessionForRun.status = 'failed';
+        sessionForRun.error = leaseError.message;
+        markSessionRunStatus(sessionForRun, 'failed', leaseError.message);
+        res.status(409).json({
+          success: false,
+          code: 'TRACE_PROCESSOR_LEASE_UNAVAILABLE',
+          error: leaseError.message,
+        });
+        return;
+      }
+    }
+
     // Validate traceContext — must be array of objects with columns/rows
     const traceContext = Array.isArray(rawTraceContext)
       ? rawTraceContext.filter(
@@ -960,6 +1027,18 @@ async function handleAnalyzeRequest(
           timestamp: Date.now(),
         });
       }
+    }).finally(() => {
+      if (!agentRunLease) return;
+      try {
+        getTraceProcessorLeaseStore().releaseHolder(
+          leaseScopeFromRequestContext(requestContext),
+          agentRunLease.id,
+          'agent_run',
+          runContext.runId,
+        );
+      } catch (releaseError: any) {
+        console.warn(`[AgentRoutes] Failed to release agent_run lease ${agentRunLease.id}: ${releaseError.message}`);
+      }
     });
 
     res.json({
@@ -974,6 +1053,8 @@ async function handleAnalyzeRequest(
       providerSnapshotChanged: preparedSession?.providerSnapshotChanged || undefined,
       architecture: 'agent-driven',
       runId: runContext.runId,
+      leaseId: agentRunLease?.id,
+      leaseState: agentRunLease?.state,
       requestId: runContext.requestId,
       runSequence: runContext.sequence,
       observability: {
@@ -4043,7 +4124,27 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
   // Generate HTML report
   let reportUrl: string | undefined;
   let reportError: string | undefined;
+  const reportId = `agent-report-${session.sessionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let reportLease: TraceProcessorLeaseRecord | null = null;
   try {
+    if (enterpriseLeasesEnabled()) {
+      const scope = leaseScopeFromSession(session);
+      if (scope) {
+        reportLease = getTraceProcessorLeaseStore().acquireHolder(
+          scope,
+          session.traceId,
+          {
+            holderType: 'report_generation',
+            holderRef: reportId,
+            reportId,
+            sessionId: session.sessionId,
+            runId: session.lastRun?.runId || session.activeRun?.runId,
+          },
+        );
+        reportLease = markLeaseReadyIfNew(reportLease, scope);
+      }
+    }
+
     const generator = getHTMLReportGenerator();
     // Report assembly (cumulative findings dedup, empty-conclusion fallback,
     // snapshot-first analysisNotes/Plan/Flags) lives in the shared builder so
@@ -4073,7 +4174,6 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
     const html = generator.generateAgentDrivenHTML(reportData);
 
     // Store report
-    const reportId = `agent-report-${session.sessionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     persistReport(reportId, {
       html,
       generatedAt: Date.now(),
@@ -4097,6 +4197,22 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       resultConfidence: result?.confidence,
       resultRounds: result?.rounds,
     });
+  } finally {
+    if (reportLease) {
+      const scope = leaseScopeFromSession(session);
+      if (scope) {
+        try {
+          getTraceProcessorLeaseStore().releaseHolder(
+            scope,
+            reportLease.id,
+            'report_generation',
+            reportId,
+          );
+        } catch (releaseError: any) {
+          console.warn(`[AgentRoutes] Failed to release report_generation lease ${reportLease.id}: ${releaseError.message}`);
+        }
+      }
+    }
   }
 
   // Send analysis_completed event with full result. Keep it replayable so a

@@ -9,6 +9,22 @@ interface MigrationStep {
   up: (db: Database.Database) => void;
 }
 
+function tableHasColumn(db: Database.Database, table: string, column: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return rows.some(row => row.name === column);
+}
+
+function addColumnIfMissing(
+  db: Database.Database,
+  table: string,
+  column: string,
+  definition: string,
+): void {
+  if (!tableHasColumn(db, table, column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
 export const ENTERPRISE_CORE_SCHEMA_TABLES = [
   'organizations',
   'workspaces',
@@ -325,13 +341,17 @@ const MIGRATIONS: MigrationStep[] = [
           holder_ref TEXT NOT NULL,
           window_id TEXT,
           heartbeat_at INTEGER,
+          expires_at INTEGER,
           created_at INTEGER NOT NULL,
+          metadata_json TEXT,
           FOREIGN KEY (lease_id) REFERENCES trace_processor_leases(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_trace_processor_holders_lease
           ON trace_processor_holders(lease_id, holder_type, holder_ref);
         CREATE INDEX IF NOT EXISTS idx_trace_processor_holders_window
           ON trace_processor_holders(window_id, heartbeat_at);
+        CREATE INDEX IF NOT EXISTS idx_trace_processor_holders_expiry
+          ON trace_processor_holders(expires_at, heartbeat_at);
 
         CREATE TABLE IF NOT EXISTS conversation_turns (
           id TEXT PRIMARY KEY,
@@ -473,6 +493,17 @@ const MIGRATIONS: MigrationStep[] = [
           ON tenant_tombstones(status, purge_after);
         CREATE INDEX IF NOT EXISTS idx_tenant_tombstones_requested_by
           ON tenant_tombstones(tenant_id, requested_by, requested_at);
+      `);
+    },
+  },
+  {
+    version: 5,
+    up: (db) => {
+      addColumnIfMissing(db, 'trace_processor_holders', 'expires_at', 'INTEGER');
+      addColumnIfMissing(db, 'trace_processor_holders', 'metadata_json', 'TEXT');
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_trace_processor_holders_expiry
+          ON trace_processor_holders(expires_at, heartbeat_at);
       `);
     },
   },

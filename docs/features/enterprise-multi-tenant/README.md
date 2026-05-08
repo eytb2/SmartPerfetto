@@ -60,7 +60,7 @@
   - [x] 4.1.6 AI session cache 加 mtime/CAS 或改为后端权威 session list
 - [x] 4.2 上传链路 stream 化（§11.1）：URL 上传不再 `arrayBuffer()` 全量进内存；本地上传与 RAM/磁盘策略联动；temp file 用 traceId/uuid + 原子 rename
 - [ ] 4.3 RSS benchmark：scroll/startup/ANR/memory/heapprofd/vendor 大 trace × 100MB/500MB/1GB，记录启动 RSS、load peak、query headroom
-- [ ] 4.4 `TraceProcessorLease` 4 类 holder（frontend_http_rpc / agent_run / report_generation / manual_register）+ 状态机（§11.4）+ 分级 TTL
+- [x] 4.4 `TraceProcessorLease` 4 类 holder（frontend_http_rpc / agent_run / report_generation / manual_register）+ 状态机（§11.4）+ 分级 TTL
 - [ ] 4.5 Backend proxy `/api/tp/:leaseId/{status,websocket,query}`（§11.3）
   - [ ] 4.5.1 同时支持 `/status` HTTP / `/websocket` 二进制双向 / `/query` HTTP
   - [ ] 4.5.2 前端 `HttpRpcEngine` 抽象成 `HttpRpcTarget`（direct-port + backend-lease-proxy）
@@ -459,7 +459,7 @@ api_keys(id, tenant_id, workspace_id, owner_user_id, key_hash, scopes, expires_a
 
 trace_assets(id, tenant_id, workspace_id, owner_user_id, local_path, sha256, size_bytes, status, metadata_json, created_at, expires_at)
 trace_processor_leases(id, tenant_id, workspace_id, trace_id, mode, state, rss_bytes, heartbeat_at, expires_at)
-trace_processor_holders(id, lease_id, holder_type, holder_ref, window_id, heartbeat_at, created_at)
+trace_processor_holders(id, lease_id, holder_type, holder_ref, window_id, heartbeat_at, expires_at, created_at, metadata_json)
 
 analysis_sessions(id, tenant_id, workspace_id, trace_id, created_by, provider_snapshot_id, title, visibility, status, created_at, updated_at)
 analysis_runs(id, tenant_id, workspace_id, session_id, mode, status, question, started_at, completed_at, error_json)

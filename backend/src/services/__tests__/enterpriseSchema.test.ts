@@ -170,7 +170,9 @@ describe('enterprise core schema', () => {
       'holder_ref',
       'window_id',
       'heartbeat_at',
+      'expires_at',
       'created_at',
+      'metadata_json',
     ]);
     expectColumns(db!, 'analysis_sessions', [
       'id',
@@ -317,6 +319,7 @@ describe('enterprise core schema', () => {
       'idx_trace_processor_leases_owner_guard',
       'idx_trace_processor_leases_trace',
       'idx_trace_processor_holders_lease',
+      'idx_trace_processor_holders_expiry',
       'idx_analysis_sessions_owner_guard',
       'idx_analysis_sessions_tenant_workspace_id_unique',
       'idx_analysis_runs_status',
@@ -354,7 +357,7 @@ describe('enterprise core schema', () => {
     const rows = db!.prepare<unknown[], { version: number }>(
       'SELECT version FROM enterprise_schema_migrations ORDER BY version',
     ).all();
-    expect(rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
+    expect(rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }]);
   });
 
   test('enforces the full tenant workspace session run event chain', () => {
