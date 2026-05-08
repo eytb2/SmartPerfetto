@@ -2452,7 +2452,12 @@ async function runAgentDrivenAnalysis(
         selectionContext: options.selectionContext,
         analysisMode: options.analysisMode,
         traceContext: options.traceContext,
+        referenceTraceId: options.referenceTraceId,
         providerId: options.providerId,
+        tenantId: session.tenantId,
+        workspaceId: session.workspaceId,
+        userId: session.userId,
+        runId: session.activeRun?.runId,
       });
     });
     console.log('[AgentRoutes.AgentDriven] analyze completed, success:', result.success);

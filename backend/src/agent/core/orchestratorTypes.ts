@@ -308,6 +308,16 @@ export interface AnalysisOptions {
   providerId?: string | null;
 
   /**
+   * Enterprise persistence scope supplied by the route layer.
+   * These fields are internal to backend runtime persistence and are not accepted
+   * directly from untrusted request bodies.
+   */
+  tenantId?: string;
+  workspaceId?: string;
+  userId?: string;
+  runId?: string;
+
+  /**
    * Pre-queried trace datasets from the frontend (populated by quick-action buttons).
    * Injected into the AI prompt as Markdown tables so the AI can analyze immediately
    * without spending turns on basic SQL queries.

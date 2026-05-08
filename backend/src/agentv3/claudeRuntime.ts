@@ -83,14 +83,27 @@ import {
   applyCapturedEntities,
 } from '../agent/core/entityCapture';
 import { DEFAULT_OUTPUT_LANGUAGE, localize } from './outputLanguage';
+import { resolveFeatureConfig } from '../config';
+import {
+  deleteClaudeSessionMapRuntimeSnapshots,
+  loadClaudeSessionMapFromRuntimeSnapshots,
+  saveClaudeSessionMapToRuntimeSnapshots,
+  type ClaudeSessionMapRuntimeEntry,
+} from '../services/runtimeSnapshotStore';
 
 const SESSION_MAP_FILE = path.resolve(__dirname, '../../logs/claude_session_map.json');
 /** Max age for session map entries before pruning (24 hours). */
 const SESSION_MAP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** Claude SDK sessions expire server-side after roughly 4 hours. */
+const SDK_SESSION_FRESHNESS_MS = 4 * 60 * 60 * 1000;
 
 interface SessionMapEntry {
   sdkSessionId: string;
   updatedAt: number;
+}
+
+function enterpriseSessionMapStoreEnabled(): boolean {
+  return resolveFeatureConfig(process.env).enterprise;
 }
 
 function loadPersistedSessionMap(): Map<string, SessionMapEntry> {
@@ -112,6 +125,25 @@ function loadPersistedSessionMap(): Map<string, SessionMapEntry> {
     // Ignore — start with empty map
   }
   return new Map();
+}
+
+function loadSessionMapForCurrentMode(): Map<string, SessionMapEntry> {
+  if (!enterpriseSessionMapStoreEnabled()) {
+    return loadPersistedSessionMap();
+  }
+
+  try {
+    const dbMap = loadClaudeSessionMapFromRuntimeSnapshots(SESSION_MAP_MAX_AGE_MS);
+    if (dbMap.size > 0) return dbMap;
+  } catch (err) {
+    console.warn('[ClaudeRuntime] Failed to load runtime_snapshots session map:', (err as Error).message);
+  }
+
+  const legacyMap = loadPersistedSessionMap();
+  if (legacyMap.size > 0) {
+    console.warn('[ClaudeRuntime] Loaded legacy logs/claude_session_map.json for migration; future enterprise writes use runtime_snapshots');
+  }
+  return legacyMap;
 }
 
 /**
@@ -333,7 +365,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     super();
     this.traceProcessorService = traceProcessorService;
     this.config = loadClaudeConfig(config);
-    this.sessionMap = loadPersistedSessionMap();
+    this.sessionMap = loadSessionMapForCurrentMode();
   }
 
   /** Restore a previously persisted SDK session mapping (e.g., after server restart). */
@@ -354,6 +386,62 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
   /** Get SDK session ID for persistence. */
   getSdkSessionId(smartPerfettoSessionId: string): string | undefined {
     return this.sessionMap.get(smartPerfettoSessionId)?.sdkSessionId;
+  }
+
+  private buildSessionMapKey(sessionId: string, referenceTraceId?: string): string {
+    return referenceTraceId ? `${sessionId}:ref:${referenceTraceId}` : sessionId;
+  }
+
+  private persistSessionMapEntry(
+    sessionId: string,
+    traceId: string,
+    sessionMapKey: string,
+    entry: ClaudeSessionMapRuntimeEntry,
+    options: AnalysisOptions,
+  ): void {
+    if (!enterpriseSessionMapStoreEnabled()) {
+      savePersistedSessionMap(this.sessionMap);
+      return;
+    }
+
+    if (!options.tenantId || !options.workspaceId) {
+      console.warn('[ClaudeRuntime] Enterprise session map persistence skipped: missing tenant/workspace scope');
+      return;
+    }
+
+    try {
+      saveClaudeSessionMapToRuntimeSnapshots({
+        tenantId: options.tenantId,
+        workspaceId: options.workspaceId,
+        userId: options.userId,
+        sessionId,
+        runId: options.runId,
+        traceId,
+      }, sessionMapKey, entry);
+    } catch (err) {
+      console.warn('[ClaudeRuntime] Failed to persist session map to runtime_snapshots:', (err as Error).message);
+    }
+  }
+
+  private rememberSdkSessionMapping(
+    sessionId: string,
+    traceId: string,
+    sessionMapKey: string,
+    sdkSessionId: string,
+    options: AnalysisOptions,
+  ): void {
+    const entry = { sdkSessionId, updatedAt: Date.now() };
+    this.sessionMap.set(sessionMapKey, entry);
+    this.persistSessionMapEntry(sessionId, traceId, sessionMapKey, entry, options);
+  }
+
+  private removeSessionMapEntries(sessionId: string): void {
+    const referencePrefix = `${sessionId}:ref:`;
+    for (const key of [...this.sessionMap.keys()]) {
+      if (key === sessionId || key.startsWith(referencePrefix)) {
+        this.sessionMap.delete(key);
+      }
+    }
   }
 
   async analyze(
@@ -485,7 +573,14 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       });
 
       // Reuse composite key from prepareAnalysisContext for comparison mode session identity isolation
-      const existingSdkSessionId = this.sessionMap.get(ctx.sessionMapKey)?.sdkSessionId;
+      const existingSessionMapEntry = this.sessionMap.get(ctx.sessionMapKey);
+      const existingSdkSessionId = existingSessionMapEntry
+        && (Date.now() - (existingSessionMapEntry.updatedAt || 0) < SDK_SESSION_FRESHNESS_MS)
+        ? existingSessionMapEntry.sdkSessionId
+        : undefined;
+      if (existingSessionMapEntry && existingSdkSessionId && enterpriseSessionMapStoreEnabled()) {
+        this.persistSessionMapEntry(sessionId, traceId, ctx.sessionMapKey, existingSessionMapEntry, options);
+      }
 
       // When resuming an SDK session, systemPrompt is ignored by the SDK (mutually exclusive).
       // Prepend selectionContext directly into the prompt so the AI sees it in the conversation.
@@ -669,8 +764,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
           if (msg.session_id && !sdkSessionId) {
             sdkSessionId = msg.session_id;
-            this.sessionMap.set(ctx.sessionMapKey, { sdkSessionId, updatedAt: Date.now() });
-            savePersistedSessionMap(this.sessionMap);
+            this.rememberSdkSessionMapping(sessionId, traceId, ctx.sessionMapKey, sdkSessionId, options);
           }
 
           // Track sub-agent lifecycle for per-agent timeouts
@@ -1586,15 +1680,17 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         timestamp: Date.now(),
       });
 
-      const sessionMapKey = sessionId;
+      const sessionMapKey = this.buildSessionMapKey(sessionId, options.referenceTraceId);
       const sessionMapEntry = this.sessionMap.get(sessionMapKey);
-      // Apply the same 4h freshness rule as the full path (see `SDK_SESSION_FRESHNESS_MS` below in
-      // prepareAnalysisContext). A stale quick entry silently resumed here would cause context loss.
-      const SDK_SESSION_FRESHNESS_MS = 4 * 60 * 60 * 1000;
+      // Apply the same 4h freshness rule as the full path. A stale quick entry
+      // silently resumed here would cause context loss.
       const existingSdkSessionId = sessionMapEntry
         && (Date.now() - (sessionMapEntry.updatedAt || 0) < SDK_SESSION_FRESHNESS_MS)
         ? sessionMapEntry.sdkSessionId
         : undefined;
+      if (sessionMapEntry && existingSdkSessionId && enterpriseSessionMapStoreEnabled()) {
+        this.persistSessionMapEntry(sessionId, traceId, sessionMapKey, sessionMapEntry, options);
+      }
       const sdkEnv = createSdkEnv(options.providerId);
 
       // Prepend pre-queried trace data so the AI skips basic SQL turns in fast mode
@@ -1654,8 +1750,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
           if (msg.session_id && !quickSdkSessionId) {
             quickSdkSessionId = msg.session_id;
-            this.sessionMap.set(sessionMapKey, { sdkSessionId: quickSdkSessionId, updatedAt: Date.now() });
-            savePersistedSessionMap(this.sessionMap);
+            this.rememberSdkSessionMapping(sessionId, traceId, sessionMapKey, quickSdkSessionId, options);
           }
 
           try { bridge(msg); } catch { /* non-fatal */ }
@@ -1833,7 +1928,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       clearTimeout(pendingTimer);
       saveTimers.delete(this.sessionMap);
     }
-    this.sessionMap.delete(sessionId);
+    this.removeSessionMapEntries(sessionId);
     this.artifactStores.delete(sessionId);
     this.sessionNotes.delete(sessionId);
     this.sessionSqlErrors.delete(sessionId);
@@ -1841,8 +1936,16 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     this.sessionHypotheses.delete(sessionId);
     this.sessionUncertaintyFlags.delete(sessionId);
     this.activeAnalyses.delete(sessionId);
-    // Use immediate save — session is being removed, must persist before cleanup completes
-    savePersistedSessionMapSync(this.sessionMap);
+    if (enterpriseSessionMapStoreEnabled()) {
+      try {
+        deleteClaudeSessionMapRuntimeSnapshots(sessionId);
+      } catch (err) {
+        console.warn('[ClaudeRuntime] Failed to delete runtime_snapshots session map:', (err as Error).message);
+      }
+    } else {
+      // Use immediate save — session is being removed, must persist before cleanup completes
+      savePersistedSessionMapSync(this.sessionMap);
+    }
   }
 
   /** Clean up all session-scoped state for a given session. */
@@ -2270,16 +2373,13 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     const sessionContext = precomputed?.sessionContext ?? sessionContextManager.getOrCreate(sessionId, traceId);
     const previousTurns = precomputed?.previousTurns ?? (sessionContext.getAllTurns?.() || []);
     // Composite key for comparison mode session identity isolation
-    const sessionMapKey = referenceTraceId
-      ? `${sessionId}:ref:${referenceTraceId}`
-      : sessionId;
+    const sessionMapKey = this.buildSessionMapKey(sessionId, referenceTraceId);
     const sessionMapEntry = this.sessionMap.get(sessionMapKey);
     const existingSdkSession = sessionMapEntry?.sdkSessionId;
     // P0-3: SDK sessions on Anthropic's side expire after ~4 hours.
     // If the local sessionMap entry is stale, treat it as expired and inject full manual context.
     // Without this check, `hasActiveResume` stays true for stale entries, causing the system
     // to skip both SDK context (expired) AND manual context injection → silent context loss.
-    const SDK_SESSION_FRESHNESS_MS = 4 * 60 * 60 * 1000; // 4 hours
     const sdkSessionFresh = !!sessionMapEntry && (Date.now() - (sessionMapEntry.updatedAt || 0) < SDK_SESSION_FRESHNESS_MS);
     const hasActiveResume = !!existingSdkSession && sdkSessionFresh;
     const previousFindings = hasActiveResume

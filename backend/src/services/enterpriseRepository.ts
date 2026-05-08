@@ -17,13 +17,15 @@ export type EnterpriseWorkspaceScopedTable =
   | 'trace_assets'
   | 'analysis_sessions'
   | 'analysis_runs'
-  | 'agent_events';
+  | 'agent_events'
+  | 'runtime_snapshots';
 
 export const ENTERPRISE_WORKSPACE_SCOPED_TABLES: readonly EnterpriseWorkspaceScopedTable[] = [
   'trace_assets',
   'analysis_sessions',
   'analysis_runs',
   'agent_events',
+  'runtime_snapshots',
 ];
 
 export type EnterpriseQueryCriteria = Record<string, SqliteBindValue | undefined>;
