@@ -43,6 +43,12 @@ let upstreamSockets: Set<NetSocket>;
 let upstreamPort: number;
 let lease: TraceProcessorLeaseRecord;
 let queryRawMock: jest.MockedFunction<(traceId: string, body: Buffer, options?: any) => Promise<Buffer>>;
+let restartLeaseMock: jest.MockedFunction<(
+  traceId: string,
+  leaseId: string,
+  mode: string,
+  scope: EnterpriseRepositoryScope,
+) => Promise<unknown>>;
 
 function restoreEnvValue(key: string, value: string | undefined): void {
   if (value === undefined) {
@@ -67,6 +73,17 @@ function ssoHeaders(req: request.Test, workspaceId = 'workspace-a'): request.Tes
     .set('X-SmartPerfetto-SSO-Roles', 'analyst')
     .set('X-SmartPerfetto-SSO-Scopes', 'trace:read,trace:write')
     .set('X-Window-Id', 'window-a');
+}
+
+function adminHeaders(req: request.Test, workspaceId = 'workspace-a'): request.Test {
+  return req
+    .set('X-SmartPerfetto-SSO-User-Id', 'admin-a')
+    .set('X-SmartPerfetto-SSO-Email', 'admin-a@example.test')
+    .set('X-SmartPerfetto-SSO-Tenant-Id', 'tenant-a')
+    .set('X-SmartPerfetto-SSO-Workspace-Id', workspaceId)
+    .set('X-SmartPerfetto-SSO-Roles', 'workspace_admin')
+    .set('X-SmartPerfetto-SSO-Scopes', 'trace:read,trace:write,runtime:manage')
+    .set('X-Window-Id', 'admin-window');
 }
 
 function binaryParser(res: request.Response, callback: (err: Error | null, body: Buffer) => void): void {
@@ -176,6 +193,13 @@ beforeEach(async () => {
   seedEnterpriseGraph();
   lease = createReadyLease();
   queryRawMock = jest.fn(async (_traceId: string, body: Buffer) => body);
+  restartLeaseMock = jest.fn(async (traceId, leaseId, _mode, restartScope) => {
+    const store = getTraceProcessorLeaseStore();
+    store.markCrashed(restartScope, leaseId);
+    store.markRestarting(restartScope, leaseId);
+    store.markReady(restartScope, leaseId);
+    return { id: 'restarted-processor', traceId };
+  });
   setTraceProcessorServiceForTests({
     getOrLoadTrace: jest.fn(async () => ({
       id: 'trace-a',
@@ -204,6 +228,7 @@ beforeEach(async () => {
       processor: {status: 'ready'},
     })),
     queryRaw: queryRawMock,
+    restartLease: restartLeaseMock,
   } as any);
 });
 
@@ -271,6 +296,78 @@ describe('trace processor lease proxy routes', () => {
     );
 
     expect(res.status).toBe(404);
+  });
+
+  it('requires runtime manage permission for lease admin actions', async () => {
+    const app = makeApp();
+
+    const res = await ssoHeaders(
+      request(app)
+        .post(`/api/tp/${lease.id}/restart`)
+        .send({ reason: 'hung query' }),
+    );
+
+    expect(res.status).toBe(403);
+    expect(restartLeaseMock).not.toHaveBeenCalled();
+  });
+
+  it('lets workspace admins drain a scoped lease and block new proxy work', async () => {
+    const app = makeApp();
+
+    const drainRes = await adminHeaders(
+      request(app)
+        .post(`/api/tp/${lease.id}/drain`)
+        .send({ reason: 'hung query' }),
+    );
+
+    expect(drainRes.status).toBe(200);
+    expect(drainRes.body).toMatchObject({
+      success: true,
+      action: 'drain',
+      reason: 'hung query',
+      lease: {
+        id: lease.id,
+        state: 'draining',
+      },
+    });
+
+    const blockedRes = await adminHeaders(
+      request(app).post(`/api/tp/${lease.id}/status`),
+    );
+    expect(blockedRes.status).toBe(409);
+    expect(blockedRes.body.error).toBe('Trace processor lease is draining');
+  });
+
+  it('lets workspace admins restart a scoped lease without changing the lease id', async () => {
+    const app = makeApp();
+
+    const restartRes = await adminHeaders(
+      request(app)
+        .post(`/api/tp/${lease.id}/restart`)
+        .send({ reason: 'operator restart after hung query' }),
+    );
+
+    expect(restartRes.status).toBe(200);
+    expect(restartRes.body).toMatchObject({
+      success: true,
+      action: 'restart',
+      reason: 'operator restart after hung query',
+      lease: {
+        id: lease.id,
+        traceId: 'trace-a',
+        state: 'active',
+      },
+    });
+    expect(restartLeaseMock).toHaveBeenCalledWith(
+      'trace-a',
+      lease.id,
+      'shared',
+      {
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-a',
+        userId: 'admin-a',
+      },
+    );
   });
 
   it('tunnels websocket upgrades to the leased trace processor port', async () => {

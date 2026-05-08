@@ -21,7 +21,8 @@ export type RbacPermission =
   | 'report:delete'
   | 'provider:manage_workspace'
   | 'provider:manage_org'
-  | 'audit:read';
+  | 'audit:read'
+  | 'runtime:manage';
 
 const ROLE_PERMISSIONS: Record<string, RbacPermission[]> = {
   viewer: ['trace:read', 'report:read'],
@@ -44,6 +45,7 @@ const ROLE_PERMISSIONS: Record<string, RbacPermission[]> = {
     'report:delete',
     'provider:manage_workspace',
     'audit:read',
+    'runtime:manage',
   ],
   org_admin: [
     'trace:read',
@@ -57,6 +59,7 @@ const ROLE_PERMISSIONS: Record<string, RbacPermission[]> = {
     'provider:manage_workspace',
     'provider:manage_org',
     'audit:read',
+    'runtime:manage',
   ],
 };
 

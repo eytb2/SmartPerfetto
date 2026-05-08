@@ -239,6 +239,17 @@ function ensureTraceRead(context: RequestContext): void {
   }
 }
 
+function ensureRuntimeManage(context: RequestContext): void {
+  if (!hasRbacPermission(context, 'runtime:manage')) {
+    throw new TraceProcessorProxyError(403, 'Trace processor lease admin requires runtime:manage permission');
+  }
+}
+
+function leaseAdminReason(req: Request): string | undefined {
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  return reason ? reason.slice(0, 500) : undefined;
+}
+
 async function resolveProxyTargetForContext(
   context: RequestContext,
   leaseId: string,
@@ -360,6 +371,69 @@ async function forwardQueryRpc(req: Request, res: Response): Promise<void> {
   res.status(200).send(responseBody);
 }
 
+async function drainLease(req: Request, res: Response): Promise<void> {
+  const leaseId = sanitizeContextId(req.params.leaseId);
+  if (!leaseId) {
+    res.status(400).json({ success: false, error: 'leaseId is required' });
+    return;
+  }
+
+  const context = requireRequestContext(req);
+  ensureRuntimeManage(context);
+  const scope = leaseScopeFromContext(context);
+  const store = getTraceProcessorLeaseStore();
+  const lease = store.getLeaseById(scope, leaseId);
+  if (!lease) {
+    throw new TraceProcessorProxyError(404, 'Trace processor lease not found');
+  }
+  if (lease.state === 'released' || lease.state === 'failed') {
+    throw new TraceProcessorProxyError(409, `Trace processor lease is ${lease.state}`);
+  }
+
+  const drained = store.beginDraining(scope, lease.id);
+  res.json({
+    success: true,
+    action: 'drain',
+    reason: leaseAdminReason(req),
+    lease: drained,
+  });
+}
+
+async function restartLease(req: Request, res: Response): Promise<void> {
+  const leaseId = sanitizeContextId(req.params.leaseId);
+  if (!leaseId) {
+    res.status(400).json({ success: false, error: 'leaseId is required' });
+    return;
+  }
+
+  const context = requireRequestContext(req);
+  ensureRuntimeManage(context);
+  const scope = leaseScopeFromContext(context);
+  const store = getTraceProcessorLeaseStore();
+  const lease = store.getLeaseById(scope, leaseId);
+  if (!lease) {
+    throw new TraceProcessorProxyError(404, 'Trace processor lease not found');
+  }
+  if (CONFLICT_STATES.has(lease.state)) {
+    throw new TraceProcessorProxyError(409, `Trace processor lease is ${lease.state}`);
+  }
+
+  const traceProcessorService = getTraceProcessorService();
+  const trace = await traceProcessorService.getOrLoadTrace(lease.traceId);
+  if (!trace) {
+    throw new TraceProcessorProxyError(404, 'Trace not found for trace processor lease');
+  }
+
+  await traceProcessorService.restartLease(lease.traceId, lease.id, lease.mode, scope);
+  const restarted = store.getLeaseById(scope, lease.id);
+  res.json({
+    success: true,
+    action: 'restart',
+    reason: leaseAdminReason(req),
+    lease: restarted,
+  });
+}
+
 function sendProxyError(res: Response, error: unknown): void {
   if (error instanceof TraceProcessorProxyError) {
     if (error.statusCode === 403) {
@@ -467,6 +541,22 @@ router.post('/:leaseId/status', express.raw({ type: '*/*', limit: serverConfig.b
 router.post('/:leaseId/query', express.raw({ type: '*/*', limit: serverConfig.bodyLimit }), async (req, res) => {
   try {
     await forwardQueryRpc(req, res);
+  } catch (error) {
+    sendProxyError(res, error);
+  }
+});
+
+router.post('/:leaseId/drain', express.json({ limit: '32kb' }), async (req, res) => {
+  try {
+    await drainLease(req, res);
+  } catch (error) {
+    sendProxyError(res, error);
+  }
+});
+
+router.post('/:leaseId/restart', express.json({ limit: '32kb' }), async (req, res) => {
+  try {
+    await restartLease(req, res);
   } catch (error) {
     sendProxyError(res, error);
   }

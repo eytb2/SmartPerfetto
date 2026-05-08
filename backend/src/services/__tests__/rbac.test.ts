@@ -35,8 +35,10 @@ describe('enterprise RBAC matrix', () => {
     expect(hasRbacPermission(context('workspace_admin'), 'trace:delete_any')).toBe(true);
     expect(hasRbacPermission(context('workspace_admin'), 'provider:manage_workspace')).toBe(true);
     expect(hasRbacPermission(context('workspace_admin'), 'provider:manage_org')).toBe(false);
+    expect(hasRbacPermission(context('workspace_admin'), 'runtime:manage')).toBe(true);
 
     expect(hasRbacPermission(context('org_admin'), 'provider:manage_org')).toBe(true);
+    expect(hasRbacPermission(context('org_admin'), 'runtime:manage')).toBe(true);
   });
 
   test('lets explicit scopes authorize API key contexts without granting unrelated permissions', () => {

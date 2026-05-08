@@ -224,6 +224,53 @@ describe('TraceProcessorService lease restart supervisor', () => {
     }
   });
 
+  it('allows an explicit admin restart of a ready lease processor', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-lease-admin-restart-'));
+    try {
+      const traceId = 'trace-admin-restart';
+      const tracePath = path.join(tmpDir, `${traceId}.trace`);
+      await fs.writeFile(tracePath, 'trace bytes');
+
+      db = new Database(':memory:');
+      applyEnterpriseMinimalSchema(db);
+      seedEnterpriseGraph(db, traceId);
+      const store = new TraceProcessorLeaseStore(db);
+      setTraceProcessorLeaseStoreForTests(store);
+      const leaseId = createActiveLease(store, traceId);
+
+      const service = new TraceProcessorService(tmpDir, {
+        backoffMs: [0],
+        jitterMs: 0,
+      });
+      await service.initializeUploadWithId(traceId, 'trace-admin-restart.trace', 11, tracePath);
+
+      const current = fakeProcessor('current-processor', traceId);
+      (service as any).processors.set(`${traceId}:lease:${leaseId}`, current);
+
+      const restarted = fakeProcessor('restarted-processor', traceId);
+      const createSpy = jest
+        .spyOn(TraceProcessorFactory, 'create')
+        .mockResolvedValue(restarted as any);
+
+      await expect(service.restartLease(traceId, leaseId, 'isolated', scope))
+        .resolves.toBe(restarted);
+
+      expect(createSpy).toHaveBeenCalledTimes(1);
+      expect(createSpy).toHaveBeenCalledWith(traceId, tracePath, expect.objectContaining({
+        processorKey: `${traceId}:lease:${leaseId}`,
+        leaseId,
+        leaseMode: 'isolated',
+      }));
+      expect(current.destroy).toHaveBeenCalledTimes(1);
+      expect(store.getLeaseById(scope, leaseId)).toMatchObject({
+        id: leaseId,
+        state: 'active',
+      });
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('marks the lease failed after the 1s/5s/15s backoff restart attempts all fail', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-lease-restart-fail-'));
     try {

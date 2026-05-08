@@ -637,6 +637,20 @@ export class TraceProcessorService extends EventEmitter {
     return this.createProcessor(traceId, { leaseId, mode });
   }
 
+  public async restartLease(
+    traceId: string,
+    leaseId: string,
+    mode: TraceProcessorLeaseMode | string,
+    leaseScope: EnterpriseRepositoryScope,
+  ): Promise<TraceProcessor> {
+    return this.restartLeaseProcessor(traceId, {
+      traceId,
+      leaseId,
+      mode,
+      leaseScope,
+    });
+  }
+
   private async restartLeaseProcessor(
     traceId: string,
     leaseContext: TraceProcessorLeaseQueryContext,
