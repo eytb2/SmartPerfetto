@@ -25,6 +25,7 @@ import { EnhancedSessionContext } from '../agent/context/enhancedSessionContext'
 import { FocusStore, FocusStoreSnapshot } from '../agent/context/focusStore';
 import { TraceAgentState } from '../agent/state/traceAgentState';
 import type { SessionStateSnapshot } from '../agentv3/sessionStateSnapshot';
+import { applyEnterpriseMinimalSchema } from './enterpriseSchema';
 
 // DB path is resolved lazily (in the constructor) rather than at module load.
 // Module-load resolution would capture `process.cwd()` at the time of the first
@@ -51,6 +52,8 @@ export class SessionPersistenceService {
 
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
+    this.db.pragma('busy_timeout = 5000');
+    this.db.pragma('foreign_keys = ON');
     this.initializeSchema();
   }
 
@@ -88,6 +91,7 @@ export class SessionPersistenceService {
 
       CREATE INDEX IF NOT EXISTS idx_session_id ON messages(session_id);
     `);
+    applyEnterpriseMinimalSchema(this.db);
   }
 
   /**

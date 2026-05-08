@@ -25,7 +25,7 @@
 - [x] 1.4 前端 `windowId` 注入 + pending trace key 加 windowId（`ai_panel.ts` / `session_manager.ts` / `backend_uploader.ts`）
 - [x] 1.5 SSE 路径明确收敛到 `fetch + ReadableStream` + `Authorization: Bearer` + `Last-Event-ID` cursor replay
 - [x] 1.6 `ProviderSnapshot` hash + resume 校验（`agentAnalyzeSessionService.prepareSession`），不再只比 `providerId`
-- [ ] 1.7 DB schema 最小切片：`organizations / workspaces / users / memberships / trace_assets / analysis_sessions / analysis_runs / agent_events / provider_snapshots`
+- [x] 1.7 DB schema 最小切片：`organizations / workspaces / users / memberships / trace_assets / analysis_sessions / analysis_runs / agent_events / provider_snapshots`
 - [ ] 1.8 三用户 + 双窗口回归脚本（落到 `backend/src/scripts/`），覆盖 D1/D2
 
 ### 0.2 主线 A：身份与权限（§18）
