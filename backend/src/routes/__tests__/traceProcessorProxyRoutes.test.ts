@@ -287,6 +287,54 @@ describe('trace processor lease proxy routes', () => {
     );
   });
 
+  it('preserves scoped lease routing for concurrent proxy queries', async () => {
+    const app = makeApp();
+    queryRawMock.mockImplementation(async (_traceId: string, body: Buffer) => {
+      if (body.equals(Buffer.from([1, 2, 3]))) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      return Buffer.from(body);
+    });
+
+    const [firstQuery, secondQuery] = await Promise.all([
+      ssoHeaders(
+        request(app)
+          .post(`/api/tp/${lease.id}/query`)
+          .set('Content-Type', 'application/x-protobuf')
+          .send(Buffer.from([1, 2, 3]))
+          .buffer(true)
+          .parse(binaryParser),
+      ),
+      ssoHeaders(
+        request(app)
+          .post(`/api/tp/${lease.id}/query`)
+          .set('Content-Type', 'application/x-protobuf')
+          .send(Buffer.from([4, 5, 6]))
+          .buffer(true)
+          .parse(binaryParser),
+      ),
+    ]);
+
+    expect(firstQuery.status).toBe(200);
+    expect(Buffer.from(firstQuery.body)).toEqual(Buffer.from([1, 2, 3]));
+    expect(secondQuery.status).toBe(200);
+    expect(Buffer.from(secondQuery.body)).toEqual(Buffer.from([4, 5, 6]));
+    expect(queryRawMock).toHaveBeenCalledTimes(2);
+    for (const call of queryRawMock.mock.calls) {
+      expect(call[0]).toBe('trace-a');
+      expect(call[2]).toEqual({
+        priority: 'p0',
+        leaseId: lease.id,
+        leaseMode: 'shared',
+        leaseScope: {
+          tenantId: 'tenant-a',
+          workspaceId: 'workspace-a',
+          userId: 'user-a',
+        },
+      });
+    }
+  });
+
   it('hides leases from other workspaces', async () => {
     const app = makeApp();
 

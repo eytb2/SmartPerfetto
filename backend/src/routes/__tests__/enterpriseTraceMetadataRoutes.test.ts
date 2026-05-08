@@ -67,14 +67,29 @@ function restoreEnvValue(key: string, value: string | undefined): void {
   }
 }
 
-function ssoHeaders(req: request.Test, workspaceId = 'workspace-a'): request.Test {
+function scopedSsoHeaders(
+  req: request.Test,
+  options: {
+    userId?: string;
+    email?: string;
+    tenantId?: string;
+    workspaceId?: string;
+    roles?: string;
+    scopes?: string;
+  } = {},
+): request.Test {
+  const userId = options.userId ?? 'user-a';
   return req
-    .set('X-SmartPerfetto-SSO-User-Id', 'user-a')
-    .set('X-SmartPerfetto-SSO-Email', 'user-a@example.test')
-    .set('X-SmartPerfetto-SSO-Tenant-Id', 'tenant-a')
-    .set('X-SmartPerfetto-SSO-Workspace-Id', workspaceId)
-    .set('X-SmartPerfetto-SSO-Roles', 'analyst')
-    .set('X-SmartPerfetto-SSO-Scopes', 'trace:read,trace:write,trace:download');
+    .set('X-SmartPerfetto-SSO-User-Id', userId)
+    .set('X-SmartPerfetto-SSO-Email', options.email ?? `${userId}@example.test`)
+    .set('X-SmartPerfetto-SSO-Tenant-Id', options.tenantId ?? 'tenant-a')
+    .set('X-SmartPerfetto-SSO-Workspace-Id', options.workspaceId ?? 'workspace-a')
+    .set('X-SmartPerfetto-SSO-Roles', options.roles ?? 'analyst')
+    .set('X-SmartPerfetto-SSO-Scopes', options.scopes ?? 'trace:read,trace:write,trace:download');
+}
+
+function ssoHeaders(req: request.Test, workspaceId = 'workspace-a'): request.Test {
+  return scopedSsoHeaders(req, { workspaceId });
 }
 
 function adminHeaders(req: request.Test, workspaceId = 'workspace-a'): request.Test {
@@ -355,6 +370,60 @@ describe('enterprise trace metadata routes', () => {
       'workspace-b',
     );
     expect(otherWorkspaceRes.status).toBe(404);
+  });
+
+  it('keeps simultaneous user uploads scoped while concurrent cleanup is blocked by active holders', async () => {
+    const app = makeApp();
+
+    const [uploadA, uploadB] = await Promise.all([
+      scopedSsoHeaders(
+        request(app)
+          .post('/api/traces/upload')
+          .attach('file', Buffer.from('trace-a'), 'same-name.trace'),
+        { userId: 'user-a', workspaceId: 'workspace-a' },
+      ),
+      scopedSsoHeaders(
+        request(app)
+          .post('/api/traces/upload')
+          .attach('file', Buffer.from('trace-b'), 'same-name.trace'),
+        { userId: 'user-b', workspaceId: 'workspace-b' },
+      ),
+    ]);
+
+    expect(uploadA.status).toBe(200);
+    expect(uploadB.status).toBe(200);
+    const traceA = uploadA.body.trace.id as string;
+    const traceB = uploadB.body.trace.id as string;
+    expect(traceA).not.toBe(traceB);
+
+    await expect(fs.readFile(
+      path.join(dataDir, 'tenant-a', 'workspace-a', 'traces', `${traceA}.trace`),
+      'utf-8',
+    )).resolves.toBe('trace-a');
+    await expect(fs.readFile(
+      path.join(dataDir, 'tenant-a', 'workspace-b', 'traces', `${traceB}.trace`),
+      'utf-8',
+    )).resolves.toBe('trace-b');
+
+    const [listA, listB, cleanupA] = await Promise.all([
+      scopedSsoHeaders(request(app).get('/api/traces'), { userId: 'user-a', workspaceId: 'workspace-a' }),
+      scopedSsoHeaders(request(app).get('/api/traces'), { userId: 'user-b', workspaceId: 'workspace-b' }),
+      adminHeaders(request(app).post('/api/traces/cleanup'), 'workspace-a'),
+    ]);
+
+    expect(listA.status).toBe(200);
+    expect(listA.body.traces.map((trace: any) => trace.id)).toEqual([traceA]);
+    expect(listB.status).toBe(200);
+    expect(listB.body.traces.map((trace: any) => trace.id)).toEqual([traceB]);
+    expect(cleanupA.status).toBe(409);
+    expect(cleanupA.body.blockedLeases).toEqual([
+      expect.objectContaining({
+        traceId: traceA,
+        holderCount: 1,
+        holderTypes: ['frontend_http_rpc'],
+      }),
+    ]);
+    expect(fakeTraceProcessorService.cleanupProcessorsForTraces).not.toHaveBeenCalled();
   });
 
   it('rejects uploads that exceed workspace trace quota before metadata is committed', async () => {

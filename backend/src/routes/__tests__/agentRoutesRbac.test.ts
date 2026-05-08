@@ -62,6 +62,19 @@ function analystHeaders(req: request.Test): request.Test {
     .set('X-SmartPerfetto-SSO-Scopes', 'trace:read,trace:write,agent:run,report:read');
 }
 
+function scopedAnalystHeaders(
+  req: request.Test,
+  options: { userId: string; workspaceId: string; email?: string },
+): request.Test {
+  return req
+    .set('X-SmartPerfetto-SSO-User-Id', options.userId)
+    .set('X-SmartPerfetto-SSO-Email', options.email ?? `${options.userId}@example.test`)
+    .set('X-SmartPerfetto-SSO-Tenant-Id', 'tenant-a')
+    .set('X-SmartPerfetto-SSO-Workspace-Id', options.workspaceId)
+    .set('X-SmartPerfetto-SSO-Roles', 'analyst')
+    .set('X-SmartPerfetto-SSO-Scopes', 'trace:read,trace:write,agent:run,report:read');
+}
+
 function restoreEnvValue(key: string, value: string | undefined): void {
   if (value === undefined) {
     delete process.env[key];
@@ -378,6 +391,145 @@ describe('agent route RBAC', () => {
         userId: 'analyst-user',
       }, { traceId })).toHaveLength(1);
     } finally {
+      leaseStore?.close();
+      setTraceProcessorLeaseStoreForTests(null);
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps concurrent analyzes isolated when one user cancels their own run', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-agent-concurrency-'));
+    let leaseStore: ReturnType<typeof getTraceProcessorLeaseStore> | null = null;
+    const sessionIds: string[] = [];
+    try {
+      const traces = new Map<string, { traceId: string; workspaceId: string; userId: string; tracePath: string }>();
+      for (const item of [
+        { traceId: 'trace-concurrent-a', workspaceId: 'workspace-a', userId: 'analyst-a' },
+        { traceId: 'trace-concurrent-b', workspaceId: 'workspace-b', userId: 'analyst-b' },
+      ]) {
+        const tracePath = path.join(tmpDir, `${item.traceId}.trace`);
+        await fs.writeFile(tracePath, `${item.traceId} bytes`);
+        traces.set(item.traceId, { ...item, tracePath });
+      }
+
+      delete process.env.SMARTPERFETTO_API_KEY;
+      process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+      process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+      process.env[ENTERPRISE_DB_PATH_ENV] = path.join(tmpDir, 'enterprise.sqlite');
+      process.env[ENTERPRISE_DATA_DIR_ENV] = path.join(tmpDir, 'data');
+      process.env.UPLOAD_DIR = path.join(tmpDir, 'uploads');
+
+      for (const item of traces.values()) {
+        await writeTraceMetadata({
+          id: item.traceId,
+          filename: `${item.traceId}.trace`,
+          size: 16,
+          uploadedAt: new Date().toISOString(),
+          status: 'ready',
+          path: item.tracePath,
+          tenantId: 'tenant-a',
+          workspaceId: item.workspaceId,
+          userId: item.userId,
+        });
+      }
+
+      setTraceProcessorServiceForTests({
+        getOrLoadTrace: jest.fn(async (traceId: string) => {
+          const item = traces.get(traceId);
+          if (!item) throw new Error(`missing trace fixture: ${traceId}`);
+          return {
+            id: item.traceId,
+            filename: `${item.traceId}.trace`,
+            size: 16,
+            filePath: item.tracePath,
+            uploadTime: new Date(),
+            status: 'ready',
+          };
+        }),
+        getTrace: jest.fn((traceId: string) => {
+          const item = traces.get(traceId);
+          if (!item) return undefined;
+          return {
+            id: item.traceId,
+            filename: `${item.traceId}.trace`,
+            size: 16,
+            filePath: item.tracePath,
+            uploadTime: new Date(),
+            status: 'ready',
+          };
+        }),
+        ensureProcessorForLease: jest.fn(async () => undefined),
+        runWithLease: jest.fn(() => new Promise<unknown>(() => undefined)),
+        query: jest.fn(async () => ({ columns: [], rows: [], durationMs: 1 })),
+      } as any);
+
+      const app = makeApp();
+      const [analyzeA, analyzeB] = await Promise.all([
+        scopedAnalystHeaders(
+          request(app).post('/api/agent/v1/analyze'),
+          { userId: 'analyst-a', workspaceId: 'workspace-a' },
+        ).send({ traceId: 'trace-concurrent-a', query: 'analyze trace a' }),
+        scopedAnalystHeaders(
+          request(app).post('/api/agent/v1/analyze'),
+          { userId: 'analyst-b', workspaceId: 'workspace-b' },
+        ).send({ traceId: 'trace-concurrent-b', query: 'analyze trace b' }),
+      ]);
+
+      expect(analyzeA.status).toBe(200);
+      expect(analyzeB.status).toBe(200);
+      sessionIds.push(analyzeA.body.sessionId, analyzeB.body.sessionId);
+      expect(analyzeA.body.sessionId).not.toBe(analyzeB.body.sessionId);
+      expect(analyzeA.body.runId).not.toBe(analyzeB.body.runId);
+
+      const [cancelA, statusB] = await Promise.all([
+        scopedAnalystHeaders(
+          request(app).post(`/api/agent/v1/${analyzeA.body.sessionId}/cancel`),
+          { userId: 'analyst-a', workspaceId: 'workspace-a' },
+        ),
+        scopedAnalystHeaders(
+          request(app).get(`/api/agent/v1/${analyzeB.body.sessionId}/status`),
+          { userId: 'analyst-b', workspaceId: 'workspace-b' },
+        ),
+      ]);
+
+      expect(cancelA.status).toBe(200);
+      expect(cancelA.body).toEqual(expect.objectContaining({
+        sessionId: analyzeA.body.sessionId,
+        status: 'failed',
+      }));
+      expect(statusB.status).toBe(200);
+      expect(statusB.body).toEqual(expect.objectContaining({
+        sessionId: analyzeB.body.sessionId,
+        status: 'running',
+      }));
+
+      const crossStatus = await scopedAnalystHeaders(
+        request(app).get(`/api/agent/v1/${analyzeB.body.sessionId}/status`),
+        { userId: 'analyst-a', workspaceId: 'workspace-a' },
+      );
+      expect(crossStatus.status).toBe(404);
+
+      const cancelB = await scopedAnalystHeaders(
+        request(app).post(`/api/agent/v1/${analyzeB.body.sessionId}/cancel`),
+        { userId: 'analyst-b', workspaceId: 'workspace-b' },
+      );
+      expect(cancelB.status).toBe(200);
+
+      leaseStore = getTraceProcessorLeaseStore();
+      expect(leaseStore.listLeases({
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-a',
+        userId: 'analyst-a',
+      }, { traceId: 'trace-concurrent-a' })).toHaveLength(1);
+      expect(leaseStore.listLeases({
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-b',
+        userId: 'analyst-b',
+      }, { traceId: 'trace-concurrent-b' })).toHaveLength(1);
+    } finally {
+      for (const sessionId of sessionIds) {
+        sessionContextManager.remove(sessionId);
+      }
       leaseStore?.close();
       setTraceProcessorLeaseStoreForTests(null);
       await fs.rm(tmpDir, { recursive: true, force: true });
