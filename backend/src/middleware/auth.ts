@@ -5,6 +5,7 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { ErrorResponse } from '../types';
+import { resolveFeatureConfig } from '../config';
 
 type RequestContextAuthType = 'sso' | 'api_key' | 'dev';
 
@@ -29,6 +30,7 @@ interface AuthenticatedRequest extends Request {
 }
 
 const API_KEY_ENV = 'SMARTPERFETTO_API_KEY';
+const SSO_TRUSTED_HEADERS_ENV = 'SMARTPERFETTO_SSO_TRUSTED_HEADERS';
 export const DEFAULT_TENANT_ID = 'default-dev-tenant';
 export const DEFAULT_WORKSPACE_ID = 'default-workspace';
 export const DEFAULT_DEV_USER_ID = 'dev-user-123';
@@ -37,6 +39,17 @@ const MAX_REQUESTS = Number.parseInt(process.env.SMARTPERFETTO_USAGE_MAX_REQUEST
 const MAX_TRACE_REQUESTS = Number.parseInt(process.env.SMARTPERFETTO_USAGE_MAX_TRACE_REQUESTS || '', 10);
 
 const usageTracker = new Map<string, { resetAt: number; total: number; trace: number }>();
+
+interface ResolvedIdentity {
+  userId: string;
+  email: string;
+  subscription: string;
+  authType: RequestContextAuthType;
+  tenantId?: string;
+  workspaceId?: string;
+  roles?: string[];
+  scopes?: string[];
+}
 
 const getProvidedApiKey = (req: Request): string | undefined => {
   const authHeader = req.headers.authorization;
@@ -62,9 +75,19 @@ const safeEquals = (a: string, b: string): boolean => {
 const hashApiKey = (apiKey: string): string =>
   crypto.createHash('sha256').update(apiKey).digest('hex').slice(0, 8);
 
+const truthyEnv = (value: string | undefined): boolean => {
+  if (!value) return false;
+  return ['1', 'true', 'yes', 'on', 'enabled'].includes(value.trim().toLowerCase());
+};
+
 const sanitizeContextId = (value: unknown): string => {
   if (typeof value !== 'string') return '';
   return value.trim().replace(/[^a-zA-Z0-9._:-]/g, '').slice(0, 128);
+};
+
+const sanitizeHeaderText = (value: unknown): string => {
+  if (typeof value !== 'string') return '';
+  return value.trim().replace(/[\r\n]/g, '').slice(0, 320);
 };
 
 const getHeaderValue = (req: Request, name: string): string => {
@@ -73,13 +96,39 @@ const getHeaderValue = (req: Request, name: string): string => {
   return typeof value === 'string' ? value : '';
 };
 
-const buildRequestContext = (
-  req: Request,
-  userId: string,
-  authType: RequestContextAuthType,
-): RequestContext => {
-  const tenantId = sanitizeContextId(getHeaderValue(req, 'x-tenant-id')) || DEFAULT_TENANT_ID;
-  const workspaceId = sanitizeContextId(getHeaderValue(req, 'x-workspace-id')) || DEFAULT_WORKSPACE_ID;
+const getFirstHeaderValue = (req: Request, names: string[]): string => {
+  for (const name of names) {
+    const value = getHeaderValue(req, name);
+    if (value.trim().length > 0) return value;
+  }
+  return '';
+};
+
+const parseHeaderList = (req: Request, names: string[], fallback: string[]): string[] => {
+  const raw = getFirstHeaderValue(req, names);
+  if (!raw.trim()) return fallback;
+  const parsed = raw
+    .split(',')
+    .map(value => sanitizeContextId(value))
+    .filter(Boolean);
+  return parsed.length > 0 ? parsed : fallback;
+};
+
+const defaultRolesForAuthType = (authType: RequestContextAuthType): string[] =>
+  authType === 'dev' ? ['org_admin'] : ['analyst'];
+
+const defaultScopesForAuthType = (authType: RequestContextAuthType): string[] =>
+  authType === 'dev'
+    ? ['*']
+    : ['trace:read', 'trace:write', 'agent:run', 'report:read'];
+
+const buildRequestContext = (req: Request, identity: ResolvedIdentity): RequestContext => {
+  const tenantId = identity.tenantId
+    || sanitizeContextId(getFirstHeaderValue(req, ['x-tenant-id', 'x-sso-tenant-id']))
+    || DEFAULT_TENANT_ID;
+  const workspaceId = identity.workspaceId
+    || sanitizeContextId(getFirstHeaderValue(req, ['x-workspace-id', 'x-sso-workspace-id']))
+    || DEFAULT_WORKSPACE_ID;
   const requestId =
     sanitizeContextId(getHeaderValue(req, 'x-request-id')) ||
     `req-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
@@ -88,15 +137,84 @@ const buildRequestContext = (
   return {
     tenantId,
     workspaceId,
-    userId,
-    authType,
-    roles: authType === 'dev' ? ['org_admin'] : ['analyst'],
-    scopes: authType === 'dev'
-      ? ['*']
-      : ['trace:read', 'trace:write', 'agent:run', 'report:read'],
+    userId: identity.userId,
+    authType: identity.authType,
+    roles: identity.roles ?? defaultRolesForAuthType(identity.authType),
+    scopes: identity.scopes ?? defaultScopesForAuthType(identity.authType),
     requestId,
     ...(windowId ? { windowId } : {}),
   };
+};
+
+const makeDevIdentity = (): ResolvedIdentity => ({
+  userId: DEFAULT_DEV_USER_ID,
+  email: 'dev@example.com',
+  subscription: 'pro',
+  authType: 'dev',
+});
+
+const makeApiKeyIdentity = (apiKey: string): ResolvedIdentity => ({
+  userId: `api-key-${hashApiKey(apiKey)}`,
+  email: '',
+  subscription: 'pro',
+  authType: 'api_key',
+});
+
+const resolveTrustedSsoIdentity = (req: Request): ResolvedIdentity | null => {
+  if (!truthyEnv(process.env[SSO_TRUSTED_HEADERS_ENV])) return null;
+
+  const userId = sanitizeContextId(getFirstHeaderValue(req, [
+    'x-smartperfetto-sso-user-id',
+    'x-sso-user-id',
+    'x-auth-request-user',
+  ]));
+  if (!userId) return null;
+
+  return {
+    userId,
+    email: sanitizeHeaderText(getFirstHeaderValue(req, [
+      'x-smartperfetto-sso-email',
+      'x-sso-email',
+      'x-auth-request-email',
+    ])),
+    subscription: 'enterprise',
+    authType: 'sso',
+    tenantId: sanitizeContextId(getFirstHeaderValue(req, [
+      'x-smartperfetto-sso-tenant-id',
+      'x-sso-tenant-id',
+      'x-tenant-id',
+    ])) || undefined,
+    workspaceId: sanitizeContextId(getFirstHeaderValue(req, [
+      'x-smartperfetto-sso-workspace-id',
+      'x-sso-workspace-id',
+      'x-workspace-id',
+    ])) || undefined,
+    roles: parseHeaderList(req, [
+      'x-smartperfetto-sso-roles',
+      'x-sso-roles',
+    ], defaultRolesForAuthType('sso')),
+    scopes: parseHeaderList(req, [
+      'x-smartperfetto-sso-scopes',
+      'x-sso-scopes',
+    ], defaultScopesForAuthType('sso')),
+  };
+};
+
+const attachIdentity = (req: AuthenticatedRequest, identity: ResolvedIdentity): void => {
+  req.user = {
+    id: identity.userId,
+    email: identity.email,
+    subscription: identity.subscription,
+  };
+  req.requestContext = buildRequestContext(req, identity);
+};
+
+const sendUnauthorized = (res: Response, details: string): void => {
+  const error: ErrorResponse = {
+    error: 'Unauthorized',
+    details,
+  };
+  res.status(401).json(error);
 };
 
 export const getRequestContext = (req: Request): RequestContext | undefined =>
@@ -118,35 +236,31 @@ export const authenticate = async (
   res: Response,
   next: NextFunction
 ): Promise<void> => {
+  const ssoIdentity = resolveTrustedSsoIdentity(req);
+  if (ssoIdentity) {
+    attachIdentity(req, ssoIdentity);
+    next();
+    return;
+  }
+
   const configuredKey = process.env[API_KEY_ENV];
   if (!configuredKey) {
-    // No auth configured: use mock user
-    req.user = {
-      id: DEFAULT_DEV_USER_ID,
-      email: 'dev@example.com',
-      subscription: 'pro',
-    };
-    req.requestContext = buildRequestContext(req, req.user.id, 'dev');
+    if (resolveFeatureConfig(process.env).enterprise) {
+      sendUnauthorized(res, 'Enterprise mode requires SSO or API key authentication');
+      return;
+    }
+    attachIdentity(req, makeDevIdentity());
     next();
     return;
   }
 
   const providedKey = getProvidedApiKey(req);
   if (!providedKey || !safeEquals(providedKey, configuredKey)) {
-    const error: ErrorResponse = {
-      error: 'Unauthorized',
-      details: 'Invalid or missing API key',
-    };
-    res.status(401).json(error);
+    sendUnauthorized(res, 'Invalid or missing API key');
     return;
   }
 
-  req.user = {
-    id: `api-key-${hashApiKey(providedKey)}`,
-    email: '',
-    subscription: 'pro',
-  };
-  req.requestContext = buildRequestContext(req, req.user.id, 'api_key');
+  attachIdentity(req, makeApiKeyIdentity(providedKey));
   next();
 };
 

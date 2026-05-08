@@ -29,7 +29,7 @@
 - [x] 1.8 三用户 + 双窗口回归脚本（落到 `backend/src/scripts/`），覆盖 D1/D2
 
 ### 0.2 主线 A：身份与权限（§18）
-- [ ] 2.1 `RequestContext` 接口与解析 middleware（SSO / API key / dev 三模式）
+- [x] 2.1 `RequestContext` 接口与解析 middleware（SSO / API key / dev 三模式）
 - [ ] 2.2 OIDC SSO 集成 + Onboarding flow（§15 全流程，含 audit）
 - [ ] 2.3 API key 管理（创建 / 撤销 / scope / 过期 / 审计）
 - [ ] 2.4 Membership / Role / RBAC 权限矩阵（§8.2）+ owner guard 全 route 覆盖

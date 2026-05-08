@@ -12,6 +12,8 @@ import {
 } from '../auth';
 
 const originalApiKey = process.env.SMARTPERFETTO_API_KEY;
+const originalEnterprise = process.env.SMARTPERFETTO_ENTERPRISE;
+const originalSsoTrustedHeaders = process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS;
 
 function makeProbeApp(middleware = authenticate): express.Express {
   const app = express();
@@ -31,6 +33,16 @@ afterEach(() => {
     delete process.env.SMARTPERFETTO_API_KEY;
   } else {
     process.env.SMARTPERFETTO_API_KEY = originalApiKey;
+  }
+  if (originalEnterprise === undefined) {
+    delete process.env.SMARTPERFETTO_ENTERPRISE;
+  } else {
+    process.env.SMARTPERFETTO_ENTERPRISE = originalEnterprise;
+  }
+  if (originalSsoTrustedHeaders === undefined) {
+    delete process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS;
+  } else {
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = originalSsoTrustedHeaders;
   }
 });
 
@@ -85,6 +97,64 @@ describe('authenticate RequestContext', () => {
     expect(res.body).toEqual({
       error: 'Unauthorized',
       details: 'Invalid or missing API key',
+    });
+  });
+
+  it('rejects dev fallback in enterprise mode when no SSO or API key identity is present', async () => {
+    delete process.env.SMARTPERFETTO_API_KEY;
+    process.env.SMARTPERFETTO_ENTERPRISE = 'true';
+
+    const res = await request(makeProbeApp()).get('/probe');
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({
+      error: 'Unauthorized',
+      details: 'Enterprise mode requires SSO or API key authentication',
+    });
+  });
+
+  it('ignores SSO identity headers unless trusted SSO headers are enabled', async () => {
+    delete process.env.SMARTPERFETTO_API_KEY;
+    process.env.SMARTPERFETTO_ENTERPRISE = 'true';
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'false';
+
+    const res = await request(makeProbeApp())
+      .get('/probe')
+      .set('X-SSO-User-Id', 'alice');
+
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('Unauthorized');
+  });
+
+  it('injects SSO RequestContext from trusted identity headers', async () => {
+    delete process.env.SMARTPERFETTO_API_KEY;
+    process.env.SMARTPERFETTO_ENTERPRISE = 'true';
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+
+    const res = await request(makeProbeApp())
+      .get('/probe')
+      .set('X-SmartPerfetto-SSO-User-Id', 'user<>alice')
+      .set('X-SmartPerfetto-SSO-Email', 'alice@example.test')
+      .set('X-SmartPerfetto-SSO-Tenant-Id', 'tenant-a')
+      .set('X-SmartPerfetto-SSO-Workspace-Id', 'workspace-a')
+      .set('X-SmartPerfetto-SSO-Roles', 'analyst,workspace_admin')
+      .set('X-SmartPerfetto-SSO-Scopes', 'trace:read,trace:write,agent:run')
+      .set('X-Window-Id', 'window-a');
+
+    expect(res.status).toBe(200);
+    expect(res.body.user).toMatchObject({
+      id: 'useralice',
+      email: 'alice@example.test',
+      subscription: 'enterprise',
+    });
+    expect(res.body.requestContext).toMatchObject({
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'useralice',
+      authType: 'sso',
+      roles: ['analyst', 'workspace_admin'],
+      scopes: ['trace:read', 'trace:write', 'agent:run'],
+      windowId: 'window-a',
     });
   });
 
