@@ -43,7 +43,7 @@ import {
 } from '../services/enterpriseTenantLifecycleService';
 import {
   buildTraceOwnerMetadata,
-  deleteTraceMetadata,
+  deleteTraceMetadataForContext,
   getTraceFilePath,
   getWritableTraceDirForContext,
   listTraceMetadataForContext,
@@ -1208,7 +1208,7 @@ router.delete('/:id', async (req, res) => {
       // File might not exist, continue
     }
 
-    await deleteTraceMetadata(id);
+    await deleteTraceMetadataForContext(id, context);
     console.log(`[Traces] Metadata deleted for ${id}`);
     recordTraceAudit(context, 'trace.deleted', id, {
       filename: metadata.filename,

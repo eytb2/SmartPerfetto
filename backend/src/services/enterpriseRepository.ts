@@ -15,19 +15,27 @@ export interface EnterpriseRepositoryScope {
 
 export type EnterpriseWorkspaceScopedTable =
   | 'trace_assets'
+  | 'trace_processor_leases'
   | 'analysis_sessions'
   | 'analysis_runs'
+  | 'conversation_turns'
   | 'agent_events'
   | 'runtime_snapshots'
-  | 'memory_entries';
+  | 'report_artifacts'
+  | 'memory_entries'
+  | 'skill_registry_entries';
 
 export const ENTERPRISE_WORKSPACE_SCOPED_TABLES: readonly EnterpriseWorkspaceScopedTable[] = [
   'trace_assets',
+  'trace_processor_leases',
   'analysis_sessions',
   'analysis_runs',
+  'conversation_turns',
   'agent_events',
   'runtime_snapshots',
+  'report_artifacts',
   'memory_entries',
+  'skill_registry_entries',
 ];
 
 export type EnterpriseQueryCriteria = Record<string, SqliteBindValue | undefined>;
@@ -47,6 +55,7 @@ export interface ListOptions {
 const IDENTIFIER_RE = /^[a-z][a-z0-9_]*$/;
 const SCOPE_COLUMNS = new Set(['tenant_id', 'workspace_id']);
 const IMMUTABLE_UPDATE_COLUMNS = new Set(['id', 'tenant_id', 'workspace_id']);
+const IMMUTABLE_WRITE_COLUMNS = new Set(['id', 'tenant_id', 'workspace_id']);
 
 function assertNonEmptyId(value: string, name: string): void {
   if (!value.trim()) {
@@ -147,6 +156,37 @@ function normalizeUpdateValues(values: EnterpriseUpdateValues): {
   return { assignments, params };
 }
 
+function normalizeWriteValues(values: EnterpriseUpdateValues): {
+  columns: string[];
+  placeholders: string[];
+  updateAssignments: string[];
+  params: Record<string, SqliteBindValue>;
+} {
+  const columns: string[] = [];
+  const placeholders: string[] = [];
+  const updateAssignments: string[] = [];
+  const params: Record<string, SqliteBindValue> = {};
+
+  for (const [column, value] of Object.entries(values)) {
+    if (value === undefined) continue;
+    assertIdentifier(column, 'write column');
+    if (IMMUTABLE_WRITE_COLUMNS.has(column)) {
+      throw new Error(`${column} cannot be written through a scoped repository`);
+    }
+    const paramName = `write_${column}`;
+    columns.push(column);
+    placeholders.push(`@${paramName}`);
+    updateAssignments.push(`${column} = excluded.${column}`);
+    params[paramName] = value;
+  }
+
+  if (columns.length === 0) {
+    throw new Error('At least one write value is required');
+  }
+
+  return { columns, placeholders, updateAssignments, params };
+}
+
 export class EnterpriseWorkspaceRepository<Row extends Record<string, unknown>> {
   constructor(
     private readonly db: Database.Database,
@@ -188,6 +228,29 @@ export class EnterpriseWorkspaceRepository<Row extends Record<string, unknown>> 
     `).run({
       ...where.params,
       ...update.params,
+    });
+    return result.changes;
+  }
+
+  upsertById(scope: EnterpriseRepositoryScope, id: string, values: EnterpriseUpdateValues): number {
+    assertNonEmptyId(id, 'id');
+    assertNonEmptyId(scope.tenantId, 'tenantId');
+    assertNonEmptyId(scope.workspaceId, 'workspaceId');
+    const write = normalizeWriteValues(values);
+    const result = this.db.prepare(`
+      INSERT INTO ${this.table}
+        (id, tenant_id, workspace_id, ${write.columns.join(', ')})
+      VALUES
+        (@insertId, @scopeTenantId, @scopeWorkspaceId, ${write.placeholders.join(', ')})
+      ON CONFLICT(id) DO UPDATE SET
+        ${write.updateAssignments.join(', ')}
+      WHERE tenant_id = @scopeTenantId
+        AND workspace_id = @scopeWorkspaceId
+    `).run({
+      insertId: id,
+      scopeTenantId: scope.tenantId,
+      scopeWorkspaceId: scope.workspaceId,
+      ...write.params,
     });
     return result.changes;
   }

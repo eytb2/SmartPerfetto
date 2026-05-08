@@ -6,6 +6,7 @@ import Database from 'better-sqlite3';
 import { type RequestContext } from '../../middleware/auth';
 import { applyEnterpriseMinimalSchema } from '../enterpriseSchema';
 import {
+  ENTERPRISE_WORKSPACE_SCOPED_TABLES,
   buildWorkspaceScopedWhere,
   createEnterpriseWorkspaceRepository,
   repositoryScopeFromRequestContext,
@@ -126,6 +127,61 @@ describe('enterprise repository scope abstraction', () => {
     expect(rows.map(row => row.id)).toEqual(['trace-a']);
   });
 
+  test('declares all id-based workspace scoped core tables as repository tables', () => {
+    expect(ENTERPRISE_WORKSPACE_SCOPED_TABLES).toEqual([
+      'trace_assets',
+      'trace_processor_leases',
+      'analysis_sessions',
+      'analysis_runs',
+      'conversation_turns',
+      'agent_events',
+      'runtime_snapshots',
+      'report_artifacts',
+      'memory_entries',
+      'skill_registry_entries',
+    ]);
+  });
+
+  test('upserts rows without allowing cross-scope ownership moves', () => {
+    const repo = createEnterpriseWorkspaceRepository<TraceAssetRow>(db!, 'trace_assets');
+    const scopeA = { tenantId: 'tenant-a', workspaceId: 'workspace-a' };
+    const scopeB = { tenantId: 'tenant-b', workspaceId: 'workspace-c' };
+
+    expect(repo.upsertById(scopeA, 'trace-new', {
+      local_path: '/tmp/trace-new.pftrace',
+      status: 'ready',
+      created_at: 123,
+    })).toBe(1);
+    expect(repo.getById(scopeA, 'trace-new')).toEqual(expect.objectContaining({
+      id: 'trace-new',
+      tenant_id: 'tenant-a',
+      workspace_id: 'workspace-a',
+      status: 'ready',
+    }));
+
+    expect(repo.upsertById(scopeA, 'trace-new', {
+      local_path: '/tmp/trace-new-v2.pftrace',
+      status: 'archived',
+      created_at: 124,
+    })).toBe(1);
+    expect(repo.getById(scopeA, 'trace-new')).toEqual(expect.objectContaining({
+      local_path: '/tmp/trace-new-v2.pftrace',
+      status: 'archived',
+    }));
+
+    expect(repo.upsertById(scopeA, 'trace-c', {
+      local_path: '/tmp/attempted-move.pftrace',
+      status: 'deleted',
+      created_at: 125,
+    })).toBe(0);
+    expect(repo.getById(scopeA, 'trace-c')).toBeNull();
+    expect(repo.getById(scopeB, 'trace-c')).toEqual(expect.objectContaining({
+      tenant_id: 'tenant-b',
+      workspace_id: 'workspace-c',
+      status: 'ready',
+    }));
+  });
+
   test('get, update, and delete stay scoped by tenant and workspace', () => {
     const repo = createEnterpriseWorkspaceRepository<TraceAssetRow>(db!, 'trace_assets');
     const scopeA = { tenantId: 'tenant-a', workspaceId: 'workspace-a' };
@@ -167,5 +223,11 @@ describe('enterprise repository scope abstraction', () => {
       'trace-a',
       { workspace_id: 'workspace-b' },
     )).toThrow('workspace_id cannot be updated through a scoped repository');
+
+    expect(() => repo.upsertById(
+      { tenantId: 'tenant-a', workspaceId: 'workspace-a' },
+      'trace-a',
+      { tenant_id: 'tenant-b', local_path: '/tmp/x', status: 'ready', created_at: 1 },
+    )).toThrow('tenant_id cannot be written through a scoped repository');
   });
 });

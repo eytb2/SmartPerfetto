@@ -8,6 +8,11 @@ import type Database from 'better-sqlite3';
 import type { RequestContext } from '../middleware/auth';
 import { openEnterpriseDb } from './enterpriseDb';
 import {
+  createEnterpriseWorkspaceRepository,
+  repositoryScopeFromRequestContext,
+  type EnterpriseRepositoryScope,
+} from './enterpriseRepository';
+import {
   enterpriseDbReadAuthorityEnabled,
   enterpriseDbWritesEnabled,
   legacyFilesystemWritesEnabled,
@@ -31,7 +36,7 @@ export interface TraceMetadata extends ResourceOwnerFields {
   expiresAt?: number;
 }
 
-interface TraceAssetRow {
+interface TraceAssetRow extends Record<string, unknown> {
   id: string;
   tenant_id: string;
   workspace_id: string;
@@ -164,6 +169,10 @@ function rowToTraceMetadata(row: TraceAssetRow): TraceMetadata {
   };
 }
 
+function isTraceAssetRowLive(row: TraceAssetRow, now = Date.now()): boolean {
+  return row.expires_at === null || row.expires_at > now;
+}
+
 function withEnterpriseTraceDb<T>(fn: (db: Database.Database) => T): T {
   const db = openEnterpriseDb();
   try {
@@ -250,32 +259,23 @@ function writeEnterpriseTraceMetadata(metadata: TraceMetadata): void {
       'trace',
       createdAt,
     );
-    db.prepare(`
-      INSERT INTO trace_assets
-        (id, tenant_id, workspace_id, owner_user_id, local_path, size_bytes, status, metadata_json, created_at, expires_at)
-      VALUES
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        tenant_id = excluded.tenant_id,
-        workspace_id = excluded.workspace_id,
-        owner_user_id = excluded.owner_user_id,
-        local_path = excluded.local_path,
-        size_bytes = excluded.size_bytes,
-        status = excluded.status,
-        metadata_json = excluded.metadata_json,
-        expires_at = excluded.expires_at
-    `).run(
+    const repo = createEnterpriseWorkspaceRepository<TraceAssetRow>(db, 'trace_assets');
+    const changes = repo.upsertById(
+      { tenantId, workspaceId, ...(ownerUserId ? { userId: ownerUserId } : {}) },
       metadata.id,
-      tenantId,
-      workspaceId,
-      ownerUserId,
-      enterpriseLocalPathForMetadata(metadata),
-      metadata.size,
-      metadata.status,
-      metadataJsonForRow(metadata),
-      createdAt,
-      expiresAt,
+      {
+        owner_user_id: ownerUserId,
+        local_path: enterpriseLocalPathForMetadata(metadata),
+        size_bytes: metadata.size,
+        status: metadata.status,
+        metadata_json: metadataJsonForRow(metadata),
+        created_at: createdAt,
+        expires_at: expiresAt,
+      },
     );
+    if (changes === 0) {
+      throw new Error('Trace metadata id already exists outside the repository scope');
+    }
   });
 }
 
@@ -304,6 +304,17 @@ function readEnterpriseTraceMetadata(traceId: string): TraceMetadata | null {
         AND (expires_at IS NULL OR expires_at > ?)
     `).get(traceId, Date.now());
     return row ? rowToTraceMetadata(row) : null;
+  });
+}
+
+function readEnterpriseTraceMetadataForScope(
+  traceId: string,
+  scope: EnterpriseRepositoryScope,
+): TraceMetadata | null {
+  return withEnterpriseTraceDb((db) => {
+    const repo = createEnterpriseWorkspaceRepository<TraceAssetRow>(db, 'trace_assets');
+    const row = repo.getById(scope, traceId);
+    return row && isTraceAssetRowLive(row) ? rowToTraceMetadata(row) : null;
   });
 }
 
@@ -366,15 +377,15 @@ export async function listTraceMetadata(): Promise<TraceMetadata[]> {
 export async function listTraceMetadataForContext(context: RequestContext): Promise<TraceMetadata[]> {
   if (enterpriseTraceStoreEnabled()) {
     return withEnterpriseTraceDb((db) => {
-      const rows = db.prepare<unknown[], TraceAssetRow>(`
-        SELECT *
-        FROM trace_assets
-        WHERE tenant_id = ?
-          AND workspace_id = ?
-          AND (expires_at IS NULL OR expires_at > ?)
-        ORDER BY created_at DESC
-      `).all(context.tenantId, context.workspaceId, Date.now());
-      return rows.map(rowToTraceMetadata).filter(metadata => canReadTraceResource(metadata, context));
+      const repo = createEnterpriseWorkspaceRepository<TraceAssetRow>(db, 'trace_assets');
+      const now = Date.now();
+      return repo.list(repositoryScopeFromRequestContext(context), {}, {
+        orderBy: 'created_at',
+        direction: 'DESC',
+      })
+        .filter(row => isTraceAssetRowLive(row, now))
+        .map(rowToTraceMetadata)
+        .filter(metadata => canReadTraceResource(metadata, context));
     });
   }
 
@@ -391,6 +402,27 @@ export async function deleteTraceMetadata(traceId: string): Promise<void> {
   if (enterpriseTraceDbWritesEnabled()) {
     withEnterpriseTraceDb((db) => {
       db.prepare('DELETE FROM trace_assets WHERE id = ?').run(traceId);
+    });
+  }
+  if (!legacyTraceMetadataWritesEnabled()) return;
+  const metadataPath = getTraceMetadataPath(traceId);
+  if (!metadataPath) return;
+  try {
+    await fs.unlink(metadataPath);
+  } catch {
+    // Already deleted.
+  }
+}
+
+export async function deleteTraceMetadataForContext(
+  traceId: string,
+  context: RequestContext,
+): Promise<void> {
+  if (!isSafeTraceId(traceId)) return;
+  if (enterpriseTraceDbWritesEnabled()) {
+    withEnterpriseTraceDb((db) => {
+      createEnterpriseWorkspaceRepository<TraceAssetRow>(db, 'trace_assets')
+        .deleteById(repositoryScopeFromRequestContext(context), traceId);
     });
   }
   if (!legacyTraceMetadataWritesEnabled()) return;
@@ -420,17 +452,10 @@ export async function readTraceMetadataForContext(
 ): Promise<TraceMetadata | null> {
   if (enterpriseTraceStoreEnabled()) {
     if (!isSafeTraceId(traceId)) return null;
-    const metadata = withEnterpriseTraceDb((db) => {
-      const row = db.prepare<unknown[], TraceAssetRow>(`
-        SELECT *
-        FROM trace_assets
-        WHERE id = ?
-          AND tenant_id = ?
-          AND workspace_id = ?
-          AND (expires_at IS NULL OR expires_at > ?)
-      `).get(traceId, context.tenantId, context.workspaceId, Date.now());
-      return row ? rowToTraceMetadata(row) : null;
-    });
+    const metadata = readEnterpriseTraceMetadataForScope(
+      traceId,
+      repositoryScopeFromRequestContext(context),
+    );
     return isTraceMetadataOwnedByContext(metadata, context) ? metadata : null;
   }
 
