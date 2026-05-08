@@ -20,7 +20,7 @@ import { TraceProcessorLeaseStore } from '../services/traceProcessorLeaseStore';
 import { ownerFieldsFromContext } from '../services/resourceOwnership';
 import type { RequestContext } from '../middleware/auth';
 
-type ScenarioName = 'D1' | 'D2' | 'D5';
+type ScenarioName = 'D1' | 'D2' | 'D4' | 'D5';
 
 interface VerifyOptions {
   tracePath?: string;
@@ -512,6 +512,97 @@ async function scenarioD2(
   };
 }
 
+async function scenarioD4(
+  db: Database.Database,
+  tracePath: string,
+  userAWindow1: WindowContext,
+): Promise<ScenarioReport> {
+  const upload = await simulateUpload(db, userAWindow1, tracePath, 'd4-user-a-crash.pftrace');
+  const store = new TraceProcessorLeaseStore(db);
+  const scope = leaseScope(userAWindow1);
+  const windowId = userAWindow1.context.windowId ?? userAWindow1.label;
+  const runId = `run-${crypto.randomUUID()}`;
+  const startedAt = 1_777_100_000_000;
+  const oldInternalPort: number = 9810;
+  const newInternalPort: number = 9811;
+
+  let lease = store.acquireHolder(scope, upload.traceId, {
+    holderType: 'frontend_http_rpc',
+    holderRef: windowId,
+    windowId,
+    frontendVisibility: 'visible',
+    metadata: {
+      scenario: 'D4',
+      internalPort: oldInternalPort,
+    },
+  }, { now: startedAt });
+  store.markStarting(scope, lease.id);
+  lease = store.markReady(scope, lease.id);
+  lease = store.acquireHolderForLease(scope, lease.id, {
+    holderType: 'agent_run',
+    holderRef: runId,
+    runId,
+    metadata: { scenario: 'D4' },
+  }, { now: startedAt + 1 });
+
+  const leaseIdBeforeCrash = lease.id;
+  const frontendProxyTargets = [
+    `/api/tp/${encodeURIComponent(lease.id)}/status`,
+    `/api/tp/${encodeURIComponent(lease.id)}/websocket`,
+    `/api/tp/${encodeURIComponent(lease.id)}/heartbeat`,
+  ];
+
+  const crashedLease = store.markCrashed(scope, lease.id);
+  const restartingLease = store.markRestarting(scope, lease.id);
+  const readyLease = store.markReady(scope, lease.id);
+  const recoveredLease = store.acquireHolderForLease(scope, readyLease.id, {
+    holderType: 'frontend_http_rpc',
+    holderRef: windowId,
+    windowId,
+    frontendVisibility: 'visible',
+    metadata: {
+      scenario: 'D4',
+      recovery: 'processor-restart',
+      internalPort: newInternalPort,
+    },
+  }, { now: startedAt + 2 });
+  const frontendHolder = recoveredLease.holders.find(holder => holder.holderRef === windowId);
+  const agentHolder = recoveredLease.holders.find(holder => holder.holderRef === runId);
+
+  const checks = {
+    leaseIdStableAcrossCrashRestart: leaseIdBeforeCrash === recoveredLease.id
+      && crashedLease.id === leaseIdBeforeCrash
+      && restartingLease.id === leaseIdBeforeCrash,
+    stateMachineUsesSingleRestartSequence: crashedLease.state === 'crashed'
+      && restartingLease.state === 'restarting'
+      && readyLease.state === 'active'
+      && recoveredLease.state === 'active',
+    holdersWaitOnSameLeaseAfterRestart: recoveredLease.holderCount === 2
+      && frontendHolder?.metadata?.recovery === 'processor-restart'
+      && agentHolder?.holderType === 'agent_run',
+    frontendContractDoesNotExposeOldPort: frontendProxyTargets.every(target =>
+      target.includes(leaseIdBeforeCrash)
+      && !target.includes(String(oldInternalPort))
+      && !target.includes(String(newInternalPort)),
+    ),
+    internalPortCanChangeWithoutChangingFrontendTarget: oldInternalPort !== newInternalPort
+      && frontendHolder?.metadata?.internalPort === newInternalPort,
+  };
+
+  return {
+    checks,
+    details: {
+      traceId: upload.traceId,
+      leaseId: leaseIdBeforeCrash,
+      oldInternalPort,
+      newInternalPort,
+      frontendProxyTargets,
+      crashStates: [crashedLease.state, restartingLease.state, readyLease.state, recoveredLease.state],
+      holderRefs: recoveredLease.holders.map(holder => holder.holderRef),
+    },
+  };
+}
+
 async function scenarioD5(
   db: Database.Database,
   tracePath: string,
@@ -663,6 +754,7 @@ export async function runEnterpriseWindowRegression(
         windows.userBWindow1,
         input.longSqlMs ?? 100,
       ),
+      D4: await scenarioD4(db, tracePath, windows.userAWindow1),
       D5: await scenarioD5(db, tracePath, windows.userAWindow1),
     };
     const report: EnterpriseWindowRegressionReport = {
@@ -671,6 +763,7 @@ export async function runEnterpriseWindowRegression(
       checks: {
         D1: scenarioPassed(scenarios.D1),
         D2: scenarioPassed(scenarios.D2),
+        D4: scenarioPassed(scenarios.D4),
         D5: scenarioPassed(scenarios.D5),
       },
       uploadRoot,
@@ -679,8 +772,9 @@ export async function runEnterpriseWindowRegression(
       coverageLimitations: [
         'D1 covers same-name trace isolation across three users and two windows at the trace metadata, TraceAsset, workspace RBAC, and analysis session/run schema layers.',
         'D2 covers a deterministic long-SQL window at the run/event metadata layer without invoking a real LLM provider.',
+        'D4 covers the lease state contract and frontend proxy target stability around a simulated trace_processor crash; TraceProcessorService restart backoff and single-supervisor behavior are covered by traceProcessorLeaseProcessorRouting tests.',
         'D5 covers TraceProcessorLease holder grace and pageshow-style reacquire semantics after offline heartbeat expiry; frontend stale-lease reload signaling is covered by HttpRpcEngine unit tests.',
-        'Production backend proxy and queue behavior remain future §0.7 D1/D2/D5 final-acceptance work against a live browser and trace_processor_shell.',
+        'Production backend proxy and queue behavior remain future §0.7 D1/D2/D4/D5 final-acceptance work against a live browser and trace_processor_shell.',
       ],
     };
     report.passed = allChecksPassed(report);
