@@ -96,6 +96,8 @@ OPENAI_MODEL=gpt-5.5
 OPENAI_LIGHT_MODEL=gpt-5.4-mini
 ```
 
+官方 OpenAI 直连应保持 `OPENAI_AGENTS_PROTOCOL=responses`。`chat_completions` 是兼容网关兜底，不是官方 OpenAI 的推荐路径；切到它会失去 Responses 侧的会话续接能力，例如 SmartPerfetto OpenAI runtime 使用的 `previousResponseId`。
+
 Ollama 或 OpenAI-compatible gateway 走 Chat Completions 协议：
 
 ```bash

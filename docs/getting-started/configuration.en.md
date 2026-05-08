@@ -94,6 +94,8 @@ OPENAI_MODEL=gpt-5.5
 OPENAI_LIGHT_MODEL=gpt-5.4-mini
 ```
 
+Keep official OpenAI direct connections on `OPENAI_AGENTS_PROTOCOL=responses`. `chat_completions` is a compatibility fallback for gateways, not the recommended official OpenAI path; switching to it disables Responses-side session continuation such as the `previousResponseId` used by the SmartPerfetto OpenAI runtime.
+
 Ollama or OpenAI-compatible gateways:
 
 ```bash
