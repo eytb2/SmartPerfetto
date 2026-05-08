@@ -1,59 +1,104 @@
 # Frontend Rules
 
-## Plugin location
+## Plugin Location
 
-`perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/`
+SmartPerfetto's Perfetto UI plugin lives at:
+
+```text
+perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/
+```
 
 Key files:
-- `ai_panel.ts` — Main UI panel
-- `sql_result_table.ts` — Data table (schema-driven from DataEnvelope)
-- `ai_service.ts` — Backend communication
-- `chart_visualizer.ts` — Chart visualization
-- `mermaid_renderer.ts` — Mermaid diagram rendering (lazy-load, CSP compliant)
-- `navigation_bookmark_bar.ts` — Navigation bookmarks
-- `scene_navigation_bar.ts` — Scene-level navigation
-- `session_manager.ts` — localStorage session persistence
-- `sse_event_handlers.ts` — SSE event dispatch (pure functions)
-- `assistant_api_v1.ts` — Agent API v1 client
-- `assistant_command_bus.ts` — Command bus for cross-component communication
-- `intervention_panel.ts` — User intervention UI
-- `scene_reconstruction.ts` — Scene reconstruction display
-- `settings_modal.ts` — Settings UI
-- `track_overlay.ts` — Track overlay rendering
-- `auto_pin_utils.ts` — Auto-pin utility functions
-- `data_formatter.ts` — Data formatting utilities
-- `conclusion_contract_aliases.ts` — Conclusion contract type aliases
-- `types.ts` — AIPanelState (incl. `analysisMode: 'fast' | 'full' | 'auto'`), Message, AISession, StreamingFlowState
-- `index.ts` — Plugin entry point
 
-Subdirectories:
-- `generated/` — Auto-generated types from backend (`data_contract.types.ts`, `frame_analysis.types.ts`, `jank_frame_detail.types.ts`) — do NOT edit manually, use `npm run generate:frontend-types`
-- `renderers/` — Data formatters (`formatters.ts`)
+- `index.ts`: plugin registration.
+- `ai_panel.ts`: main AI assistant panel.
+- `ai_sidebar_panel.ts`: sidebar integration.
+- `ai_floating_window.ts`, `ai_floating_state.ts`: floating assistant window.
+- `ai_service.ts`: backend communication.
+- `assistant_api_v1.ts`: Agent API v1 client.
+- `sse_event_handlers.ts`: SSE event handling.
+- `session_manager.ts`: localStorage session persistence.
+- `assistant_command_bus.ts`: cross-component command bus.
+- `provider_panel.ts`, `provider_form.ts`, `provider_switcher.ts`: provider UI.
+- `comparison_state_manager.ts`: reference trace comparison state.
+- `critical_path_extension.ts`: selected-slice critical path UI extension.
+- `ai_area_selection_tab.ts`: area/range selection workflow.
+- `sql_result_table.ts`: DataEnvelope table rendering.
+- `chart_visualizer.ts`: chart rendering.
+- `mermaid_renderer.ts`: same-origin Mermaid rendering.
+- `navigation_bookmark_bar.ts`, `scene_navigation_bar.ts`, `track_overlay.ts`,
+  `ai_timeline_notes.ts`: timeline/navigation helpers.
+- `generated/`: generated frontend types from backend contracts. Do not edit
+  manually.
+- `renderers/`: DataEnvelope formatters.
 
-## Mermaid chart support
+## User and Docker Contract
 
-- Lazy-load from same-origin `assets/mermaid.min.js` (CSP compliant)
-- Base64 encoded chart source in `data-mermaid-b64` attribute
-- Error handling + source code collapse display
+There are two frontend modes:
 
-## Analysis Mode Chip
+- `./start.sh`: default user path. Serves the committed pre-built `frontend/`
+  bundle and does not require the `perfetto/` submodule.
+- `./scripts/start-dev.sh`: UI development path. Builds the Perfetto UI
+  submodule from source and hot-reloads plugin changes.
 
-`ai_panel.ts::renderAnalysisModeChips()` renders a segmented control above the input wrapper:
-`[⚡ 快速] [🔍 完整] [🤖 智能]`
+Docker Hub images and source Docker builds also consume the committed
+`frontend/` bundle. They must not require contributors or users to build the
+Perfetto submodule.
 
-- `AIPanelState.analysisMode` is sticky via `localStorage['ai-analysis-mode']` (default `'auto'`).
-- `onAnalysisModeChange()` clears `agentSessionId` on mid-session mode switch so the backend opens a fresh SDK session (avoids 10-turn quick vs 60-turn full context mix) and appends a system message toast.
-- Fast chip is **disabled** under comparison mode (`state.referenceTraceId` set): `buildQuickSystemPrompt` does not accept `selectionContext` and the lightweight MCP registration skips comparison tools.
-- Request body: `options.analysisMode` is sent with every `POST /api/agent/v1/analyze`.
+## Updating Prebuilt Frontend
 
-## Perfetto submodule
+After any change under `perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/`:
 
-This is a forked Google project. See `rules/git.md` for push rules.
+1. Run `./scripts/start-dev.sh`.
+2. Verify the UI change in the browser at `http://localhost:10000`.
+3. Run relevant Perfetto UI tests/typecheck for the touched code.
+4. Run `./scripts/update-frontend.sh`.
+5. Commit the plugin source, `frontend/index.html`, the active `frontend/v*`
+   bundle, and any SmartPerfetto static assistant assets that changed.
 
-## Prebuilt frontend contract
+`scripts/update-frontend.sh` is the supported way to refresh `frontend/`. It
+must preserve:
 
-- Pure users, `./start.sh`, Docker Hub, and source Docker builds all serve the committed pre-built UI from the root `frontend/` directory.
-- Docker users must not need the Perfetto submodule, frontend dev dependencies, or `build.js --watch`; `Dockerfile` must copy `frontend/` into `/app/perfetto/out/ui/ui`.
-- After any change under `perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/`, run and commit `./scripts/update-frontend.sh` after browser verification.
-- `scripts/update-frontend.sh` must preserve SmartPerfetto static assistant assets in `frontend/index.html`: `assistant-flamegraph.css`, `assistant-flamegraph.js`, and `assistant-critical-path.js`.
-- The same script must remove stale sibling `frontend/v*` directories. Do not leave old prebuilt version directories for a later manual cleanup.
+- `assistant-flamegraph.css`
+- `assistant-flamegraph.js`
+- `assistant-critical-path.js`
+
+It also removes stale sibling `frontend/v*` directories. Do not leave old
+prebuilt version directories for a later manual cleanup.
+
+## Generated Types
+
+Do not manually edit:
+
+```text
+perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/generated/*.ts
+```
+
+Regenerate from backend contracts with:
+
+```bash
+cd backend
+npm run generate:frontend-types
+```
+
+## SSE and Session Semantics
+
+The plugin talks to `/api/agent/v1/*`.
+
+- `conclusion` is near terminal: show the answer as soon as it arrives.
+- `analysis_completed` is terminal: report generation has finished and report
+  metadata is available.
+- Mode/provider changes that alter SDK context must start a fresh backend agent
+  session instead of reusing a session with incompatible turn budgets or
+  provider state.
+
+## UI Implementation Conventions
+
+- Follow existing Perfetto UI plugin style and TypeScript patterns.
+- Keep SSE event transforms pure when possible; test them with focused unit
+  tests.
+- Keep DataEnvelope rendering schema-driven; do not special-case rows in the
+  panel when the backend contract can describe them.
+- Avoid card-on-card composition and decorative UI that reduces timeline/data
+  density.
+- Keep conversation messages copyable.

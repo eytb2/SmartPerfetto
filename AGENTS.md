@@ -1,239 +1,188 @@
-# SmartPerfetto Development Guide
+# SmartPerfetto Agent Guide
 
-AI-driven Perfetto analysis platform for Android performance data.
+Project-scoped instructions for AI coding agents working in this repository.
+Keep personal preferences, local credentials, and machine-only workflows out of
+this file. Put durable repository conventions here so collaborators can clone
+the project and get the same agent behavior.
 
-## Language
+Claude Code reads `CLAUDE.md`. Codex, OpenCode, Windsurf, Cline, and other
+agents commonly read `AGENTS.md`. Keep those two root files in sync. Tool
+adapter files such as Cursor, Copilot, and Gemini should stay short and point
+back to this canonical guide plus the detailed `.claude/rules/` files.
 
-用中英文思考，用中文回答。Insight 内容必须使用中文。
+## Response and Product Language
 
-## Compact Instructions
+- Reply to maintainers in the language they use in the task.
+- Repository documentation may be English or Chinese; follow the existing file.
+- SmartPerfetto user-facing AI answers, streamed progress, reports, and Insight
+  text default to Simplified Chinese. Respect `SMARTPERFETTO_OUTPUT_LANGUAGE`
+  and existing `localize(...)` / prompt-language templates when a task changes
+  runtime output.
 
-```
-Tech: TypeScript strict, follow existing patterns
-Dev:  tsx watch (backend) + build.js --watch (frontend) — auto-rebuild on save
-Test: by change category (see Verification table below) — regression mandatory for mcp/memory/report touchpoints + PR landing
-PR Gate: npm run verify:pr                              ← run before opening PR
-Start (users):      ./start.sh                          ← pre-built frontend, no submodule
-Start (UI dev):     ./scripts/start-dev.sh              ← requires perfetto submodule, hot reload
-Update prebuilt:    ./scripts/update-frontend.sh        ← run after modifying AI plugin UI
-Restart backend:    ./scripts/restart-backend.sh        ← .env/npm changes only
-Build backend:      cd backend && npm run build
-```
+## Project Snapshot
 
-## Post-change Dev Workflow
+SmartPerfetto is an AGPL-licensed, AI-assisted Android Perfetto analysis
+platform.
 
-Backend (`tsx watch`) auto-rebuilds on file save. Frontend hot-reload only works in `start-dev.sh` mode.
-
-**Default assumption**: user runs `./start.sh` (pre-built frontend).
-
-- **Backend `.ts` / `.yaml` / `.md` changes**: restart-backend.sh not needed — tsx watch reloads automatically. Tell user to refresh browser.
-- **Frontend plugin changes** (`ai_panel.ts`, `styles.scss` etc.): must be running `./scripts/start-dev.sh` for hot reload. After verifying, run `./scripts/update-frontend.sh` to update `frontend/`.
-- **Only use `./scripts/restart-backend.sh`** for: `.env` changes, `npm install`, or tsx watch stuck.
-- **Only use `./scripts/start-dev.sh`** for: modifying AI plugin UI (requires submodule).
-- **Default assumption**: User only refreshes browser after changes.
-
-## Prebuilt Frontend / Docker Rule
-
-- Pure users, `./start.sh`, Docker Hub, and source Docker builds all consume the committed pre-built UI in `frontend/`.
-- Docker users do not build the Perfetto submodule or run `build.js --watch`; `Dockerfile` must keep copying `frontend/` into `/app/perfetto/out/ui/ui`.
-- Any AI Assistant plugin UI change must be followed by `./scripts/update-frontend.sh` before committing so `frontend/index.html`, the active `frontend/v*` bundle, and SmartPerfetto static assistant assets stay in sync.
-- `scripts/update-frontend.sh` is the only supported way to refresh `frontend/`; it must preserve `assistant-flamegraph.css`, `assistant-flamegraph.js`, and `assistant-critical-path.js`, and remove stale `frontend/v*` directories.
-
-## Verification (done-conditions)
-
-Every task must satisfy these before completion:
-
-| Task Type | Done When |
-|-----------|-----------|
-| Contract / type-only change (e.g. `backend/src/types/sparkContracts.ts`) | `cd backend && npx tsc --noEmit` + relevant `__tests__/sparkContracts.test.ts` |
-| CRUD-only service (file IO, no agent path touched) | That service's `__tests__/<name>.test.ts` |
-| Touches mcp / memory / report / agent runtime | `cd backend && npm run test:scene-trace-regression` passes (6 canonical traces) |
-| Skill YAML change | `npm run validate:skills` passes + regression passes |
-| Strategy/template .md change | `npm run validate:strategies` passes + regression passes |
-| Build/type error | `npm run typecheck` passes in backend/ |
-| Before PR | `npm run verify:pr` passes from repo root |
-| Pre-commit | Run `/simplify` on changed code |
-
-## Health Stack
-
-Tools used by `/health` for the code quality dashboard:
-
-- typecheck: `cd backend && npm run typecheck`
-- test: `cd backend && npm run test:core`
-- lint: `npm run lint`
-- deadcode: `npm run deadcode`
-- shell: `npm run shellcheck` (requires `shellcheck` locally; CI installs it)
-
-`/health` composites these into a 0-10 score and appends a snapshot to `~/.gstack/projects/Gracker-SmartPerfetto/health-history.jsonl` for trend tracking.
-
-## Architecture Overview
-
-```
-Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
-                │                                     │
-                └───────── HTTP RPC (9100-9900) ──────┘
-                                  │
-                    trace_processor_shell (Shared)
+```text
+Perfetto UI @ :10000
+  com.smartperfetto.AIAssistant plugin
+        | SSE / HTTP
+        v
+Express backend @ :3000
+  runtime selector -> Claude Agent SDK or OpenAI Agents SDK
+  MCP tools / YAML Skills / Markdown Strategies / report generation
+        |
+        v
+trace_processor_shell HTTP RPC pool, ports 9100-9900
 ```
 
-**Core Concepts:**
-- **Claude Agent SDK runtime** — default orchestrator for Anthropic, Bedrock, Vertex, and Anthropic-compatible providers (20 MCP tools)
-- **OpenAI Agents SDK runtime** — OpenAI/OpenAI-compatible orchestrator reusing the same SmartPerfetto tool surface
-- Scene Classifier → scene-specific system prompts (12 scenes: scrolling/startup/anr/pipeline/interaction/touch-tracking/teaching/memory/game/overview/scroll-response/general)
-- Analysis logic in YAML Skills (`backend/skills/`) — L1→L2→L3→L4 layered results
-- SSE for real-time streaming
+Core stack:
 
-**Detailed rules by area:** See `.claude/rules/` for backend, frontend, skills, prompts, git, and testing rules.
+- Node.js 24 LTS, TypeScript strict mode, Express.
+- Forked Perfetto UI submodule under `perfetto/`.
+- Committed pre-built UI under `frontend/` for users and Docker images.
+- Runtime selector in `backend/src/agentRuntime/`.
+- Claude runtime in `backend/src/agentv3/`.
+- OpenAI Agents SDK runtime in `backend/src/agentOpenAI/`.
+- Assistant/session orchestration in `backend/src/assistant/`.
+- YAML Skill engine and assets under `backend/skills/`.
+- Markdown scene strategies and prompt templates under `backend/strategies/`.
 
-## Key Rules (NEVER / ALWAYS)
+## Start Commands
 
-1. **NEVER hardcode prompt content in TypeScript** — use `*.strategy.md` / `*.template.md` (see `rules/prompts.md`)
-2. **ALWAYS push perfetto submodule to `fork` remote**, never `origin` (see `rules/git.md`)
-3. **ALWAYS run the right test tier** after code changes — trace regression for mcp/memory/report touchpoints, full `verify:pr` before PR landing (see `rules/testing.md`)
-4. **ALWAYS check if file is auto-generated** before fixing build errors (see `rules/backend.md`)
-5. **ALWAYS update committed `frontend/` prebuilds after Perfetto UI plugin changes** before Docker/user-facing commits
-
-## API Endpoints
-
-**Agent (primary path):**
-- `POST /api/agent/v1/analyze` — Start analysis
-- `GET /api/agent/v1/:sessionId/stream` — SSE real-time stream
-- `GET /api/agent/v1/:sessionId/status` — Poll status
-- `POST /api/agent/v1/resume` — Resume analysis (multi-turn SDK context recovery)
-
-**Multi-turn & interaction:**
-- `GET /api/agent/v1/:sessionId/turns` — Get analysis turns
-- `POST /api/agent/v1/:sessionId/respond` — Multi-turn response
-- `POST /api/agent/v1/:sessionId/intervene` — User intervention
-- `POST /api/agent/v1/:sessionId/cancel` — Cancel analysis
-- `POST /api/agent/v1/:sessionId/interaction` — Handle interaction
-- `GET /api/agent/v1/:sessionId/focus` — Get focus app
-- `GET /api/agent/v1/:sessionId/report` — Get analysis report
-
-**Scene reconstruction:**
-- `POST /api/agent/v1/scene-reconstruct` — Start reconstruction
-- `GET /api/agent/v1/scene-reconstruct/:analysisId/stream` — SSE stream
-- `GET /api/agent/v1/scene-reconstruct/:analysisId/status` — Get status
-- `POST /api/agent/v1/scene-reconstruct/:analysisId/deep-dive` — Deep dive
-- `DELETE /api/agent/v1/scene-reconstruct/:analysisId` — Delete
-
-**Supporting:** `/api/agent/v1/scene-detect-quick`, `/api/agent/v1/teaching/pipeline`, `/api/agent/v1/logs/*`, `/api/agent/v1/sessions`, `/api/traces/*`, `/api/skills/*`, `/api/export/*`, `/api/sessions/*`
-
-## SSE Events (agentv3)
-
-| Event | Description |
-|-------|-------------|
-| progress | Phase transitions (starting/analyzing/concluding) |
-| agent_response | MCP tool results (SQL/Skill) |
-| answer_token | Final text streaming |
-| thought | Intermediate reasoning |
-| conclusion | Near-terminal — SDK result arrives, conclusion text ready |
-| analysis_completed | Terminal — HTML report generated (carries reportUrl) |
-| error | Exceptions |
-
-Note: agentv3 sends `conclusion` first (user sees result immediately), then `analysis_completed` follows after report generation.
-
-## Analysis Mode (fast / full / auto)
-
-`POST /api/agent/v1/analyze` accepts `options.analysisMode`:
-
-| Mode | Turns | MCP tools | Verifier / sub-agents | Typical cost |
-|------|:-----:|:---------:|:---:|---:|
-| `fast` | 10 | 3 lightweight (`execute_sql`, `invoke_skill`, `lookup_sql_schema`) | skipped | $0.05–0.25 |
-| `full` | 60 | 20 (full toolkit) | enabled | $0.3–1.0 |
-| `auto` (default) | routed | per chosen path | per chosen path | varies |
-
-`auto` routing order: `applyKeywordRules` (drill-down keyword → full / short confirm keyword → quick) → `applyHardRules` (selection / comparison / findings / prior-full / 7 deterministic scenes) → Haiku fallback.
-
-**Frontend** (`ai_panel.ts`): chip selector persisted in `localStorage['ai-analysis-mode']`. Switching mode mid-session clears `agentSessionId` so the backend opens a fresh SDK session (avoids 10-turn quick / 60-turn full context mix).
-
-**Known limitation**: fast mode + heavy query (e.g. `分析启动性能`) can exhaust the 10-turn budget when Claude calls `invoke_skill` and spends turns parsing large (~200 KB) skill JSON. Prefer `execute_sql` for simple factual queries in fast mode, or steer heavy queries to full mode.
-
-## Session Management
-
-- In-memory `Map<sessionId, AnalysisSession>` with 30-min cleanup
-- SDK session ID persisted to `logs/claude_session_map.json` (debounced, 24h TTL)
-- Multi-turn: reuse sessionId, agentv3 uses `resume: sdkSessionId` for SDK context recovery
-- Concurrency: `activeAnalyses` Set prevents parallel analyze() on same session
-
-## Environment
+Use the same entry points contributors use:
 
 ```bash
-# backend/.env — see .env.example for full provider list (GLM/DeepSeek/Qwen/Kimi/Doubao/OpenAI/Gemini/Ollama...)
-PORT=3000
-# Local source runs can omit all AI credentials when `claude` already works.
-# ANTHROPIC_API_KEY=sk-ant-xxx              # Anthropic direct (X-Api-Key)
-# ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
-# ANTHROPIC_AUTH_TOKEN=sk-provider-xxx      # Claude Code-compatible provider token
-CLAUDE_MODEL=claude-sonnet-4-6             # Optional, or provider main model (e.g. deepseek-v4-pro)
-# CLAUDE_LIGHT_MODEL=claude-haiku-4-5       # Optional, or provider light model (e.g. deepseek-v4-flash)
-# CLAUDE_MAX_TURNS=60                     # Optional, full-mode turn budget
-# CLAUDE_QUICK_MAX_TURNS=10               # Optional, fast-mode turn budget
-# CLAUDE_MAX_BUDGET_USD=5                 # Optional, per-analysis budget cap (Anthropic only)
-# CLAUDE_EFFORT=high                      # Optional, SDK effort level (Anthropic only)
-# CLAUDE_SUB_AGENT_MODEL=sonnet           # Optional, sub-agent model (haiku/sonnet/opus/inherit)
-# Per-turn timeouts — raise for slower LLMs (DeepSeek / Ollama / GLM / Qwen)
-# CLAUDE_FULL_PER_TURN_MS=60000           # Optional, full-path per-turn budget (default 60s)
-# CLAUDE_QUICK_PER_TURN_MS=40000          # Optional, quick-path per-turn budget (default 40s)
-# CLAUDE_VERIFIER_TIMEOUT_MS=60000        # Optional, verifier LLM single-turn timeout (default 60s)
-# CLAUDE_CLASSIFIER_TIMEOUT_MS=30000      # Optional, query complexity classifier timeout (default 30s)
-# SMARTPERFETTO_API_KEY=xxx               # Optional, bearer token auth
-# SMARTPERFETTO_AGENT_RUNTIME=openai-agents-sdk  # Optional, explicit runtime override (claude-agent-sdk/openai-agents-sdk)
-
-# Agent safety limits (optional)
-# AGENT_SQL_MAX_ROWS=1000
-# AGENT_SQL_TABLE_CACHE_TTL_MS=300000
-# AGENT_TASK_TIMEOUT_MS=180000
-
-# Usage throttling (optional)
-# SMARTPERFETTO_USAGE_MAX_REQUESTS=200
-# SMARTPERFETTO_USAGE_MAX_TRACE_REQUESTS=100
-# SMARTPERFETTO_USAGE_WINDOW_MS=86400000
+./start.sh                         # default user/local source path; pre-built frontend
+./scripts/start-dev.sh             # Perfetto UI plugin development; requires submodule
+./scripts/start-dev.sh --quick     # restart dev services without a full frontend rebuild
+./scripts/update-frontend.sh       # refresh committed frontend/ after UI plugin changes
+./scripts/restart-backend.sh       # only after .env/dependency changes or stuck watcher
+cd backend && npm run build
 ```
 
-## Quick Start
+Default assumption: the user is running `./start.sh`, so backend `.ts`, Skill
+`.yaml`, and strategy/template `.md` changes normally require only a browser
+refresh. Do not tell users to restart the backend unless `.env`, dependencies,
+or the watcher state changed.
 
-```bash
-./scripts/start-dev.sh                       # Default: download prebuilt trace_processor_shell (~5s)
-./scripts/start-dev.sh --build-from-source   # Force source build (use after modifying perfetto C++)
-# Backend @ :3000, Frontend @ :10000
-```
+## Source Boundaries
 
-`trace_processor_shell` is acquired by `scripts/start-dev.sh` in this order: cached binary at
-`perfetto/out/ui/trace_processor_shell` → version-pinned LUCI prebuilt (SHA256-verified) → source
-build fallback. Pin source of truth: `scripts/trace-processor-pin.env` (shared with `Dockerfile`
-and the CI workflow). When upgrading the perfetto submodule (e.g. v54 → v55), update
-`PERFETTO_VERSION` and recompute the 4 per-platform SHA256s in that file (instructions inline).
+Important paths:
 
-## Common Issues
+- `backend/src/index.ts`: Express bootstrap and route registration.
+- `backend/src/routes/agentRoutes.ts`: primary `POST /api/agent/v1/analyze`
+  flow and SSE session endpoints.
+- `backend/src/assistant/application/agentAnalyzeSessionService.ts`: session
+  creation, reuse, provider pinning, and persistence recovery.
+- `backend/src/agentRuntime/runtimeSelection.ts`: runtime selection from active
+  Provider Manager profile, persisted snapshot, env override, or default.
+- `backend/src/agentv3/claudeRuntime.ts`: Claude Agent SDK orchestrator.
+- `backend/src/agentOpenAI/openAiRuntime.ts`: OpenAI Agents SDK orchestrator.
+- `backend/src/agentv3/claudeMcpServer.ts` and `mcpToolRegistry.ts`: shared MCP
+  tool surface used by both runtime families.
+- `backend/src/services/skillEngine/`: YAML Skill execution.
+- `perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/`: SmartPerfetto UI
+  plugin source.
+- `frontend/`: committed pre-built UI bundle consumed by `./start.sh`, Docker
+  Hub images, and source Docker builds.
+- `.claude/rules/`: detailed project rules by area; read the relevant file
+  before editing that area.
 
-| Issue | Solution |
-|-------|----------|
-| "AI backend not connected" | `./scripts/start-dev.sh` |
-| Empty data | Check stepId matches YAML `id:` |
-| Port conflict | `pkill -f trace_processor_shell` |
-| Debug | Check `backend/logs/sessions/*.jsonl` |
+## Non-Negotiable Rules
 
-## Code Generation
+- Do not hardcode prompt content in TypeScript. Put scene strategy text in
+  `backend/strategies/*.strategy.md`, reusable prompt text in
+  `backend/strategies/*.template.md`, and deterministic trace analysis in
+  `backend/skills/**/*.skill.yaml`.
+- Do not manually edit generated files. Fix the generator/template instead.
+  Examples include `perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/generated/*.ts`,
+  `dist/`, checked-in generated bundles, and files marked `Generated` or
+  `Auto-generated`.
+- Any AI Assistant plugin UI change under `perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/`
+  must be verified in dev mode and followed by `./scripts/update-frontend.sh`
+  before committing, so `frontend/index.html` and the active `frontend/v*`
+  bundle remain in sync.
+- Docker users and `./start.sh` users consume `frontend/`; they do not build the
+  Perfetto submodule.
+- When changing `AnalysisOptions`, also update the explicit whitelist in
+  `backend/src/routes/agentRoutes.ts` before calling `orchestrator.analyze(...)`.
+  New fields do not propagate automatically.
+- For Provider Manager / runtime work, preserve provider pinning semantics:
+  active provider wins for new sessions, explicit `providerId` wins for that
+  request, persisted sessions restore their saved runtime/provider snapshot, and
+  `providerId: null` means env/default fallback.
+- Never push a root commit that points at a local-only `perfetto/` submodule
+  commit.
 
-When fixing L10n or code generation issues, always fix the generator script/template, not the generated output.
+## Verification Matrix
 
-## Skill routing
+Run the smallest command that proves the change, and run the full PR gate before
+opening or landing a PR.
 
-When the user's request matches an available skill, ALWAYS invoke it using the Skill
-tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
-The skill has specialized workflows that produce better results than ad-hoc answers.
+| Change type | Required verification |
+| --- | --- |
+| Docs-only, no runtime-read files | `git diff --check` |
+| Build/type fix | `cd backend && npm run typecheck` plus the affected test tier |
+| Contract/type-only change | `cd backend && npx tsc --noEmit` plus the relevant contract tests |
+| CRUD-only service, no agent/runtime path | That service's `__tests__/<name>.test.ts` |
+| MCP, memory, report, provider, session, or agent runtime | `cd backend && npm run test:scene-trace-regression` |
+| Skill YAML | `cd backend && npm run validate:skills` plus scene trace regression |
+| Strategy/template Markdown | `cd backend && npm run validate:strategies` plus scene trace regression |
+| Frontend generated types | `cd backend && npm run generate:frontend-types` plus relevant frontend/backend tests |
+| AI plugin UI | dev-server browser verification, relevant `perfetto/ui` tests/typecheck, then `./scripts/update-frontend.sh` |
+| Before PR | `npm run verify:pr` from the repository root |
 
-Key routing rules:
-- Product ideas, "is this worth building", brainstorming → invoke office-hours
-- Bugs, errors, "why is this broken", 500 errors → invoke investigate
-- Ship, deploy, push, create PR → invoke ship
-- QA, test the site, find bugs → invoke qa
-- Code review, check my diff → invoke review
-- Update docs after shipping → invoke document-release
-- Weekly retro → invoke retro
-- Design system, brand → invoke design-consultation
-- Visual audit, design polish → invoke design-review
-- Architecture review → invoke plan-eng-review
-- Save progress, checkpoint, resume → invoke checkpoint
-- Code quality, health check → invoke health
+`npm run verify:pr` runs root quality checks, Rust checks, backend Skill and
+Strategy validation, typecheck, build, CLI package checks, core tests,
+trace-processor availability, and the 6-trace scene regression gate.
+
+## Git and Submodule Rules
+
+- Root remote is `origin` (`Gracker/SmartPerfetto`).
+- `perfetto/` is a submodule fork of Google Perfetto.
+- Inside `perfetto/`, push SmartPerfetto changes to the `fork` remote, never to
+  upstream `origin`.
+- Submodule landing order: commit in `perfetto/`, push to `fork`, return to root,
+  update `frontend/` if UI output changed, stage the gitlink and root artifacts,
+  then commit and push root.
+- Worktrees may contain user changes. Do not revert unrelated local edits.
+
+## API Surface
+
+Primary agent endpoints are under `/api/agent/v1`:
+
+- `POST /api/agent/v1/analyze`
+- `GET /api/agent/v1/:sessionId/stream`
+- `GET /api/agent/v1/:sessionId/status`
+- `GET /api/agent/v1/:sessionId/turns`
+- `POST /api/agent/v1/:sessionId/respond`
+- `POST /api/agent/v1/:sessionId/intervene`
+- `POST /api/agent/v1/:sessionId/cancel`
+- `GET /api/agent/v1/:sessionId/report`
+- `POST /api/agent/v1/resume`
+- `POST /api/agent/v1/scene-reconstruct`
+
+Supporting APIs include `/api/traces`, `/api/skills`, `/api/reports`,
+`/api/export`, `/api/v1/providers`, `/api/memory`, `/api/cases`, `/api/rag`,
+`/api/baselines`, `/api/ci`, `/api/flamegraph`, and `/api/critical-path`.
+
+Main SSE events: `progress`, `agent_response`, `thought`, `answer_token`,
+`conclusion`, `analysis_completed`, and `error`. The `conclusion` event is near
+terminal and may arrive before report generation completes; `analysis_completed`
+is terminal and carries report metadata.
+
+## Detailed Rule Files
+
+Read these when touching the corresponding area:
+
+- `.claude/rules/backend.md`
+- `.claude/rules/frontend.md`
+- `.claude/rules/prompts.md`
+- `.claude/rules/skills.md`
+- `.claude/rules/testing.md`
+- `.claude/rules/git.md`
+
+If these files drift from code, update the rules in the same change that changes
+the architecture or workflow.

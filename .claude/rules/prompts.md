@@ -1,36 +1,79 @@
-# Prompt Content Rules
+# Prompt and Strategy Rules
 
-## NEVER hardcode prompt content in TypeScript files
+## No Prompt Content in TypeScript
 
-All prompt content must live in Markdown files, never in TypeScript source:
+Do not hardcode durable prompt instructions in TypeScript. TypeScript should
+load, validate, substitute, route, and assemble prompt assets. The content lives
+in Markdown strategy/template files.
 
-- Scene strategies → `backend/strategies/*.strategy.md` (YAML frontmatter + markdown body, 12 scenes). Frontmatter may include `phase_hints` for mid-analysis restatement injection.
-- Selection context → `backend/strategies/selection-*.template.md` (uses `{{variable}}` placeholders)
-- Prompt templates → `backend/strategies/prompt-*.template.md` and `arch-*.template.md`
-- Knowledge templates → `backend/strategies/knowledge-*.template.md` (6 templates: rendering-pipeline, binder-ipc, gc-dynamics, cpu-scheduler, thermal-throttling, lock-contention) — loaded on-demand by `lookup_knowledge` MCP tool
-- TypeScript only does: template loading, variable substitution, structural wiring
+Runtime prompt assets:
 
-## Template system
+- Scene strategies: `backend/strategies/*.strategy.md`
+- Prompt templates: `backend/strategies/prompt-*.template.md`
+- Architecture templates: `backend/strategies/arch-*.template.md`
+- Selection templates: `backend/strategies/selection-*.template.md`
+- Knowledge templates: `backend/strategies/knowledge-*.template.md`
+- Comparison methodology: `backend/strategies/comparison-methodology.template.md`
 
-- `strategyLoader.ts` provides: `getStrategyContent()`, `loadPromptTemplate()`, `loadSelectionTemplate()`, `renderTemplate()`, `getPhaseHints()`
-- `loadSelectionTemplate(kind)` delegates to `loadPromptTemplate('selection-' + kind)` — unified cache
-- Variables use `{{variable}}` syntax in templates
-- Skill parameters use `${param|default}` syntax in YAML
+Current strategy set is discovered from strategy frontmatter through
+`strategyLoader.ts`; do not duplicate the scene list in TypeScript when the
+frontmatter can be the source of truth.
 
-## Content System (dual-track)
+## Runtime Content Paths
 
-**Path 1: `.md` → System Prompt (Claude's "brain")**
+SmartPerfetto uses two content tracks:
+
+```text
+Markdown strategies/templates
+  -> strategyLoader.ts
+  -> system prompt / quick prompt / classifier prompt
+  -> agent runtime
+
+YAML Skills
+  -> invoke_skill MCP tool
+  -> SkillExecutor
+  -> SQL / trace_processor_shell
+  -> DataEnvelope / DisplayResult
 ```
-classifyScene(query) → SceneType (from strategy.md frontmatter keywords)
-    → buildSystemPrompt() → assembles: prompt-role + arch-* + prompt-methodology({{sceneStrategy}}) + selection-* + prompt-output-format
-    → System Prompt → Claude Agent SDK
+
+Strategies shape agent behavior. Skills collect deterministic evidence. Keep
+that boundary intact.
+
+## Template Syntax
+
+- Prompt/template variables use `{{variable}}`.
+- Skill YAML parameter substitution uses `${param|default}`.
+- Strategy frontmatter may include `keywords`, `compound_patterns`, `priority`,
+  and `phase_hints`.
+
+`strategyLoader.ts` owns loading, frontmatter parsing, template rendering, cache
+behavior, and phase hint access. Update it and its tests when adding template
+syntax or frontmatter fields.
+
+## Language Output
+
+Runtime output language is controlled by `SMARTPERFETTO_OUTPUT_LANGUAGE`.
+
+- Default: `zh-CN`.
+- English override: `en`.
+- Use `backend/strategies/prompt-language-zh.template.md` and
+  `prompt-language-en.template.md`.
+- For TypeScript-generated runtime text, use `localize(...)` from
+  `backend/src/agentv3/outputLanguage.ts`.
+
+Do not reintroduce hardcoded English-only or Chinese-only runtime messages in
+paths that stream to users, reports, or insights.
+
+## Validation
+
+After changing strategies/templates:
+
+```bash
+cd backend
+npm run validate:strategies
+npm run test:scene-trace-regression
 ```
 
-**Path 2: `.skill.yaml` → MCP tool execution (Claude's "hands")**
-```
-invoke_skill(skillId, params) → skillExecutor.execute()
-    → YAML steps → ${param|default} substitution → SQL → trace_processor
-    → DisplayResult[] (L1-L4) → DataEnvelope → SSE → frontend
-```
-
-**Hot reload:** In DEV mode, changes to `.md` or `.yaml` take effect on browser refresh. No backend restart needed.
+If the change affects startup, scrolling, Flutter, comparison, selection,
+system prompt, verifier, or MCP tool behavior, also run the relevant Agent SSE
+e2e command from `.claude/rules/testing.md`.

@@ -1,52 +1,85 @@
 # YAML Skill Rules
 
-## Skill types
+## Role of Skills
 
-atomic, composite, iterator, parallel, conditional
+Skills are deterministic trace-analysis programs. They are the agent's evidence
+collection layer, not a place for open-ended prompt prose.
 
-## Layered results (L1-L4)
+Location:
 
-- **L1 (overview):** Aggregated metrics — `display.level: overview/summary`
-- **L2 (list):** Data lists — `display.level: list/detail` + expandableData
-- **L3 (diagnosis):** Per-frame diagnosis — iterator over jank frames
-- **L4 (deep):** Detailed analysis — `display.level: deep/frame`
+```text
+backend/skills/
+  atomic/       # single-purpose SQL/evidence steps
+  composite/    # multi-step scene analyses
+  deep/         # deeper diagnostics
+  pipelines/    # rendering-pipeline detection and teaching
+  _template/    # skill authoring templates
+```
 
-## Parameter substitution
+The repository currently contains 200+ skill/config YAML files. Avoid hardcoding
+counts in code or docs unless a test enforces them.
 
-Skills receive parameters via `${param|default}` syntax:
+## Skill Types and Layers
+
+Common skill types:
+
+- `atomic`
+- `composite`
+- `iterator`
+- `parallel`
+- `conditional`
+
+Layered results:
+
+- L1 overview: aggregated metrics, `display.level: overview` or `summary`.
+- L2 list/detail: tables and expandable rows.
+- L3 diagnosis: per-frame or per-event diagnosis, often iterator output.
+- L4 deep: detailed frame/slice/callstack evidence.
+
+Keep DataEnvelope output self-describing so frontend rendering stays generic.
+
+## Parameter and Display Contracts
+
+Skill parameters use:
+
 ```yaml
-inputs:
-  - name: max_frames_per_session
-    type: number
-    required: false
-steps:
-  - id: diagnose
-    type: iterator
-    max_items: "${max_frames_per_session|8}"
+${param|default}
 ```
 
-## Skill locations
+DataEnvelope columns should use typed column metadata where possible:
 
-- `backend/skills/atomic/` — single-step detection (87 skills)
-- `backend/skills/composite/` — combined analysis (29 skills)
-- `backend/skills/deep/` — deep analysis (2 skills)
-- `backend/skills/pipelines/` — render pipeline detection + teaching (28 skills, excl. `_base.skill.yaml` template)
-- `backend/skills/modules/` — module config: app/framework/hardware/kernel (18 skills)
-- `backend/skills/vendors/` — vendor-specific overrides via `.override.yaml` (pixel/samsung/xiaomi/honor/oppo/vivo/qualcomm/mtk)
-- `backend/skills/config/` — conclusion scene templates
+- `timestamp`
+- `duration`
+- `number`
+- `string`
+- `percentage`
+- `bytes`
 
-## DataEnvelope (v2.0)
+Click actions should be explicit, for example:
 
-Unified data contract — self-describing data, frontend renders by config:
-```typescript
-interface DataEnvelope<T> {
-  meta: { type, version, source, skillId?, stepId? };
-  data: T;  // { columns, rows, expandableData }
-  display: { layer, format, title, columns?: ColumnDefinition[] };
-}
+- `navigate_timeline`
+- `navigate_range`
+- `copy`
+
+## Runtime Boundaries
+
+- SQL should stay inside Skills or MCP SQL helpers, not UI code.
+- Skill docs and `doc_path` references must point at committed repository docs.
+- If a rendering-pipeline doc becomes runtime evidence, validate the matching
+  Skill after editing that doc.
+- Vendor or platform-specific behavior should be explicit in Skill inputs,
+  conditions, or overrides, not hidden in generic SQL.
+
+## Validation
+
+After changing Skill YAML:
+
+```bash
+cd backend
+npm run validate:skills
+npm run test:scene-trace-regression
 ```
 
-Column types: `timestamp`, `duration`, `number`, `string`, `percentage`, `bytes`
-Click actions: `navigate_timeline`, `navigate_range`, `copy`
-
-Type generation: `npm run generate:frontend-types` (auto-run by start-dev.sh)
+For scene-critical Skills, also run the relevant Agent SSE e2e check from
+`.claude/rules/testing.md` and inspect both `backend/test-output/` and
+`backend/logs/sessions/`.

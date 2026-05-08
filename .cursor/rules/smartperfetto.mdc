@@ -1,0 +1,21 @@
+---
+description: SmartPerfetto project architecture, workflow, and verification rules
+alwaysApply: true
+---
+
+# SmartPerfetto Cursor Rules
+
+Use the repository root `AGENTS.md` as the canonical project guide. Before code
+edits, read `AGENTS.md` and the relevant detailed rule file under
+`.claude/rules/`.
+
+Essential invariants:
+
+- Node.js 24 LTS, TypeScript strict mode, Express backend, forked Perfetto UI.
+- Do not hardcode prompt content in TypeScript; use `backend/strategies/` and
+  `backend/skills/`.
+- Default user startup is `./start.sh`; use `./scripts/start-dev.sh` only for
+  Perfetto UI plugin development.
+- After AI Assistant plugin UI changes, verify in the browser and run
+  `./scripts/update-frontend.sh` before committing.
+- Run the verification tier from `AGENTS.md`; before PR, run `npm run verify:pr`.
