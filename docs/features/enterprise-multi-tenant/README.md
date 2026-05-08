@@ -99,7 +99,7 @@
 - [x] 6.5 Security：ID 枚举、跨 tenant、无权限访问统一 404
 - [x] 6.6 Runtime：lease acquire / release / heartbeat / stale / crash recovery
 - [x] 6.7 Persistence：backend restart / queue shadow 恢复 / DB reconnect / SecretStore failure
-- [ ] 6.8 SSE：fetch-stream reconnect / cursor replay / terminal event 落库
+- [x] 6.8 SSE：fetch-stream reconnect / cursor replay / terminal event 落库
 - [x] 6.9 Migration：dry-run / 双写 / 切读 / 退役 / snapshot restore
 - [ ] 6.10 Regression：每次 PR 跑 `cd backend && npm run test:scene-trace-regression`
 - [ ] 6.11 PR Gate：合入前 `npm run verify:pr` 通过
@@ -149,6 +149,7 @@
 - [x] `docs/features/enterprise-multi-tenant/security-coverage-matrix.md`（§0.6.5 ID 枚举、跨 tenant/workspace、无权限资源访问覆盖证据）
 - [x] `docs/features/enterprise-multi-tenant/runtime-coverage-matrix.md`（§0.6.6 lease acquire/release/heartbeat/stale/crash recovery 覆盖证据）
 - [x] `docs/features/enterprise-multi-tenant/persistence-coverage-matrix.md`（§0.6.7 backend restart/queue shadow/DB reconnect/SecretStore failure 覆盖证据）
+- [x] `docs/features/enterprise-multi-tenant/sse-coverage-matrix.md`（§0.6.8 fetch-stream reconnect/cursor replay/terminal event 落库覆盖证据）
 
 ### 0.10 PR / 提交收尾（每次 PR 都要走）
 - [ ] 每个主线 / 子主线一个独立 PR；不跨主线串改动

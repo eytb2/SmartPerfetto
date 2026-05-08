@@ -375,7 +375,7 @@ describe('agent route RBAC', () => {
 
       const streamRes = await analystHeaders(
         request(makeApp())
-          .get(`/api/agent/v1/${sessionId}/stream`)
+          .get(`/api/agent/v1/${sessionId}/stream?lastEventId=100`)
           .set('Last-Event-ID', '98')
           .set('Accept', 'text/event-stream'),
       );
@@ -384,6 +384,17 @@ describe('agent route RBAC', () => {
       expect(streamRes.text).toContain('id: 99');
       expect(streamRes.text).toContain('event: analysis_completed');
       expect(streamRes.text).toContain('/api/reports/report-from-db');
+
+      const legacyQueryStreamRes = await analystHeaders(
+        request(makeApp())
+          .get(`/api/agent/v1/${sessionId}/stream?lastEventId=98`)
+          .set('Accept', 'text/event-stream'),
+      );
+
+      expect(legacyQueryStreamRes.status).toBe(200);
+      expect(legacyQueryStreamRes.text).toContain('id: 99');
+      expect(legacyQueryStreamRes.text).toContain('event: analysis_completed');
+      expect(legacyQueryStreamRes.text).toContain('/api/reports/report-from-db');
       leaseStore = getTraceProcessorLeaseStore();
       expect(leaseStore.listLeases({
         tenantId: 'tenant-a',
