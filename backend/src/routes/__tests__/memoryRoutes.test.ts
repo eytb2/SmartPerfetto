@@ -60,14 +60,22 @@ function restoreEnvValue(key: string, value: string | undefined): void {
   }
 }
 
-function ssoHeaders(req: request.Test): request.Test {
+function ssoHeaders(
+  req: request.Test,
+  input: {
+    userId?: string;
+    role?: string;
+    scopes?: string;
+  } = {},
+): request.Test {
+  const userId = input.userId ?? 'memory-admin';
   return req
-    .set('X-SmartPerfetto-SSO-User-Id', 'memory-admin')
-    .set('X-SmartPerfetto-SSO-Email', 'memory-admin@example.test')
+    .set('X-SmartPerfetto-SSO-User-Id', userId)
+    .set('X-SmartPerfetto-SSO-Email', `${userId}@example.test`)
     .set('X-SmartPerfetto-SSO-Tenant-Id', 'tenant-a')
     .set('X-SmartPerfetto-SSO-Workspace-Id', 'workspace-a')
-    .set('X-SmartPerfetto-SSO-Roles', 'workspace_admin')
-    .set('X-SmartPerfetto-SSO-Scopes', 'audit:read');
+    .set('X-SmartPerfetto-SSO-Roles', input.role ?? 'workspace_admin')
+    .set('X-SmartPerfetto-SSO-Scopes', input.scopes ?? 'audit:read');
 }
 
 function readEnterpriseAuditActions(dbPath: string): string[] {
@@ -96,6 +104,33 @@ function makeEntry(
 }
 
 describe('GET /api/memory', () => {
+  it('requires audit read permission for memory admin access in enterprise SSO', async () => {
+    process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+    process.env[ENTERPRISE_DB_PATH_ENV] = path.join(tmpDir, 'enterprise.sqlite');
+    delete process.env.SMARTPERFETTO_API_KEY;
+    memory.saveProjectMemoryEntry(makeEntry({entryId: 'a'}));
+
+    const analystHeaders = {
+      userId: 'memory-analyst',
+      role: 'analyst',
+      scopes: 'trace:read,report:read',
+    };
+    const listRes = await ssoHeaders(request(app).get('/api/memory'), analystHeaders);
+    expect(listRes.status).toBe(403);
+    expect(listRes.body.details).toContain('Memory administration requires audit:read permission');
+
+    const auditRes = await ssoHeaders(request(app).get('/api/memory/audit'), analystHeaders);
+    expect(auditRes.status).toBe(403);
+
+    const deleteRes = await ssoHeaders(request(app).delete('/api/memory/a'), analystHeaders);
+    expect(deleteRes.status).toBe(403);
+
+    const adminRes = await ssoHeaders(request(app).get('/api/memory'));
+    expect(adminRes.status).toBe(200);
+    expect(adminRes.body.success).toBe(true);
+  });
+
   it('lists entries with count', async () => {
     memory.saveProjectMemoryEntry(makeEntry({entryId: 'a'}));
     memory.saveProjectMemoryEntry(makeEntry({entryId: 'b'}));

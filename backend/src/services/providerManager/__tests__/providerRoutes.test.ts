@@ -60,14 +60,22 @@ describe('Provider Routes', () => {
     }
   }
 
-  function ssoHeaders(req: request.Test): request.Test {
+  function ssoHeaders(
+    req: request.Test,
+    input: {
+      userId?: string;
+      role?: string;
+      scopes?: string;
+    } = {},
+  ): request.Test {
+    const userId = input.userId ?? 'provider-admin';
     return req
-      .set('X-SmartPerfetto-SSO-User-Id', 'provider-admin')
-      .set('X-SmartPerfetto-SSO-Email', 'provider-admin@example.test')
+      .set('X-SmartPerfetto-SSO-User-Id', userId)
+      .set('X-SmartPerfetto-SSO-Email', `${userId}@example.test`)
       .set('X-SmartPerfetto-SSO-Tenant-Id', 'tenant-a')
       .set('X-SmartPerfetto-SSO-Workspace-Id', 'workspace-a')
-      .set('X-SmartPerfetto-SSO-Roles', 'workspace_admin')
-      .set('X-SmartPerfetto-SSO-Scopes', 'provider:write,audit:read');
+      .set('X-SmartPerfetto-SSO-Roles', input.role ?? 'workspace_admin')
+      .set('X-SmartPerfetto-SSO-Scopes', input.scopes ?? 'provider:write,audit:read');
   }
 
   function readEnterpriseAuditActions(dbPath: string): string[] {
@@ -94,6 +102,23 @@ describe('Provider Routes', () => {
     const xiaomi = res.body.templates.find((template: { type: string }) => template.type === 'xiaomi');
     expect(xiaomi.defaultConnection.claudeBaseUrl).toBe('https://token-plan-sgp.xiaomimimo.com/anthropic');
     expect(xiaomi.defaultConnection.openaiBaseUrl).toBe('https://token-plan-sgp.xiaomimimo.com/v1');
+  });
+
+  it('requires provider management permission for provider access in enterprise SSO', async () => {
+    process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+    delete process.env.SMARTPERFETTO_API_KEY;
+
+    const analystRes = await ssoHeaders(
+      request(app).get('/api/v1/providers'),
+      { userId: 'provider-analyst', role: 'analyst', scopes: 'trace:read,report:read' },
+    );
+    expect(analystRes.status).toBe(403);
+    expect(analystRes.body.details).toContain('Provider management requires provider:manage_workspace permission');
+
+    const adminRes = await ssoHeaders(request(app).get('/api/v1/providers/templates'));
+    expect(adminRes.status).toBe(200);
+    expect(adminRes.body.success).toBe(true);
   });
 
   it('POST + GET + DELETE lifecycle', async () => {

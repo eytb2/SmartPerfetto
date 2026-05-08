@@ -89,7 +89,7 @@
   - [x] 5.7.5 `agent/core/ModelRouter` DeepSeek 全局 provider 路径
   - [x] 5.7.6 `agentv2` fallback
 - [ ] 5.8 管理员运行时 dashboard：active leases / RSS / queue length / events / LLM cost
-- [ ] 5.9 安全审计：ID 枚举、跨 tenant、无权限 provider/report/memory 访问
+- [x] 5.9 安全审计：ID 枚举、跨 tenant、无权限 provider/report/memory 访问
 
 ### 0.6 测试矩阵补全（§20，与主线绑定）
 - [ ] 6.1 Unit：RequestContext / RBAC / owner guard / provider resolution / ProviderSnapshot hash
@@ -140,6 +140,7 @@
 - [x] `docs/features/enterprise-multi-tenant/adr-0001-sqlite-wal-repository.md`（§0.3.1 SQLite WAL + repository abstraction 决策）
 - [ ] `docs/features/enterprise-multi-tenant/rss-benchmark.md`（§0.4.3 RSS benchmark runbook；等待 100MB/500MB/1GB 大 trace 实测）
 - [x] `docs/features/enterprise-multi-tenant/runtime-isolation-checklist.md`（§0.4.12 §11.11 漏洞清单设计验收证据）
+- [x] `docs/features/enterprise-multi-tenant/security-audit.md`（§0.5.9 安全审计证据）
 
 ### 0.10 PR / 提交收尾（每次 PR 都要走）
 - [ ] 每个主线 / 子主线一个独立 PR；不跨主线串改动

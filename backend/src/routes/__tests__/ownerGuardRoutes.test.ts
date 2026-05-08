@@ -230,6 +230,29 @@ describe('owner guard for trace and report routes', () => {
     expect(reportStore.has('other-report')).toBe(true);
   });
 
+  it('returns 404 for same-workspace reports when caller lacks report read permission', async () => {
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+    reportStore.set('report-no-read', {
+      html: '<html><body>restricted report</body></html>',
+      generatedAt: Date.now(),
+      sessionId: 'restricted-session',
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'report-owner',
+    });
+    const app = makeResourceApp();
+
+    const exportRes = await ssoHeaders(
+      request(app).get('/api/reports/report-no-read/export'),
+      'report-analyst',
+      'trace_only_custom_role',
+      'trace:read',
+    );
+
+    expect(exportRes.status).toBe(404);
+    expect(exportRes.body.error).toBe('Report not found');
+  });
+
   it('allows workspace admin to delete another user report in the same workspace', async () => {
     process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
     reportStore.set('peer-report', {

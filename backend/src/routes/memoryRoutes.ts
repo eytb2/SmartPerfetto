@@ -33,6 +33,7 @@ import {Router, type Router as ExpressRouter} from 'express';
 import {authenticate, requireRequestContext} from '../middleware/auth';
 import {ProjectMemory} from '../agentv3/projectMemory';
 import {recordEnterpriseAuditEventForContext} from '../services/enterpriseAuditService';
+import {hasRbacPermission, sendForbidden} from '../services/rbac';
 import {knowledgeScopeFromRequestContext} from '../services/scopedKnowledgeStore';
 import type {MemoryPromotionPolicy} from '../types/sparkContracts';
 
@@ -53,6 +54,14 @@ export function createMemoryRoutes(memory?: ProjectMemory): ExpressRouter {
   const m = memory ?? getDefaultMemory();
   const router = Router();
   router.use(authenticate);
+  router.use((req, res, next) => {
+    const context = requireRequestContext(req);
+    if (!hasRbacPermission(context, 'audit:read')) {
+      sendForbidden(res, 'Memory administration requires audit:read permission');
+      return;
+    }
+    next();
+  });
 
   /**
    * GET /api/memory

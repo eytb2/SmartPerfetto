@@ -7,10 +7,19 @@ import type { AgentRuntimeKind, ProviderCreateInput, ProviderScope, ProviderUpda
 import { testProviderConnection } from '../services/providerManager/connectionTester';
 import { authenticate, requireRequestContext, type RequestContext } from '../middleware/auth';
 import { recordEnterpriseAuditEventForContext } from '../services/enterpriseAuditService';
+import { hasRbacPermission, sendForbidden } from '../services/rbac';
 
 const router = express.Router();
 
 router.use(authenticate);
+router.use((req, res, next) => {
+  const context = requireRequestContext(req);
+  if (!hasRbacPermission(context, 'provider:manage_workspace')) {
+    sendForbidden(res, 'Provider management requires provider:manage_workspace permission');
+    return;
+  }
+  next();
+});
 
 function providerScopeForRequest(req: express.Request): ProviderScope {
   const context = requireRequestContext(req);
