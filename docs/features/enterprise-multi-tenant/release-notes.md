@@ -57,12 +57,14 @@ state is intentionally conservative:
 
 ## Validation State
 
-Latest acceptance-evidence PR validation:
+Latest substantive acceptance-evidence validation:
 
 - PR: https://github.com/Gracker/SmartPerfetto/pull/129
-- Head: `11f57643`
-- Remote checks: `quality`, `gate`, and `docker-smoke` passed on run
-  `25583825465`.
+- Code head: `11f57643` before doc-only validation-state refresh commits.
+- Remote checks for that code head: `quality`, `gate`, and `docker-smoke`
+  passed on run `25583825465`.
+- Before merge, re-check the live PR status because doc-only refresh commits may
+  advance the branch without changing acceptance behavior.
 - Current readiness audit:
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run enterprise:readiness-audit -- --require-ready`
   - Result: blocked as expected until README §0.4.3, §0.8, and the terminal
