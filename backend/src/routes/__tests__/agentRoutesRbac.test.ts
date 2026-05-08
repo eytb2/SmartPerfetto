@@ -9,6 +9,7 @@ import os from 'os';
 import path from 'path';
 import request from 'supertest';
 import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../config';
+import { EnhancedSessionContext, sessionContextManager } from '../../agent/context/enhancedSessionContext';
 import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../../services/enterpriseDb';
 import { ENTERPRISE_DATA_DIR_ENV, writeTraceMetadata } from '../../services/traceMetadataStore';
 import {
@@ -23,6 +24,7 @@ import {
   getTraceProcessorLeaseStore,
   setTraceProcessorLeaseStoreForTests,
 } from '../../services/traceProcessorLeaseStore';
+import { SessionPersistenceService } from '../../services/sessionPersistenceService';
 import { setTraceProcessorServiceForTests } from '../../services/traceProcessorService';
 import agentRoutes from '../agentRoutes';
 
@@ -72,6 +74,7 @@ afterEach(async () => {
   jest.restoreAllMocks();
   setTraceProcessorServiceForTests(null);
   setTraceProcessorLeaseStoreForTests(null);
+  SessionPersistenceService.resetForTests();
   resetAgentEventStoreForTests();
   resetAnalysisRunStoreForTests();
   if (originalApiKey === undefined) {
@@ -84,6 +87,7 @@ afterEach(async () => {
   restoreEnvValue(ENTERPRISE_DB_PATH_ENV, originalEnterpriseDbPath);
   restoreEnvValue(ENTERPRISE_DATA_DIR_ENV, originalEnterpriseDataDir);
   restoreEnvValue('UPLOAD_DIR', originalUploadDir);
+  sessionContextManager.remove('session-resume-integration');
 });
 
 describe('agent route RBAC', () => {
@@ -376,6 +380,101 @@ describe('agent route RBAC', () => {
     } finally {
       leaseStore?.close();
       setTraceProcessorLeaseStoreForTests(null);
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('resumes a persisted enterprise session and accepts an authorized respond action', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-agent-resume-'));
+    try {
+      const traceId = 'trace-resume-integration';
+      const sessionId = 'session-resume-integration';
+      const tracePath = path.join(tmpDir, `${traceId}.trace`);
+      await fs.writeFile(tracePath, 'trace bytes');
+      delete process.env.SMARTPERFETTO_API_KEY;
+      process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+      process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+      process.env[ENTERPRISE_DB_PATH_ENV] = path.join(tmpDir, 'enterprise.sqlite');
+      process.env[ENTERPRISE_DATA_DIR_ENV] = path.join(tmpDir, 'data');
+      process.env.UPLOAD_DIR = path.join(tmpDir, 'uploads');
+      SessionPersistenceService.resetForTests();
+
+      await writeTraceMetadata({
+        id: traceId,
+        filename: `${traceId}.trace`,
+        size: 11,
+        uploadedAt: new Date().toISOString(),
+        status: 'ready',
+        path: tracePath,
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-a',
+        userId: 'analyst-user',
+      });
+      setTraceProcessorServiceForTests({
+        getOrLoadTrace: jest.fn(async () => ({
+          id: traceId,
+          filename: `${traceId}.trace`,
+          size: 11,
+          filePath: tracePath,
+          uploadTime: new Date(),
+          status: 'ready',
+        })),
+      } as any);
+
+      const context = new EnhancedSessionContext(sessionId, traceId);
+      context.addTurn('resume this persisted session', {
+        primaryGoal: 'resume_integration',
+        aspects: ['agent_resume', 'respond'],
+        expectedOutputType: 'diagnosis',
+        complexity: 'moderate',
+      });
+      const persistence = SessionPersistenceService.getInstance();
+      persistence.saveSession({
+        id: sessionId,
+        traceId,
+        traceName: `${traceId}.trace`,
+        question: 'resume this persisted session',
+        createdAt: Date.now() - 1000,
+        updatedAt: Date.now(),
+        messages: [],
+        metadata: {
+          tenantId: 'tenant-a',
+          workspaceId: 'workspace-a',
+          userId: 'analyst-user',
+        },
+      });
+      expect(persistence.saveSessionContext(sessionId, context)).toBe(true);
+
+      const resumeRes = await analystHeaders(request(makeApp()).post('/api/agent/v1/resume'))
+        .send({ sessionId, traceId });
+
+      expect(resumeRes.status).toBe(200);
+      expect(resumeRes.body).toEqual(expect.objectContaining({
+        success: true,
+        sessionId,
+        traceId,
+        restored: true,
+        status: 'completed',
+      }));
+      expect(resumeRes.body.restoredStats).toEqual(expect.objectContaining({
+        turnCount: 1,
+      }));
+
+      const respondRes = await analystHeaders(
+        request(makeApp())
+          .post(`/api/agent/v1/${sessionId}/respond`)
+          .send({ action: 'abort' }),
+      );
+
+      expect(respondRes.status).toBe(200);
+      expect(respondRes.body).toEqual({
+        success: true,
+        sessionId,
+        status: 'failed',
+      });
+    } finally {
+      sessionContextManager.remove('session-resume-integration');
+      SessionPersistenceService.resetForTests();
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });

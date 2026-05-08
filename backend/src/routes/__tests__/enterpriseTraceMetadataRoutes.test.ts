@@ -336,6 +336,15 @@ describe('enterprise trace metadata routes', () => {
 
     const ownTraceRes = await ssoHeaders(request(app).get(`/api/traces/${traceId}`));
     expect(ownTraceRes.status).toBe(200);
+
+    const downloadRes = await ssoHeaders(request(app).get(`/api/traces/${traceId}/file`));
+    expect(downloadRes.status).toBe(200);
+    expect(
+      Buffer.isBuffer(downloadRes.body)
+        ? downloadRes.body.toString('utf-8')
+        : downloadRes.text,
+    ).toBe('trace-content');
+
     expect(readAuditActions()).toEqual(expect.arrayContaining([
       'trace.uploaded',
       'trace.read',
