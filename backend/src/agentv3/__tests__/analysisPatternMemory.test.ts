@@ -566,8 +566,10 @@ describe('enterprise scope isolation', () => {
     );
 
     expect(mockPatterns).toHaveLength(2);
-    expect(mockPatterns[0].provenance.sourceTenantId).toBe('tenant-a');
-    expect(mockPatterns[1].provenance.sourceTenantId).toBe('tenant-b');
+    expect(mockPatterns.map(pattern => pattern.provenance.sourceTenantId).sort()).toEqual([
+      'tenant-a',
+      'tenant-b',
+    ]);
     expect(matchPatterns(features, scopeA).map(p => p.keyInsights[0])).toEqual([
       'tenant-a insight',
     ]);
