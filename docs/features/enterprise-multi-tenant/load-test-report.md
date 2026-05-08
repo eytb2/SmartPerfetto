@@ -11,6 +11,7 @@ executed in this environment.
 The final report must cover:
 
 - 50 distinct online users with successful sampled requests.
+- All requested analysis runs start successfully without start failures.
 - 5 to 15 simultaneously running analysis runs, observed in at least two
   polling samples.
 - Additional queued or pending runs, observed in at least two polling samples.
@@ -18,7 +19,7 @@ The final report must cover:
 - Error rate.
 - worker / lease RSS.
 - queue length.
-- LLM cost and call count.
+- LLM cost and a positive LLM call count.
 
 ## Command
 
@@ -54,6 +55,10 @@ If the backend requires `SMARTPERFETTO_API_KEY`, add:
   with measured output and `acceptance.passed = true` in the JSON report.
 - `acceptance.passed` requires observing successful requests from 50 distinct
   `online-user-*` clients; the configured `--users` value alone is not enough.
+- All requested `target-running + target-pending` analysis runs must start
+  successfully; any start failure keeps the report open.
 - `acceptance.passed` also requires at least two status samples with 5-15
   running runs and at least two status samples with queued/pending runs, so a
   single transient spike cannot satisfy the "stable pending queue" requirement.
+- The runtime dashboard must provide LLM cost and a positive LLM call count;
+  cost alone is not enough evidence that the agent path exercised a real LLM.

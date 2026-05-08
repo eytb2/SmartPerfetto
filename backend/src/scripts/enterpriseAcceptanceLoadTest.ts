@@ -355,8 +355,11 @@ export function evaluateAcceptance(
   runtimeSamples: RuntimeSample[],
 ): EnterpriseLoadTestReport['acceptance'] {
   const missing: string[] = [];
+  const requestedRuns = options.targetRunningRuns + options.targetPendingRuns;
   if (options.onlineUsers < 50) missing.push('onlineUsers < 50');
   if (summary.onlineUsers.observed < 50) missing.push('observed online users < 50');
+  if (summary.analysis.started < requestedRuns) missing.push('started analysis runs < requested target');
+  if (summary.analysis.startFailures > 0) missing.push('analysis start failures observed');
   if (summary.analysis.maxRunning < 5) missing.push('observed max running runs < 5');
   else if (summary.analysis.maxRunning > 15) missing.push('observed max running runs > 15');
   else if (summary.analysis.runningInRangeSnapshots < 2) {
@@ -374,6 +377,8 @@ export function evaluateAcceptance(
   }
   if (summary.runtime.maxQueueLength === null) missing.push('missing queue length samples');
   if (summary.runtime.finalLlmCostUsd === null) missing.push('missing LLM cost sample');
+  if (summary.runtime.finalLlmCalls === null) missing.push('missing LLM call sample');
+  else if (summary.runtime.finalLlmCalls <= 0) missing.push('LLM call count did not increase');
   if (runtimeSamples.length === 0) missing.push('runtime dashboard was not sampled');
   return {
     passed: missing.length === 0,

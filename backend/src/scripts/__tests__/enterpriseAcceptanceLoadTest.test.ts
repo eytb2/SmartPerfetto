@@ -197,11 +197,13 @@ describe('enterprise acceptance load test helpers', () => {
       missing: expect.arrayContaining([
         'onlineUsers < 50',
         'observed online users < 50',
+        'started analysis runs < requested target',
         'observed max running runs < 5',
         'no queued/pending runs observed',
         'missing worker/lease RSS samples',
         'missing queue length samples',
         'missing LLM cost sample',
+        'missing LLM call sample',
         'runtime dashboard was not sampled',
       ]),
     });
@@ -215,7 +217,13 @@ describe('enterprise acceptance load test helpers', () => {
         ...onlineUserSamples(49),
         sample('trace_list', 10, false, 'online-user-050'),
       ],
-      runs: [],
+      runs: Array.from({ length: 15 }, (_unused, index) => ({
+        userId: `load-user-${String(index + 1).padStart(3, '0')}`,
+        traceId: 'trace-a',
+        startStatus: 200,
+        startOk: true,
+        lastStatus: 'running' as const,
+      })),
       statusSnapshots: [
         {
           timestamp: '2026-05-09T00:00:01.000Z',
@@ -287,7 +295,13 @@ describe('enterprise acceptance load test helpers', () => {
     const summary = summarizeLoadTest({
       options: opts,
       httpSamples: onlineUserSamples(50),
-      runs: [],
+      runs: Array.from({ length: 15 }, (_unused, index) => ({
+        userId: `load-user-${String(index + 1).padStart(3, '0')}`,
+        traceId: 'trace-a',
+        startStatus: 200,
+        startOk: true,
+        lastStatus: 'running' as const,
+      })),
       statusSnapshots: [
         {
           timestamp: '2026-05-09T00:00:01.000Z',
@@ -321,21 +335,101 @@ describe('enterprise acceptance load test helpers', () => {
     });
   });
 
+  it('requires all requested analysis runs to start and LLM call metrics to be present', () => {
+    const opts = options({ onlineUsers: 50 });
+    const summary = summarizeLoadTest({
+      options: opts,
+      httpSamples: onlineUserSamples(50),
+      runs: [
+        ...Array.from({ length: 14 }, (_unused, index) => ({
+          userId: `load-user-${String(index + 1).padStart(3, '0')}`,
+          traceId: 'trace-a',
+          startStatus: 200,
+          startOk: true,
+          lastStatus: 'running' as const,
+        })),
+        {
+          userId: 'load-user-015',
+          traceId: 'trace-a',
+          startStatus: 500,
+          startOk: false,
+          lastStatus: 'error' as const,
+        },
+      ],
+      statusSnapshots: [
+        {
+          timestamp: '2026-05-09T00:00:01.000Z',
+          counts: {
+            queued: 1,
+            pending: 1,
+            running: 5,
+            completed: 0,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
+        {
+          timestamp: '2026-05-09T00:00:02.000Z',
+          counts: {
+            queued: 0,
+            pending: 1,
+            running: 5,
+            completed: 1,
+            failed: 0,
+            error: 0,
+            quota_exceeded: 0,
+            unknown: 0,
+          },
+        },
+      ],
+      runtimeSamples: [
+        {
+          timestamp: '2026-05-09T00:00:01.000Z',
+          queueLength: 1,
+          workerRssBytes: 256,
+          leaseRssBytes: null,
+          llmCostUsd: 0.1,
+          llmCalls: 0,
+        },
+      ],
+    });
+
+    expect(evaluateAcceptance(opts, summary, [
+      {
+        timestamp: '2026-05-09T00:00:01.000Z',
+        queueLength: 1,
+        workerRssBytes: 256,
+        leaseRssBytes: null,
+        llmCostUsd: 0.1,
+        llmCalls: 0,
+      },
+    ])).toEqual({
+      passed: false,
+      missing: [
+        'started analysis runs < requested target',
+        'analysis start failures observed',
+        'LLM call count did not increase',
+      ],
+    });
+  });
+
   it('renders the required load-test report fields', () => {
     const opts = options();
     const report = buildLoadTestReport({
       options: opts,
       httpSamples: [...onlineUserSamples(50), sample('analyze_start', 30)],
       runs: [
-        {
-          userId: 'load-user-001',
+        ...Array.from({ length: 15 }, (_unused, index) => ({
+          userId: `load-user-${String(index + 1).padStart(3, '0')}`,
           traceId: 'trace-a',
-          sessionId: 'session-a',
-          runId: 'run-a',
+          sessionId: `session-${index + 1}`,
+          runId: `run-${index + 1}`,
           startStatus: 200,
           startOk: true,
           lastStatus: 'running',
-        },
+        } as const)),
       ],
       statusSnapshots: [
         {
