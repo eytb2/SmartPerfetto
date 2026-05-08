@@ -8,9 +8,20 @@
  */
 
 import { Router } from 'express';
+import { authenticate, requireRequestContext, type RequestContext } from '../middleware/auth';
+import { recordEnterpriseAuditEvent } from '../services/enterpriseAuditService';
+import { openEnterpriseDb } from '../services/enterpriseDb';
+import { buildTenantExportBundle } from '../services/enterpriseTenantExportService';
 import { ResultExportService, AnalysisSessionExport } from '../services/resultExportService';
+import { sendForbidden } from '../services/rbac';
 
 const router = Router();
+
+function canExportTenant(context: RequestContext): boolean {
+  return context.scopes.includes('*')
+    || context.scopes.includes('tenant:export')
+    || context.roles.includes('org_admin');
+}
 
 /**
  * POST /api/export/result
@@ -125,6 +136,52 @@ router.post('/analysis', async (req, res) => {
     res.send(exportResult.data);
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message || 'An unknown error occurred' });
+  }
+});
+
+/**
+ * GET /api/export/tenant
+ * Export a tenant-scoped compliance bundle without trace file bodies or secrets.
+ */
+router.get('/tenant', authenticate, async (req, res) => {
+  const context = requireRequestContext(req);
+  if (!canExportTenant(context)) {
+    return sendForbidden(res, 'Tenant export requires org_admin or tenant:export scope');
+  }
+
+  const db = openEnterpriseDb();
+  try {
+    const exportResult = await buildTenantExportBundle(db, context);
+    recordEnterpriseAuditEvent(db, {
+      tenantId: context.tenantId,
+      actorUserId: context.userId,
+      action: 'tenant.exported',
+      resourceType: 'tenant',
+      resourceId: context.tenantId,
+      metadata: {
+        bundleSha256: exportResult.bundleSha256,
+        traceCount: exportResult.bundle.manifest.traceCount,
+        reportCount: exportResult.bundle.manifest.reportCount,
+        sessionCount: exportResult.bundle.manifest.sessionCount,
+        runCount: exportResult.bundle.manifest.runCount,
+        memoryRecordCount: exportResult.bundle.manifest.memoryRecordCount,
+        requestId: context.requestId,
+      },
+    });
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${exportResult.filename}"`);
+    res.json({
+      success: true,
+      bundleSha256: exportResult.bundleSha256,
+      bundle: exportResult.bundle,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to export tenant bundle',
+    });
+  } finally {
+    db.close();
   }
 });
 

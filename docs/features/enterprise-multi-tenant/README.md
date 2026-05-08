@@ -78,7 +78,7 @@
 - [ ] 5.1 tenant / workspace / member / provider / quota 管理 UI 与后端 API
 - [x] 5.2 `audit_events` 表 + 关键操作埋点（trace / report / provider / memory / cleanup / delete / promote）
 - [x] 5.3 配额 / 预算 / retention policy（§16.1，含 quota_exceeded 终态）
-- [ ] 5.4 Tenant export bundle（§16.2，含 SHA256 + tenant identity proof）
+- [x] 5.4 Tenant export bundle（§16.2，含 SHA256 + tenant identity proof）
 - [ ] 5.5 Tenant tombstone + 7 天硬删窗口 + async purge + audit proof（§16.3）
 - [ ] 5.6 Custom skill v1 处置（§14.3）：禁用 write endpoint 或修 loader 闭环
 - [ ] 5.7 Legacy AI route 处置（§14.4 表）
@@ -980,6 +980,13 @@ v1 要求：
 - audit 子集。
 - provider metadata，去除 secrets。
 - bundle SHA256 checksum 和 tenant identity proof。
+
+当前实现：
+
+- `GET /api/export/tenant` 生成 tenant-scoped JSON bundle，仅允许 `org_admin` 或 `tenant:export` scope。
+- bundle 包含 tenant identity proof、trace manifest、report HTML/JSON、sessions/runs/turns、`memory_entries` 私有知识数据、audit 子集和 provider metadata。
+- trace 文件本体默认不导出，provider `secret_ref` 与 secret-like JSON key 会被移除/脱敏。
+- 响应返回 `bundleSha256`，按 stable JSON 对 bundle payload 计算；导出操作写入 `tenant.exported` audit event。
 
 ### 16.3 Tenant 删除
 
