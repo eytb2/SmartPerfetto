@@ -48,7 +48,7 @@
 - [x] 3.7 Memory / RAG / Case / Baseline 表加 scope（§14.1，先 filter 后语义召回）
 - [x] 3.8 双写 → 切读 → 退役 三阶段（§17），每阶段都能回滚；准备 filesystem + DB snapshot
 - [x] 3.9 SecretStore：libsodium 加密 + OS keyring 解 master key + secret rotation + 读取审计
-- [ ] 3.10 集成测试：backend restart 后 session/report/trace metadata 可恢复
+- [x] 3.10 集成测试：backend restart 后 session/report/trace metadata 可恢复
 
 ### 0.4 主线 C：运行时隔离（§18 + §11）
 - [x] 4.1 §11.10 第一批最小改动（独立 PR）
@@ -1044,6 +1044,11 @@ request delete
 - 后端进程重启后，session list、report、trace metadata、run status 可恢复。
 - DB 是企业模式权威状态。
 - 本地 dev 仍可低成本运行。
+
+当前已覆盖 `backend/src/routes/__tests__/enterpriseRestartPersistence.test.ts`：
+清空 in-memory report/session context 并重建 `SessionPersistenceService` 后，
+`/api/traces`、`/api/reports/:id`、`/api/agent/v1/sessions` 与
+`/api/agent/v1/:sessionId/turns` 均可从企业 SQLite DB 与 scoped data 文件恢复。
 
 ### 主线 C：运行时隔离
 

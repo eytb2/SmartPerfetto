@@ -26,6 +26,7 @@ import { FocusStore, FocusStoreSnapshot } from '../agent/context/focusStore';
 import { TraceAgentState } from '../agent/state/traceAgentState';
 import type { SessionStateSnapshot } from '../agentv3/sessionStateSnapshot';
 import { applyEnterpriseMinimalSchema } from './enterpriseSchema';
+import { resolveEnterpriseDbPath } from './enterpriseDb';
 
 // DB path is resolved lazily (in the constructor) rather than at module load.
 // Module-load resolution would capture `process.cwd()` at the time of the first
@@ -33,17 +34,17 @@ import { applyEnterpriseMinimalSchema } from './enterpriseSchema';
 // backend root so all services share one data dir, but that chdir happens
 // *after* imports have already resolved. Lazy resolution lets both HTTP (cwd
 // already == backend) and CLI (cwd set by bootstrap) land on the same path.
-function resolveDbDir(): string {
-  return path.join(process.cwd(), 'data', 'sessions');
+export function resolveSessionPersistenceDbPath(env: NodeJS.ProcessEnv = process.env): string {
+  return resolveEnterpriseDbPath(env);
 }
 
 export class SessionPersistenceService {
   private db: Database.Database;
-  private static instance: SessionPersistenceService;
+  private static instance: SessionPersistenceService | null = null;
 
   private constructor() {
-    const dbDir = resolveDbDir();
-    const dbPath = path.join(dbDir, 'sessions.db');
+    const dbPath = resolveSessionPersistenceDbPath();
+    const dbDir = path.dirname(dbPath);
 
     // Ensure data directory exists
     if (!fs.existsSync(dbDir)) {
@@ -62,6 +63,12 @@ export class SessionPersistenceService {
       SessionPersistenceService.instance = new SessionPersistenceService();
     }
     return SessionPersistenceService.instance;
+  }
+
+  static resetForTests(): void {
+    if (!SessionPersistenceService.instance) return;
+    SessionPersistenceService.instance.db.close();
+    SessionPersistenceService.instance = null;
   }
 
   private initializeSchema(): void {
