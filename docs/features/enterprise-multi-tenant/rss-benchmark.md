@@ -29,6 +29,24 @@ Each successful run records:
 
 ## Command
 
+First audit whether the machine has enough candidate traces for the required
+matrix. This command does not start `trace_processor_shell` and is not RSS
+benchmark evidence; it only prevents local trace discovery from being an
+untracked manual `find` step:
+
+```bash
+PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
+  npm run benchmark:trace-rss:audit -- \
+  --scan-dir /path/to/large-trace-directory \
+  --output test-output/trace-processor-rss-matrix-audit.json \
+  --markdown test-output/trace-processor-rss-matrix-audit.md \
+  --require-complete-matrix
+```
+
+`--require-complete-matrix` exits non-zero until every scene/size candidate cell
+exists. A passing audit is only permission to run the benchmark below; it does
+not complete §0.4.3 by itself.
+
 Run from `backend/` with Node 24:
 
 ```bash
@@ -98,3 +116,15 @@ benchmarked and recorded in `baseline.md`, covering only `startup:100MB`.
 The required matrix still lacks the remaining 17 cells, so §0.4.3 remains
 blocked on collecting representative scroll, ANR, memory, heapprofd, vendor,
 500MB, and 1GB traces.
+
+A broader candidate audit on 2026-05-09 scanned:
+
+- `/Users/chris/Code/SmartPerfetto/Trace`
+- `/Users/chris/traces`
+- `/Users/chris/tools/perfetto_shell/trace`
+- `/Users/chris/SynologyDrive/技术分享/2024-Google-Extended-IO-Chengdu/Perfetto-Trace`
+- `/Users/chris/Code/HighPerformanceFriendsCircle/perfetto-trace`
+
+It still found only the three `startup:100MB` candidates above. The largest
+non-startup traces on this machine are below the 100MB bucket, so they remain
+smoke inputs rather than §0.4.3 evidence.

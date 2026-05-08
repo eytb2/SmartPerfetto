@@ -101,3 +101,38 @@ Missing §0.4.3 required matrix cells:
 - memory: 100MB, 500MB, 1GB
 - heapprofd: 100MB, 500MB, 1GB
 - vendor: 100MB, 500MB, 1GB
+
+## 2026-05-09 RSS Matrix Candidate Audit
+
+Branch: `feature/enterprise-multi-tenant-acceptance-evidence`
+
+Command:
+
+```bash
+PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
+  npm run benchmark:trace-rss:audit -- \
+  --scan-dir /Users/chris/Code/SmartPerfetto/Trace \
+  --scan-dir /Users/chris/traces \
+  --scan-dir /Users/chris/tools/perfetto_shell/trace \
+  --scan-dir "/Users/chris/SynologyDrive/技术分享/2024-Google-Extended-IO-Chengdu/Perfetto-Trace" \
+  --scan-dir /Users/chris/Code/HighPerformanceFriendsCircle/perfetto-trace \
+  --output test-output/trace-processor-rss-matrix-audit-local.json \
+  --markdown test-output/trace-processor-rss-matrix-audit-local.md
+```
+
+Result: PASS for the candidate audit command, but §0.4.3 remains blocked. The
+audit only checks candidate trace availability; it does not replace the real RSS
+benchmark.
+
+Observed §0.4.3 candidate matrix cells:
+
+- startup: 100MB
+
+Missing §0.4.3 candidate matrix cells:
+
+- scroll: 100MB, 500MB, 1GB
+- startup: 500MB, 1GB
+- ANR: 100MB, 500MB, 1GB
+- memory: 100MB, 500MB, 1GB
+- heapprofd: 100MB, 500MB, 1GB
+- vendor: 100MB, 500MB, 1GB

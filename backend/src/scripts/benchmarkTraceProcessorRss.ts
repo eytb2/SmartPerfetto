@@ -33,9 +33,9 @@ export const REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS = [
   '1GB',
 ] as const;
 
-type RequiredScene = typeof REQUIRED_RSS_BENCHMARK_SCENES[number];
-type RequiredSizeBucket = typeof REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS[number];
-type SizeBucket = RequiredSizeBucket | 'under-100MB';
+export type RequiredScene = typeof REQUIRED_RSS_BENCHMARK_SCENES[number];
+export type RequiredSizeBucket = typeof REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS[number];
+export type SizeBucket = RequiredSizeBucket | 'under-100MB';
 type BenchmarkPhase = 'startup_load' | 'post_load' | 'query';
 
 export interface QuerySpec {
@@ -211,7 +211,7 @@ export function classifyRequiredSizeBucket(sizeBytes: number): SizeBucket {
   return 'under-100MB';
 }
 
-function inferSceneFromPath(filePath: string): string {
+export function inferBenchmarkSceneFromPath(filePath: string): string {
   const lower = path.basename(filePath).toLowerCase();
   if (lower.includes('scroll') || lower.includes('flutter')) return 'scroll';
   if (lower.includes('launch') || lower.includes('startup') || lower.includes('lacunh')) return 'startup';
@@ -235,7 +235,7 @@ function parseTraceArg(value: string, cwd: string): TraceBenchmarkSpec {
   }
 
   const tracePath = path.resolve(cwd, value);
-  const scene = inferSceneFromPath(tracePath);
+  const scene = inferBenchmarkSceneFromPath(tracePath);
   return {
     scene,
     path: tracePath,
@@ -264,7 +264,7 @@ function normalizeManifestTrace(input: any, manifestDir: string): TraceBenchmark
   const tracePath = path.resolve(manifestDir, input.path);
   const scene = typeof input.scene === 'string' && input.scene.trim()
     ? input.scene.trim()
-    : inferSceneFromPath(tracePath);
+    : inferBenchmarkSceneFromPath(tracePath);
   return {
     scene,
     path: tracePath,
