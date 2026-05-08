@@ -60,13 +60,19 @@ state is intentionally conservative:
 Latest acceptance-evidence PR validation:
 
 - PR: https://github.com/Gracker/SmartPerfetto/pull/129
-- Head: `33e51887`
+- Head: `50deb113`
 - Remote checks: `quality`, `gate`, and `docker-smoke` passed on run
-  `25581001574`.
-- Local checks for the latest load-harness hardening:
+  `25583529012`.
+- Current readiness audit:
+  - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run enterprise:readiness-audit -- --require-ready`
+  - Result: blocked as expected until README §0.4.3, §0.8, and the terminal
+    evidence docs are backed by measured RSS/load-test output.
+- Local checks for the latest acceptance-evidence hardening:
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest src/scripts/__tests__/enterpriseAcceptanceLoadTest.test.ts --runInBand`
+  - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest src/scripts/__tests__/auditTraceProcessorRssMatrix.test.ts src/scripts/__tests__/enterpriseReadinessAudit.test.ts --runInBand`
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run typecheck`
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run test:core`
+  - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run test:scene-trace-regression`
   - `git diff --check`
 
 ## Known Limits Before Final Release
