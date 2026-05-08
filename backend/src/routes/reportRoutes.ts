@@ -25,6 +25,7 @@ import {
 import { REPORT_CAUSAL_MAP_CSS, REPORT_CAUSAL_MAP_SCRIPT } from '../services/reportCausalMapAssets';
 import { localize, parseOutputLanguage } from '../agentv3/outputLanguage';
 import { resolveEnterpriseDataRoot } from '../services/traceMetadataStore';
+import { resolveEnterpriseRetentionExpiresAt } from '../services/enterpriseQuotaPolicyService';
 import {
   sendResourceNotFound,
   type ResourceOwnerFields,
@@ -55,6 +56,7 @@ type PersistedReport = ResourceOwnerFields & {
   runId?: string;
   traceId?: string;
   visibility?: string;
+  expiresAt?: number | null;
 };
 
 export const reportStore = new Map<string, PersistedReport>();
@@ -145,6 +147,10 @@ function fallbackTraceId(entry: PersistedReport): string {
 
 function fallbackRunId(entry: PersistedReport): string {
   return entry.runId || `run-${entry.sessionId}-report`;
+}
+
+function isReportExpired(entry: PersistedReport, now = Date.now()): boolean {
+  return typeof entry.expiresAt === 'number' && entry.expiresAt <= now;
 }
 
 function ensureEnterpriseReportGraph(
@@ -247,6 +253,17 @@ function persistEnterpriseReport(reportId: string, entry: PersistedReport): void
     const createdAt = entry.generatedAt || Date.now();
     const visibility = entry.visibility || 'private';
     const contentHash = reportContentHash(entry.html);
+    const expiresAt = resolveEnterpriseRetentionExpiresAt(
+      db,
+      {
+        tenantId: entry.tenantId!,
+        workspaceId: entry.workspaceId!,
+        ...(entry.userId ? { userId: entry.userId } : {}),
+      },
+      'report',
+      createdAt,
+    );
+    entry.expiresAt = expiresAt;
     db.prepare(`
       INSERT INTO report_artifacts
         (id, tenant_id, workspace_id, session_id, run_id, local_path, content_hash, visibility, created_by, created_at, expires_at)
@@ -273,7 +290,7 @@ function persistEnterpriseReport(reportId: string, entry: PersistedReport): void
       visibility,
       entry.userId ?? null,
       createdAt,
-      null,
+      expiresAt,
     );
 
     fs.writeFileSync(metadataPath, JSON.stringify({
@@ -287,6 +304,7 @@ function persistEnterpriseReport(reportId: string, entry: PersistedReport): void
       userId: entry.userId,
       visibility,
       contentHash,
+      expiresAt,
     }, null, 2));
   });
 }
@@ -304,6 +322,7 @@ function persistLegacyReport(reportId: string, entry: PersistedReport): void {
     workspaceId: entry.workspaceId,
     userId: entry.userId,
     visibility: entry.visibility,
+    expiresAt: entry.expiresAt,
   }));
 }
 
@@ -315,7 +334,8 @@ function loadEnterpriseReport(reportId: string): PersistedReport | null {
         SELECT *
         FROM report_artifacts
         WHERE id = ?
-      `).get(reportId);
+          AND (expires_at IS NULL OR expires_at > ?)
+      `).get(reportId, Date.now());
       if (!row || !fs.existsSync(row.local_path)) return null;
       const html = fs.readFileSync(row.local_path, 'utf-8');
       const entry: PersistedReport = {
@@ -327,6 +347,7 @@ function loadEnterpriseReport(reportId: string): PersistedReport | null {
         workspaceId: row.workspace_id,
         ...(row.created_by ? { userId: row.created_by } : {}),
         visibility: row.visibility,
+        expiresAt: row.expires_at,
       };
       reportStore.set(reportId, entry);
       return entry;
@@ -395,6 +416,7 @@ function loadLegacyReportFromDisk(reportId: string): PersistedReport | null {
     let runId: string | undefined;
     let traceId: string | undefined;
     let visibility: string | undefined;
+    let expiresAt: number | undefined;
     let owner: ResourceOwnerFields = {};
     if (fs.existsSync(metaPath)) {
       const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
@@ -403,12 +425,16 @@ function loadLegacyReportFromDisk(reportId: string): PersistedReport | null {
       runId = meta.runId;
       traceId = meta.traceId;
       visibility = meta.visibility;
+      expiresAt = typeof meta.expiresAt === 'number' ? meta.expiresAt : undefined;
       owner = {
         tenantId: meta.tenantId,
         workspaceId: meta.workspaceId,
         userId: meta.userId,
         ownerUserId: meta.ownerUserId,
       };
+      if (typeof expiresAt === 'number' && expiresAt <= Date.now()) {
+        return null;
+      }
     }
 
     const entry = {
@@ -418,6 +444,7 @@ function loadLegacyReportFromDisk(reportId: string): PersistedReport | null {
       ...(runId ? { runId } : {}),
       ...(traceId ? { traceId } : {}),
       ...(visibility ? { visibility } : {}),
+      ...(typeof expiresAt === 'number' ? { expiresAt } : {}),
       ...owner,
     };
     // Cache in memory for subsequent access
@@ -478,6 +505,10 @@ function deletePersistedReport(reportId: string): boolean {
 function getReportForContext(reportId: string, req: express.Request): PersistedReport | null {
   const context = requireRequestContext(req);
   const report = reportStore.get(reportId) || loadReportFromDisk(reportId);
+  if (report && isReportExpired(report)) {
+    reportStore.delete(reportId);
+    return null;
+  }
   if (!report || !canReadReportResource(report, context)) {
     return null;
   }

@@ -34,6 +34,10 @@ import {
   type TraceProcessorLeaseModeDecision,
 } from '../services/traceProcessorLeaseModeDecision';
 import {
+  evaluateTraceUploadQuota,
+  type EnterpriseQuotaDecision,
+} from '../services/enterpriseQuotaPolicyService';
+import {
   buildTraceOwnerMetadata,
   deleteTraceMetadata,
   getTraceFilePath,
@@ -232,6 +236,19 @@ function recordTraceAudit(
     resourceType: 'trace',
     resourceId: traceId,
     metadata,
+  });
+}
+
+function sendTraceQuotaDenied(
+  res: Response,
+  decision: EnterpriseQuotaDecision,
+): Response {
+  return res.status(decision.httpStatus).json({
+    success: false,
+    code: decision.code,
+    status: decision.status,
+    error: decision.message,
+    details: decision.details,
   });
 }
 
@@ -673,6 +690,11 @@ router.post(
       }
 
       const file = req.file;
+      const quotaDecision = evaluateTraceUploadQuota(context, file.size);
+      if (!quotaDecision.allowed) {
+        await cleanupFile(file.path);
+        return sendTraceQuotaDenied(res, quotaDecision);
+      }
 
       // Generate trace ID upfront for consistency
       const traceId = uuidv4();
@@ -760,11 +782,18 @@ router.post('/upload-url', async (req, res) => {
 
     const contentLength = response.headers.get('content-length');
     const uploadLimitBytes = resolveTraceUploadLimitBytes();
-    if (contentLength && Number.parseInt(contentLength, 10) > uploadLimitBytes) {
+    const contentLengthBytes = contentLength ? Number.parseInt(contentLength, 10) : Number.NaN;
+    if (Number.isFinite(contentLengthBytes) && contentLengthBytes > uploadLimitBytes) {
       return res.status(413).json({
         error: 'Trace file too large',
         details: `Remote trace exceeds ${uploadLimitBytes} bytes`
       });
+    }
+    if (Number.isFinite(contentLengthBytes)) {
+      const quotaDecision = evaluateTraceUploadQuota(context, contentLengthBytes);
+      if (!quotaDecision.allowed) {
+        return sendTraceQuotaDenied(res, quotaDecision);
+      }
     }
 
     const tracesDir = getWritableTraceDirForContext(context);
@@ -776,6 +805,11 @@ router.post('/upload-url', async (req, res) => {
     let size = 0;
     try {
       size = await streamResponseBodyToTempFile(response, tempPath);
+      const quotaDecision = evaluateTraceUploadQuota(context, size);
+      if (!quotaDecision.allowed) {
+        await cleanupFile(tempPath);
+        return sendTraceQuotaDenied(res, quotaDecision);
+      }
       await renameTraceAtomically(tempPath, finalPath);
     } catch (streamError) {
       await cleanupFile(tempPath);

@@ -55,7 +55,7 @@ export interface AnalyzeSessionRunContext {
   query: string;
   startedAt: number;
   completedAt?: number;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'quota_exceeded';
   error?: string;
 }
 

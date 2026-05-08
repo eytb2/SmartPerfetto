@@ -12,7 +12,8 @@ export type PersistedAnalysisRunStatus =
   | 'awaiting_user'
   | 'completed'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  | 'quota_exceeded';
 
 export interface AnalysisRunPersistenceScope extends EnterpriseRepositoryScope {
   sessionId: string;
@@ -78,7 +79,7 @@ export function resetAnalysisRunStoreForTests(): void {
 }
 
 function isTerminalStatus(status: string): boolean {
-  return status === 'completed' || status === 'failed' || status === 'cancelled';
+  return status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'quota_exceeded';
 }
 
 function ensureAnalysisRunGraph(

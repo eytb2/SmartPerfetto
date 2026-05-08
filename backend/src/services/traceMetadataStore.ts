@@ -17,6 +17,7 @@ import {
   type ResourceOwnerFields,
 } from './resourceOwnership';
 import { canReadTraceResource } from './rbac';
+import { resolveEnterpriseRetentionExpiresAt } from './enterpriseQuotaPolicyService';
 
 export interface TraceMetadata extends ResourceOwnerFields {
   id: string;
@@ -27,6 +28,7 @@ export interface TraceMetadata extends ResourceOwnerFields {
   path?: string;
   port?: number;
   externalRpc?: boolean;
+  expiresAt?: number;
 }
 
 interface TraceAssetRow {
@@ -158,6 +160,7 @@ function rowToTraceMetadata(row: TraceAssetRow): TraceMetadata {
     ...(row.owner_user_id ? { userId: row.owner_user_id } : {}),
     ...(typeof port === 'number' ? { port } : {}),
     ...(externalRpc ? { externalRpc: true } : {}),
+    ...(typeof row.expires_at === 'number' ? { expiresAt: row.expires_at } : {}),
   };
 }
 
@@ -241,6 +244,12 @@ function writeEnterpriseTraceMetadata(metadata: TraceMetadata): void {
 
   withEnterpriseTraceDb((db) => {
     ensureEnterpriseTraceOwner(db, tenantId, workspaceId, ownerUserId ?? undefined);
+    const expiresAt = resolveEnterpriseRetentionExpiresAt(
+      db,
+      { tenantId, workspaceId, ...(ownerUserId ? { userId: ownerUserId } : {}) },
+      'trace',
+      createdAt,
+    );
     db.prepare(`
       INSERT INTO trace_assets
         (id, tenant_id, workspace_id, owner_user_id, local_path, size_bytes, status, metadata_json, created_at, expires_at)
@@ -265,7 +274,7 @@ function writeEnterpriseTraceMetadata(metadata: TraceMetadata): void {
       metadata.status,
       metadataJsonForRow(metadata),
       createdAt,
-      null,
+      expiresAt,
     );
   });
 }
@@ -292,7 +301,8 @@ function readEnterpriseTraceMetadata(traceId: string): TraceMetadata | null {
       SELECT *
       FROM trace_assets
       WHERE id = ?
-    `).get(traceId);
+        AND (expires_at IS NULL OR expires_at > ?)
+    `).get(traceId, Date.now());
     return row ? rowToTraceMetadata(row) : null;
   });
 }
@@ -323,8 +333,9 @@ function listEnterpriseTraceMetadata(): TraceMetadata[] {
     const rows = db.prepare<unknown[], TraceAssetRow>(`
       SELECT *
       FROM trace_assets
+      WHERE expires_at IS NULL OR expires_at > ?
       ORDER BY created_at DESC
-    `).all();
+    `).all(Date.now());
     return rows.map(rowToTraceMetadata);
   });
 }
@@ -360,8 +371,9 @@ export async function listTraceMetadataForContext(context: RequestContext): Prom
         FROM trace_assets
         WHERE tenant_id = ?
           AND workspace_id = ?
+          AND (expires_at IS NULL OR expires_at > ?)
         ORDER BY created_at DESC
-      `).all(context.tenantId, context.workspaceId);
+      `).all(context.tenantId, context.workspaceId, Date.now());
       return rows.map(rowToTraceMetadata).filter(metadata => canReadTraceResource(metadata, context));
     });
   }
@@ -415,7 +427,8 @@ export async function readTraceMetadataForContext(
         WHERE id = ?
           AND tenant_id = ?
           AND workspace_id = ?
-      `).get(traceId, context.tenantId, context.workspaceId);
+          AND (expires_at IS NULL OR expires_at > ?)
+      `).get(traceId, context.tenantId, context.workspaceId, Date.now());
       return row ? rowToTraceMetadata(row) : null;
     });
     return isTraceMetadataOwnedByContext(metadata, context) ? metadata : null;

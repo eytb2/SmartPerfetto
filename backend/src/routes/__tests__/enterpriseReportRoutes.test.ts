@@ -32,6 +32,7 @@ interface ReportArtifactRow {
   content_hash: string;
   visibility: string;
   created_by: string | null;
+  expires_at: number | null;
 }
 
 let tmpDir: string;
@@ -80,6 +81,31 @@ function readAuditActions(): string[] {
   const db = openEnterpriseDb(dbPath);
   try {
     return listEnterpriseAuditEvents(db).map(event => event.action);
+  } finally {
+    db.close();
+  }
+}
+
+function writeWorkspacePolicies(input: {
+  retentionPolicy?: Record<string, unknown>;
+}): void {
+  const db = openEnterpriseDb(dbPath);
+  const now = Date.now();
+  try {
+    db.prepare(`
+      INSERT OR IGNORE INTO organizations (id, name, status, plan, created_at, updated_at)
+      VALUES ('tenant-a', 'tenant-a', 'active', 'enterprise', ?, ?)
+    `).run(now, now);
+    db.prepare(`
+      INSERT OR REPLACE INTO workspaces
+        (id, tenant_id, name, retention_policy, quota_policy, created_at, updated_at)
+      VALUES
+        ('workspace-a', 'tenant-a', 'workspace-a', ?, NULL, ?, ?)
+    `).run(
+      input.retentionPolicy ? JSON.stringify(input.retentionPolicy) : null,
+      now,
+      now,
+    );
   } finally {
     db.close();
   }
@@ -197,5 +223,31 @@ describe('enterprise report routes', () => {
     await expect(fs.access(row!.local_path)).rejects.toThrow();
     await expect(fs.access(path.dirname(row!.local_path))).rejects.toThrow();
     expect(readAuditActions()).toContain('report.deleted');
+  });
+
+  it('applies report retention policy and hides expired cached reports', async () => {
+    const app = makeApp();
+    const reportId = 'report-expired';
+    writeWorkspacePolicies({
+      retentionPolicy: {
+        reportRetentionDays: 0,
+      },
+    });
+
+    persistReport(reportId, {
+      html: '<html><body>expired report</body></html>',
+      generatedAt: Date.now() - 1,
+      sessionId: 'session-expired',
+      runId: 'run-expired',
+      traceId: 'trace-expired',
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'user-a',
+      visibility: 'private',
+    });
+
+    expect(readReportArtifact(reportId)?.expires_at).toBeLessThanOrEqual(Date.now());
+    const getRes = await ssoHeaders(request(app).get(`/api/reports/${reportId}`));
+    expect(getRes.status).toBe(404);
   });
 });

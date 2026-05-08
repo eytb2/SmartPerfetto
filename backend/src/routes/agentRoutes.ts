@@ -67,6 +67,10 @@ import {
   buildTraceProcessorLeaseModeDecision,
   type TraceProcessorLeaseModeDecision,
 } from '../services/traceProcessorLeaseModeDecision';
+import {
+  evaluateAnalysisRunQuota,
+  type EnterpriseQuotaDecision,
+} from '../services/enterpriseQuotaPolicyService';
 import { estimateTraceProcessorRssBytes } from '../services/traceProcessorRamBudget';
 import { TraceProcessorFactory } from '../services/workingTraceProcessor';
 import { registerAgentLogsRoutes } from './agentLogsRoutes';
@@ -165,6 +169,26 @@ function normalizeRunSequence(value: unknown): number {
 
 function buildRunId(sessionId: string, sequence: number): string {
   return `run-${sessionId}-${sequence}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function sendAgentQuotaDenied(
+  res: express.Response,
+  decision: EnterpriseQuotaDecision,
+): express.Response {
+  return res.status(decision.httpStatus).json({
+    success: false,
+    code: decision.code,
+    status: decision.status,
+    error: decision.message,
+    details: decision.details,
+  });
+}
+
+function terminalRunStatusForResult(
+  result: AgentRuntimeAnalysisResult,
+): Extract<PersistedAnalysisRunStatus, 'completed' | 'failed' | 'quota_exceeded'> {
+  if (result.terminationReason === 'max_budget_usd') return 'quota_exceeded';
+  return result.success ? 'completed' : 'failed';
 }
 
 function enterpriseLeasesEnabled(): boolean {
@@ -302,7 +326,7 @@ function markSessionRunStatus(
 ): void {
   if (!session.activeRun) return;
   session.activeRun.status = status;
-  if (status === 'completed' || status === 'failed') {
+  if (status === 'completed' || status === 'failed' || status === 'quota_exceeded') {
     session.activeRun.completedAt = Date.now();
   }
   session.activeRun.error = error;
@@ -331,7 +355,7 @@ interface AnalysisSession {
   sessionId: string;
   sseClients: express.Response[];
   result?: AgentRuntimeAnalysisResult;
-  status: 'pending' | 'running' | 'awaiting_user' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'awaiting_user' | 'completed' | 'failed' | 'quota_exceeded';
   error?: string;
   traceId: string;
   tenantId?: string;
@@ -1108,6 +1132,12 @@ async function handleAnalyzeRequest(
       console.log(`[AgentRoutes] Comparison mode: current=${traceId}, reference=${referenceTraceId}`);
     }
 
+    const quotaDecision = evaluateAnalysisRunQuota(requestContext);
+    if (!quotaDecision.allowed) {
+      sendAgentQuotaDenied(res, quotaDecision);
+      return;
+    }
+
     // Initialize tools
     ensureToolsRegistered();
 
@@ -1393,7 +1423,7 @@ function handleSessionStream(req: express.Request, res: express.Response, sessio
 
   // If analysis is already completed, send the result.
   // Resumed sessions may not have session.result in memory; recover from persisted turn context.
-  if (session.status === 'completed') {
+  if (session.status === 'completed' || session.status === 'quota_exceeded') {
     recoverResultForSessionIfNeeded(sessionId, session);
     if (session.result) {
       sendAgentDrivenResult(res, session);
@@ -1489,7 +1519,7 @@ router.get('/:sessionId/status', (req, res) => {
     observability: buildSessionObservability(session),
   };
 
-  if (session.status === 'completed') {
+  if (session.status === 'completed' || session.status === 'quota_exceeded') {
     const recoveredResult = recoverResultForSessionIfNeeded(sessionId, session);
     if (recoveredResult) {
       const conclusion = normalizeNarrativeForClient(recoveredResult.conclusion);
@@ -2824,8 +2854,11 @@ async function runAgentDrivenAnalysis(
         if (idx >= 0) session.hypotheses[idx] = h;
       }
     }
-    session.status = result.success ? 'completed' : 'failed';
-    markSessionRunStatus(session, result.success ? 'completed' : 'failed');
+    const terminalRunStatus = terminalRunStatusForResult(result);
+    session.status = terminalRunStatus === 'quota_exceeded'
+      ? 'quota_exceeded'
+      : result.success ? 'completed' : 'failed';
+    markSessionRunStatus(session, terminalRunStatus);
 
     // Record conclusion in cross-turn history
     if (!session.conclusionHistory) session.conclusionHistory = [];

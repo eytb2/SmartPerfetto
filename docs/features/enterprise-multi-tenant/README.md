@@ -77,7 +77,7 @@
 ### 0.5 主线 D：控制面与合规（§18）
 - [ ] 5.1 tenant / workspace / member / provider / quota 管理 UI 与后端 API
 - [x] 5.2 `audit_events` 表 + 关键操作埋点（trace / report / provider / memory / cleanup / delete / promote）
-- [ ] 5.3 配额 / 预算 / retention policy（§16.1，含 quota_exceeded 终态）
+- [x] 5.3 配额 / 预算 / retention policy（§16.1，含 quota_exceeded 终态）
 - [ ] 5.4 Tenant export bundle（§16.2，含 SHA256 + tenant identity proof）
 - [ ] 5.5 Tenant tombstone + 7 天硬删窗口 + async purge + audit proof（§16.3）
 - [ ] 5.6 Custom skill v1 处置（§14.3）：禁用 write endpoint 或修 loader 闭环
@@ -960,6 +960,14 @@ v1 要求：
 | Fast/Full mode 降级 | 只在 run 开始前、用户选 auto 且策略允许时发生；run 中途禁止降级 |
 | Trace processor RAM budget 满 | pending 排队；heartbeat stale 后才回收 |
 | 磁盘空间低于阈值 | 拒绝新 trace upload，提示管理员 cleanup 或扩容 |
+
+当前实现：
+
+- `workspaces.quota_policy` 读取 JSON 字段：`maxTraceBytes`、`maxWorkspaceTraceBytes`、`maxConcurrentRuns`、`monthlyRunLimit`。
+- trace upload preflight 在落库前拒绝单文件或 workspace trace storage 超额。
+- analysis run preflight 区分 `pending` 型并发 cap 与 `quota_exceeded` 型月度 run cap。
+- runtime 返回 `terminationReason: "max_budget_usd"` 时，`analysis_runs.status` / `analysis_sessions.status` 落为终态 `quota_exceeded`。
+- `workspaces.retention_policy` 读取 JSON 字段：`defaultRetentionDays`、`traceRetentionDays`、`reportRetentionDays`，写入 `trace_assets.expires_at` 与 `report_artifacts.expires_at`，读路径过滤过期 artifact。
 
 ### 16.2 Tenant export
 

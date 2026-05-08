@@ -103,6 +103,33 @@ describe('analysis run store', () => {
     expect(isAnalysisRunHeartbeatFresh(runScope, 'run-failed', 1_777_000_011_000, 60_000)).toBe(false);
   });
 
+  it('persists quota_exceeded as a terminal run and session state', () => {
+    const runScope = scope({ runId: 'run-quota', sessionId: 'session-quota' });
+
+    persistAnalysisRunState(runScope, 'running', { now: 1_777_000_000_000 });
+    persistAnalysisRunState(runScope, 'quota_exceeded', {
+      now: 1_777_000_010_000,
+      error: 'single-run LLM budget exhausted',
+    });
+
+    expect(getAnalysisRunLifecycle(runScope, 'run-quota')).toEqual(expect.objectContaining({
+      status: 'quota_exceeded',
+      completedAt: 1_777_000_010_000,
+      heartbeatAt: 1_777_000_010_000,
+      errorJson: JSON.stringify({ message: 'single-run LLM budget exhausted' }),
+    }));
+    expect(isAnalysisRunHeartbeatFresh(runScope, 'run-quota', 1_777_000_011_000, 60_000)).toBe(false);
+
+    const db = openEnterpriseDb();
+    try {
+      expect(db.prepare('SELECT status FROM analysis_sessions WHERE id = ?').get('session-quota')).toEqual({
+        status: 'quota_exceeded',
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   it('fails interrupted nonterminal runs on backend startup while preserving terminal runs', () => {
     const pendingScope = scope({ sessionId: 'session-pending', runId: 'run-pending' });
     const runningScope = scope({ sessionId: 'session-running', runId: 'run-running' });

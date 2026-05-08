@@ -9,7 +9,8 @@ export type AssistantSessionStatus =
   | 'running'
   | 'awaiting_user'
   | 'completed'
-  | 'failed';
+  | 'failed'
+  | 'quota_exceeded';
 
 export interface ManagedAssistantSession {
   sessionId: string;

@@ -35,6 +35,7 @@ interface TraceAssetRow {
   status: string;
   size_bytes: number;
   metadata_json: string;
+  expires_at: number | null;
 }
 
 let tmpDir: string;
@@ -172,6 +173,33 @@ function readCount(table: 'trace_assets' | 'trace_processor_leases'): number {
   }
 }
 
+function writeWorkspacePolicies(input: {
+  quotaPolicy?: Record<string, unknown>;
+  retentionPolicy?: Record<string, unknown>;
+}): void {
+  const db = openEnterpriseDb(dbPath);
+  const now = Date.now();
+  try {
+    db.prepare(`
+      INSERT OR IGNORE INTO organizations (id, name, status, plan, created_at, updated_at)
+      VALUES ('tenant-a', 'tenant-a', 'active', 'enterprise', ?, ?)
+    `).run(now, now);
+    db.prepare(`
+      INSERT OR REPLACE INTO workspaces
+        (id, tenant_id, name, retention_policy, quota_policy, created_at, updated_at)
+      VALUES
+        ('workspace-a', 'tenant-a', 'workspace-a', ?, ?, ?, ?)
+    `).run(
+      input.retentionPolicy ? JSON.stringify(input.retentionPolicy) : null,
+      input.quotaPolicy ? JSON.stringify(input.quotaPolicy) : null,
+      now,
+      now,
+    );
+  } finally {
+    db.close();
+  }
+}
+
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-enterprise-trace-routes-'));
   dbPath = path.join(tmpDir, 'enterprise.sqlite');
@@ -299,6 +327,51 @@ describe('enterprise trace metadata routes', () => {
       'workspace-b',
     );
     expect(otherWorkspaceRes.status).toBe(404);
+  });
+
+  it('rejects uploads that exceed workspace trace quota before metadata is committed', async () => {
+    const app = makeApp();
+    writeWorkspacePolicies({
+      quotaPolicy: {
+        maxTraceBytes: 4,
+      },
+    });
+
+    const res = await ssoHeaders(
+      request(app)
+        .post('/api/traces/upload')
+        .attach('file', Buffer.from('12345'), 'too-large.trace'),
+    );
+
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual(expect.objectContaining({
+      success: false,
+      code: 'TRACE_SIZE_QUOTA_EXCEEDED',
+      status: 'quota_exceeded',
+    }));
+    expect(readCount('trace_assets')).toBe(0);
+    expect(fakeTraceProcessorService.initializeUploadWithId).not.toHaveBeenCalled();
+  });
+
+  it('applies workspace trace retention policy to uploaded trace metadata', async () => {
+    const app = makeApp();
+    writeWorkspacePolicies({
+      retentionPolicy: {
+        traceRetentionDays: 3,
+      },
+    });
+    const beforeUpload = Date.now();
+
+    const res = await ssoHeaders(
+      request(app)
+        .post('/api/traces/upload')
+        .attach('file', Buffer.from('trace-with-retention'), 'retained.trace'),
+    );
+
+    expect(res.status).toBe(200);
+    const row = readTraceAsset(res.body.trace.id);
+    expect(row?.expires_at).toBeGreaterThanOrEqual(beforeUpload + 3 * 24 * 60 * 60 * 1000);
+    expect(row?.expires_at).toBeLessThanOrEqual(Date.now() + 3 * 24 * 60 * 60 * 1000);
   });
 
   it('records observed processor RSS on the frontend lease and exposes RAM budget stats', async () => {
