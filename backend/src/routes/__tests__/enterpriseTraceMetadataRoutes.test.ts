@@ -370,6 +370,34 @@ describe('enterprise trace metadata routes', () => {
       'workspace-b',
     );
     expect(otherWorkspaceRes.status).toBe(404);
+    expect(otherWorkspaceRes.body).toEqual({
+      error: 'Trace not found',
+      id: traceId,
+    });
+
+    const missingTraceRes = await ssoHeaders(request(app).get('/api/traces/missing-trace-id'));
+    expect(missingTraceRes.status).toBe(404);
+    expect(missingTraceRes.body).toEqual({
+      error: 'Trace not found',
+      id: 'missing-trace-id',
+    });
+
+    const otherWorkspaceFileRes = await ssoHeaders(
+      request(app).get(`/api/traces/${traceId}/file`),
+      'workspace-b',
+    );
+    expect(otherWorkspaceFileRes.status).toBe(404);
+    expect(otherWorkspaceFileRes.body).toEqual({
+      error: 'Trace file not found',
+      id: traceId,
+    });
+
+    const missingFileRes = await ssoHeaders(request(app).get('/api/traces/missing-trace-id/file'));
+    expect(missingFileRes.status).toBe(404);
+    expect(missingFileRes.body).toEqual({
+      error: 'Trace file not found',
+      id: 'missing-trace-id',
+    });
   });
 
   it('keeps simultaneous user uploads scoped while concurrent cleanup is blocked by active holders', async () => {

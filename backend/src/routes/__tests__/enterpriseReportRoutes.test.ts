@@ -194,6 +194,27 @@ describe('enterprise report routes', () => {
       'workspace-b',
     );
     expect(otherWorkspaceRes.status).toBe(404);
+
+    const missingReportRes = await ssoHeaders(request(app).get('/api/reports/report-missing'));
+    expect(missingReportRes.status).toBe(404);
+    expect(missingReportRes.text).toContain('<html');
+
+    const otherWorkspaceExportRes = await ssoHeaders(
+      request(app).get(`/api/reports/${reportId}/export`),
+      'workspace-b',
+    );
+    expect(otherWorkspaceExportRes.status).toBe(404);
+    expect(otherWorkspaceExportRes.body).toEqual({
+      success: false,
+      error: 'Report not found',
+    });
+
+    const missingExportRes = await ssoHeaders(request(app).get('/api/reports/report-missing/export'));
+    expect(missingExportRes.status).toBe(404);
+    expect(missingExportRes.body).toEqual({
+      success: false,
+      error: 'Report not found',
+    });
   });
 
   it('deletes enterprise report_artifacts metadata and scoped report files', async () => {

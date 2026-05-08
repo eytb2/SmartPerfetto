@@ -481,6 +481,25 @@ describe('agent route RBAC', () => {
       expect(analyzeA.body.sessionId).not.toBe(analyzeB.body.sessionId);
       expect(analyzeA.body.runId).not.toBe(analyzeB.body.runId);
 
+      const [crossRunStream, missingRunStream] = await Promise.all([
+        scopedAnalystHeaders(
+          request(app)
+            .get(`/api/agent/v1/runs/${analyzeB.body.runId}/stream`)
+            .set('Accept', 'text/event-stream'),
+          { userId: 'analyst-a', workspaceId: 'workspace-a' },
+        ),
+        scopedAnalystHeaders(
+          request(app)
+            .get('/api/agent/v1/runs/run-missing-security/stream')
+            .set('Accept', 'text/event-stream'),
+          { userId: 'analyst-a', workspaceId: 'workspace-a' },
+        ),
+      ]);
+      expect(crossRunStream.status).toBe(404);
+      expect(crossRunStream.body).toEqual({ success: false, error: 'Run not found' });
+      expect(missingRunStream.status).toBe(404);
+      expect(missingRunStream.body).toEqual({ success: false, error: 'Run not found' });
+
       const [cancelA, statusB] = await Promise.all([
         scopedAnalystHeaders(
           request(app).post(`/api/agent/v1/${analyzeA.body.sessionId}/cancel`),

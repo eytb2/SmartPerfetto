@@ -358,6 +358,10 @@ describe('owner guard for agent session routes', () => {
     const res = await authHeaders(request(app).get('/api/agent/v1/other-session/report'));
 
     expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: 'Session not found' });
+    const missingRes = await authHeaders(request(app).get('/api/agent/v1/missing-session/report'));
+    expect(missingRes.status).toBe(404);
+    expect(missingRes.body).toEqual({ success: false, error: 'Session not found' });
     expect(recoverResultForSessionIfNeeded).not.toHaveBeenCalled();
   });
 });

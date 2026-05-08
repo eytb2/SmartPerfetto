@@ -96,7 +96,7 @@
 - [x] 6.2 Integration：trace upload/list/delete/download；agent analyze/resume/respond/stream；report read/delete
 - [x] 6.3 Concurrency：多用户同时 upload / analyze / query / cancel / cleanup
 - [x] 6.4 Dual-window e2e：D1-D10 每个场景至少 1 个自动化用例（详见 §0.7）
-- [ ] 6.5 Security：ID 枚举、跨 tenant、无权限访问统一 404
+- [x] 6.5 Security：ID 枚举、跨 tenant、无权限访问统一 404
 - [ ] 6.6 Runtime：lease acquire / release / heartbeat / stale / crash recovery
 - [ ] 6.7 Persistence：backend restart / queue shadow 恢复 / DB reconnect / SecretStore failure
 - [ ] 6.8 SSE：fetch-stream reconnect / cursor replay / terminal event 落库
@@ -146,6 +146,7 @@
 - [x] `docs/features/enterprise-multi-tenant/unit-coverage-matrix.md`（§0.6.1 Unit 覆盖证据与 test:core 固定入口）
 - [x] `docs/features/enterprise-multi-tenant/integration-coverage-matrix.md`（§0.6.2 Integration 主链路覆盖证据与 test:core 固定入口）
 - [x] `docs/features/enterprise-multi-tenant/concurrency-coverage-matrix.md`（§0.6.3 多用户并发 upload/analyze/query/cancel/cleanup 覆盖证据）
+- [x] `docs/features/enterprise-multi-tenant/security-coverage-matrix.md`（§0.6.5 ID 枚举、跨 tenant/workspace、无权限资源访问覆盖证据）
 
 ### 0.10 PR / 提交收尾（每次 PR 都要走）
 - [ ] 每个主线 / 子主线一个独立 PR；不跨主线串改动
