@@ -17,10 +17,17 @@ import {
   writeTraceMetadata,
 } from '../services/traceMetadataStore';
 import { TraceProcessorLeaseStore } from '../services/traceProcessorLeaseStore';
+import {
+  TP_ADMISSION_CONTROL_ENV,
+  TP_ESTIMATE_MULTIPLIER_ENV,
+  TP_MIN_ESTIMATE_BYTES_ENV,
+  TP_RAM_BUDGET_BYTES_ENV,
+  decideTraceProcessorAdmission,
+} from '../services/traceProcessorRamBudget';
 import { ownerFieldsFromContext } from '../services/resourceOwnership';
 import type { RequestContext } from '../middleware/auth';
 
-type ScenarioName = 'D1' | 'D2' | 'D4' | 'D5' | 'D6' | 'D7' | 'D8' | 'D9';
+type ScenarioName = 'D1' | 'D2' | 'D4' | 'D5' | 'D6' | 'D7' | 'D8' | 'D9' | 'D10';
 
 interface VerifyOptions {
   tracePath?: string;
@@ -1361,6 +1368,122 @@ async function scenarioD9(
   }
 }
 
+async function scenarioD10(
+  db: Database.Database,
+  tracePath: string,
+  userAWindow1: WindowContext,
+): Promise<ScenarioReport> {
+  const mib = 1024 * 1024;
+  const activeUpload = await simulateUpload(db, userAWindow1, tracePath, 'd10-active-window.pftrace');
+  const candidateUpload = await simulateUpload(db, userAWindow1, tracePath, 'd10-rejected-new-lease.pftrace');
+  const store = new TraceProcessorLeaseStore(db);
+  const scope = leaseScope(userAWindow1);
+  const windowId = userAWindow1.context.windowId ?? userAWindow1.label;
+  const activeRssBytes = 448 * mib;
+  const budgetBytes = 512 * mib;
+  const minEstimateBytes = 128 * mib;
+
+  let activeLease = store.acquireHolder(scope, activeUpload.traceId, {
+    holderType: 'frontend_http_rpc',
+    holderRef: windowId,
+    windowId,
+    frontendVisibility: 'visible',
+    metadata: { scenario: 'D10' },
+  });
+  store.markStarting(scope, activeLease.id);
+  activeLease = store.markReady(scope, activeLease.id);
+  activeLease = store.recordRss(scope, activeLease.id, activeRssBytes);
+
+  const admissionEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    [TP_ADMISSION_CONTROL_ENV]: 'true',
+    [TP_RAM_BUDGET_BYTES_ENV]: String(budgetBytes),
+    [TP_ESTIMATE_MULTIPLIER_ENV]: '1',
+    [TP_MIN_ESTIMATE_BYTES_ENV]: String(minEstimateBytes),
+  };
+  const processorSamples = store.listLeases(scope, {
+    states: ['pending', 'starting', 'ready', 'idle', 'active', 'crashed', 'restarting'],
+  }).map(lease => ({
+    traceId: lease.traceId,
+    rssBytes: lease.rssBytes,
+  }));
+  const decision = decideTraceProcessorAdmission({
+    traceId: candidateUpload.traceId,
+    traceSizeBytes: candidateUpload.sizeBytes,
+    processors: processorSamples,
+    env: admissionEnv,
+  });
+
+  let newLeaseAttempted = false;
+  if (decision.admitted) {
+    newLeaseAttempted = true;
+    store.acquireHolder(scope, candidateUpload.traceId, {
+      holderType: 'agent_run',
+      holderRef: 'run-d10-candidate',
+      metadata: { scenario: 'D10' },
+    });
+  }
+
+  const activeLeaseAfterRejectedAdmission = store.getLeaseById(scope, activeLease.id);
+  const candidateLeases = store.listLeases(scope, { traceId: candidateUpload.traceId });
+  const activeHolderCountBeforeShare = activeLeaseAfterRejectedAdmission?.holderCount ?? 0;
+  const sharedLease = store.acquireHolder(scope, activeUpload.traceId, {
+    holderType: 'agent_run',
+    holderRef: 'run-d10-existing-trace',
+    runId: 'run-d10-existing-trace',
+    metadata: { scenario: 'D10', reuse: 'existing-lease' },
+  });
+  const activeTraceLeases = store.listLeases(scope, { traceId: activeUpload.traceId });
+  const activeTraceAssetPresent = scalar<number>(
+    db,
+    'SELECT COUNT(*) AS value FROM trace_assets WHERE id = ?',
+    [activeUpload.traceId],
+  ) === 1;
+  const candidateTraceAssetPresent = scalar<number>(
+    db,
+    'SELECT COUNT(*) AS value FROM trace_assets WHERE id = ?',
+    [candidateUpload.traceId],
+  ) === 1;
+
+  const checks = {
+    admissionRejectsNewLeaseNearRamBudget: !decision.admitted
+      && decision.estimatedRssBytes === minEstimateBytes
+      && decision.stats.availableForNewLeaseBytes === budgetBytes - activeRssBytes
+      && Boolean(decision.reason?.includes('exceeds available budget')),
+    rejectedAdmissionDoesNotCreateCandidateLease: !newLeaseAttempted
+      && candidateLeases.length === 0
+      && candidateTraceAssetPresent
+      && fs.existsSync(candidateUpload.localPath),
+    activeLeaseSurvivesRejectedAdmission: activeLeaseAfterRejectedAdmission?.id === activeLease.id
+      && activeLeaseAfterRejectedAdmission.state === 'active'
+      && activeLeaseAfterRejectedAdmission.rssBytes === activeRssBytes
+      && activeLeaseAfterRejectedAdmission.holderCount === 1,
+    existingTraceCanReuseSharedLeaseWithoutNewProcessor: sharedLease.id === activeLease.id
+      && sharedLease.holderCount === activeHolderCountBeforeShare + 1
+      && activeTraceLeases.length === 1,
+    noOomStyleCleanupOfExistingWindow: activeTraceAssetPresent
+      && fs.existsSync(activeUpload.localPath)
+      && store.getLeaseById(scope, activeLease.id)?.state === 'active',
+  };
+
+  return {
+    checks,
+    details: {
+      activeTraceId: activeUpload.traceId,
+      candidateTraceId: candidateUpload.traceId,
+      activeLeaseId: activeLease.id,
+      activeRssBytes,
+      budgetBytes,
+      estimatedRssBytes: decision.estimatedRssBytes,
+      availableForNewLeaseBytes: decision.stats.availableForNewLeaseBytes,
+      admissionReason: decision.reason,
+      activeHolderCountBeforeShare,
+      activeHolderCountAfterShare: sharedLease.holderCount,
+      candidateLeaseCount: candidateLeases.length,
+    },
+  };
+}
+
 function allChecksPassed(report: EnterpriseWindowRegressionReport): boolean {
   return Object.values(report.scenarios).every(scenario =>
     Object.values(scenario.checks).every(Boolean),
@@ -1428,6 +1551,7 @@ export async function runEnterpriseWindowRegression(
       D7: await scenarioD7(db, tracePath, windows.userAWindow1),
       D8: await scenarioD8(db, tracePath, windows.userAWindow1),
       D9: await scenarioD9(tracePath, windows.userAWindow1),
+      D10: await scenarioD10(db, tracePath, windows.userAWindow1),
     };
     const report: EnterpriseWindowRegressionReport = {
       timestamp: new Date().toISOString(),
@@ -1441,6 +1565,7 @@ export async function runEnterpriseWindowRegression(
         D7: scenarioPassed(scenarios.D7),
         D8: scenarioPassed(scenarios.D8),
         D9: scenarioPassed(scenarios.D9),
+        D10: scenarioPassed(scenarios.D10),
       },
       uploadRoot,
       tracePath,
@@ -1454,7 +1579,8 @@ export async function runEnterpriseWindowRegression(
         'D7 covers running run, active lease, report_generation holder, and draining rejection invariants; actual route blocking is covered by enterpriseTraceMetadataRoutes tests.',
         'D8 covers the DB ProviderSnapshot pin/hash-mismatch invariant in the enterprise window regression; AgentAnalyzeSessionService tests cover actual in-memory and persisted SDK session non-reuse.',
         'D9 covers file-backed DB close/reopen recovery for trace metadata, run states, and AgentEvent replay; enterpriseRestartPersistence tests cover the route-level restart recovery path.',
-        'Production backend proxy and queue behavior remain future §0.7 D1/D2/D4/D5/D6/D7/D8/D9 final-acceptance work against a live browser and trace_processor_shell.',
+        'D10 covers RAM-admission rejection without creating a new lease or cleaning up existing active holders; TraceProcessorFactory tests cover pre-spawn rejection before a real processor starts.',
+        'Production backend proxy and queue behavior remain future §0.7 D1/D2/D3/D4/D5/D6/D7/D8/D9/D10 final-acceptance work against a live browser and trace_processor_shell.',
       ],
     };
     report.passed = allChecksPassed(report);
