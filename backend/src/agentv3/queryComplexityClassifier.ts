@@ -15,7 +15,7 @@
  */
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import { createSdkEnv, type ClaudeAgentConfig } from './claudeConfig';
+import { createSdkEnv, getSdkBinaryOption, type ClaudeAgentConfig } from './claudeConfig';
 import { loadPromptTemplate, renderTemplate } from './strategyLoader';
 import type { ComplexityClassifierInput, QueryComplexity } from './types';
 
@@ -156,6 +156,7 @@ async function classifyWithHaiku(
       stderr: (data: string) => {
         console.warn(`[ComplexityClassifier] SDK stderr: ${data.trimEnd()}`);
       },
+      ...getSdkBinaryOption(),
     },
   });
 

@@ -27,6 +27,20 @@ export function getBundledTraceProcessorPath(): string {
   return path.resolve(__dirname, '../../../perfetto/out/ui/trace_processor_shell');
 }
 
+// Cached probe result: does the current binary support --http-additional-cors-origins?
+let _corsOriginsFlagSupported: boolean | undefined;
+function supportsCorsOriginsFlag(): boolean {
+  if (_corsOriginsFlagSupported !== undefined) return _corsOriginsFlagSupported;
+  try {
+    const binary = getTraceProcessorPath();
+    const help = execSync(`"${binary}" --help 2>&1 || true`, { encoding: 'utf-8', timeout: 5000 });
+    _corsOriginsFlagSupported = help.includes('additional-cors');
+  } catch {
+    _corsOriginsFlagSupported = false;
+  }
+  return _corsOriginsFlagSupported;
+}
+
 export function getUserTraceProcessorPath(): string {
   const home = process.env.SMARTPERFETTO_HOME && process.env.SMARTPERFETTO_HOME.trim()
     ? path.resolve(process.env.SMARTPERFETTO_HOME)
@@ -228,8 +242,9 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
       const args = [
         '--httpd',
         '--http-port', String(this.httpPort),
-        // Allow CORS from the Perfetto UI origin
-        '--http-additional-cors-origins', corsOrigins,
+        // Only pass --http-additional-cors-origins when supported (added after v47);
+        // older binaries (≤v47) don't enforce CORS and exit with code 1 on unknown flags.
+        ...(supportsCorsOriginsFlag() ? ['--http-additional-cors-origins', corsOrigins] : []),
         this.tracePath
       ];
 
@@ -280,7 +295,8 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
         }
 
         // Also check stderr for server ready message
-        if (text.includes('Starting HTTP server') || text.includes('Trace loaded')) {
+        // v47+ prints "Starting RPC server"; older versions print "Starting HTTP server"
+        if (text.includes('Starting HTTP server') || text.includes('Starting RPC server') || text.includes('Trace loaded')) {
           setTimeout(() => {
             if (!resolved) {
               resolved = true;
@@ -300,9 +316,12 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
           }
         }
 
-        // Check for port in use error
+        // Check for port in use error — but ignore IPv6-only failures.
+        // On hosts with IPv6 disabled, trace_processor_shell prints
+        // "Failed to listen on IPv6 socket" while still serving on IPv4.
         if (text.includes('Failed to listen') || text.includes('Address already in use')) {
-          if (!resolved) {
+          const isIPv6Only = text.includes('[::') || text.includes('IPv6 socket');
+          if (!isIPv6Only && !resolved) {
             resolved = true;
             clearTimeout(timeout);
             reject(new Error(`PORT_IN_USE:${this.httpPort}`));

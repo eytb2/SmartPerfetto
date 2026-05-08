@@ -34,6 +34,7 @@ import {
   createQuickConfig,
   createSdkEnv,
   explainClaudeRuntimeError,
+  getSdkBinaryOption,
   loadClaudeConfig,
   resolveEffort,
   resolveRuntimeConfig,
@@ -226,6 +227,10 @@ function sdkQueryWithRetry(
   } = {},
 ): SdkQueryHandle {
   const { maxRetries = 2, baseDelayMs = 2000, emitUpdate, outputLanguage = loadClaudeConfig().outputLanguage } = options;
+  const binaryOpt = getSdkBinaryOption();
+  const mergedParams = binaryOpt.pathToClaudeCodeExecutable
+    ? { ...params, options: { ...params.options, ...binaryOpt } }
+    : params;
 
   // Tracks the Query instance currently being iterated so `close()` can
   // forward termination to the underlying SDK subprocess across retries.
@@ -239,7 +244,7 @@ function sdkQueryWithRetry(
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       if (closed) return;
       try {
-        currentQuery = sdkQuery(params);
+        currentQuery = sdkQuery(mergedParams);
         // Yield all messages from the stream
         for await (const msg of currentQuery) {
           if (closed) return;
