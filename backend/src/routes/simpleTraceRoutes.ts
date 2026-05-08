@@ -16,7 +16,7 @@ import { resolveFeatureConfig } from '../config';
 import { attachRequestContext, requireRequestContext, type RequestContext } from '../middleware/auth';
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import { getPortPool } from '../services/portPool';
-import { TraceProcessorFactory } from '../services/workingTraceProcessor';
+import { TraceProcessorFactory, type TraceProcessorRuntimeStats } from '../services/workingTraceProcessor';
 import { openEnterpriseDb } from '../services/enterpriseDb';
 import { recordEnterpriseAuditEvent } from '../services/enterpriseAuditService';
 import {
@@ -151,8 +151,21 @@ function recordLeaseRssFromProcessor(
   return getTraceProcessorLeaseStore().recordRss(leaseScopeFromContext(context), lease.id, rssBytes);
 }
 
-function queueLengthForTrace(traceId: string): number {
-  return sharedQueueLengthForTrace(traceId, TraceProcessorFactory.getStats().processors);
+function processorQueueLength(processor: TraceProcessorRuntimeStats): number {
+  const worker = processor.sqlWorker;
+  return worker ? worker.queuedP0 + worker.queuedP1 + worker.queuedP2 : 0;
+}
+
+function queueLengthForLease(
+  lease: TraceProcessorLeaseRecord,
+  processors: TraceProcessorRuntimeStats[],
+): number {
+  if (lease.mode === 'isolated') {
+    return processors
+      .filter(processor => processor.traceId === lease.traceId && processor.leaseId === lease.id)
+      .reduce((sum, processor) => sum + processorQueueLength(processor), 0);
+  }
+  return sharedQueueLengthForTrace(lease.traceId, processors);
 }
 
 function recordTraceCleanupAudit(
@@ -769,7 +782,7 @@ router.get('/stats', async (req, res) => {
             mode: lease.mode,
             state: lease.state,
             rssBytes: lease.rssBytes,
-            queueLength: queueLengthForTrace(lease.traceId),
+            queueLength: queueLengthForLease(lease, processors),
             holderCount: lease.holderCount,
             holders: lease.holders.map(holder => ({
               holderType: holder.holderType,
