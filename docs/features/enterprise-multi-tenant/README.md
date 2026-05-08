@@ -136,7 +136,9 @@
 - [x] `docs/features/enterprise-multi-tenant/appendix-ha.md`（未来扩展，v1 仅作参考）
 - [x] `docs/features/enterprise-multi-tenant/agent-goal.md`（AI 接手用 self-contained goal prompt）
 - [x] `docs/features/enterprise-multi-tenant/baseline.md`（0.0 baseline 命令与实测结果）
-- [ ] （新增 ADR / 设计 / runbook 在此追加，例如：`docs/adr/0001-enterprise-db-choice.md` …）
+
+> 追加模板：新增 ADR / 设计 / runbook 在本区末尾追加，例如 `docs/adr/0001-enterprise-db-choice.md`。
+
 - [x] `docs/features/enterprise-multi-tenant/adr-0001-sqlite-wal-repository.md`（§0.3.1 SQLite WAL + repository abstraction 决策）
 - [ ] `docs/features/enterprise-multi-tenant/rss-benchmark.md`（§0.4.3 RSS benchmark runbook；等待 100MB/500MB/1GB 大 trace 实测）
 - [x] `docs/features/enterprise-multi-tenant/runtime-isolation-checklist.md`（§0.4.12 §11.11 漏洞清单设计验收证据）
