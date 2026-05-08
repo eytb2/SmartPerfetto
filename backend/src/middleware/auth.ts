@@ -29,9 +29,9 @@ interface AuthenticatedRequest extends Request {
 }
 
 const API_KEY_ENV = 'SMARTPERFETTO_API_KEY';
-const DEFAULT_TENANT_ID = 'default-dev-tenant';
-const DEFAULT_WORKSPACE_ID = 'default-workspace';
-const DEFAULT_DEV_USER_ID = 'dev-user-123';
+export const DEFAULT_TENANT_ID = 'default-dev-tenant';
+export const DEFAULT_WORKSPACE_ID = 'default-workspace';
+export const DEFAULT_DEV_USER_ID = 'dev-user-123';
 const USAGE_WINDOW_MS = Number.parseInt(process.env.SMARTPERFETTO_USAGE_WINDOW_MS || '', 10) || 24 * 60 * 60 * 1000;
 const MAX_REQUESTS = Number.parseInt(process.env.SMARTPERFETTO_USAGE_MAX_REQUESTS || '', 10);
 const MAX_TRACE_REQUESTS = Number.parseInt(process.env.SMARTPERFETTO_USAGE_MAX_TRACE_REQUESTS || '', 10);
