@@ -18,6 +18,14 @@
 
 未达成时只能宣告"阶段性进展 + 下一步"，不可宣告"完成"。
 
+**2026-05-09 维护者范围覆盖**：维护者明确要求本轮先不阻塞
+§0.4.3 真实大 trace RSS 矩阵和 §0.8 真实 50 在线用户压测，后续由维护者
+手动实测。本轮 agent 目标可以在 README §0 全部打勾、D1-D10 自动化通过、
+PR gate 通过、且
+`enterprise:readiness-audit -- --require-ready --allow-user-deferred-external-evidence`
+通过时收口。未带该显式参数的严格 release audit 仍必须继续阻塞未实测的
+RSS/load 证据，不能把 `User-deferred` 当成真实测量结果。
+
 ## 2. 不可违背的硬约束（写死，不再决策）
 
 | 约束 | 内容 |

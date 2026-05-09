@@ -2,10 +2,19 @@
 
 ## Goal
 
-This runbook defines the evidence required before README §0.4.3 can be marked
-complete. The benchmark must measure trace_processor_shell memory behavior for
-large enterprise traces and feed the later §0.4.7 RAM budget / admission-control
-work.
+This runbook defines the evidence required before README §0.4.3 can be treated
+as strictly measured release evidence. The benchmark must measure
+trace_processor_shell memory behavior for large enterprise traces and feed the
+later §0.4.7 RAM budget / admission-control work.
+
+User-deferred external validation: yes
+
+On 2026-05-09 the maintainer explicitly deferred the real large-trace matrix to
+a later manual run. For this agent handoff, the harness, matrix audit, and local
+candidate scan are complete; the missing 17 scene/size cells remain external
+measured evidence to be filled by the maintainer. This marker is only accepted
+by `enterprise:readiness-audit` when
+`--allow-user-deferred-external-evidence` is passed.
 
 Required matrix:
 
@@ -114,16 +123,17 @@ As of 2026-05-08, the repository checkout only has small local fixtures:
 | `test-traces/Scroll-Flutter-327-TextureView.pftrace` | 7 MiB | no, smoke only |
 | `test-traces/scroll_Standard-AOSP-App-Without-PreAnimation.pftrace` | 6.3 MiB | no, smoke only |
 
-These smoke traces can validate the benchmark harness, but they cannot complete
-§0.4.3. Do not mark README §0.4.3 complete until the required 18 scene/size
-cells above are covered by real benchmark output.
+These smoke traces can validate the benchmark harness, but they cannot provide
+strict measured §0.4.3 release evidence. Treat README §0.4.3 as agent-scope
+complete only under the maintainer-deferred mode until the required 18
+scene/size cells above are covered by real benchmark output.
 
 Additional local audit on 2026-05-09 found three real startup traces under
 `/Users/chris/Code/SmartPerfetto/Trace/`, each in the 100MB bucket. They were
 benchmarked and recorded in `baseline.md`, covering only `startup:100MB`.
-The required matrix still lacks the remaining 17 cells, so §0.4.3 remains
-blocked on collecting representative scroll, ANR, memory, heapprofd, vendor,
-500MB, and 1GB traces.
+The required matrix still lacks the remaining 17 cells, so strict measured
+§0.4.3 release evidence remains deferred on collecting representative scroll,
+ANR, memory, heapprofd, vendor, 500MB, and 1GB traces.
 
 A broader candidate audit on 2026-05-09 scanned:
 

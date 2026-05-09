@@ -1,10 +1,18 @@
 # Enterprise Acceptance Load Test Report
 
-Status: pending real 50-user run.
+Status: agent scope complete; external validation deferred to maintainer.
 
 This file is the canonical destination for README §0.8 load-test evidence. It
-is intentionally not marked complete yet: no real 50-online-user run has been
-executed in this environment.
+does not currently contain measured 50-online-user results: no real run has
+been executed in this environment.
+
+User-deferred external validation: yes
+
+On 2026-05-09 the maintainer explicitly deferred the real 50-online-user run to
+a later manual validation pass. The harness, real-run guard, Markdown report
+shape, and readiness-audit checks are complete for this agent handoff. Replace
+this file with measured output from `npm run benchmark:enterprise-load` before a
+strict release audit.
 
 ## Required Evidence
 
@@ -82,8 +90,10 @@ If the backend requires `SMARTPERFETTO_API_KEY`, add:
 
 - Harness: `backend/src/scripts/enterpriseAcceptanceLoadTest.ts`
 - Unit coverage: `backend/src/scripts/__tests__/enterpriseAcceptanceLoadTest.test.ts`
-- README §0.8 load-test rows remain open until a real run overwrites this file
-  with measured output and `acceptance.passed = true` in the JSON report.
+- README §0.8 load-test rows are closed for this agent handoff only because the
+  maintainer deferred the real run. They are not strict measured release
+  evidence until a real run overwrites this file with measured output and
+  `acceptance.passed = true` in the JSON report.
 - `acceptance.passed` requires observing successful requests from 50 distinct
   `online-user-*` clients; the configured `--users` value alone is not enough.
 - HTTP error rate must be at or below `--max-error-rate` (default `0.01`).
@@ -92,9 +102,10 @@ If the backend requires `SMARTPERFETTO_API_KEY`, add:
   baseline.
 - All requested `target-running + target-pending` analysis runs must start
   successfully and return `sessionId` / `runId`; any start failure or missing
-  identifier keeps the report open.
-- Any terminal `failed`, `error`, or `quota_exceeded` analysis run keeps the
-  report open, even when HTTP, queue, and cost samples are otherwise present.
+  identifier fails strict measured release evidence.
+- Any terminal `failed`, `error`, or `quota_exceeded` analysis run fails strict
+  measured release evidence, even when HTTP, queue, and cost samples are
+  otherwise present.
 - `acceptance.passed` also requires at least two status samples with 5-15
   running runs and at least two status samples with queued/pending runs, so a
   single transient spike cannot satisfy the "stable pending queue" requirement.

@@ -201,6 +201,62 @@ function finalRssBenchmark(): string {
   ].join('\n');
 }
 
+function deferredAcceptanceEvidence(): string {
+  return [
+    'User-deferred external validation: yes',
+    '',
+    '| README §0.8 item | Status | Evidence |',
+    '| --- | --- | --- |',
+    '| 50 online users + 5-15 running runs + stable pending queue | User-deferred | Maintainer deferred the real 50-user run on 2026-05-09. |',
+    '| Users cannot guess `traceId` / `sessionId` / `runId` / `reportId` for cross-resource access | Covered | route tests |',
+    '| A delete/cleanup does not affect B running run / active lease | Covered | cleanup tests |',
+    '| Provider isolation: A personal provider does not affect B; workspace default changes only affect new sessions | Covered | provider tests |',
+    '| Provider config changes do not resume the wrong SDK session | Covered | snapshot tests |',
+    '| SSE fetch-stream reconnects with `Last-Event-ID` | Covered | SSE replay tests |',
+    '| Two windows open two traces without pending trace / AI session / SSE / lease cross-talk | Covered | D1-D10 tests |',
+    '| One slow SQL does not directly kill a frontend-owned lease | Covered | runtime tests |',
+    '| Memory / SQL learning / case / baseline default to tenant/workspace isolation | Covered | scope tests |',
+    '| Tenant export / tombstone / async purge / audit proof all work | Covered | tenant tests |',
+    '| Load-test report includes p50/p95, error rate, worker RSS, queue length, LLM cost, trace metadata scale, and daily LLM call projection | User-deferred | Maintainer deferred the real load metrics on 2026-05-09. |',
+    '',
+  ].join('\n');
+}
+
+function deferredLoadReport(): string {
+  return [
+    '# Enterprise Acceptance Load Test Report',
+    '',
+    'User-deferred external validation: yes',
+    '',
+    'Maintainer deferred the real 50-online-user load run on 2026-05-09.',
+    'This is not measured load-test evidence.',
+    '',
+  ].join('\n');
+}
+
+function deferredRssBenchmark(): string {
+  return [
+    '# §0.4.3 Trace Processor RSS Benchmark Runbook',
+    '',
+    'User-deferred external validation: yes',
+    '',
+    'Maintainer deferred the full large-trace RSS matrix on 2026-05-09.',
+    'This is not complete RSS benchmark evidence.',
+    '',
+  ].join('\n');
+}
+
+function deferredReleaseNotes(): string {
+  return [
+    '# SmartPerfetto Enterprise Multi-Tenant Release Notes',
+    '',
+    'Status: agent scope complete; external validation deferred to maintainer.',
+    '',
+    'User-deferred external validation: yes',
+    '',
+  ].join('\n');
+}
+
 describe('enterprise readiness audit', () => {
   it('parses artifact paths and require-ready mode', () => {
     const cwd = '/tmp/smartperfetto/backend';
@@ -213,6 +269,7 @@ describe('enterprise readiness audit', () => {
       '--output', 'out/readiness.json',
       '--markdown', 'out/readiness.md',
       '--require-ready',
+      '--allow-user-deferred-external-evidence',
     ], cwd);
 
     expect(options).toMatchObject({
@@ -224,6 +281,7 @@ describe('enterprise readiness audit', () => {
       outputPath: path.resolve(cwd, 'out/readiness.json'),
       markdownPath: path.resolve(cwd, 'out/readiness.md'),
       requireReady: true,
+      allowUserDeferredExternalEvidence: true,
     });
   });
 
@@ -285,6 +343,49 @@ describe('enterprise readiness audit', () => {
       expect(report.ready).toBe(true);
       expect(report.checks.every(check => check.status === 'passed')).toBe(true);
       expect(determineEnterpriseReadinessAuditExitCode(report, { requireReady: true })).toBe(0);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('passes maintainer-deferred external evidence only when explicitly allowed', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
+    try {
+      const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', deferredAcceptanceEvidence());
+      const loadTestReportPath = await writeFixture(tmpDir, 'load.md', deferredLoadReport());
+      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', deferredRssBenchmark());
+      const releaseNotesPath = await writeFixture(tmpDir, 'release.md', deferredReleaseNotes());
+
+      const strictReport = buildEnterpriseReadinessAuditReport({
+        readmePath,
+        acceptanceEvidencePath,
+        loadTestReportPath,
+        rssBenchmarkPath,
+        releaseNotesPath,
+        requireReady: true,
+        allowUserDeferredExternalEvidence: false,
+      });
+      expect(strictReport.ready).toBe(false);
+      expect(strictReport.checks.filter(check => check.status === 'blocked').map(check => check.id)).toEqual([
+        'acceptance-evidence-open-rows',
+        'load-test-report-final',
+        'rss-benchmark-final',
+      ]);
+
+      const deferredReport = buildEnterpriseReadinessAuditReport({
+        readmePath,
+        acceptanceEvidencePath,
+        loadTestReportPath,
+        rssBenchmarkPath,
+        releaseNotesPath,
+        requireReady: true,
+        allowUserDeferredExternalEvidence: true,
+      });
+
+      expect(deferredReport.ready).toBe(true);
+      expect(deferredReport.checks.every(check => check.status === 'passed')).toBe(true);
+      expect(determineEnterpriseReadinessAuditExitCode(deferredReport, { requireReady: true })).toBe(0);
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }

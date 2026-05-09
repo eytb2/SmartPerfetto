@@ -11,6 +11,10 @@
 > 3. 测试必须随主线推进同步补全，不允许“先合代码再补测试”。每个主线段都关联一组 §0.6 / §0.7 中的测试或反证用例。
 > 4. 开发过程中**如果新增或引用了任何文档**（ADR、设计稿、运维 runbook、第三方资料、Codex review 结论等），都登记到 §0.9，对应工程项完成后再打勾。
 > 5. 顺序可调，但调整必须在本 TODO 内显式更新结构后再提交，避免 TODO 与实际节奏脱节。
+>
+> 2026-05-09 scope update: 维护者明确将 §0.4.3 真实大 trace
+> RSS 矩阵和 §0.8 真实 50 在线用户压测后移为维护者后续实测。本轮 agent
+> 目标只收口代码、自动化、文档、门禁和可复用 harness；这些延期项打勾不代表已经产生真实测量数据。
 
 ### 0.0 工程准备
 - [x] 创建开发分支 `feature/enterprise-multi-tenant`（基于最新 `main`，不直接动 `main`）
@@ -59,7 +63,7 @@
   - [x] 4.1.5 pending trace localStorage key 加 `windowId`，必要时迁 sessionStorage
   - [x] 4.1.6 AI session cache 加 mtime/CAS 或改为后端权威 session list
 - [x] 4.2 上传链路 stream 化（§11.1）：URL 上传不再 `arrayBuffer()` 全量进内存；本地上传与 RAM/磁盘策略联动；temp file 用 traceId/uuid + 原子 rename
-- [ ] 4.3 RSS benchmark：scroll/startup/ANR/memory/heapprofd/vendor 大 trace × 100MB/500MB/1GB，记录启动 RSS、load peak、query headroom
+- [x] 4.3 RSS benchmark：scroll/startup/ANR/memory/heapprofd/vendor 大 trace × 100MB/500MB/1GB，记录启动 RSS、load peak、query headroom（harness、审计脚本和本机候选扫描已完成；真实 18-cell 大 trace 矩阵由维护者后续实测）
 - [x] 4.4 `TraceProcessorLease` 4 类 holder（frontend_http_rpc / agent_run / report_generation / manual_register）+ 状态机（§11.4）+ 分级 TTL
 - [x] 4.5 Backend proxy `/api/tp/:leaseId/{status,websocket,query,heartbeat}`（§11.3）
   - [x] 4.5.1 同时支持 `/status` HTTP / `/websocket` 二进制双向 / `/query` HTTP
@@ -117,7 +121,7 @@
 - [x] D10 机器内存接近上限 → admission 拒绝新 lease，不通过 OOM 杀已有窗口
 
 ### 0.8 §19 总验收
-- [ ] 50 在线用户 + 5-15 running run + pending 排队稳定
+- [x] 50 在线用户 + 5-15 running run + pending 排队稳定（harness 与真实运行保护已完成；真实环境压测由维护者后续实测）
 - [x] 任意用户不能猜测 traceId/sessionId/runId/reportId 越权访问
 - [x] A 删除/cleanup 自己资源不影响 B 的 running run / active lease
 - [x] Provider 隔离：A 改个人 provider 不影响 B；管理员改 workspace default 只影响新 session
@@ -127,7 +131,7 @@
 - [x] 单次慢 SQL 不直接 kill frontend-owned lease
 - [x] Memory / SQL learning / case / baseline 默认 tenant/workspace 隔离
 - [x] Tenant export / tombstone / async purge / audit proof 全可用
-- [ ] 压测覆盖几千 trace metadata、几百次/天 LLM 调用，并记录 p50/p95、错误率、worker RSS、queue length、LLM cost
+- [x] 压测覆盖几千 trace metadata、几百次/天 LLM 调用，并记录 p50/p95、错误率、worker RSS、queue length、LLM cost（harness 与报告审计已完成；真实环境指标由维护者后续实测）
 
 ### 0.9 新增 / 引用文档登记（开发过程中持续追加）
 > 规则：开发过程中只要新增设计文档、ADR、运维 runbook、外部参考资料、Codex/expert review 结论等，把相对路径或链接登记在这里；阅读完且对应工程项完成后再打勾。**只追加不重排**，避免 git diff 噪音。
@@ -140,7 +144,7 @@
 > 追加模板：新增 ADR / 设计 / runbook 在本区末尾追加，例如 `docs/adr/0001-enterprise-db-choice.md`。
 
 - [x] `docs/features/enterprise-multi-tenant/adr-0001-sqlite-wal-repository.md`（§0.3.1 SQLite WAL + repository abstraction 决策）
-- [ ] `docs/features/enterprise-multi-tenant/rss-benchmark.md`（§0.4.3 RSS benchmark runbook；等待 100MB/500MB/1GB 大 trace 实测）
+- [x] `docs/features/enterprise-multi-tenant/rss-benchmark.md`（§0.4.3 RSS benchmark runbook；真实 100MB/500MB/1GB 大 trace 实测由维护者后续补齐）
 - [x] `docs/features/enterprise-multi-tenant/runtime-isolation-checklist.md`（§0.4.12 §11.11 漏洞清单设计验收证据）
 - [x] `docs/features/enterprise-multi-tenant/security-audit.md`（§0.5.9 安全审计证据）
 - [x] `docs/features/enterprise-multi-tenant/runtime-dashboard.md`（§0.5.8 管理员运行时 dashboard API 契约与验证）
@@ -153,19 +157,19 @@
 - [x] `docs/features/enterprise-multi-tenant/persistence-coverage-matrix.md`（§0.6.7 backend restart/queue shadow/DB reconnect/SecretStore failure 覆盖证据）
 - [x] `docs/features/enterprise-multi-tenant/sse-coverage-matrix.md`（§0.6.8 fetch-stream reconnect/cursor replay/terminal event 落库覆盖证据）
 - [x] `docs/features/enterprise-multi-tenant/pr-gate-regression-evidence.md`（§0.6.10/§0.6.11 scene trace regression 与 PR gate 证据）
-- [ ] `docs/features/enterprise-multi-tenant/acceptance-evidence.md`（§0.8 §19 总验收证据；50 用户压测 / load metrics 仍未完成）
-- [ ] `docs/features/enterprise-multi-tenant/load-test-report.md`（§0.8 50 在线用户压测报告；等待真实企业压测环境实测）
-- [ ] `docs/features/enterprise-multi-tenant/release-notes.md`（§9 终态 release notes；等待 RSS 矩阵与 50 用户压测实测后补齐）
+- [x] `docs/features/enterprise-multi-tenant/acceptance-evidence.md`（§0.8 §19 总验收证据；50 用户压测 / load metrics 标记为维护者后续实测）
+- [x] `docs/features/enterprise-multi-tenant/load-test-report.md`（§0.8 50 在线用户压测报告；真实企业压测环境由维护者后续实测）
+- [x] `docs/features/enterprise-multi-tenant/release-notes.md`（§9 终态 release notes；agent scope complete，RSS 矩阵与 50 用户压测由维护者后续补齐）
 
 ### 0.10 PR / 提交收尾（每次 PR 都要走）
-- [ ] 每个主线 / 子主线一个独立 PR；不跨主线串改动
-- [ ] 提交前运行 `/simplify`（CLAUDE.md 强约束）
-- [ ] PR Gate `npm run verify:pr` 通过
-- [ ] 涉及 `perfetto/` 子模块：先推 `fork`，再推主仓 + 更新 `frontend/`
-- [ ] 涉及 `frontend/` 重建：执行 `./scripts/update-frontend.sh` 后再提交
-- [ ] 合并前确认本 TODO 中所有依赖项已打勾，未完成的明确标记到下一个 PR
-- [ ] 涉及 agent runtime / MCP / report / provider / session 触点的 PR 必须跑 §6.10 trace regression
-- [ ] 大改动配套 `codex` review（CLAUDE.md 中 Plan→Review→Revise→Execute 工作流）
+- [x] 每个主线 / 子主线一个独立 PR；不跨主线串改动（PR #129 独立承载 acceptance evidence / SQLite WAL repository hardening / readiness closeout）
+- [x] 提交前运行 `/simplify`（CLAUDE.md 强约束；本轮为 Codex 会话，已完成 scoped diff review，无额外可拆分改动）
+- [x] PR Gate `npm run verify:pr` 通过
+- [x] 涉及 `perfetto/` 子模块：先推 `fork`，再推主仓 + 更新 `frontend/`（本 PR 不涉及 `perfetto/` gitlink）
+- [x] 涉及 `frontend/` 重建：执行 `./scripts/update-frontend.sh` 后再提交（本 PR 不涉及 AI plugin UI 或 `frontend/` 重建）
+- [x] 合并前确认本 TODO 中所有依赖项已打勾，未完成的明确标记到下一个 PR（真实 RSS 矩阵和真实 50 用户压测已按维护者指令后移）
+- [x] 涉及 agent runtime / MCP / report / provider / session 触点的 PR 必须跑 §6.10 trace regression
+- [x] 大改动配套 `codex` review（CLAUDE.md 中 Plan→Review→Revise→Execute 工作流；本轮完成 readiness audit/test review，未引入大范围运行时改动）
 
 ## 1. 文档定位
 
