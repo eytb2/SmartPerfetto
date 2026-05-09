@@ -406,9 +406,48 @@ function missingLoadReportMetricEvidence(markdown: string): string[] {
   const requestedRuns = targetRunning !== null && targetPending !== null
     ? targetRunning + targetPending
     : null;
+  missing.push(...missingLoadReportOnlineUserEvidence(markdown, observedUsers));
   missing.push(...missingLoadReportRunTableEvidence(markdown, requestedRuns));
   missing.push(...missingLoadReportStatusSnapshotEvidence(markdown));
   missing.push(...missingLoadReportRuntimeSampleEvidence(markdown));
+
+  return missing;
+}
+
+function missingLoadReportOnlineUserEvidence(markdown: string, observedUsers: number | null): string[] {
+  const missing: string[] = [];
+  const userRows = markdownTableRows(markdown).filter(row =>
+    row.User !== undefined
+    && row['Successful trace_list samples'] !== undefined
+    && row['Failed trace_list samples'] !== undefined
+    && row['Max visible trace metadata'] !== undefined
+  );
+  const distinctUsers = new Set(userRows.map(row => row.User.trim()).filter(user => user.startsWith('online-user-')));
+  const requiredUsers = Math.max(50, observedUsers ?? 0);
+
+  if (distinctUsers.size < requiredUsers) {
+    missing.push(`online user sample rows < ${requiredUsers}`);
+  }
+
+  const rowsWithNoSuccessfulTraceList = userRows.filter((row) => {
+    const successCount = parseMarkdownNumber(row['Successful trace_list samples']);
+    return row.User.trim().startsWith('online-user-') && (successCount === null || successCount < 1);
+  });
+  if (rowsWithNoSuccessfulTraceList.length > 0) {
+    missing.push('online user sample rows without successful trace_list samples');
+  }
+
+  const rowsBelowTraceScale = userRows.filter((row) => {
+    const visibleTraceMetadata = parseMarkdownNumber(row['Max visible trace metadata']);
+    return row.User.trim().startsWith('online-user-')
+      && (
+        visibleTraceMetadata === null
+        || visibleTraceMetadata < MIN_ACCEPTANCE_VISIBLE_TRACE_METADATA
+      );
+  });
+  if (rowsBelowTraceScale.length > 0) {
+    missing.push(`online user sample rows with max visible trace metadata < ${MIN_ACCEPTANCE_VISIBLE_TRACE_METADATA}`);
+  }
 
   return missing;
 }

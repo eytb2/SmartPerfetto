@@ -52,6 +52,19 @@ function finalAnalysisRunRows(count = 15): string[] {
   ];
 }
 
+function finalOnlineUserSampleRows(count = 50): string[] {
+  return [
+    '## Online User Samples',
+    '',
+    '| User | Successful trace_list samples | Failed trace_list samples | Max visible trace metadata |',
+    '| --- | ---: | ---: | ---: |',
+    ...Array.from({ length: count }, (_unused, index) => {
+      const ordinal = index + 1;
+      return `| online-user-${String(ordinal).padStart(3, '0')} | 1 | 0 | 1000 |`;
+    }),
+  ];
+}
+
 function finalStatusSnapshotRows(): string[] {
   return [
     '## Status Snapshots',
@@ -121,6 +134,8 @@ function finalLoadReport(): string {
     '| Final LLM calls | 4 |',
     '| LLM call delta | 1 |',
     '| Estimated daily LLM calls | 288 |',
+    '',
+    ...finalOnlineUserSampleRows(),
     '',
     ...finalStatusSnapshotRows(),
     '',
@@ -416,6 +431,44 @@ describe('enterprise readiness audit', () => {
           'analysis run table has missing session/run ids',
           'analysis run table has non-2xx start status',
           'analysis run table has terminal failed/error/quota_exceeded rows',
+        ]),
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('requires final load report online user sample rows to be directly auditable', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
+    try {
+      const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', finalAcceptanceEvidence());
+      const loadTestReportPath = await writeFixture(
+        tmpDir,
+        'load.md',
+        finalLoadReport()
+          .replace('| online-user-050 | 1 | 0 | 1000 |', '')
+          .replace('| online-user-049 | 1 | 0 | 1000 |', '| online-user-049 | 0 | 1 | n/a |'),
+      );
+      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', finalRssBenchmark());
+      const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
+
+      const report = buildEnterpriseReadinessAuditReport({
+        readmePath,
+        acceptanceEvidencePath,
+        loadTestReportPath,
+        rssBenchmarkPath,
+        releaseNotesPath,
+        requireReady: true,
+      });
+
+      expect(report.ready).toBe(false);
+      expect(report.checks.find(check => check.id === 'load-test-report-final')).toMatchObject({
+        status: 'blocked',
+        evidence: expect.arrayContaining([
+          'online user sample rows < 50',
+          'online user sample rows without successful trace_list samples',
+          'online user sample rows with max visible trace metadata < 1000',
         ]),
       });
     } finally {

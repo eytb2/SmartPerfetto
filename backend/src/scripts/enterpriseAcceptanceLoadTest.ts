@@ -963,8 +963,45 @@ function formatCount(value: number | null): string {
   return value === null ? 'n/a' : value.toFixed(0);
 }
 
+function buildOnlineUserSampleRows(samples: HttpSample[]): Array<{
+  userId: string;
+  successfulTraceListSamples: number;
+  failedTraceListSamples: number;
+  maxVisibleTraceMetadata: number | null;
+}> {
+  const rows = new Map<string, {
+    successfulTraceListSamples: number;
+    failedTraceListSamples: number;
+    maxVisibleTraceMetadata: number | null;
+  }>();
+
+  for (const sample of samples) {
+    if (sample.operation !== 'trace_list' || !sample.userId.startsWith('online-user-')) continue;
+    const existing = rows.get(sample.userId) ?? {
+      successfulTraceListSamples: 0,
+      failedTraceListSamples: 0,
+      maxVisibleTraceMetadata: null,
+    };
+    if (sample.ok) {
+      existing.successfulTraceListSamples += 1;
+      if (typeof sample.traceCount === 'number') {
+        existing.maxVisibleTraceMetadata = Math.max(existing.maxVisibleTraceMetadata ?? 0, sample.traceCount);
+      }
+    } else {
+      existing.failedTraceListSamples += 1;
+    }
+    rows.set(sample.userId, existing);
+  }
+
+  return Array.from(rows.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([userId, row]) => ({ userId, ...row }));
+}
+
 export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): string {
   const lines: string[] = [];
+  const onlineUserRows = buildOnlineUserSampleRows(report.httpSamples);
+
   lines.push('# Enterprise Acceptance Load Test Report');
   lines.push('');
   lines.push(`Generated: ${report.generatedAt}`);
@@ -1024,6 +1061,14 @@ export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): s
   lines.push('| --- | ---: | ---: | ---: | ---: |');
   for (const [operation, summary] of Object.entries(report.summary.latency.byOperation)) {
     lines.push(`| ${operation} | ${summary.count} | ${formatMs(summary.p50Ms)} | ${formatMs(summary.p95Ms)} | ${formatMs(summary.maxMs)} |`);
+  }
+  lines.push('');
+  lines.push('## Online User Samples');
+  lines.push('');
+  lines.push('| User | Successful trace_list samples | Failed trace_list samples | Max visible trace metadata |');
+  lines.push('| --- | ---: | ---: | ---: |');
+  for (const row of onlineUserRows) {
+    lines.push(`| ${row.userId} | ${row.successfulTraceListSamples} | ${row.failedTraceListSamples} | ${row.maxVisibleTraceMetadata ?? 'n/a'} |`);
   }
   lines.push('');
   lines.push('## Status Snapshots');

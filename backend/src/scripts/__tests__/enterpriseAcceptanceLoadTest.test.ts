@@ -926,6 +926,8 @@ describe('enterprise acceptance load test helpers', () => {
     expect(markdown).toContain('| Final LLM calls | 4 |');
     expect(markdown).toContain('| LLM call delta | 1 |');
     expect(markdown).toContain('| Estimated daily LLM calls | 1440 |');
+    expect(markdown).toContain('## Online User Samples');
+    expect(markdown).toContain('| online-user-050 | 1 | 0 | 1000 |');
     expect(markdown).toContain('## Status Snapshots');
     expect(markdown).toContain('| 2026-05-09T00:00:01.000Z | 1 | 1 | 5 | 0 | 0 | 0 | 0 | 0 |');
     expect(markdown).toContain('## Runtime Samples');
