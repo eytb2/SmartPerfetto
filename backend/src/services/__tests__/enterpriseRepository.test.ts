@@ -142,6 +142,19 @@ describe('enterprise repository scope abstraction', () => {
     ]);
   });
 
+  test('keeps every repository table backed by id, tenant_id, and workspace_id schema columns', () => {
+    for (const table of ENTERPRISE_WORKSPACE_SCOPED_TABLES) {
+      const columns = new Set(
+        db!.prepare<unknown[], { name: string }>(`PRAGMA table_info(${table})`).all()
+          .map(row => row.name),
+      );
+      expect(columns.has('id')).toBe(true);
+      expect(columns.has('tenant_id')).toBe(true);
+      expect(columns.has('workspace_id')).toBe(true);
+      expect(() => createEnterpriseWorkspaceRepository(db!, table)).not.toThrow();
+    }
+  });
+
   test('upserts rows without allowing cross-scope ownership moves', () => {
     const repo = createEnterpriseWorkspaceRepository<TraceAssetRow>(db!, 'trace_assets');
     const scopeA = { tenantId: 'tenant-a', workspaceId: 'workspace-a' };
@@ -213,6 +226,12 @@ describe('enterprise repository scope abstraction', () => {
       {},
       { orderBy: 'id; DROP TABLE trace_assets' },
     )).toThrow('Invalid orderBy column');
+
+    expect(() => repo.list(
+      { tenantId: 'tenant-a', workspaceId: 'workspace-a' },
+      {},
+      { orderBy: 'id', direction: 'DESC; DROP TABLE trace_assets' as never },
+    )).toThrow('Invalid order direction');
   });
 
   test('does not allow scoped updates to mutate identity columns', () => {

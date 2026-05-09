@@ -214,29 +214,21 @@ export function saveClaudeSessionMapToRuntimeSnapshots(
         traceId: graph.traceId,
       });
 
-      db.prepare(`
-        INSERT INTO runtime_snapshots
-          (id, tenant_id, workspace_id, session_id, run_id, runtime_type, snapshot_json, created_at)
-        VALUES
-          (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          tenant_id = excluded.tenant_id,
-          workspace_id = excluded.workspace_id,
-          session_id = excluded.session_id,
-          run_id = excluded.run_id,
-          runtime_type = excluded.runtime_type,
-          snapshot_json = excluded.snapshot_json,
-          created_at = excluded.created_at
-      `).run(
+      const repo = createEnterpriseWorkspaceRepository<RuntimeSnapshotRow>(db, 'runtime_snapshots');
+      const changes = repo.upsertById(
+        { tenantId: graph.tenantId, workspaceId: graph.workspaceId },
         id,
-        graph.tenantId,
-        graph.workspaceId,
-        graph.sessionId,
-        graph.runId,
-        CLAUDE_SESSION_MAP_RUNTIME_TYPE,
-        snapshotJson,
-        entry.updatedAt,
+        {
+          session_id: graph.sessionId,
+          run_id: graph.runId,
+          runtime_type: CLAUDE_SESSION_MAP_RUNTIME_TYPE,
+          snapshot_json: snapshotJson,
+          created_at: entry.updatedAt,
+        },
       );
+      if (changes === 0) {
+        throw new Error('Runtime snapshot id already exists outside the repository scope');
+      }
     });
     write();
   });

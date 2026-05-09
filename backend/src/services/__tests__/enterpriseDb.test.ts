@@ -55,4 +55,35 @@ describe('enterprise SQLite WAL database', () => {
       db.close();
     }
   });
+
+  test('allows a writer to commit while another WAL connection holds a read transaction', async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-enterprise-db-'));
+    const dbPath = path.join(tmpDir, 'enterprise.sqlite');
+    const reader = openEnterpriseDb(dbPath);
+    const writer = openEnterpriseDb(dbPath);
+
+    try {
+      reader.prepare('BEGIN').run();
+      expect(reader.prepare('SELECT COUNT(*) AS count FROM organizations').get()).toEqual({ count: 0 });
+
+      writer.prepare(`
+        INSERT INTO organizations (id, name, status, plan, created_at, updated_at)
+        VALUES ('tenant-wal', 'Tenant WAL', 'active', 'enterprise', 1, 1)
+      `).run();
+
+      expect(writer.prepare('SELECT COUNT(*) AS count FROM organizations').get()).toEqual({ count: 1 });
+      expect(reader.prepare('SELECT COUNT(*) AS count FROM organizations').get()).toEqual({ count: 0 });
+
+      reader.prepare('COMMIT').run();
+      expect(reader.prepare('SELECT COUNT(*) AS count FROM organizations').get()).toEqual({ count: 1 });
+    } finally {
+      try {
+        reader.prepare('ROLLBACK').run();
+      } catch {
+        // Transaction may already be committed.
+      }
+      reader.close();
+      writer.close();
+    }
+  });
 });

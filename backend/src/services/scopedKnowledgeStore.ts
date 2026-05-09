@@ -169,30 +169,28 @@ export function upsertScopedKnowledgeRecord<T>(
         ...(sourceRunId ? {sourceRunId} : {}),
         record,
       };
-      db.prepare(`
-        INSERT INTO memory_entries
-          (id, tenant_id, workspace_id, scope, source_run_id, content_json, embedding_ref, created_at, updated_at)
-        VALUES
-          (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          tenant_id = excluded.tenant_id,
-          workspace_id = excluded.workspace_id,
-          scope = excluded.scope,
-          source_run_id = excluded.source_run_id,
-          content_json = excluded.content_json,
-          embedding_ref = excluded.embedding_ref,
-          updated_at = excluded.updated_at
-      `).run(
-        scopedKnowledgeRowId(kind, externalId, scope),
-        scope.tenantId,
-        scope.workspaceId,
-        rowScope,
-        sourceRunId,
-        JSON.stringify(envelope),
-        opts.embeddingRef ?? null,
-        createdAt,
-        updatedAt,
+      const repo = createEnterpriseWorkspaceRepository<KnowledgeEntryRow>(
+        db,
+        'memory_entries',
       );
+      const rowId = scopedKnowledgeRowId(kind, externalId, scope);
+      const updateValues = {
+        scope: rowScope,
+        source_run_id: sourceRunId,
+        content_json: JSON.stringify(envelope),
+        embedding_ref: opts.embeddingRef ?? null,
+        updated_at: updatedAt,
+      };
+      const existing = repo.getById(scope, rowId);
+      const changes = existing
+        ? repo.updateById(scope, rowId, updateValues)
+        : repo.upsertById(scope, rowId, {
+          ...updateValues,
+          created_at: createdAt,
+        });
+      if (changes === 0) {
+        throw new Error('Knowledge entry id already exists outside the repository scope');
+      }
     });
     tx();
   });
