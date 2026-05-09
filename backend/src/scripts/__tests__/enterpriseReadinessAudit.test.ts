@@ -135,8 +135,9 @@ function finalRssBenchmark(): string {
       '10ms',
       '100.0 MiB',
       '200.0 MiB',
+      '205.0 MiB',
       '210.0 MiB',
-      '10.0 MiB',
+      '5.0 MiB',
       '63.00 GiB',
       'passed |',
     ].join(' | '))
@@ -147,8 +148,8 @@ function finalRssBenchmark(): string {
     '',
     'Coverage status: complete',
     '',
-    '| Trace | Scene | Size bucket | File size | Init | Startup RSS | Load peak | Query peak | Query delta | Query headroom | Status |',
-    '| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |',
+    '| Trace | Scene | Size bucket | File size | Init | Startup RSS | Load peak | Post-load RSS | Query peak | Query delta | Query headroom | Status |',
+    '| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |',
     ...rows,
     '',
     'Missing required matrix cells:',
@@ -529,6 +530,46 @@ describe('enterprise readiness audit', () => {
         evidence: expect.arrayContaining([
           'RSS cell scroll:100MB missing query headroom',
           'RSS cell vendor:1GB missing query headroom',
+        ]),
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('requires final RSS rows to include the full memory measurement set', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
+    try {
+      const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', finalAcceptanceEvidence());
+      const loadTestReportPath = await writeFixture(tmpDir, 'load.md', finalLoadReport());
+      const rssBenchmarkPath = await writeFixture(
+        tmpDir,
+        'rss.md',
+        finalRssBenchmark()
+          .replace(/205\.0 MiB/g, 'n/a')
+          .replace(/210\.0 MiB/g, 'n/a')
+          .replace(/5\.0 MiB/g, 'n/a'),
+      );
+      const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
+
+      const report = buildEnterpriseReadinessAuditReport({
+        readmePath,
+        acceptanceEvidencePath,
+        loadTestReportPath,
+        rssBenchmarkPath,
+        releaseNotesPath,
+        requireReady: true,
+      });
+
+      expect(report.ready).toBe(false);
+      expect(report.checks.find(check => check.id === 'rss-benchmark-final')).toMatchObject({
+        status: 'blocked',
+        evidence: expect.arrayContaining([
+          'RSS cell scroll:100MB missing post-load RSS',
+          'RSS cell scroll:100MB missing query peak',
+          'RSS cell scroll:100MB missing query delta',
+          'RSS cell vendor:1GB missing post-load RSS',
         ]),
       });
     } finally {

@@ -625,8 +625,8 @@ export function buildMarkdownReport(report: BenchmarkReport): string {
   lines.push('');
   lines.push(`Coverage status: ${report.coverage.complete ? 'complete' : 'blocked_missing_required_traces'}`);
   lines.push('');
-  lines.push('| Trace | Scene | Size bucket | File size | Init | Startup RSS | Load peak | Query peak | Query delta | Query headroom | Status |');
-  lines.push('| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |');
+  lines.push('| Trace | Scene | Size bucket | File size | Init | Startup RSS | Load peak | Post-load RSS | Query peak | Query delta | Query headroom | Status |');
+  lines.push('| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |');
   for (const trace of report.traces) {
     lines.push([
       `| ${trace.label}`,
@@ -636,6 +636,7 @@ export function buildMarkdownReport(report: BenchmarkReport): string {
       `${trace.initializeMs}ms`,
       formatBytes(trace.rssSummary.startupRssBytes),
       formatBytes(trace.rssSummary.loadPeakRssBytes),
+      formatBytes(trace.rssSummary.postLoadRssBytes),
       formatBytes(trace.rssSummary.queryPeakRssBytes),
       formatBytes(trace.rssSummary.queryIncrementalRssBytes),
       formatBytes(trace.rssSummary.queryHeadroomBytes),

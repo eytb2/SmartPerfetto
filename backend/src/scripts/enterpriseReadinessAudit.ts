@@ -455,6 +455,9 @@ function missingRssBenchmarkMetricEvidence(markdown: string): string[] {
   const requiredMetrics = [
     ['Startup RSS', 'startup RSS'],
     ['Load peak', 'load peak'],
+    ['Post-load RSS', 'post-load RSS'],
+    ['Query peak', 'query peak'],
+    ['Query delta', 'query delta'],
     ['Query headroom', 'query headroom'],
   ] as const;
 
