@@ -59,12 +59,13 @@ state is intentionally conservative:
 
 Latest substantive RSS benchmark output, manifest generation, load run-table
 evidence guard, online-user/load-sample evidence guard, explicit real-run
-confirmation, and final evidence readiness validation:
+confirmation, SQLite WAL/repository boundary hardening, and final evidence
+readiness validation:
 
 - PR: https://github.com/Gracker/SmartPerfetto/pull/129
-- Code head: `a5322bc5` before doc-only validation-state refresh commits.
+- Code head: `cab13c24` before doc-only validation-state refresh commits.
 - Remote checks for that code head: `quality`, `gate`, and `docker-smoke`
-  passed on run `25587620352`.
+  passed on run `25587845982`.
 - Before merge, re-check the live PR status because doc-only refresh commits may
   advance the branch without changing acceptance behavior.
 - Current readiness audit:
@@ -72,7 +73,9 @@ confirmation, and final evidence readiness validation:
   - Result: blocked as expected until README §0.4.3, §0.8, and the terminal
     evidence docs are backed by measured RSS/load-test output.
 - Local checks for the latest storage/RSS/load-report/readiness hardening:
-  - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest src/services/__tests__/enterpriseDb.test.ts src/services/__tests__/enterpriseRepository.test.ts --runInBand`
+  - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest src/services/__tests__/enterpriseDb.test.ts src/services/__tests__/enterpriseRepository.test.ts src/services/__tests__/runtimeSnapshotStore.test.ts src/services/__tests__/enterpriseKnowledgeScope.test.ts --runInBand`
+    covers WAL read/write concurrency, repository/schema allowlist drift,
+    runtime snapshot scoped writes, and tenant/workspace knowledge isolation.
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest src/scripts/__tests__/benchmarkTraceProcessorRss.test.ts src/scripts/__tests__/enterpriseReadinessAudit.test.ts --runInBand`
     covers the RSS benchmark Markdown output fields and final readiness guards
     for startup RSS, load peak, post-load RSS, query peak, query delta, query
