@@ -58,13 +58,13 @@ state is intentionally conservative:
 ## Validation State
 
 Latest substantive RSS benchmark output, manifest generation, load run-table
-evidence guard, explicit real-run confirmation, and final evidence readiness
-validation:
+evidence guard, load sample evidence guard, explicit real-run confirmation, and
+final evidence readiness validation:
 
 - PR: https://github.com/Gracker/SmartPerfetto/pull/129
-- Code head: `11ebb398` before doc-only validation-state refresh commits.
+- Code head: `c4404dc6` before doc-only validation-state refresh commits.
 - Remote checks for that code head: `quality`, `gate`, and `docker-smoke`
-  passed on run `25587271719`.
+  passed on run `25587456443`.
 - Before merge, re-check the live PR status because doc-only refresh commits may
   advance the branch without changing acceptance behavior.
 - Current readiness audit:
@@ -82,7 +82,9 @@ validation:
     budget, pre-run runtime baseline, and LLM cost delta.
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest src/scripts/__tests__/enterpriseAcceptanceLoadTest.test.ts src/scripts/__tests__/enterpriseReadinessAudit.test.ts --runInBand`
     covers the `--confirm-real-run` guard that prevents a real 50-user load
-    test from starting before the prepared enterprise environment is confirmed.
+    test from starting before the prepared enterprise environment is confirmed,
+    and verifies final Markdown rows for status snapshots plus runtime RSS,
+    queue, LLM cost, and LLM call samples.
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run benchmark:trace-rss:audit -- --scan-dir /Users/chris/Code/SmartPerfetto/Trace --output test-output/trace-processor-rss-matrix-audit-manifest-check.json --markdown test-output/trace-processor-rss-matrix-audit-manifest-check.md --benchmark-manifest test-output/trace-processor-rss-benchmark-manifest-check.json --require-complete-matrix` with expected exit `2` and no manifest file because the local matrix is incomplete.
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run typecheck`
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run enterprise:readiness-audit -- --require-ready`
