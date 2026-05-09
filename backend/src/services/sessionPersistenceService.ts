@@ -25,6 +25,7 @@ import { EnhancedSessionContext } from '../agent/context/enhancedSessionContext'
 import { FocusStore, FocusStoreSnapshot } from '../agent/context/focusStore';
 import { TraceAgentState } from '../agent/state/traceAgentState';
 import type { SessionStateSnapshot } from '../agentv3/sessionStateSnapshot';
+import { backendDataPath } from '../runtimePaths';
 import { applyEnterpriseMinimalSchema } from './enterpriseSchema';
 import { resolveEnterpriseDbPath } from './enterpriseDb';
 
@@ -36,6 +37,7 @@ import { resolveEnterpriseDbPath } from './enterpriseDb';
 // already == backend) and CLI (cwd set by bootstrap) land on the same path.
 export function resolveSessionPersistenceDbPath(env: NodeJS.ProcessEnv = process.env): string {
   return resolveEnterpriseDbPath(env);
+
 }
 
 export class SessionPersistenceService {

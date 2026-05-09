@@ -86,7 +86,7 @@ SMARTPERFETTO_OUTPUT_LANGUAGE=en
 | 分析逻辑 | `backend/skills/` 下的 YAML Skill，`backend/strategies/` 下的 Markdown 策略 |
 | 存储 | 本地上传文件、Session 日志、报告、运行时学习文件 |
 | 测试 | Jest、Skill 校验、Strategy 校验、6 条 canonical trace 回归 |
-| 部署 | Docker Compose 或本地开发脚本 |
+| 部署 | Docker Compose、Windows EXE 包或本地开发脚本 |
 
 ## 使用者
 
@@ -118,6 +118,36 @@ Windows 用户使用 Docker Desktop，并启用 WSL2 backend。发布的是 Linu
 停止容器时运行 `docker compose -f docker-compose.hub.yml down`。
 
 上传文件、日志和 Provider Manager profile 保存在 Docker volume 中，容器重启后仍会保留。
+
+### 免安装包
+
+如果用户不想安装 Docker，可以使用维护者打出的 Windows、macOS、Linux 免安装包。包内包含 Node.js 24 runtime、目标平台原生 `node_modules`、预构建 Perfetto UI、后端运行时代码和固定版本的 `trace_processor_shell`。
+
+产物：
+
+- `smartperfetto-v<version>-windows-x64.zip`：解压后双击 `SmartPerfetto.exe`。
+- `smartperfetto-v<version>-macos-arm64.zip`：解压后双击 `SmartPerfetto.app`。
+- `smartperfetto-v<version>-linux-x64.tar.gz`：解压后运行 `./SmartPerfetto`。
+
+启动器会拉起后端和预构建 Perfetto UI，并打开 [http://localhost:10000](http://localhost:10000)。AI 分析需要在 UI 里配置 Provider profile，或在对应平台的用户数据 env 文件中配置凭证。
+
+维护者打包命令：
+
+```bash
+npm run package:portable
+npm run package:windows-exe
+npm run package:macos-app
+npm run package:linux
+```
+
+版本号以根目录 `package.json` 为源头，并同步到 `backend/package.json` 和 lockfile。正常发布时先运行 `npm run version:set -- 1.0.1`，提交版本文件，然后发布：
+
+```bash
+npm run release:portable -- 1.0.1
+npm run release:windows-exe -- 1.0.1
+```
+
+跨平台产物在 `dist/portable/`；兼容的 Windows 命令仍会输出到 `dist/windows-exe/`。完整打包、发布、smoke 验证和签名说明见 [免安装包打包](docs/reference/portable-packaging.md)。
 
 ### 本地脚本运行
 

@@ -128,6 +128,7 @@ import {
   type SessionLookup as FeedbackSessionLookup,
 } from '../agentv3/selfImprove/feedbackEnricher';
 import { applyFeedbackToPattern } from '../agentv3/analysisPatternMemory';
+import { backendLogPath } from '../runtimePaths';
 
 const router = express.Router();
 
@@ -1718,7 +1719,7 @@ router.delete('/:sessionId', (req, res) => {
   res.json({ success: true });
 });
 
-const FEEDBACK_DIR = path.join(process.cwd(), 'logs', 'feedback');
+const FEEDBACK_DIR = backendLogPath('feedback');
 const FEEDBACK_FILE = path.join(FEEDBACK_DIR, 'feedback.jsonl');
 
 /**

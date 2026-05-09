@@ -24,6 +24,7 @@ import {
 } from '../services/enterpriseMigration';
 import { REPORT_CAUSAL_MAP_CSS, REPORT_CAUSAL_MAP_SCRIPT } from '../services/reportCausalMapAssets';
 import { localize, parseOutputLanguage } from '../agentv3/outputLanguage';
+import { backendLogPath } from '../runtimePaths';
 import { resolveEnterpriseDataRoot } from '../services/traceMetadataStore';
 import { resolveEnterpriseRetentionExpiresAt } from '../services/enterpriseQuotaPolicyService';
 import {
@@ -39,7 +40,7 @@ import {
 
 const router = express.Router();
 
-const REPORTS_DIR = path.resolve(__dirname, '../../logs/reports');
+const REPORTS_DIR = backendLogPath('reports');
 
 // Ensure reports directory exists
 if (!fs.existsSync(REPORTS_DIR)) {

@@ -1,6 +1,10 @@
 import dotenv from 'dotenv';
 // Load environment variables FIRST before importing routes
-dotenv.config({ override: true });
+dotenv.config(
+  process.env.SMARTPERFETTO_ENV_FILE
+    ? { path: process.env.SMARTPERFETTO_ENV_FILE, override: true }
+    : { override: true },
+);
 
 import { installEpipeGuard } from './utils/epipeGuard';
 
@@ -74,6 +78,7 @@ import {
 import { TraceProcessorFactory, killOrphanProcessors } from './services/workingTraceProcessor';
 import { getPortPool, resetPortPool } from './services/portPool';
 import { failInterruptedAnalysisRunsOnStartup } from './services/analysisRunStore';
+import { getSmartPerfettoVersion } from './version';
 
 const app = express();
 const PORT = serverConfig.port;
@@ -124,7 +129,7 @@ app.get('/health', (req, res) => {
     status: 'OK',
     timestamp: new Date().toISOString(),
     environment: NODE_ENV,
-    version: '1.0.0',
+    version: getSmartPerfettoVersion(),
     traceAnalysis: getTraceAnalysisConfigurationStatus(),
     aiEngine: {
       runtime: runtimeSelection.kind,

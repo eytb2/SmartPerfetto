@@ -26,19 +26,15 @@
  * @module ragAdminRoutes
  */
 
-import * as path from 'path';
-
 import {Router, type Router as ExpressRouter} from 'express';
 
 import {authenticate, requireRequestContext} from '../middleware/auth';
 import {RagStore} from '../services/ragStore';
 import {knowledgeScopeFromRequestContext} from '../services/scopedKnowledgeStore';
 import type {RagSourceKind} from '../types/sparkContracts';
+import {backendLogPath} from '../runtimePaths';
 
-const DEFAULT_STORAGE_PATH = path.resolve(
-  __dirname,
-  '../../logs/rag_store.json',
-);
+const DEFAULT_STORAGE_PATH = backendLogPath('rag_store.json');
 
 let cachedStore: RagStore | null = null;
 function getDefaultStore(): RagStore {

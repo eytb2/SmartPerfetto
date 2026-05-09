@@ -70,6 +70,7 @@ import {
 import { SkillNotesBudget } from './selfImprove/skillNotesInjector';
 import { runSnapshots } from './selfImprove/strategyFingerprint';
 import { verifyConclusion, generateCorrectionPrompt, isConclusionIncomplete } from './claudeVerifier';
+import { backendLogPath } from '../runtimePaths';
 
 function parseQuickBudgetEnv(): number | undefined {
   const v = process.env.SELF_IMPROVE_QUICK_NOTES_BUDGET;
@@ -97,7 +98,7 @@ import {
 import type { ProviderScope } from '../services/providerManager';
 import type { KnowledgeScope } from '../services/scopedKnowledgeStore';
 
-const SESSION_MAP_FILE = path.resolve(__dirname, '../../logs/claude_session_map.json');
+const SESSION_MAP_FILE = backendLogPath('claude_session_map.json');
 /** Max age for session map entries before pruning (24 hours). */
 const SESSION_MAP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 /** Claude SDK sessions expire server-side after roughly 4 hours. */

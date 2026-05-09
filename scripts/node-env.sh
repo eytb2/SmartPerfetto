@@ -43,6 +43,8 @@ smartperfetto_load_nvm() {
     return 1
   fi
 
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+
   # shellcheck source=/dev/null
   . "$nvm_sh"
   command -v nvm >/dev/null 2>&1
@@ -103,6 +105,15 @@ smartperfetto_ensure_node() {
   echo ""
   echo "Install and use Node.js $SMARTPERFETTO_NODE_MAJOR, then rerun:"
   echo "  nvm install $node_spec && nvm use $node_spec"
+  echo ""
+  echo "If nvm is installed but not initialized, initialize one of these paths first:"
+  echo "  export NVM_DIR=\"\$HOME/.nvm\""
+  echo "  [ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\""
+  echo '  [ -s "/opt/homebrew/opt/nvm/nvm.sh" ] && . "/opt/homebrew/opt/nvm/nvm.sh"'
+  echo '  [ -s "/usr/local/opt/nvm/nvm.sh" ] && . "/usr/local/opt/nvm/nvm.sh"'
+  echo ""
+  echo "One-shot workaround:"
+  echo "  NVM_DIR=\"\$HOME/.nvm\" ./start.sh"
   echo ""
   echo "The repo includes .nvmrc/.node-version so most shells can auto-select it."
   return 1

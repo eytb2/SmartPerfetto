@@ -25,6 +25,34 @@ and the 6-trace scene regression gate.
 | Strategy/template Markdown | `cd backend && npm run validate:strategies` plus scene trace regression |
 | Frontend generated types | `cd backend && npm run generate:frontend-types` plus relevant tests |
 | AI plugin UI | Browser verification in `start-dev.sh`, relevant `perfetto/ui` tests/typecheck, then `./scripts/update-frontend.sh` |
+| Portable packaging/release | Shell syntax/static checks, Node script syntax checks, launcher cross-compile, full package build, and package manifest verification |
+
+## Portable Packaging Verification
+
+When changing portable packaging, release scripts, version synchronization,
+trace-processor handling, bundled runtime assets, or docs that define
+the release process, run:
+
+```bash
+bash -n scripts/package-portable.sh scripts/release-portable.sh scripts/package-windows-exe.sh scripts/release-windows-exe.sh
+shellcheck -x scripts/package-portable.sh scripts/release-portable.sh scripts/package-windows-exe.sh scripts/release-windows-exe.sh
+node --check scripts/sync-version.cjs scripts/verify-portable-package.cjs scripts/verify-windows-package.cjs
+npm run version:sync -- --check
+GO111MODULE=off GOOS=windows GOARCH=amd64 go build -o /tmp/smartperfetto-launcher.exe ./scripts/portable-launcher
+GO111MODULE=off GOOS=darwin GOARCH=arm64 go build -o /tmp/SmartPerfetto-macos ./scripts/portable-launcher
+GO111MODULE=off GOOS=linux GOARCH=amd64 go build -o /tmp/SmartPerfetto-linux ./scripts/portable-launcher
+npm run package:portable
+node scripts/verify-portable-package.cjs \
+  --asset "dist/portable/smartperfetto-v<version>-windows-x64.zip" \
+  --target windows-x64 \
+  --version "<version>" \
+  --commit "$(git rev-parse HEAD)"
+```
+
+For a clean public release, the package manifest must contain
+`gitDirty: false` and `gitCommit` equal to the release target commit. If testing
+the release script without uploading, use a fake `gh` shim or a draft release;
+do not rely on `--allow-dirty` for public release validation.
 
 ## Canonical Scene Regression
 
