@@ -1026,6 +1026,39 @@ export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): s
     lines.push(`| ${operation} | ${summary.count} | ${formatMs(summary.p50Ms)} | ${formatMs(summary.p95Ms)} | ${formatMs(summary.maxMs)} |`);
   }
   lines.push('');
+  lines.push('## Status Snapshots');
+  lines.push('');
+  lines.push('| Timestamp | Queued | Pending | Running | Completed | Failed | Error | Quota exceeded | Unknown |');
+  lines.push('| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |');
+  for (const snapshot of report.statusSnapshots) {
+    lines.push([
+      `| ${snapshot.timestamp}`,
+      snapshot.counts.queued ?? 0,
+      snapshot.counts.pending ?? 0,
+      snapshot.counts.running ?? 0,
+      snapshot.counts.completed ?? 0,
+      snapshot.counts.failed ?? 0,
+      snapshot.counts.error ?? 0,
+      snapshot.counts.quota_exceeded ?? 0,
+      `${snapshot.counts.unknown ?? 0} |`,
+    ].join(' | '));
+  }
+  lines.push('');
+  lines.push('## Runtime Samples');
+  lines.push('');
+  lines.push('| Timestamp | Queue length | Worker RSS | Lease RSS | LLM cost | LLM calls |');
+  lines.push('| --- | ---: | ---: | ---: | ---: | ---: |');
+  for (const sample of report.runtimeSamples) {
+    lines.push([
+      `| ${sample.timestamp}`,
+      sample.queueLength ?? 'n/a',
+      formatBytes(sample.workerRssBytes),
+      formatBytes(sample.leaseRssBytes),
+      sample.llmCostUsd ?? 'n/a',
+      `${formatCount(sample.llmCalls)} |`,
+    ].join(' | '));
+  }
+  lines.push('');
   lines.push('## Analysis Runs');
   lines.push('');
   lines.push('| User | Trace | Session | Run | Start | Last status | Error |');

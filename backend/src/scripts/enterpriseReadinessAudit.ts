@@ -407,6 +407,101 @@ function missingLoadReportMetricEvidence(markdown: string): string[] {
     ? targetRunning + targetPending
     : null;
   missing.push(...missingLoadReportRunTableEvidence(markdown, requestedRuns));
+  missing.push(...missingLoadReportStatusSnapshotEvidence(markdown));
+  missing.push(...missingLoadReportRuntimeSampleEvidence(markdown));
+
+  return missing;
+}
+
+function missingLoadReportStatusSnapshotEvidence(markdown: string): string[] {
+  const missing: string[] = [];
+  const snapshotRows = markdownTableRows(markdown).filter(row =>
+    row.Timestamp !== undefined
+    && row.Queued !== undefined
+    && row.Pending !== undefined
+    && row.Running !== undefined
+    && row.Failed !== undefined
+    && row.Error !== undefined
+    && row['Quota exceeded'] !== undefined
+  );
+
+  if (snapshotRows.length === 0) {
+    missing.push('missing status snapshot table');
+    return missing;
+  }
+
+  const runningInRangeRows = snapshotRows.filter((row) => {
+    const running = parseMarkdownNumber(row.Running);
+    return running !== null && running >= 5 && running <= 15;
+  });
+  if (runningInRangeRows.length < 2) {
+    missing.push('status snapshot rows with running 5-15 < 2');
+  }
+
+  const queuedOrPendingRows = snapshotRows.filter((row) => {
+    const queued = parseMarkdownNumber(row.Queued) ?? 0;
+    const pending = parseMarkdownNumber(row.Pending) ?? 0;
+    return queued + pending > 0;
+  });
+  if (queuedOrPendingRows.length < 2) {
+    missing.push('status snapshot rows with queued/pending > 0 < 2');
+  }
+
+  if (snapshotRows.some((row) => {
+    const failed = parseMarkdownNumber(row.Failed) ?? 0;
+    const error = parseMarkdownNumber(row.Error) ?? 0;
+    const quotaExceeded = parseMarkdownNumber(row['Quota exceeded']) ?? 0;
+    return failed + error + quotaExceeded > 0;
+  })) {
+    missing.push('status snapshot table has failed/error/quota_exceeded counts');
+  }
+
+  return missing;
+}
+
+function missingLoadReportRuntimeSampleEvidence(markdown: string): string[] {
+  const missing: string[] = [];
+  const runtimeRows = markdownTableRows(markdown).filter(row =>
+    row.Timestamp !== undefined
+    && row['Queue length'] !== undefined
+    && row['Worker RSS'] !== undefined
+    && row['Lease RSS'] !== undefined
+    && row['LLM cost'] !== undefined
+    && row['LLM calls'] !== undefined
+  );
+
+  if (runtimeRows.length < 2) {
+    missing.push('runtime sample rows < 2');
+    return missing;
+  }
+
+  if (runtimeRows.every(row => parseMarkdownNumber(row['Queue length']) === null)) {
+    missing.push('runtime sample table missing queue length values');
+  }
+  if (runtimeRows.every(row =>
+    !isPresentMarkdownMetric(row['Worker RSS'] ?? null)
+    && !isPresentMarkdownMetric(row['Lease RSS'] ?? null)
+  )) {
+    missing.push('runtime sample table missing RSS values');
+  }
+
+  const llmCosts = runtimeRows
+    .map(row => parseMarkdownNumber(row['LLM cost']))
+    .filter((value): value is number => value !== null);
+  if (llmCosts.length < 2) {
+    missing.push('runtime sample table has fewer than 2 LLM cost values');
+  } else if (llmCosts[llmCosts.length - 1]! < llmCosts[0]!) {
+    missing.push('runtime sample table LLM cost decreased');
+  }
+
+  const llmCalls = runtimeRows
+    .map(row => parseMarkdownNumber(row['LLM calls']))
+    .filter((value): value is number => value !== null);
+  if (llmCalls.length < 2) {
+    missing.push('runtime sample table has fewer than 2 LLM call values');
+  } else if (llmCalls[llmCalls.length - 1]! <= llmCalls[0]!) {
+    missing.push('runtime sample table LLM calls did not increase');
+  }
 
   return missing;
 }

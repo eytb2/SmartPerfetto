@@ -52,6 +52,29 @@ function finalAnalysisRunRows(count = 15): string[] {
   ];
 }
 
+function finalStatusSnapshotRows(): string[] {
+  return [
+    '## Status Snapshots',
+    '',
+    '| Timestamp | Queued | Pending | Running | Completed | Failed | Error | Quota exceeded | Unknown |',
+    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
+    '| 2026-05-09T00:00:01.000Z | 3 | 2 | 5 | 0 | 0 | 0 | 0 | 0 |',
+    '| 2026-05-09T00:00:02.000Z | 2 | 3 | 10 | 0 | 0 | 0 | 0 | 0 |',
+    '| 2026-05-09T00:00:03.000Z | 0 | 1 | 10 | 4 | 0 | 0 | 0 | 0 |',
+  ];
+}
+
+function finalRuntimeSampleRows(): string[] {
+  return [
+    '## Runtime Samples',
+    '',
+    '| Timestamp | Queue length | Worker RSS | Lease RSS | LLM cost | LLM calls |',
+    '| --- | ---: | ---: | ---: | ---: | ---: |',
+    '| 2026-05-09T00:00:00.000Z | 1 | 128.0 MiB | 64.0 MiB | 0.75 | 3 |',
+    '| 2026-05-09T00:00:01.000Z | 5 | 256.0 MiB | 128.0 MiB | 1.23 | 4 |',
+  ];
+}
+
 function finalLoadReport(): string {
   return [
     '# Enterprise Acceptance Load Test Report',
@@ -98,6 +121,10 @@ function finalLoadReport(): string {
     '| Final LLM calls | 4 |',
     '| LLM call delta | 1 |',
     '| Estimated daily LLM calls | 288 |',
+    '',
+    ...finalStatusSnapshotRows(),
+    '',
+    ...finalRuntimeSampleRows(),
     '',
     ...finalAnalysisRunRows(),
     '',
@@ -389,6 +416,51 @@ describe('enterprise readiness audit', () => {
           'analysis run table has missing session/run ids',
           'analysis run table has non-2xx start status',
           'analysis run table has terminal failed/error/quota_exceeded rows',
+        ]),
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('requires final load report status snapshots and runtime samples to be directly auditable', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
+    try {
+      const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', finalAcceptanceEvidence());
+      const loadTestReportPath = await writeFixture(
+        tmpDir,
+        'load.md',
+        finalLoadReport()
+          .replace('| 2026-05-09T00:00:01.000Z | 3 | 2 | 5 | 0 | 0 | 0 | 0 | 0 |', '| 2026-05-09T00:00:01.000Z | 0 | 0 | 1 | 0 | 1 | 0 | 0 | 0 |')
+          .replace('| 2026-05-09T00:00:02.000Z | 2 | 3 | 10 | 0 | 0 | 0 | 0 | 0 |', '| 2026-05-09T00:00:02.000Z | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 0 |')
+          .replace('| 2026-05-09T00:00:03.000Z | 0 | 1 | 10 | 4 | 0 | 0 | 0 | 0 |', '| 2026-05-09T00:00:03.000Z | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 0 |')
+          .replace('| 2026-05-09T00:00:00.000Z | 1 | 128.0 MiB | 64.0 MiB | 0.75 | 3 |', '| 2026-05-09T00:00:00.000Z | n/a | n/a | n/a | 1.23 | 4 |')
+          .replace('| 2026-05-09T00:00:01.000Z | 5 | 256.0 MiB | 128.0 MiB | 1.23 | 4 |', '| 2026-05-09T00:00:01.000Z | n/a | n/a | n/a | 0.75 | 3 |'),
+      );
+      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', finalRssBenchmark());
+      const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
+
+      const report = buildEnterpriseReadinessAuditReport({
+        readmePath,
+        acceptanceEvidencePath,
+        loadTestReportPath,
+        rssBenchmarkPath,
+        releaseNotesPath,
+        requireReady: true,
+      });
+
+      expect(report.ready).toBe(false);
+      expect(report.checks.find(check => check.id === 'load-test-report-final')).toMatchObject({
+        status: 'blocked',
+        evidence: expect.arrayContaining([
+          'status snapshot rows with running 5-15 < 2',
+          'status snapshot rows with queued/pending > 0 < 2',
+          'status snapshot table has failed/error/quota_exceeded counts',
+          'runtime sample table missing queue length values',
+          'runtime sample table missing RSS values',
+          'runtime sample table LLM cost decreased',
+          'runtime sample table LLM calls did not increase',
         ]),
       });
     } finally {
