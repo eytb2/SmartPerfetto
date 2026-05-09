@@ -19,12 +19,15 @@ The final report must cover:
 - 5 to 15 simultaneously running analysis runs, observed in at least two
   polling samples.
 - Additional queued or pending runs, observed in at least two polling samples.
+- At least 1,000 visible trace metadata entries in the target workspace trace
+  list.
 - p50 and p95 HTTP latency.
 - Error rate within the configured threshold.
 - worker / lease RSS.
 - queue length.
-- LLM cost delta and an LLM call-count increase from the pre-run runtime
-  baseline.
+- LLM cost delta, an LLM call-count increase from the pre-run runtime
+  baseline, and at least 200 estimated LLM calls per day when projected from
+  the measured load-test window.
 
 ## Command
 
@@ -47,8 +50,9 @@ PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
   --markdown test-output/enterprise-acceptance-load-preflight.md
 ```
 
-Run from `backend/` with Node 24 against a prepared enterprise backend and at
-least one already uploaded trace in the target workspace:
+Run from `backend/` with Node 24 against a prepared enterprise backend, at
+least 1,000 visible trace metadata entries in the target workspace, and at
+least one configured trace id that exists in that workspace:
 
 ```bash
 PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
@@ -96,7 +100,8 @@ If the backend requires `SMARTPERFETTO_API_KEY`, add:
   and then during the test window. Runtime evidence must include a measurable
   LLM cost delta plus an increased LLM call count; historical positive cost or
   call totals are not enough evidence that this run exercised a real LLM.
-- `--preflight-only` checks load shape, trace list access, configured traceId
-  visibility, runtime dashboard access, queue/RSS counters, and LLM counters
-  without starting analysis runs. A passing preflight only means the environment
-  is ready for the real command; it does not close either README §0.8 row.
+- `--preflight-only` checks load shape, trace list access, at least 1,000
+  visible trace metadata entries, configured traceId visibility, runtime
+  dashboard access, queue/RSS counters, and LLM counters without starting
+  analysis runs. A passing preflight only means the environment is ready for
+  the real command; it does not close either README §0.8 row.

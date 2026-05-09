@@ -9,6 +9,10 @@ import {
   REQUIRED_RSS_BENCHMARK_SCENES,
   REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS,
 } from './enterpriseRssBenchmarkMatrix';
+import {
+  MIN_ACCEPTANCE_ESTIMATED_DAILY_LLM_CALLS,
+  MIN_ACCEPTANCE_VISIBLE_TRACE_METADATA,
+} from './enterpriseAcceptanceLoadTest';
 
 type ReadinessStatus = 'passed' | 'blocked';
 
@@ -59,7 +63,7 @@ const REQUIRED_ACCEPTANCE_EVIDENCE_ITEMS = [
   'One slow SQL does not directly kill a frontend-owned lease',
   'Memory / SQL learning / case / baseline default to tenant/workspace isolation',
   'Tenant export / tombstone / async purge / audit proof all work',
-  'Load-test report includes p50/p95, error rate, worker RSS, queue length, and LLM cost',
+  'Load-test report includes p50/p95, error rate, worker RSS, queue length, LLM cost, trace metadata scale, and daily LLM call projection',
 ];
 
 function printUsage(): void {
@@ -319,6 +323,7 @@ function missingLoadReportMetricEvidence(markdown: string): string[] {
   const observedUsers = parseMarkdownNumber(markdownTableValue(markdown, 'Observed online users'));
   const targetRunning = parseMarkdownNumber(markdownTableValue(markdown, 'Target running runs'));
   const targetPending = parseMarkdownNumber(markdownTableValue(markdown, 'Target pending runs'));
+  const visibleTraceMetadata = parseMarkdownNumber(markdownTableValue(markdown, 'Visible trace metadata'));
   const startedRuns = parseMarkdownNumber(markdownTableValue(markdown, 'Started analysis runs'));
   const startFailures = parseMarkdownNumber(markdownTableValue(markdown, 'Start failures'));
   const missingIds = parseMarkdownNumber(markdownTableValue(markdown, 'Started runs missing ids'));
@@ -328,10 +333,14 @@ function missingLoadReportMetricEvidence(markdown: string): string[] {
   const pendingSamples = parseMarkdownNumber(markdownTableValue(markdown, 'Queued/pending samples'));
   const maxQueueLength = parseMarkdownNumber(markdownTableValue(markdown, 'Max queue length'));
   const llmCallDelta = parseMarkdownNumber(markdownTableValue(markdown, 'LLM call delta'));
+  const estimatedDailyLlmCalls = parseMarkdownNumber(markdownTableValue(markdown, 'Estimated daily LLM calls'));
 
   if (observedUsers === null || observedUsers < 50) missing.push('observed online users < 50');
   if (targetRunning === null || targetRunning < 5 || targetRunning > 15) missing.push('target running runs not in 5-15 range');
   if (targetPending === null || targetPending < 1) missing.push('target pending runs missing');
+  if (visibleTraceMetadata === null || visibleTraceMetadata < MIN_ACCEPTANCE_VISIBLE_TRACE_METADATA) {
+    missing.push(`visible trace metadata < ${MIN_ACCEPTANCE_VISIBLE_TRACE_METADATA}`);
+  }
   if (startedRuns === null || targetRunning === null || targetPending === null || startedRuns < targetRunning + targetPending) {
     missing.push('started analysis runs < requested target');
   }
@@ -353,6 +362,9 @@ function missingLoadReportMetricEvidence(markdown: string): string[] {
   }
   if (!isPresentMarkdownMetric(markdownTableValue(markdown, 'LLM cost delta'))) missing.push('missing LLM cost delta');
   if (llmCallDelta === null || llmCallDelta <= 0) missing.push('LLM call delta <= 0');
+  if (estimatedDailyLlmCalls === null || estimatedDailyLlmCalls < MIN_ACCEPTANCE_ESTIMATED_DAILY_LLM_CALLS) {
+    missing.push(`estimated daily LLM calls < ${MIN_ACCEPTANCE_ESTIMATED_DAILY_LLM_CALLS}`);
+  }
 
   return missing;
 }

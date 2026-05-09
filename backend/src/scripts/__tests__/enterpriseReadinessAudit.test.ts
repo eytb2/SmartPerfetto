@@ -56,6 +56,7 @@ function finalLoadReport(): string {
     '| Max error rate | 1.00% |',
     '| Duration | 300000ms |',
     '| Trace count | 1 |',
+    '| Visible trace metadata | 1000 |',
     '',
     '## Summary',
     '',
@@ -83,6 +84,7 @@ function finalLoadReport(): string {
     '| Initial LLM calls | 3 |',
     '| Final LLM calls | 4 |',
     '| LLM call delta | 1 |',
+    '| Estimated daily LLM calls | 288 |',
     '',
   ].join('\n');
 }
@@ -101,7 +103,7 @@ function finalAcceptanceEvidence(): string {
     '| One slow SQL does not directly kill a frontend-owned lease | Covered | runtime tests |',
     '| Memory / SQL learning / case / baseline default to tenant/workspace isolation | Covered | scope tests |',
     '| Tenant export / tombstone / async purge / audit proof all work | Covered | tenant tests |',
-    '| Load-test report includes p50/p95, error rate, worker RSS, queue length, and LLM cost | Covered | measured load report |',
+    '| Load-test report includes p50/p95, error rate, worker RSS, queue length, LLM cost, trace metadata scale, and daily LLM call projection | Covered | measured load report |',
     '',
   ].join('\n');
 }
@@ -256,6 +258,43 @@ describe('enterprise readiness audit', () => {
           'missing overall p50',
           'missing worker/lease RSS',
           'LLM call delta <= 0',
+        ]),
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('requires load-test scale evidence for trace metadata and daily LLM calls', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
+    try {
+      const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', finalAcceptanceEvidence());
+      const loadTestReportPath = await writeFixture(
+        tmpDir,
+        'load.md',
+        finalLoadReport()
+          .replace('| Visible trace metadata | 1000 |', '| Visible trace metadata | 999 |')
+          .replace('| Estimated daily LLM calls | 288 |', '| Estimated daily LLM calls | 199 |'),
+      );
+      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', finalRssBenchmark());
+      const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
+
+      const report = buildEnterpriseReadinessAuditReport({
+        readmePath,
+        acceptanceEvidencePath,
+        loadTestReportPath,
+        rssBenchmarkPath,
+        releaseNotesPath,
+        requireReady: true,
+      });
+
+      expect(report.ready).toBe(false);
+      expect(report.checks.find(check => check.id === 'load-test-report-final')).toMatchObject({
+        status: 'blocked',
+        evidence: expect.arrayContaining([
+          'visible trace metadata < 1000',
+          'estimated daily LLM calls < 200',
         ]),
       });
     } finally {

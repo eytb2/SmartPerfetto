@@ -47,6 +47,7 @@ function sample(operation: string, durationMs: number, ok = true, userId = 'user
     ok,
     durationMs,
     timestamp: '2026-05-09T00:00:00.000Z',
+    ...(operation.startsWith('trace_list') && ok ? { traceCount: 1000 } : {}),
   };
 }
 
@@ -62,6 +63,14 @@ function onlineUserSamples(count: number): HttpSample[] {
   return Array.from({ length: count }, (_unused, index) =>
     sample('trace_list', 10, true, `online-user-${String(index + 1).padStart(3, '0')}`)
   );
+}
+
+function visibleTraceIds(count: number, requiredIds: string[] = []): string[] {
+  const ids = [...requiredIds];
+  for (let index = ids.length; index < count; index++) {
+    ids.push(`trace-${String(index + 1).padStart(4, '0')}`);
+  }
+  return ids;
 }
 
 function passingHttpSamples(onlineUsers = 50): HttpSample[] {
@@ -177,7 +186,7 @@ describe('enterprise acceptance load test helpers', () => {
       traceList: {
         status: 200,
         ok: true,
-        traceIds: ['trace-a', 'trace-b', 'trace-c'],
+        traceIds: visibleTraceIds(1000, ['trace-a', 'trace-b']),
       },
       runtimeSamples: [
         runtimeSample({
@@ -199,6 +208,7 @@ describe('enterprise acceptance load test helpers', () => {
     const markdown = buildMarkdownLoadTestPreflightReport(report);
     expect(markdown).toContain('Preflight status: ready');
     expect(markdown).toContain('not README §0.8 acceptance evidence');
+    expect(markdown).toContain('| trace-metadata-scale | passed | visibleTraceMetadata=1000<br>minimum=1000 |');
     expect(markdown).toContain('| trace-id-access | passed | trace-a<br>trace-b |');
   });
 
@@ -233,6 +243,7 @@ describe('enterprise acceptance load test helpers', () => {
     expect(report.ready).toBe(false);
     expect(report.checks.filter(check => check.status === 'blocked').map(check => check.id)).toEqual([
       'load-shape-config',
+      'trace-metadata-scale',
       'trace-id-access',
       'runtime-rss-and-queue-counters',
       'runtime-llm-counters',
@@ -305,6 +316,8 @@ describe('enterprise acceptance load test helpers', () => {
     });
 
     expect(summary.errorRate).toBe(0.2);
+    expect(summary.scale.visibleTraceMetadataCount).toBe(1000);
+    expect(summary.scale.estimatedDailyLlmCalls).toBe(2880);
     expect(summary.onlineUsers).toEqual({
       configured: 50,
       observed: 0,
@@ -337,9 +350,11 @@ describe('enterprise acceptance load test helpers', () => {
 
   it('requires direct load metrics before acceptance can pass', () => {
     const opts = options({ onlineUsers: 49 });
+    const traceSampleWithoutCount = sample('trace_list', 10);
+    delete traceSampleWithoutCount.traceCount;
     const summary = summarizeLoadTest({
       options: opts,
-      httpSamples: [sample('trace_list', 10)],
+      httpSamples: [traceSampleWithoutCount],
       runs: [],
       statusSnapshots: [],
       runtimeSamples: [],
@@ -350,6 +365,7 @@ describe('enterprise acceptance load test helpers', () => {
       missing: expect.arrayContaining([
         'onlineUsers < 50',
         'observed online users < 50',
+        'visible trace metadata < 1000',
         'started analysis runs < requested target',
         'observed max running runs < 5',
         'no queued/pending runs observed',
@@ -358,6 +374,7 @@ describe('enterprise acceptance load test helpers', () => {
         'missing queue length samples',
         'missing LLM cost sample',
         'missing LLM call sample',
+        'estimated daily LLM calls < 200',
         'runtime dashboard was not sampled',
       ]),
     });
@@ -510,6 +527,7 @@ describe('enterprise acceptance load test helpers', () => {
         'analysis start failures observed',
         'terminal analysis failures observed',
         'LLM call count did not increase',
+        'estimated daily LLM calls < 200',
       ],
     });
   });
@@ -763,7 +781,10 @@ describe('enterprise acceptance load test helpers', () => {
     }));
     expect(evaluateAcceptance(opts, summary, runtimeSamples)).toEqual({
       passed: false,
-      missing: ['LLM call count did not increase'],
+      missing: [
+        'LLM call count did not increase',
+        'estimated daily LLM calls < 200',
+      ],
     });
   });
 
@@ -880,6 +901,7 @@ describe('enterprise acceptance load test helpers', () => {
     expect(markdown).toContain('Acceptance status: passed');
     expect(markdown).toContain('| Online users | 50 |');
     expect(markdown).toContain('| Observed online users | 50 |');
+    expect(markdown).toContain('| Visible trace metadata | 1000 |');
     expect(markdown).toContain('| Max error rate | 1.00% |');
     expect(markdown).toContain('| Overall p50 | 10ms |');
     expect(markdown).toContain('| Started runs missing ids | 0 |');
@@ -893,5 +915,6 @@ describe('enterprise acceptance load test helpers', () => {
     expect(markdown).toContain('| Initial LLM calls | 3 |');
     expect(markdown).toContain('| Final LLM calls | 4 |');
     expect(markdown).toContain('| LLM call delta | 1 |');
+    expect(markdown).toContain('| Estimated daily LLM calls | 1440 |');
   });
 });

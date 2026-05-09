@@ -127,7 +127,7 @@
 - [x] 单次慢 SQL 不直接 kill frontend-owned lease
 - [x] Memory / SQL learning / case / baseline 默认 tenant/workspace 隔离
 - [x] Tenant export / tombstone / async purge / audit proof 全可用
-- [ ] 压测记录 p50/p95、错误率、worker RSS、queue length、LLM cost
+- [ ] 压测覆盖几千 trace metadata、几百次/天 LLM 调用，并记录 p50/p95、错误率、worker RSS、queue length、LLM cost
 
 ### 0.9 新增 / 引用文档登记（开发过程中持续追加）
 > 规则：开发过程中只要新增设计文档、ADR、运维 runbook、外部参考资料、Codex/expert review 结论等，把相对路径或链接登记在这里；阅读完且对应工程项完成后再打勾。**只追加不重排**，避免 git diff 噪音。

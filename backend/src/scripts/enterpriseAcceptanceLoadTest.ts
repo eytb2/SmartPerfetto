@@ -33,6 +33,7 @@ export interface HttpSample {
   ok: boolean;
   durationMs: number;
   timestamp: string;
+  traceCount?: number;
   error?: string;
 }
 
@@ -72,6 +73,10 @@ export interface EnterpriseLoadTestSummary {
   totalRequests: number;
   failedRequests: number;
   errorRate: number;
+  scale: {
+    visibleTraceMetadataCount: number | null;
+    estimatedDailyLlmCalls: number | null;
+  };
   onlineUsers: {
     configured: number;
     observed: number;
@@ -183,6 +188,9 @@ interface RequestResult<T = any> {
 const DEFAULT_DURATION_MS = 5 * 60 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 1000;
 const DEFAULT_MAX_ERROR_RATE = 0.01;
+export const MIN_ACCEPTANCE_VISIBLE_TRACE_METADATA = 1000;
+export const MIN_ACCEPTANCE_ESTIMATED_DAILY_LLM_CALLS = 200;
+const DAY_MS = 24 * 60 * 60 * 1000;
 const TERMINAL_STATUSES = new Set<AnalysisStatus>(['completed', 'failed', 'error', 'quota_exceeded']);
 
 function printUsage(): void {
@@ -349,6 +357,11 @@ function numberSamples(values: Array<number | null | undefined>): number[] {
   return values.filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
 }
 
+function estimateDailyLlmCalls(llmCallDelta: number | null, durationMs: number): number | null {
+  if (llmCallDelta === null || durationMs <= 0) return null;
+  return (llmCallDelta / durationMs) * DAY_MS;
+}
+
 function hasPreRunRuntimeBaseline(samples: HttpSample[]): boolean {
   const firstAnalyzeStartIndex = samples.findIndex(sample => sample.operation === 'analyze_start');
   const firstRuntimeDashboardIndex = samples.findIndex(sample =>
@@ -399,10 +412,18 @@ export function summarizeLoadTest(input: {
       .filter(sample => sample.ok && sample.operation === 'trace_list' && sample.userId.startsWith('online-user-'))
       .map(sample => sample.userId),
   ).size;
+  const visibleTraceMetadataCount = maxNullable(input.httpSamples
+    .filter(sample => sample.ok && sample.operation === 'trace_list')
+    .map(sample => sample.traceCount));
+  const llmCallDelta = initialLlmCalls !== null && finalLlmCalls !== null ? finalLlmCalls - initialLlmCalls : null;
   return {
     totalRequests: input.httpSamples.length,
     failedRequests,
     errorRate: input.httpSamples.length > 0 ? failedRequests / input.httpSamples.length : 0,
+    scale: {
+      visibleTraceMetadataCount,
+      estimatedDailyLlmCalls: estimateDailyLlmCalls(llmCallDelta, input.options.durationMs),
+    },
     onlineUsers: {
       configured: input.options.onlineUsers,
       observed: observedOnlineUsers,
@@ -433,7 +454,7 @@ export function summarizeLoadTest(input: {
         : null,
       initialLlmCalls,
       finalLlmCalls,
-      llmCallDelta: initialLlmCalls !== null && finalLlmCalls !== null ? finalLlmCalls - initialLlmCalls : null,
+      llmCallDelta,
     },
   };
 }
@@ -447,6 +468,12 @@ export function evaluateAcceptance(
   const requestedRuns = options.targetRunningRuns + options.targetPendingRuns;
   if (options.onlineUsers < 50) missing.push('onlineUsers < 50');
   if (summary.onlineUsers.observed < 50) missing.push('observed online users < 50');
+  if (
+    summary.scale.visibleTraceMetadataCount === null
+    || summary.scale.visibleTraceMetadataCount < MIN_ACCEPTANCE_VISIBLE_TRACE_METADATA
+  ) {
+    missing.push(`visible trace metadata < ${MIN_ACCEPTANCE_VISIBLE_TRACE_METADATA}`);
+  }
   if (summary.errorRate > options.maxErrorRate) {
     missing.push(`error rate ${formatPercent(summary.errorRate)} exceeds max ${formatPercent(options.maxErrorRate)}`);
   }
@@ -484,6 +511,12 @@ export function evaluateAcceptance(
   if (summary.runtime.finalLlmCalls === null) missing.push('missing LLM call sample');
   else if (summary.runtime.llmCallDelta === null || summary.runtime.llmCallDelta <= 0) {
     missing.push('LLM call count did not increase');
+  }
+  if (
+    summary.scale.estimatedDailyLlmCalls === null
+    || summary.scale.estimatedDailyLlmCalls < MIN_ACCEPTANCE_ESTIMATED_DAILY_LLM_CALLS
+  ) {
+    missing.push(`estimated daily LLM calls < ${MIN_ACCEPTANCE_ESTIMATED_DAILY_LLM_CALLS}`);
   }
   if (runtimeSamples.length === 0) missing.push('runtime dashboard was not sampled');
   return {
@@ -537,6 +570,9 @@ async function requestJson<T>(
         parseError = error instanceof Error ? error.message : String(error);
       }
     }
+    const traceIds = response.ok && !parseError && input.operation.startsWith('trace_list')
+      ? extractTraceIdsFromTraceListBody(body)
+      : null;
     const sample: HttpSample = {
       operation: input.operation,
       userId: input.userId,
@@ -544,6 +580,7 @@ async function requestJson<T>(
       ok: response.ok && !parseError,
       durationMs: Date.now() - started,
       timestamp: new Date().toISOString(),
+      ...(traceIds === null ? {} : { traceCount: traceIds.length }),
       ...(response.ok && !parseError ? {} : {
         error: parseError
           ?? (typeof (body as any)?.error === 'string' ? (body as any).error : text.slice(0, 200)),
@@ -613,6 +650,7 @@ export function buildLoadTestPreflightReport(input: {
   const missingTraceIds = traceList.traceIds === null
     ? options.traceIds
     : options.traceIds.filter(traceId => !traceList.traceIds!.includes(traceId));
+  const visibleTraceMetadataCount = traceList.traceIds?.length ?? null;
   const checks: EnterpriseLoadTestPreflightCheck[] = [
     preflightCheck(
       'load-shape-config',
@@ -642,6 +680,16 @@ export function buildLoadTestPreflightReport(input: {
         `status=${traceList.status}`,
         traceList.traceIds === null ? 'trace list body did not contain traces[]' : `visibleTraces=${traceList.traceIds.length}`,
         ...(traceList.error ? [`error=${traceList.error}`] : []),
+      ],
+    ),
+    preflightCheck(
+      'trace-metadata-scale',
+      visibleTraceMetadataCount !== null
+        && visibleTraceMetadataCount >= MIN_ACCEPTANCE_VISIBLE_TRACE_METADATA,
+      'Target workspace exposes enough trace metadata for README §19 load scale.',
+      [
+        `visibleTraceMetadata=${visibleTraceMetadataCount ?? 'missing'}`,
+        `minimum=${MIN_ACCEPTANCE_VISIBLE_TRACE_METADATA}`,
       ],
     ),
     preflightCheck(
@@ -905,6 +953,10 @@ function formatPercent(value: number): string {
   return `${(value * 100).toFixed(2)}%`;
 }
 
+function formatCount(value: number | null): string {
+  return value === null ? 'n/a' : value.toFixed(0);
+}
+
 export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): string {
   const lines: string[] = [];
   lines.push('# Enterprise Acceptance Load Test Report');
@@ -930,6 +982,7 @@ export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): s
   lines.push(`| Max error rate | ${formatPercent(report.config.maxErrorRate)} |`);
   lines.push(`| Duration | ${formatMs(report.config.durationMs)} |`);
   lines.push(`| Trace count | ${report.config.traceCount} |`);
+  lines.push(`| Visible trace metadata | ${report.summary.scale.visibleTraceMetadataCount ?? 'n/a'} |`);
   lines.push('');
   lines.push('## Summary');
   lines.push('');
@@ -957,6 +1010,7 @@ export function buildMarkdownLoadTestReport(report: EnterpriseLoadTestReport): s
   lines.push(`| Initial LLM calls | ${report.summary.runtime.initialLlmCalls ?? 'n/a'} |`);
   lines.push(`| Final LLM calls | ${report.summary.runtime.finalLlmCalls ?? 'n/a'} |`);
   lines.push(`| LLM call delta | ${report.summary.runtime.llmCallDelta ?? 'n/a'} |`);
+  lines.push(`| Estimated daily LLM calls | ${formatCount(report.summary.scale.estimatedDailyLlmCalls)} |`);
   lines.push('');
   lines.push('## Latency By Operation');
   lines.push('');
