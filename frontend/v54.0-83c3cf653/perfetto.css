@@ -8540,19 +8540,90 @@ tr.detail-row .expanded-empty.compact .empty-sections {
   font-style: italic;
 }
 .ai-message-content .ai-mermaid-block {
-  margin: 12px 0;
+  margin: 12px 0 16px;
   padding: 12px;
-  border: 1px solid var(--chat-border);
+  border: 1px solid #cbd5e1;
   border-radius: 8px;
-  background: var(--chat-bg);
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
 }
 .ai-message-content .ai-mermaid-diagram {
+  position: relative;
   overflow-x: auto;
+  padding: 16px;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #0f172a;
+  cursor: zoom-in;
+}
+.ai-message-content .ai-mermaid-diagram::after {
+  content: "点击放大";
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  padding: 3px 7px;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #475569;
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.ai-message-content .ai-mermaid-diagram:hover::after,
+.ai-message-content .ai-mermaid-diagram:focus-visible::after {
+  opacity: 1;
 }
 .ai-message-content .ai-mermaid-diagram svg {
-  max-width: 100%;
+  max-width: none;
   height: auto;
   display: block;
+  margin: 0 auto;
+  background: #ffffff !important;
+  overflow: visible !important;
+}
+.ai-message-content .ai-mermaid-diagram svg foreignObject {
+  overflow: visible !important;
+}
+.ai-message-content .ai-mermaid-diagram svg .node rect,
+.ai-message-content .ai-mermaid-diagram svg .node polygon,
+.ai-message-content .ai-mermaid-diagram svg .node circle,
+.ai-message-content .ai-mermaid-diagram svg .node ellipse {
+  stroke: #64748b !important;
+  stroke-width: 1.4px;
+}
+.ai-message-content .ai-mermaid-diagram svg .nodeLabel,
+.ai-message-content .ai-mermaid-diagram svg .edgeLabel,
+.ai-message-content .ai-mermaid-diagram svg .label,
+.ai-message-content .ai-mermaid-diagram svg .cluster-label {
+  color: #0f172a !important;
+  fill: #0f172a !important;
+}
+.ai-message-content .ai-mermaid-diagram svg .cluster rect {
+  fill: #f8fafc !important;
+  stroke: #cbd5e1 !important;
+  stroke-width: 1.2px;
+}
+.ai-message-content .ai-mermaid-diagram svg .edgeLabel rect,
+.ai-message-content .ai-mermaid-diagram svg .labelBkg {
+  fill: #ffffff !important;
+  stroke: #dbeafe !important;
+  stroke-width: 1px;
+}
+.ai-message-content .ai-mermaid-diagram svg .edgePath path,
+.ai-message-content .ai-mermaid-diagram svg .edgePath .path,
+.ai-message-content .ai-mermaid-diagram svg .flowchart-link {
+  stroke: #334155 !important;
+  stroke-width: 1.7px;
+  fill: none !important;
+}
+.ai-message-content .ai-mermaid-diagram svg marker path,
+.ai-message-content .ai-mermaid-diagram svg .marker path,
+.ai-message-content .ai-mermaid-diagram svg .arrowheadPath {
+  fill: #334155 !important;
+  stroke: #334155 !important;
 }
 .ai-message-content .ai-mermaid-error {
   padding: 8px;
@@ -8562,6 +8633,18 @@ tr.detail-row .expanded-empty.compact .empty-sections {
 }
 .ai-message-content .ai-mermaid-details {
   margin-top: 10px;
+}
+.ai-message-content .ai-mermaid-details .ai-mermaid-summary-open {
+  display: inline;
+}
+.ai-message-content .ai-mermaid-details .ai-mermaid-summary-closed {
+  display: none;
+}
+.ai-message-content .ai-mermaid-details:not([open]) .ai-mermaid-summary-open {
+  display: none;
+}
+.ai-message-content .ai-mermaid-details:not([open]) .ai-mermaid-summary-closed {
+  display: inline;
 }
 .ai-message-content .ai-mermaid-actions {
   display: flex;
@@ -8591,6 +8674,8 @@ tr.detail-row .expanded-empty.compact .empty-sections {
   line-height: 1.4;
   white-space: pre;
   overflow-x: auto;
+  -webkit-user-select: text !important;
+  user-select: text !important;
 }
 .ai-message-content a {
   color: var(--chat-primary);
@@ -16377,6 +16462,87 @@ tr.detail-row .expanded-empty.compact .empty-sections {
   margin: 4px 8px;
   font-size: 0.7em;
   font-style: italic;
+}
+
+.ai-mermaid-preview-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: flex;
+  padding: 28px;
+  background: rgba(15, 23, 42, 0.56);
+}
+
+.ai-mermaid-preview-shell {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.32);
+}
+
+.ai-mermaid-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 10px 12px;
+  background: #f8fafc;
+}
+
+.ai-mermaid-preview-title {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ai-mermaid-preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ai-mermaid-preview-control,
+.ai-mermaid-preview-close {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 5px 10px;
+  background: #ffffff;
+  color: #334155;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ai-mermaid-preview-control {
+  min-width: 32px;
+}
+
+.ai-mermaid-preview-control:hover,
+.ai-mermaid-preview-close:hover {
+  border-color: #64748b;
+  background: #f8fafc;
+}
+
+.ai-mermaid-preview-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px;
+  background: #ffffff;
+}
+
+.ai-mermaid-preview-content svg {
+  display: block;
+  margin: 0 auto;
+  background: #ffffff !important;
+  overflow: visible;
 }
 
 .pf-minimap {
