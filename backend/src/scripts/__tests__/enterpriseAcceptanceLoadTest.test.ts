@@ -916,5 +916,7 @@ describe('enterprise acceptance load test helpers', () => {
     expect(markdown).toContain('| Final LLM calls | 4 |');
     expect(markdown).toContain('| LLM call delta | 1 |');
     expect(markdown).toContain('| Estimated daily LLM calls | 1440 |');
+    expect(markdown).toContain('## Analysis Runs');
+    expect(markdown).toContain('| load-user-015 | trace-a | session-15 | run-15 | 200 | running |  |');
   });
 });

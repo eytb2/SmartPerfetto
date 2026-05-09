@@ -14,7 +14,8 @@ The final report must cover:
 - A successful runtime dashboard baseline sampled before the first
   `analyze_start` request.
 - All requested analysis runs start successfully with `sessionId` / `runId`
-  evidence and without start failures.
+  evidence, without start failures, and with directly auditable rows in the
+  final `Analysis Runs` table.
 - No analysis run ends in `failed`, `error`, or `quota_exceeded`.
 - 5 to 15 simultaneously running analysis runs, observed in at least two
   polling samples.

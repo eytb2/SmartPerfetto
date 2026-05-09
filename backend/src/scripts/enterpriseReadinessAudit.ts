@@ -365,6 +365,44 @@ function missingLoadReportMetricEvidence(markdown: string): string[] {
   if (estimatedDailyLlmCalls === null || estimatedDailyLlmCalls < MIN_ACCEPTANCE_ESTIMATED_DAILY_LLM_CALLS) {
     missing.push(`estimated daily LLM calls < ${MIN_ACCEPTANCE_ESTIMATED_DAILY_LLM_CALLS}`);
   }
+  const requestedRuns = targetRunning !== null && targetPending !== null
+    ? targetRunning + targetPending
+    : null;
+  missing.push(...missingLoadReportRunTableEvidence(markdown, requestedRuns));
+
+  return missing;
+}
+
+function missingLoadReportRunTableEvidence(markdown: string, requestedRuns: number | null): string[] {
+  const missing: string[] = [];
+  const runRows = markdownTableRows(markdown).filter(row =>
+    row.User !== undefined
+    && row.Trace !== undefined
+    && row.Session !== undefined
+    && row.Run !== undefined
+    && row.Start !== undefined
+    && row['Last status'] !== undefined
+  );
+
+  if (runRows.length === 0) {
+    missing.push('missing analysis run table');
+    return missing;
+  }
+  if (requestedRuns !== null && runRows.length < requestedRuns) {
+    missing.push('analysis run rows < requested target');
+  }
+  if (runRows.some(row => row.Session.trim().length === 0 || row.Run.trim().length === 0)) {
+    missing.push('analysis run table has missing session/run ids');
+  }
+  if (runRows.some(row => {
+    const startStatus = parseMarkdownNumber(row.Start);
+    return startStatus === null || startStatus < 200 || startStatus >= 300;
+  })) {
+    missing.push('analysis run table has non-2xx start status');
+  }
+  if (runRows.some(row => ['failed', 'error', 'quota_exceeded'].includes(row['Last status'].trim().toLowerCase()))) {
+    missing.push('analysis run table has terminal failed/error/quota_exceeded rows');
+  }
 
   return missing;
 }
