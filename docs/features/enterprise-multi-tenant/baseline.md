@@ -136,3 +136,43 @@ Missing §0.4.3 candidate matrix cells:
 - memory: 100MB, 500MB, 1GB
 - heapprofd: 100MB, 500MB, 1GB
 - vendor: 100MB, 500MB, 1GB
+
+## 2026-05-09 RSS Matrix Candidate Audit After PB/Protobuf Discovery
+
+Branch: `feature/enterprise-multi-tenant-acceptance-evidence`
+
+Command:
+
+```bash
+PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
+  npm run benchmark:trace-rss:audit -- \
+  --scan-dir /Users/chris/Code/SmartPerfetto/Trace \
+  --scan-dir /Users/chris/traces \
+  --scan-dir /Users/chris/tools/perfetto_shell/trace \
+  --scan-dir "/Users/chris/SynologyDrive/技术分享/2024-Google-Extended-IO-Chengdu/Perfetto-Trace" \
+  --scan-dir /Users/chris/Code/HighPerformanceFriendsCircle/perfetto-trace \
+  --output test-output/trace-processor-rss-matrix-audit-local-pb.json \
+  --markdown test-output/trace-processor-rss-matrix-audit-local-pb.md
+```
+
+Result: PASS for the candidate audit command. This rerun used the expanded
+candidate discovery list (`.trace`, `.pftrace`, `.perfetto-trace`, `.pb`,
+`.protobuf`) and still found only the three local `startup:100MB` candidates.
+
+Observed §0.4.3 candidate matrix cells:
+
+- startup: 100MB
+
+Missing §0.4.3 candidate matrix cells:
+
+- scroll: 100MB, 500MB, 1GB
+- startup: 500MB, 1GB
+- ANR: 100MB, 500MB, 1GB
+- memory: 100MB, 500MB, 1GB
+- heapprofd: 100MB, 500MB, 1GB
+- vendor: 100MB, 500MB, 1GB
+
+Conclusion: expanding candidate discovery to `.pb` / `.protobuf` did not find
+new representative large traces on this machine. README §0.4.3 remains blocked
+on collecting real scroll, ANR, memory, heapprofd, vendor, 500MB, and 1GB
+Perfetto traces.
