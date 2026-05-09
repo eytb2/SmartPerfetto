@@ -53,28 +53,27 @@ state is intentionally conservative:
 | Slow SQL does not kill frontend-owned leases | Covered | WorkingTraceProcessor timeout and lease-mode decision tests. |
 | Memory / SQL learning / case / baseline tenant/workspace isolation | Covered | Knowledge-scope and analysis-pattern memory tests. |
 | Tenant export / tombstone / async purge / audit proof | Covered | Tenant export and tombstone/purge route tests. |
-| p50/p95, error rate, worker RSS, queue length, LLM cost report | Open | Pending real `load-test-report.md` with `acceptance.passed = true`. |
+| p50/p95, error rate, worker RSS, queue length, LLM cost, trace metadata scale, and daily LLM call projection | Open | Pending real `load-test-report.md` with `acceptance.passed = true`. |
 
 ## Validation State
 
-Latest substantive acceptance-evidence validation:
+Latest substantive load-scale evidence guard validation:
 
 - PR: https://github.com/Gracker/SmartPerfetto/pull/129
-- Code head: `f280d08e` before doc-only validation-state refresh commits.
+- Code head: `6ba49b90` before doc-only validation-state refresh commits.
 - Remote checks for that code head: `quality`, `gate`, and `docker-smoke`
-  passed on run `25585397493`.
+  passed on run `25585825506`.
 - Before merge, re-check the live PR status because doc-only refresh commits may
   advance the branch without changing acceptance behavior.
 - Current readiness audit:
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run enterprise:readiness-audit -- --require-ready`
   - Result: blocked as expected until README §0.4.3, §0.8, and the terminal
     evidence docs are backed by measured RSS/load-test output.
-- Local checks for the latest acceptance-evidence/readiness hardening:
-  - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest src/scripts/__tests__/enterpriseAcceptanceLoadTest.test.ts --runInBand`
-  - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest src/scripts/__tests__/auditTraceProcessorRssMatrix.test.ts src/scripts/__tests__/enterpriseReadinessAudit.test.ts --runInBand`
+- Local checks for the latest load-scale/readiness hardening:
+  - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest src/scripts/__tests__/enterpriseAcceptanceLoadTest.test.ts src/scripts/__tests__/enterpriseReadinessAudit.test.ts --runInBand`
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run typecheck`
+  - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run enterprise:readiness-audit -- --require-ready`
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run test:core`
-  - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run test:scene-trace-regression`
   - `PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run verify:pr`
   - `git diff --check`
 
@@ -86,7 +85,9 @@ Latest substantive acceptance-evidence validation:
 - README §0.8 load acceptance is still blocked by a real enterprise load-test
   environment. The harness exists and requires observed successful requests from
   50 distinct online clients, 5-15 running runs, queued/pending work, runtime RSS
-  and queue samples, and LLM cost samples.
+  and queue samples, at least 1,000 visible trace metadata rows, LLM cost
+  samples, and at least 200 estimated LLM calls per day projected from the
+  measured load-test window.
 - `docs/features/enterprise-multi-tenant/load-test-report.md` is still a
   pending template until overwritten by a real measured run.
 - Future HA expansion remains outside v1 scope and is tracked separately in
