@@ -274,6 +274,32 @@ function parseMarkdownNumber(value: string | null): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parseMarkdownBytes(value: string | null): number | null {
+  if (!value || value.trim().toLowerCase() === 'n/a') return null;
+  const normalized = value.trim().replace(/,/g, '');
+  const match = normalized.match(/^([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B|[KMGT]?B)?$/i);
+  if (!match) return null;
+
+  const numeric = Number.parseFloat(match[1]!);
+  if (!Number.isFinite(numeric)) return null;
+
+  const unit = (match[2] ?? 'B').toUpperCase();
+  const multiplier = unit === 'GIB' || unit === 'GB'
+    ? 1024 ** 3
+    : unit === 'MIB' || unit === 'MB'
+      ? 1024 ** 2
+      : unit === 'KIB' || unit === 'KB'
+        ? 1024
+        : 1;
+  return numeric * multiplier;
+}
+
+function requiredRssBucketMinimumBytes(sizeBucket: string): number {
+  if (sizeBucket === '1GB') return 1024 ** 3;
+  if (sizeBucket === '500MB') return 500 * 1024 ** 2;
+  return 100 * 1024 ** 2;
+}
+
 function isPresentMarkdownMetric(value: string | null): boolean {
   return value !== null && value.trim().length > 0 && value.trim().toLowerCase() !== 'n/a';
 }
@@ -324,6 +350,10 @@ function missingLoadReportMetricEvidence(markdown: string): string[] {
   const targetRunning = parseMarkdownNumber(markdownTableValue(markdown, 'Target running runs'));
   const targetPending = parseMarkdownNumber(markdownTableValue(markdown, 'Target pending runs'));
   const visibleTraceMetadata = parseMarkdownNumber(markdownTableValue(markdown, 'Visible trace metadata'));
+  const totalRequests = parseMarkdownNumber(markdownTableValue(markdown, 'Total HTTP requests'));
+  const failedRequests = parseMarkdownNumber(markdownTableValue(markdown, 'Failed HTTP requests'));
+  const maxErrorRate = parseMarkdownNumber(markdownTableValue(markdown, 'Max error rate'));
+  const errorRate = parseMarkdownNumber(markdownTableValue(markdown, 'Error rate'));
   const startedRuns = parseMarkdownNumber(markdownTableValue(markdown, 'Started analysis runs'));
   const startFailures = parseMarkdownNumber(markdownTableValue(markdown, 'Start failures'));
   const missingIds = parseMarkdownNumber(markdownTableValue(markdown, 'Started runs missing ids'));
@@ -332,6 +362,8 @@ function missingLoadReportMetricEvidence(markdown: string): string[] {
   const runningSamples = parseMarkdownNumber(markdownTableValue(markdown, 'Running-in-range samples'));
   const pendingSamples = parseMarkdownNumber(markdownTableValue(markdown, 'Queued/pending samples'));
   const maxQueueLength = parseMarkdownNumber(markdownTableValue(markdown, 'Max queue length'));
+  const preRunBaseline = markdownTableValue(markdown, 'Pre-run runtime baseline')?.trim().toLowerCase() ?? null;
+  const llmCostDelta = parseMarkdownNumber(markdownTableValue(markdown, 'LLM cost delta'));
   const llmCallDelta = parseMarkdownNumber(markdownTableValue(markdown, 'LLM call delta'));
   const estimatedDailyLlmCalls = parseMarkdownNumber(markdownTableValue(markdown, 'Estimated daily LLM calls'));
 
@@ -341,6 +373,11 @@ function missingLoadReportMetricEvidence(markdown: string): string[] {
   if (visibleTraceMetadata === null || visibleTraceMetadata < MIN_ACCEPTANCE_VISIBLE_TRACE_METADATA) {
     missing.push(`visible trace metadata < ${MIN_ACCEPTANCE_VISIBLE_TRACE_METADATA}`);
   }
+  if (totalRequests === null || totalRequests <= 0) missing.push('total HTTP requests <= 0');
+  if (failedRequests === null || failedRequests < 0) missing.push('missing failed HTTP requests');
+  if (maxErrorRate === null) missing.push('missing max error rate');
+  if (errorRate === null) missing.push('missing error rate');
+  else if (maxErrorRate !== null && errorRate > maxErrorRate) missing.push('error rate exceeds max error rate');
   if (startedRuns === null || targetRunning === null || targetPending === null || startedRuns < targetRunning + targetPending) {
     missing.push('started analysis runs < requested target');
   }
@@ -352,15 +389,16 @@ function missingLoadReportMetricEvidence(markdown: string): string[] {
   if (pendingSamples === null || pendingSamples < 2) missing.push('queued/pending stable samples < 2');
   if (!isPresentMarkdownMetric(markdownTableValue(markdown, 'Overall p50'))) missing.push('missing overall p50');
   if (!isPresentMarkdownMetric(markdownTableValue(markdown, 'Overall p95'))) missing.push('missing overall p95');
-  if (!isPresentMarkdownMetric(markdownTableValue(markdown, 'Error rate'))) missing.push('missing error rate');
   if (maxQueueLength === null) missing.push('missing max queue length');
+  if (preRunBaseline !== 'yes') missing.push('pre-run runtime baseline not yes');
   if (
     !isPresentMarkdownMetric(markdownTableValue(markdown, 'Max worker RSS'))
     && !isPresentMarkdownMetric(markdownTableValue(markdown, 'Max lease RSS'))
   ) {
     missing.push('missing worker/lease RSS');
   }
-  if (!isPresentMarkdownMetric(markdownTableValue(markdown, 'LLM cost delta'))) missing.push('missing LLM cost delta');
+  if (llmCostDelta === null) missing.push('missing LLM cost delta');
+  else if (llmCostDelta < 0) missing.push('LLM cost delta < 0');
   if (llmCallDelta === null || llmCallDelta <= 0) missing.push('LLM call delta <= 0');
   if (estimatedDailyLlmCalls === null || estimatedDailyLlmCalls < MIN_ACCEPTANCE_ESTIMATED_DAILY_LLM_CALLS) {
     missing.push(`estimated daily LLM calls < ${MIN_ACCEPTANCE_ESTIMATED_DAILY_LLM_CALLS}`);
@@ -436,6 +474,14 @@ function missingRssBenchmarkMetricEvidence(markdown: string): string[] {
       if (passedRows.length === 0) {
         missing.push(`RSS cell ${cell} missing passed status`);
         continue;
+      }
+
+      const hasRequiredFileSize = passedRows.some((row) => {
+        const fileSizeBytes = parseMarkdownBytes(row['File size'] ?? null);
+        return fileSizeBytes !== null && fileSizeBytes >= requiredRssBucketMinimumBytes(sizeBucket);
+      });
+      if (!hasRequiredFileSize) {
+        missing.push(`RSS cell ${cell} missing file size >= ${sizeBucket}`);
       }
 
       for (const [column, label] of requiredMetrics) {

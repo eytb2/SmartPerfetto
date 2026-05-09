@@ -317,6 +317,45 @@ describe('enterprise readiness audit', () => {
     }
   });
 
+  it('requires final load report baseline and budget evidence, not just passing text', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
+    try {
+      const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', finalAcceptanceEvidence());
+      const loadTestReportPath = await writeFixture(
+        tmpDir,
+        'load.md',
+        finalLoadReport()
+          .replace('| Error rate | 0.00% |', '| Error rate | 2.00% |')
+          .replace('| Pre-run runtime baseline | yes |', '| Pre-run runtime baseline | no |')
+          .replace('| LLM cost delta | 0.48 |', '| LLM cost delta | -0.25 |'),
+      );
+      const rssBenchmarkPath = await writeFixture(tmpDir, 'rss.md', finalRssBenchmark());
+      const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
+
+      const report = buildEnterpriseReadinessAuditReport({
+        readmePath,
+        acceptanceEvidencePath,
+        loadTestReportPath,
+        rssBenchmarkPath,
+        releaseNotesPath,
+        requireReady: true,
+      });
+
+      expect(report.ready).toBe(false);
+      expect(report.checks.find(check => check.id === 'load-test-report-final')).toMatchObject({
+        status: 'blocked',
+        evidence: expect.arrayContaining([
+          'error rate exceeds max error rate',
+          'pre-run runtime baseline not yes',
+          'LLM cost delta < 0',
+        ]),
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('requires final load report analysis run rows to be directly auditable', async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
     try {
@@ -490,6 +529,43 @@ describe('enterprise readiness audit', () => {
         evidence: expect.arrayContaining([
           'RSS cell scroll:100MB missing query headroom',
           'RSS cell vendor:1GB missing query headroom',
+        ]),
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('requires final RSS matrix rows to carry file sizes matching their buckets', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'enterprise-readiness-'));
+    try {
+      const readmePath = await writeFixture(tmpDir, 'README.md', completeReadme());
+      const acceptanceEvidencePath = await writeFixture(tmpDir, 'acceptance.md', finalAcceptanceEvidence());
+      const loadTestReportPath = await writeFixture(tmpDir, 'load.md', finalLoadReport());
+      const rssBenchmarkPath = await writeFixture(
+        tmpDir,
+        'rss.md',
+        finalRssBenchmark()
+          .replace('| scroll-1GB | scroll | 1GB | 1GB |', '| scroll-1GB | scroll | 1GB | 100MB |')
+          .replace('| vendor-500MB | vendor | 500MB | 500MB |', '| vendor-500MB | vendor | 500MB | n/a |'),
+      );
+      const releaseNotesPath = await writeFixture(tmpDir, 'release.md', '# Release Notes\nAll final.\n');
+
+      const report = buildEnterpriseReadinessAuditReport({
+        readmePath,
+        acceptanceEvidencePath,
+        loadTestReportPath,
+        rssBenchmarkPath,
+        releaseNotesPath,
+        requireReady: true,
+      });
+
+      expect(report.ready).toBe(false);
+      expect(report.checks.find(check => check.id === 'rss-benchmark-final')).toMatchObject({
+        status: 'blocked',
+        evidence: expect.arrayContaining([
+          'RSS cell scroll:1GB missing file size >= 1GB',
+          'RSS cell vendor:500MB missing file size >= 500MB',
         ]),
       });
     } finally {
