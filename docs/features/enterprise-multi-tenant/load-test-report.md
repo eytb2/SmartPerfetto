@@ -67,6 +67,7 @@ PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
   --max-error-rate 0.01 \
   --duration-ms 300000 \
   --trace-id <existing-trace-id> \
+  --confirm-real-run \
   --output test-output/enterprise-acceptance-load-test.json \
   --markdown ../docs/features/enterprise-multi-tenant/load-test-report.md
 ```
@@ -106,3 +107,6 @@ If the backend requires `SMARTPERFETTO_API_KEY`, add:
   dashboard access, queue/RSS counters, and LLM counters without starting
   analysis runs. A passing preflight only means the environment is ready for
   the real command; it does not close either README §0.8 row.
+- A real run refuses to start unless `--confirm-real-run` is present. This
+  forces the environment confirmation step required by `agent-goal.md` §6 before
+  the script starts analysis runs or simulates 50 online clients.

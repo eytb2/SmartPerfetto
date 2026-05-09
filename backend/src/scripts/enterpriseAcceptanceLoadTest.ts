@@ -14,6 +14,7 @@ export interface EnterpriseLoadTestOptions {
   workspaceId: string;
   apiKey?: string;
   preflightOnly: boolean;
+  confirmRealRun: boolean;
   onlineUsers: number;
   targetRunningRuns: number;
   targetPendingRuns: number;
@@ -212,6 +213,7 @@ function printUsage(): void {
   console.log('  --output <path>               JSON report path.');
   console.log('  --markdown <path>             Optional Markdown report path.');
   console.log('  --preflight-only              Check load-test prerequisites without starting runs.');
+  console.log('  --confirm-real-run            Required for the real load test; not needed for --preflight-only.');
   console.log('  --help                        Show this help.');
 }
 
@@ -241,6 +243,7 @@ export function parseLoadTestArgs(argv: string[], cwd = process.cwd()): Enterpri
     tenantId: 'tenant-a',
     workspaceId: 'workspace-a',
     preflightOnly: false,
+    confirmRealRun: false,
     onlineUsers: 50,
     targetRunningRuns: 15,
     targetPendingRuns: 10,
@@ -304,6 +307,9 @@ export function parseLoadTestArgs(argv: string[], cwd = process.cwd()): Enterpri
         break;
       case '--preflight-only':
         options.preflightOnly = true;
+        break;
+      case '--confirm-real-run':
+        options.confirmRealRun = true;
         break;
       case '--help':
         printUsage();
@@ -1060,6 +1066,9 @@ export function buildMarkdownLoadTestPreflightReport(report: EnterpriseLoadTestP
 }
 
 export async function runEnterpriseAcceptanceLoadTest(options: EnterpriseLoadTestOptions): Promise<EnterpriseLoadTestReport> {
+  if (!options.confirmRealRun) {
+    throw new Error('Refusing to start real load test without --confirm-real-run. Run --preflight-only first and confirm the prepared enterprise test environment.');
+  }
   if (options.traceIds.length === 0) {
     throw new Error('At least one --trace-id is required for a real load test run');
   }

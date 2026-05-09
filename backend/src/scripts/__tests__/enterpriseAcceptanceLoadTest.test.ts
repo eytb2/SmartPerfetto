@@ -12,6 +12,7 @@ import {
   extractTraceIdsFromTraceListBody,
   parseLoadTestArgs,
   percentile,
+  runEnterpriseAcceptanceLoadTest,
   summarizeLoadTest,
   type AnalysisRunRecord,
   type AnalysisStatusSnapshot,
@@ -26,6 +27,7 @@ function options(overrides: Partial<EnterpriseLoadTestOptions> = {}): Enterprise
     tenantId: 'tenant-a',
     workspaceId: 'workspace-a',
     preflightOnly: false,
+    confirmRealRun: false,
     onlineUsers: 50,
     targetRunningRuns: 10,
     targetPendingRuns: 5,
@@ -137,6 +139,7 @@ describe('enterprise acceptance load test helpers', () => {
       '--output', 'out/load.json',
       '--markdown', 'out/load.md',
       '--preflight-only',
+      '--confirm-real-run',
     ], cwd);
 
     expect(parsed).toEqual(expect.objectContaining({
@@ -144,6 +147,7 @@ describe('enterprise acceptance load test helpers', () => {
       tenantId: 'tenant-z',
       workspaceId: 'workspace-z',
       preflightOnly: true,
+      confirmRealRun: true,
       onlineUsers: 55,
       targetRunningRuns: 12,
       targetPendingRuns: 7,
@@ -155,6 +159,12 @@ describe('enterprise acceptance load test helpers', () => {
       outputPath: path.resolve(cwd, 'out/load.json'),
       markdownPath: path.resolve(cwd, 'out/load.md'),
     }));
+  });
+
+  it('requires an explicit confirmation flag before starting a real load test', async () => {
+    await expect(runEnterpriseAcceptanceLoadTest(options()))
+      .rejects
+      .toThrow('Refusing to start real load test without --confirm-real-run');
   });
 
   it('computes nearest-rank percentiles', () => {
