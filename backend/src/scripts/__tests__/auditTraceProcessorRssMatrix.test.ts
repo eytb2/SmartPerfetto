@@ -6,6 +6,7 @@ import fsp from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import {
+  buildBenchmarkManifest,
   buildMarkdownAuditReport,
   collectTraceMatrixCandidates,
   computeTraceMatrixCandidateCoverage,
@@ -53,6 +54,7 @@ describe('trace processor RSS matrix audit helpers', () => {
       '--scan-dir', 'traces',
       '--output', 'out/audit.json',
       '--markdown', 'out/audit.md',
+      '--benchmark-manifest', 'out/manifest.json',
       '--min-size-mb', '50',
       '--exclude-unknown-scene',
       '--require-complete-matrix',
@@ -62,6 +64,7 @@ describe('trace processor RSS matrix audit helpers', () => {
       roots: [path.resolve(cwd, 'traces')],
       outputPath: path.resolve(cwd, 'out/audit.json'),
       markdownPath: path.resolve(cwd, 'out/audit.md'),
+      benchmarkManifestPath: path.resolve(cwd, 'out/manifest.json'),
       minSizeBytes: 50 * MIB,
       includeUnknownScene: false,
       requireCompleteMatrix: true,
@@ -155,6 +158,71 @@ describe('trace processor RSS matrix audit helpers', () => {
     expect(markdown).toContain('Coverage status: blocked_missing_required_traces');
     expect(markdown).toContain('| scroll-100MB.pftrace | scroll | 100MB |');
     expect(markdown).toContain('- startup:100MB');
+  });
+
+  it('builds a benchmark manifest only from a complete candidate matrix', () => {
+    const fullMatrix = REQUIRED_RSS_BENCHMARK_SCENES.flatMap(scene =>
+      REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS.map(sizeBucket => candidate(scene, sizeBucket))
+    );
+    const largerScroll = {
+      ...candidate('scroll', '100MB'),
+      label: 'scroll-largest.trace',
+      path: '/traces/scroll-largest.trace',
+      sizeBytes: 250 * MIB,
+    };
+    const report: TraceMatrixAuditReport = {
+      generatedAt: '2026-05-09T00:00:00.000Z',
+      roots: ['/traces'],
+      minSizeBytes: 100 * MIB,
+      host: {
+        platform: 'darwin',
+        arch: 'arm64',
+        node: 'v24.15.0',
+      },
+      requiredMatrix: {
+        scenes: REQUIRED_RSS_BENCHMARK_SCENES,
+        sizeBuckets: REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS,
+      },
+      coverage: computeTraceMatrixCandidateCoverage([...fullMatrix, largerScroll]),
+      candidates: [...fullMatrix, largerScroll],
+    };
+
+    const manifest = buildBenchmarkManifest(report);
+
+    expect(manifest.traces).toHaveLength(18);
+    expect(manifest.traces[0]).toEqual({
+      scene: 'scroll',
+      label: 'scroll-largest.trace',
+      path: '/traces/scroll-largest.trace',
+      sizeBucket: '100MB',
+    });
+    expect(manifest.traces[manifest.traces.length - 1]).toEqual({
+      scene: 'vendor',
+      label: 'vendor-1GB.pftrace',
+      path: '/traces/vendor-1GB.pftrace',
+      sizeBucket: '1GB',
+    });
+  });
+
+  it('rejects benchmark manifest generation when candidate matrix is incomplete', () => {
+    const report: TraceMatrixAuditReport = {
+      generatedAt: '2026-05-09T00:00:00.000Z',
+      roots: ['/traces'],
+      minSizeBytes: 100 * MIB,
+      host: {
+        platform: 'darwin',
+        arch: 'arm64',
+        node: 'v24.15.0',
+      },
+      requiredMatrix: {
+        scenes: REQUIRED_RSS_BENCHMARK_SCENES,
+        sizeBuckets: REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS,
+      },
+      coverage: computeTraceMatrixCandidateCoverage([candidate('scroll', '100MB')]),
+      candidates: [candidate('scroll', '100MB')],
+    };
+
+    expect(() => buildBenchmarkManifest(report)).toThrow('Cannot write benchmark manifest; missing cells');
   });
 
   it('fails complete-matrix audit only when required', () => {

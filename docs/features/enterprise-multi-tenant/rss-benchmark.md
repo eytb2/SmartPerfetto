@@ -40,6 +40,7 @@ PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
   --scan-dir /path/to/large-trace-directory \
   --output test-output/trace-processor-rss-matrix-audit.json \
   --markdown test-output/trace-processor-rss-matrix-audit.md \
+  --benchmark-manifest test-output/trace-processor-rss-benchmark-manifest.json \
   --require-complete-matrix
 ```
 
@@ -50,12 +51,16 @@ not complete §0.4.3 by itself.
 The audit recognizes `.trace`, `.pftrace`, `.perfetto-trace`, `.pb`, and
 `.protobuf` files.
 
+`--benchmark-manifest` writes the benchmark manifest only when every required
+scene/size cell has at least one candidate. For duplicate candidates in a cell,
+the largest trace is selected.
+
 Run from `backend/` with Node 24:
 
 ```bash
 PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
   npm run benchmark:trace-rss -- \
-  --manifest ../docs/features/enterprise-multi-tenant/rss-benchmark-manifest.local.json \
+  --manifest test-output/trace-processor-rss-benchmark-manifest.json \
   --output test-output/trace-processor-rss-benchmark.json \
   --markdown test-output/trace-processor-rss-benchmark.md \
   --require-complete-matrix

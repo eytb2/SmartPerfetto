@@ -49,6 +49,7 @@ export interface TraceMatrixAuditOptions {
   minSizeBytes: number;
   outputPath?: string;
   markdownPath?: string;
+  benchmarkManifestPath?: string;
   includeUnknownScene: boolean;
   requireCompleteMatrix: boolean;
 }
@@ -70,6 +71,15 @@ export interface TraceMatrixAuditReport {
   candidates: TraceMatrixCandidate[];
 }
 
+export interface TraceBenchmarkManifest {
+  traces: Array<{
+    scene: RequiredScene;
+    label: string;
+    path: string;
+    sizeBucket: RequiredSizeBucket;
+  }>;
+}
+
 function printUsage(): void {
   console.log('Usage: npx tsx src/scripts/auditTraceProcessorRssMatrix.ts [options]');
   console.log('');
@@ -77,6 +87,7 @@ function printUsage(): void {
   console.log('  --scan-dir <path>             Directory or file to scan. Repeatable.');
   console.log('  --output <path>               JSON audit report path.');
   console.log('  --markdown <path>             Optional Markdown audit report path.');
+  console.log('  --benchmark-manifest <path>   Write benchmark manifest when every matrix cell has a candidate.');
   console.log('  --min-size-mb <mb>            Minimum candidate size. Default: 100.');
   console.log('  --exclude-unknown-scene       Hide large traces whose scene cannot be inferred from filename.');
   console.log('  --require-complete-matrix     Exit non-zero if any §0.4.3 scene/size cell lacks a candidate.');
@@ -196,6 +207,7 @@ export function parseTraceMatrixAuditArgs(argv: string[], cwd = process.cwd()): 
   const roots: string[] = [];
   let outputPath: string | undefined;
   let markdownPath: string | undefined;
+  let benchmarkManifestPath: string | undefined;
   let minSizeBytes = DEFAULT_MIN_SIZE_BYTES;
   let includeUnknownScene = true;
   let requireCompleteMatrix = false;
@@ -226,6 +238,12 @@ export function parseTraceMatrixAuditArgs(argv: string[], cwd = process.cwd()): 
       i += 1;
       continue;
     }
+    if (arg === '--benchmark-manifest') {
+      if (!next) throw new Error('--benchmark-manifest requires a value');
+      benchmarkManifestPath = path.resolve(cwd, next);
+      i += 1;
+      continue;
+    }
     if (arg === '--min-size-mb') {
       if (!next) throw new Error('--min-size-mb requires a value');
       const minSizeMb = Number.parseInt(next, 10);
@@ -252,6 +270,7 @@ export function parseTraceMatrixAuditArgs(argv: string[], cwd = process.cwd()): 
     minSizeBytes,
     outputPath,
     markdownPath,
+    benchmarkManifestPath,
     includeUnknownScene,
     requireCompleteMatrix,
   };
@@ -355,6 +374,41 @@ export function buildMarkdownAuditReport(report: TraceMatrixAuditReport): string
   return `${lines.join('\n')}\n`;
 }
 
+export function buildBenchmarkManifest(report: TraceMatrixAuditReport): TraceBenchmarkManifest {
+  if (!report.coverage.complete) {
+    throw new Error(`Cannot write benchmark manifest; missing cells: ${report.coverage.missingCells.join(', ')}`);
+  }
+
+  const selected = new Map<string, TraceMatrixCandidate>();
+  for (const candidate of report.candidates) {
+    if (!(REQUIRED_RSS_BENCHMARK_SCENES as readonly string[]).includes(candidate.scene)) continue;
+    if (!(REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS as readonly string[]).includes(candidate.sizeBucket)) continue;
+    const key = `${candidate.scene}:${candidate.sizeBucket}`;
+    const existing = selected.get(key);
+    if (!existing || candidate.sizeBytes > existing.sizeBytes) {
+      selected.set(key, candidate);
+    }
+  }
+
+  const traces: TraceBenchmarkManifest['traces'] = [];
+  for (const scene of REQUIRED_RSS_BENCHMARK_SCENES) {
+    for (const sizeBucket of REQUIRED_RSS_BENCHMARK_SIZE_BUCKETS) {
+      const candidate = selected.get(`${scene}:${sizeBucket}`);
+      if (!candidate) {
+        throw new Error(`Cannot write benchmark manifest; missing cell: ${scene}:${sizeBucket}`);
+      }
+      traces.push({
+        scene,
+        label: candidate.label,
+        path: candidate.path,
+        sizeBucket,
+      });
+    }
+  }
+
+  return { traces };
+}
+
 async function writeAuditReport(report: TraceMatrixAuditReport, options: TraceMatrixAuditOptions): Promise<void> {
   const outputPath = options.outputPath
     ?? path.resolve(process.cwd(), 'test-output/trace-processor-rss-matrix-audit.json');
@@ -366,6 +420,19 @@ async function writeAuditReport(report: TraceMatrixAuditReport, options: TraceMa
     await fsp.mkdir(path.dirname(options.markdownPath), { recursive: true });
     await fsp.writeFile(options.markdownPath, buildMarkdownAuditReport(report), 'utf8');
     console.log(`[RSS Matrix Audit] Markdown report: ${options.markdownPath}`);
+  }
+
+  if (options.benchmarkManifestPath) {
+    if (!report.coverage.complete) {
+      console.warn(
+        `[RSS Matrix Audit] Benchmark manifest skipped; missing required candidates: ${report.coverage.missingCells.join(', ')}`,
+      );
+      return;
+    }
+    const manifest = buildBenchmarkManifest(report);
+    await fsp.mkdir(path.dirname(options.benchmarkManifestPath), { recursive: true });
+    await fsp.writeFile(options.benchmarkManifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    console.log(`[RSS Matrix Audit] Benchmark manifest: ${options.benchmarkManifestPath}`);
   }
 }
 
