@@ -45,11 +45,14 @@ import type {
   AnalysisNote,
   AnalysisPlanV3,
   ClaudeAnalysisContext,
+  ComplexityClassifierInput,
   Hypothesis,
   PlanPhase,
   TraceCompleteness,
   UncertaintyFlag,
 } from '../agentv3/types';
+import { classifyQueryComplexityLocal } from '../agentv3/queryComplexityClassifier';
+import { classifyQueryWithOpenAILightModel } from './openAiComplexityClassifier';
 import { ArtifactStore } from '../agentv3/artifactStore';
 import type { SessionFieldsForSnapshot, SessionStateSnapshot } from '../agentv3/sessionStateSnapshot';
 import {
@@ -229,7 +232,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     let rounds = 0;
     const config = loadOpenAIConfig(options.providerId, providerScopeFromOptions(options));
     const sceneType = classifyScene(query);
-    const quickMode = options.analysisMode === 'fast';
+    const quickMode = await this.classifyModeForRequest(query, sessionId, traceId, options, sceneType, config);
 
     try {
       const context = await this.prepareAnalysisContext(query, sessionId, traceId, options, {
@@ -969,6 +972,49 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       console.warn('[OpenAIRuntime] Trace completeness probe failed:', (error as Error).message);
       return undefined;
     }
+  }
+
+  /**
+   * Decide quickMode for this request. Provider-symmetric to ClaudeRuntime:
+   *   explicit fast/full → user wins; auto → keyword/hard rules first, then
+   *   OpenAI light-model AI fallback. Stays provider-independent: never calls
+   *   the Anthropic SDK, even when the operator hasn't installed it.
+   */
+  private async classifyModeForRequest(
+    query: string,
+    sessionId: string,
+    traceId: string,
+    options: AnalysisOptions,
+    sceneType: SceneType,
+    config: OpenAIAgentConfig,
+  ): Promise<boolean> {
+    const explicitMode = options.analysisMode;
+    if (explicitMode === 'fast') return true;
+    if (explicitMode === 'full') return false;
+
+    const sessionContext = sessionContextManager.getOrCreate(sessionId, traceId);
+    const previousTurns = sessionContext.getAllTurns?.() ?? [];
+    const classifierInput: ComplexityClassifierInput = {
+      query,
+      sceneType,
+      hasSelectionContext: !!options.selectionContext,
+      selectionContext: options.selectionContext,
+      hasReferenceTrace: !!options.referenceTraceId,
+      hasExistingFindings: previousTurns.some(
+        t => t.intent?.complexity !== 'simple' && (t.findings?.length ?? 0) > 0,
+      ),
+      hasPriorFullAnalysis: previousTurns.some(t => t.intent?.complexity !== 'simple'),
+    };
+
+    const local = classifyQueryComplexityLocal(classifierInput);
+    if (local) {
+      console.log(`[OpenAIRuntime] auto → ${local.complexity} (${local.source}: ${local.reason})`);
+      return local.complexity === 'quick';
+    }
+
+    const ai = await classifyQueryWithOpenAILightModel(query, config);
+    console.log(`[OpenAIRuntime] auto → ${ai.complexity} (ai: ${ai.reason})`);
+    return ai.complexity === 'quick';
   }
 
   private getPlanCompletionStatus(sessionId: string, quickMode: boolean): PlanCompletionStatus {

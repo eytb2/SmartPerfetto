@@ -50,12 +50,13 @@ const DETERMINISTIC_SCENES = new Set([
 ]);
 
 /**
- * Classify query complexity using hard rules + optional AI classification.
+ * Local-only classification using keyword pre-filter + hard rules.
+ * Returns null when no local rule matches, so callers can decide their own
+ * AI fallback. Provider-agnostic: zero LLM/SDK dependency.
  */
-export async function classifyQueryComplexity(
+export function classifyQueryComplexityLocal(
   input: ComplexityClassifierInput,
-  config?: Pick<ClaudeAgentConfig, 'lightModel' | 'classifierTimeoutMs'>,
-): Promise<{ complexity: QueryComplexity; reason: string; source: 'hard_rule' | 'ai' }> {
+): { complexity: QueryComplexity; reason: string; source: 'hard_rule' } | null {
   const kwResult = applyKeywordRules(input.query);
   if (kwResult) {
     console.log(`[ComplexityClassifier] Keyword → ${kwResult.complexity}: ${kwResult.reason}`);
@@ -67,6 +68,19 @@ export async function classifyQueryComplexity(
     console.log(`[ComplexityClassifier] Hard rule → ${hardResult.complexity}: ${hardResult.reason}`);
     return { ...hardResult, source: 'hard_rule' };
   }
+
+  return null;
+}
+
+/**
+ * Classify query complexity using hard rules + optional AI classification.
+ */
+export async function classifyQueryComplexity(
+  input: ComplexityClassifierInput,
+  config?: Pick<ClaudeAgentConfig, 'lightModel' | 'classifierTimeoutMs'>,
+): Promise<{ complexity: QueryComplexity; reason: string; source: 'hard_rule' | 'ai' }> {
+  const local = classifyQueryComplexityLocal(input);
+  if (local) return local;
 
   try {
     const aiResult = await classifyWithHaiku(input.query, config?.lightModel, config?.classifierTimeoutMs);
