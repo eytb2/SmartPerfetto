@@ -73,6 +73,8 @@ describe('trace processor RSS matrix audit helpers', () => {
     try {
       await sparseFile(path.join(tmpDir, 'scroll-big.perfetto-trace'), 100 * MIB);
       await sparseFile(path.join(tmpDir, 'StartUp_big.trace'), 100 * MIB);
+      await sparseFile(path.join(tmpDir, 'anr-big.protobuf'), 100 * MIB);
+      await sparseFile(path.join(tmpDir, 'memory-big.pb'), 100 * MIB);
       await sparseFile(path.join(tmpDir, 'small-scroll.pftrace'), MIB);
       await sparseFile(path.join(tmpDir, 'notes.txt'), 200 * MIB);
 
@@ -91,6 +93,16 @@ describe('trace processor RSS matrix audit helpers', () => {
         {
           scene: 'startup',
           label: 'StartUp_big.trace',
+          sizeBucket: '100MB',
+        },
+        {
+          scene: 'anr',
+          label: 'anr-big.protobuf',
+          sizeBucket: '100MB',
+        },
+        {
+          scene: 'memory',
+          label: 'memory-big.pb',
           sizeBucket: '100MB',
         },
       ]);

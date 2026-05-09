@@ -18,7 +18,13 @@ import {
 
 const MIB = 1024 * 1024;
 const DEFAULT_MIN_SIZE_BYTES = 100 * MIB;
-const TRACE_EXTENSIONS = new Set(['.trace', '.pftrace', '.perfetto-trace']);
+const TRACE_EXTENSIONS = new Set([
+  '.trace',
+  '.pftrace',
+  '.perfetto-trace',
+  '.pb',
+  '.protobuf',
+]);
 const SKIPPED_DIR_NAMES = new Set([
   '.git',
   '.hg',

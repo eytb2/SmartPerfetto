@@ -47,6 +47,9 @@ PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" \
 exists. A passing audit is only permission to run the benchmark below; it does
 not complete §0.4.3 by itself.
 
+The audit recognizes `.trace`, `.pftrace`, `.perfetto-trace`, `.pb`, and
+`.protobuf` files.
+
 Run from `backend/` with Node 24:
 
 ```bash
