@@ -2,12 +2,19 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-import { afterEach, describe, expect, it } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
+import * as path from 'path';
+// Use require so jest.spyOn can rebind these properties — `import * as fs`
+// produces a frozen module namespace in some TS-Jest configs.
+const fs: typeof import('fs') = require('fs');
 import {
   createQuickConfig,
   explainClaudeRuntimeError,
   getClaudeRuntimeDiagnostics,
+  getClaudeSdkBinaryDiagnostics,
+  getSdkBinaryOption,
   loadClaudeConfig,
+  resetSdkBinaryOptionCache,
 } from '../claudeConfig';
 
 const ORIGINAL_QUICK_MAX_TURNS = process.env.CLAUDE_QUICK_MAX_TURNS;
@@ -137,5 +144,175 @@ describe('explainClaudeRuntimeError', () => {
     const message = 'trace processor failed';
 
     expect(explainClaudeRuntimeError(message)).toBe(message);
+  });
+
+  it('detects SDK native-binary-missing errors and points at CLAUDE_BINARY_PATH (zh-CN)', () => {
+    const sdkError = 'Claude Code native binary not found at /app/backend/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64-musl/claude. Please ensure Claude Code is installed via native installer or specify a valid path with options.pathToClaudeCodeExecutable.';
+    const explained = explainClaudeRuntimeError(sdkError, 'zh-CN');
+
+    expect(explained).toContain(sdkError);
+    expect(explained).toContain('CLAUDE_BINARY_PATH');
+    expect(explained).toContain('docker exec');
+    expect(explained).toContain('原生二进制');
+    // Must NOT be misclassified as a quota/auth issue
+    expect(explained).not.toContain('CC Switch');
+  });
+
+  it('detects SDK native-binary-missing errors in English mode', () => {
+    const sdkError = 'Claude Code native binary not found at /app/backend/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64-musl/claude.';
+    const explained = explainClaudeRuntimeError(sdkError, 'en');
+
+    expect(explained).toContain('CLAUDE_BINARY_PATH');
+    expect(explained).toContain('platform detection failed');
+    expect(explained).not.toContain('CC Switch');
+  });
+});
+
+describe('getSdkBinaryOption — auto fallback', () => {
+  let accessSyncSpy: jest.SpiedFunction<typeof fs.accessSync>;
+  let readdirSyncSpy: jest.SpiedFunction<typeof fs.readdirSync>;
+  let originalReport: NodeJS.Process['report'];
+  const ORIGINAL_BINARY_PATH = process.env.CLAUDE_BINARY_PATH;
+
+  beforeEach(() => {
+    resetSdkBinaryOptionCache();
+    delete process.env.CLAUDE_BINARY_PATH;
+    accessSyncSpy = jest.spyOn(fs, 'accessSync');
+    readdirSyncSpy = jest.spyOn(fs, 'readdirSync');
+    originalReport = process.report;
+  });
+
+  afterEach(() => {
+    accessSyncSpy.mockRestore();
+    readdirSyncSpy.mockRestore();
+    Object.defineProperty(process, 'report', { value: originalReport, configurable: true });
+    if (ORIGINAL_BINARY_PATH === undefined) {
+      delete process.env.CLAUDE_BINARY_PATH;
+    } else {
+      process.env.CLAUDE_BINARY_PATH = ORIGINAL_BINARY_PATH;
+    }
+    resetSdkBinaryOptionCache();
+  });
+
+  function mockGlibcReport(glibcVersion: string | undefined): void {
+    Object.defineProperty(process, 'report', {
+      value: { getReport: () => ({ header: { glibcVersionRuntime: glibcVersion } }) },
+      configurable: true,
+    });
+  }
+
+  function expectedAnthropicDir(): string {
+    const sdkMain = require.resolve('@anthropic-ai/claude-agent-sdk');
+    return path.resolve(path.dirname(sdkMain), '..');
+  }
+
+  /** accessSync mock that throws ENOENT for any path NOT in the allowlist. */
+  function mockBinariesPresent(...allowedPaths: string[]): void {
+    accessSyncSpy.mockImplementation((p) => {
+      if (!allowedPaths.includes(String(p))) {
+        const err = new Error('ENOENT') as NodeJS.ErrnoException;
+        err.code = 'ENOENT';
+        throw err;
+      }
+    });
+  }
+
+  it('explicit CLAUDE_BINARY_PATH wins and bypasses fs probing', () => {
+    process.env.CLAUDE_BINARY_PATH = '/custom/claude';
+    const opt = getSdkBinaryOption();
+
+    expect(opt).toEqual({ pathToClaudeCodeExecutable: '/custom/claude' });
+    expect(accessSyncSpy).not.toHaveBeenCalled();
+    expect(getClaudeSdkBinaryDiagnostics().source).toBe('env-override');
+  });
+
+  it('explicit override reads from passed env, not just process.env', () => {
+    delete process.env.CLAUDE_BINARY_PATH;
+    const opt = getSdkBinaryOption({ CLAUDE_BINARY_PATH: '/passed/claude' });
+    expect(opt).toEqual({ pathToClaudeCodeExecutable: '/passed/claude' });
+  });
+
+  it('picks SDK default variant when its binary exists', () => {
+    if (process.platform !== 'linux') return; // linux-only branch
+    mockGlibcReport('2.36');
+    const dir = expectedAnthropicDir();
+    const expected = path.join(dir, `claude-agent-sdk-linux-${process.arch}`, 'claude');
+    mockBinariesPresent(expected);
+
+    const opt = getSdkBinaryOption();
+    expect(opt.pathToClaudeCodeExecutable).toBe(expected);
+
+    const diag = getClaudeSdkBinaryDiagnostics();
+    expect(diag.source).toBe('sdk-default');
+    expect(diag.fallbackUsed).toBe(false);
+    expect(diag.detectedPlatformKey).toBe(`linux-${process.arch}`);
+  });
+
+  it('falls back to a sibling variant when SDK default is missing', () => {
+    if (process.platform !== 'linux') return; // linux-only branch
+    mockGlibcReport(undefined); // SDK would pick -musl
+    const dir = expectedAnthropicDir();
+    const muslPath = path.join(dir, `claude-agent-sdk-linux-${process.arch}-musl`, 'claude');
+    const glibcPath = path.join(dir, `claude-agent-sdk-linux-${process.arch}`, 'claude');
+
+    mockBinariesPresent(glibcPath);
+    readdirSyncSpy.mockReturnValue([
+      { name: `claude-agent-sdk-linux-${process.arch}`, isDirectory: () => true },
+      { name: `claude-agent-sdk-linux-${process.arch}-musl`, isDirectory: () => true },
+      { name: 'claude-agent-sdk', isDirectory: () => true },
+    ] as unknown as never);
+
+    const opt = getSdkBinaryOption();
+    expect(opt.pathToClaudeCodeExecutable).toBe(glibcPath);
+    expect(opt.pathToClaudeCodeExecutable).not.toBe(muslPath);
+
+    const diag = getClaudeSdkBinaryDiagnostics();
+    expect(diag.source).toBe('fallback');
+    expect(diag.fallbackUsed).toBe(true);
+  });
+
+  it('returns {} and reports source=none when nothing is found', () => {
+    if (process.platform !== 'linux') return; // linux-only branch
+    mockGlibcReport('2.36');
+    mockBinariesPresent(); // nothing exists
+    readdirSyncSpy.mockReturnValue([] as unknown as never);
+
+    expect(getSdkBinaryOption()).toEqual({});
+    expect(getClaudeSdkBinaryDiagnostics().source).toBe('none');
+  });
+
+  it('memoizes auto-detection across calls', () => {
+    if (process.platform !== 'linux') return; // linux-only branch
+    mockGlibcReport('2.36');
+    const dir = expectedAnthropicDir();
+    const expected = path.join(dir, `claude-agent-sdk-linux-${process.arch}`, 'claude');
+    mockBinariesPresent(expected);
+
+    getSdkBinaryOption();
+    const callsAfterFirst = accessSyncSpy.mock.calls.length;
+    getSdkBinaryOption();
+    getSdkBinaryOption();
+    expect(accessSyncSpy.mock.calls.length).toBe(callsAfterFirst);
+  });
+
+  it('skips process.report.getReport on env-override (hot health-poll path)', () => {
+    process.env.CLAUDE_BINARY_PATH = '/custom/claude';
+    const reportSpy = jest.fn(() => ({ header: { glibcVersionRuntime: '2.36' } }));
+    Object.defineProperty(process, 'report', {
+      value: { getReport: reportSpy },
+      configurable: true,
+    });
+
+    getClaudeSdkBinaryDiagnostics();
+    getClaudeSdkBinaryDiagnostics();
+    expect(reportSpy).not.toHaveBeenCalled();
+  });
+
+  it('swallows probe errors and returns {} (never crashes the runtime)', () => {
+    accessSyncSpy.mockImplementation(() => { throw new Error('EACCES'); });
+    readdirSyncSpy.mockImplementation(() => { throw new Error('EACCES'); });
+
+    expect(() => getSdkBinaryOption()).not.toThrow();
+    expect(getSdkBinaryOption()).toEqual({});
   });
 });

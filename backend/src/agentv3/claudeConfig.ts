@@ -2,6 +2,8 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import * as fs from 'fs';
+import * as path from 'path';
 import type { SceneType } from './sceneClassifier';
 import { getRegisteredScenes } from './strategyLoader';
 import { DEFAULT_OUTPUT_LANGUAGE, outputLanguageDisplayName, parseOutputLanguage, type OutputLanguage } from './outputLanguage';
@@ -210,11 +212,54 @@ export function getClaudeRuntimeDiagnostics() {
     configHint: process.env.ANTHROPIC_BASE_URL
       ? 'Using Anthropic-compatible proxy. Ensure the mapped model supports streaming and tool/function calling.'
       : 'Set ANTHROPIC_API_KEY for Anthropic direct access, or ANTHROPIC_BASE_URL plus ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN for a third-party Anthropic-compatible provider.',
+    sdkBinary: getClaudeSdkBinaryDiagnostics(),
   };
 }
 
-export function explainClaudeRuntimeError(message: string): string {
+/** Match before quotaOrAuth — binary-missing can surface as process-exit-1. */
+function isNativeBinaryMissing(messageLower: string): boolean {
+  if (messageLower.includes('claude code native binary not found')) return true;
+  return messageLower.includes('claude-agent-sdk-') && messageLower.includes('/claude');
+}
+
+const NATIVE_BINARY_HINT_EXAMPLE = '/app/backend/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude';
+const NATIVE_BINARY_HINT_INSPECT = 'docker exec -it <container> ls /app/backend/node_modules/@anthropic-ai/';
+
+const NATIVE_BINARY_HINT_TEXT: Record<OutputLanguage, {
+  intro: string;
+  cause: string;
+  fix: string;
+  inspectLabel: string;
+}> = {
+  'zh-CN': {
+    intro: '该错误与 AI provider（DeepSeek / Kimi / Anthropic 等）配置无关，是 Claude Agent SDK 的原生二进制平台探测失败。',
+    cause: '常见原因：容器/Node 版本下 glibc 探测异常导致 SDK 误选 musl 变体；或 npm install 跳过了 optional dependencies。',
+    fix: '解决：在 .env 中设置 CLAUDE_BINARY_PATH 指向实际安装的二进制，例如：',
+    inspectLabel: '排查命令（Docker）：',
+  },
+  en: {
+    intro: 'This is unrelated to your AI provider (DeepSeek / Kimi / Anthropic / etc.) configuration. The Claude Agent SDK\'s native-binary platform detection failed.',
+    cause: 'Common causes: glibc detection misfires inside the container so the SDK selects the musl variant; or npm install skipped optional dependencies.',
+    fix: 'Fix: set CLAUDE_BINARY_PATH in .env to the actually-installed binary, e.g.:',
+    inspectLabel: 'Inspect inside Docker:',
+  },
+};
+
+function nativeBinaryHint(message: string, lang: OutputLanguage): string {
+  const t = NATIVE_BINARY_HINT_TEXT[lang];
+  return `${message}\n\n${t.intro}\n${t.cause}\n${t.fix}\n  CLAUDE_BINARY_PATH=${NATIVE_BINARY_HINT_EXAMPLE}\n${t.inspectLabel} ${NATIVE_BINARY_HINT_INSPECT}`;
+}
+
+export function explainClaudeRuntimeError(
+  message: string,
+  outputLanguage: OutputLanguage = parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE),
+): string {
   const lower = message.toLowerCase();
+
+  if (isNativeBinaryMissing(lower)) {
+    return nativeBinaryHint(message, outputLanguage);
+  }
+
   const quotaOrAuth =
     lower.includes('out of') ||
     lower.includes('extra usage') ||
@@ -258,15 +303,131 @@ export function createQuickConfig(baseConfig: ClaudeAgentConfig): ClaudeAgentCon
   };
 }
 
+/** Diagnostics describing how the Claude Agent SDK native binary was resolved. */
+export interface ClaudeSdkBinaryDiagnostics {
+  detectedPlatformKey: string | null;
+  chosenPath: string | null;
+  fallbackUsed: boolean;
+  source: 'env-override' | 'sdk-default' | 'fallback' | 'none';
+  error?: string;
+}
+
+interface AutoBinaryResolution {
+  path: string | null;
+  diagnostics: ClaudeSdkBinaryDiagnostics;
+}
+
+let autoBinaryCache: AutoBinaryResolution | null = null;
+
+/** Test-only: reset the auto-detection memo. */
+export function resetSdkBinaryOptionCache(): void {
+  autoBinaryCache = null;
+}
+
+/** Mirror of the SDK's internal platform detection. Falsy glibc → musl. */
+function detectPlatformKey(): string {
+  try {
+    if (process.platform === 'linux') {
+      const report = typeof process.report?.getReport === 'function'
+        ? (process.report.getReport() as { header?: { glibcVersionRuntime?: string } })
+        : undefined;
+      const glibc = report?.header?.glibcVersionRuntime;
+      return `linux-${process.arch}${glibc ? '' : '-musl'}`;
+    }
+    return `${process.platform}-${process.arch}`;
+  } catch {
+    return `${process.platform}-${process.arch}`;
+  }
+}
+
+function isExecutableBinary(p: string): boolean {
+  try {
+    fs.accessSync(p, process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Returns pathToClaudeCodeExecutable when CLAUDE_BINARY_PATH is set.
- * Needed on Linux glibc systems where the SDK auto-selects the musl binary
- * (tried first) but musl libc is absent. Point to the glibc variant:
- *   CLAUDE_BINARY_PATH=<repo>/backend/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude
+ * SDK runtime glibc/musl detection can disagree with npm-install's selection
+ * inside containers, leaving the SDK's auto-selected variant absent. Falls
+ * back to any installed same-platform/arch sibling.
+ */
+function autoResolveSdkBinary(): AutoBinaryResolution {
+  if (autoBinaryCache) return autoBinaryCache;
+
+  const diagnostics: ClaudeSdkBinaryDiagnostics = {
+    detectedPlatformKey: null,
+    chosenPath: null,
+    fallbackUsed: false,
+    source: 'none',
+  };
+
+  try {
+    const platformKey = detectPlatformKey();
+    diagnostics.detectedPlatformKey = platformKey;
+
+    const sdkMain = require.resolve('@anthropic-ai/claude-agent-sdk');
+    const anthropicDir = path.resolve(path.dirname(sdkMain), '..');
+    const binaryName = process.platform === 'win32' ? 'claude.exe' : 'claude';
+
+    const preferredPath = path.join(anthropicDir, `claude-agent-sdk-${platformKey}`, binaryName);
+    if (isExecutableBinary(preferredPath)) {
+      diagnostics.chosenPath = preferredPath;
+      diagnostics.source = 'sdk-default';
+      autoBinaryCache = { path: preferredPath, diagnostics };
+      return autoBinaryCache;
+    }
+
+    const platformPrefix = `claude-agent-sdk-${process.platform}-${process.arch}`;
+    const entries = fs.readdirSync(anthropicDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (!entry.name.startsWith(platformPrefix)) continue;
+      const candidatePath = path.join(anthropicDir, entry.name, binaryName);
+      if (isExecutableBinary(candidatePath)) {
+        diagnostics.chosenPath = candidatePath;
+        diagnostics.fallbackUsed = true;
+        diagnostics.source = 'fallback';
+        autoBinaryCache = { path: candidatePath, diagnostics };
+        return autoBinaryCache;
+      }
+    }
+
+    autoBinaryCache = { path: null, diagnostics };
+    return autoBinaryCache;
+  } catch (err) {
+    diagnostics.error = (err as Error).message;
+    autoBinaryCache = { path: null, diagnostics };
+    return autoBinaryCache;
+  }
+}
+
+/**
+ * Resolve `pathToClaudeCodeExecutable`. Explicit CLAUDE_BINARY_PATH is read
+ * per-call so Provider Manager env overlays take effect; auto-detection is
+ * memoized.
  */
 export function getSdkBinaryOption(env: Record<string, string | undefined> = process.env): { pathToClaudeCodeExecutable?: string } {
-  const binaryPath = env.CLAUDE_BINARY_PATH?.trim();
-  return binaryPath ? { pathToClaudeCodeExecutable: binaryPath } : {};
+  const explicitPath = env.CLAUDE_BINARY_PATH?.trim();
+  if (explicitPath) return { pathToClaudeCodeExecutable: explicitPath };
+
+  const auto = autoResolveSdkBinary();
+  return auto.path ? { pathToClaudeCodeExecutable: auto.path } : {};
+}
+
+export function getClaudeSdkBinaryDiagnostics(env: Record<string, string | undefined> = process.env): ClaudeSdkBinaryDiagnostics {
+  const explicitPath = env.CLAUDE_BINARY_PATH?.trim();
+  if (explicitPath) {
+    return {
+      detectedPlatformKey: null,
+      chosenPath: explicitPath,
+      fallbackUsed: false,
+      source: 'env-override',
+    };
+  }
+  return autoResolveSdkBinary().diagnostics;
 }
 
 /**

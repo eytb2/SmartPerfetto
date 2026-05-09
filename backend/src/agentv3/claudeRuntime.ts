@@ -1519,7 +1519,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         terminationMessage,
       };
     } catch (error) {
-      const errMsg = explainClaudeRuntimeError((error as Error).message || 'Unknown error');
+      const errMsg = explainClaudeRuntimeError((error as Error).message || 'Unknown error', this.config.outputLanguage);
       console.error('[ClaudeRuntime] Analysis failed:', errMsg);
 
       // P1-3: Preserve partial findings and generate partial conclusion on mid-stream errors
@@ -1920,7 +1920,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         terminationMessage,
       };
     } catch (error) {
-      const errMsg = explainClaudeRuntimeError((error as Error).message || 'Unknown error');
+      const errMsg = explainClaudeRuntimeError((error as Error).message || 'Unknown error', this.config.outputLanguage);
       console.error('[ClaudeRuntime] Quick analysis failed:', errMsg);
       this.emitUpdate({
         type: 'error',

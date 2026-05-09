@@ -119,6 +119,8 @@ Stop the container with `docker compose -f docker-compose.hub.yml down`.
 
 Uploads, logs, and Provider Manager profiles are stored in Docker volumes, so they survive container restarts.
 
+If analysis fails with `Claude Code native binary not found at .../claude-agent-sdk-linux-x64-musl/claude` (or the glibc variant), this is the SDK's per-platform native binary auto-selection misfiring inside the container — it is unrelated to your AI provider configuration. The backend will normally auto-fall-back to an installed sibling variant; if it still mispicks, set `CLAUDE_BINARY_PATH` in `.env` to the actual installed binary. See `.env.example` for details.
+
 ### Portable Packages
 
 Users who do not want Docker can use maintainer-built portable packages for Windows, macOS, and Linux. Each package includes the Node.js 24 runtime, target-native `node_modules`, the pre-built Perfetto UI, backend runtime files, and the pinned `trace_processor_shell`.
