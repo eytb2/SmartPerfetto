@@ -60,9 +60,9 @@ state is intentionally conservative:
 Latest substantive acceptance-evidence validation:
 
 - PR: https://github.com/Gracker/SmartPerfetto/pull/129
-- Code head: `8244dcd8` before doc-only validation-state refresh commits.
+- Code head: `f280d08e` before doc-only validation-state refresh commits.
 - Remote checks for that code head: `quality`, `gate`, and `docker-smoke`
-  passed on run `25585184289`.
+  passed on run `25585397493`.
 - Before merge, re-check the live PR status because doc-only refresh commits may
   advance the branch without changing acceptance behavior.
 - Current readiness audit:
