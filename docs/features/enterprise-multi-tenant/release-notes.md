@@ -57,12 +57,12 @@ state is intentionally conservative:
 
 ## Validation State
 
-Latest substantive load run-table evidence guard validation:
+Latest substantive RSS candidate discovery and load run-table evidence guard validation:
 
 - PR: https://github.com/Gracker/SmartPerfetto/pull/129
-- Code head: `52faa996` before doc-only validation-state refresh commits.
+- Code head: `2c541df3` before doc-only validation-state refresh commits.
 - Remote checks for that code head: `quality`, `gate`, and `docker-smoke`
-  passed on run `25586111949`.
+  passed on run `25586331162`.
 - Before merge, re-check the live PR status because doc-only refresh commits may
   advance the branch without changing acceptance behavior.
 - Current readiness audit:
@@ -71,6 +71,7 @@ Latest substantive load run-table evidence guard validation:
     evidence docs are backed by measured RSS/load-test output.
 - Local checks for the latest storage/load-report/readiness hardening:
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest src/services/__tests__/enterpriseDb.test.ts src/services/__tests__/enterpriseRepository.test.ts --runInBand`
+  - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest src/scripts/__tests__/auditTraceProcessorRssMatrix.test.ts src/scripts/__tests__/enterpriseReadinessAudit.test.ts --runInBand`
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest src/scripts/__tests__/enterpriseAcceptanceLoadTest.test.ts src/scripts/__tests__/enterpriseReadinessAudit.test.ts --runInBand`
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run typecheck`
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npm run enterprise:readiness-audit -- --require-ready`
