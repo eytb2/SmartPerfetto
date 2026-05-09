@@ -58,12 +58,12 @@ state is intentionally conservative:
 ## Validation State
 
 Latest substantive RSS benchmark manifest generation, load run-table evidence
-guard, and explicit real-run confirmation validation:
+guard, explicit real-run confirmation, and final evidence readiness validation:
 
 - PR: https://github.com/Gracker/SmartPerfetto/pull/129
-- Code head: `d15cb3e0` before doc-only validation-state refresh commits.
+- Code head: `7b4df869` before doc-only validation-state refresh commits.
 - Remote checks for that code head: `quality`, `gate`, and `docker-smoke`
-  passed on run `25586842741`.
+  passed on run `25587059143`.
 - Before merge, re-check the live PR status because doc-only refresh commits may
   advance the branch without changing acceptance behavior.
 - Current readiness audit:
@@ -73,6 +73,8 @@ guard, and explicit real-run confirmation validation:
 - Local checks for the latest storage/RSS/load-report/readiness hardening:
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest src/services/__tests__/enterpriseDb.test.ts src/services/__tests__/enterpriseRepository.test.ts --runInBand`
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest src/scripts/__tests__/auditTraceProcessorRssMatrix.test.ts src/scripts/__tests__/enterpriseReadinessAudit.test.ts --runInBand`
+    covers final evidence guards for RSS file-size buckets, load-test error
+    budget, pre-run runtime baseline, and LLM cost delta.
   - `cd backend && PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$PATH" npx jest src/scripts/__tests__/enterpriseAcceptanceLoadTest.test.ts src/scripts/__tests__/enterpriseReadinessAudit.test.ts --runInBand`
     covers the `--confirm-real-run` guard that prevents a real 50-user load
     test from starting before the prepared enterprise environment is confirmed.
