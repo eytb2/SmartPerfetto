@@ -323,6 +323,7 @@ echo "Stopping existing processes..."
 kill_processes_on_port 3000
 kill_processes_on_port 10000
 pkill -f "$PROJECT_ROOT/backend/node_modules/.bin/tsx watch src/index.ts" 2>/dev/null || true
+pkill -f "trace_processor_shell.*--httpd" 2>/dev/null || true
 sleep 1
 
 # ── trace_processor_shell ─────────────────────────────────────────────────────
@@ -396,6 +397,13 @@ echo ""
 echo "  💡 To develop the AI plugin UI: ./scripts/start-dev.sh"
 echo "  💡 Press Ctrl+C to stop"
 echo "=============================================="
+
+# Open browser automatically
+if command -v open >/dev/null 2>&1; then
+  open http://localhost:10000
+elif command -v xdg-open >/dev/null 2>&1; then
+  xdg-open http://localhost:10000
+fi
 
 echo "$BACKEND_PID"  > "$PROJECT_ROOT/.backend.pid"
 echo "$FRONTEND_PID" > "$PROJECT_ROOT/.frontend.pid"

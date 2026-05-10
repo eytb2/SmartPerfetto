@@ -29,7 +29,7 @@ function estimateTokens(text: string): number {
 }
 
 /** Maximum system prompt token budget. Sections are progressively dropped if exceeded. */
-const MAX_PROMPT_TOKENS = 4500;
+const MAX_PROMPT_TOKENS = 8000;
 
 function buildOutputLanguageSection(language: OutputLanguage): string {
   const templateName = language === 'en' ? 'prompt-language-en' : 'prompt-language-zh';
