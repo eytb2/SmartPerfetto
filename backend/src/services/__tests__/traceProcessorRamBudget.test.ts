@@ -2,7 +2,6 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../config';
 import {
   TP_ADMISSION_CONTROL_ENV,
   TP_ESTIMATE_MULTIPLIER_ENV,
@@ -39,13 +38,10 @@ describe('trace processor RAM budget', () => {
     expect(estimateTraceProcessorRssBytes(200 * MIB, options)).toBe(400 * MIB);
   });
 
-  it('defaults admission control to the enterprise feature flag', () => {
-    expect(traceProcessorAdmissionEnabled(env({ [ENTERPRISE_FEATURE_FLAG_ENV]: 'false' }))).toBe(false);
-    expect(traceProcessorAdmissionEnabled(env({ [ENTERPRISE_FEATURE_FLAG_ENV]: 'true' }))).toBe(true);
-    expect(traceProcessorAdmissionEnabled(env({
-      [ENTERPRISE_FEATURE_FLAG_ENV]: 'true',
-      [TP_ADMISSION_CONTROL_ENV]: 'false',
-    }))).toBe(false);
+  it('defaults admission control to enabled and honors explicit overrides', () => {
+    expect(traceProcessorAdmissionEnabled(env({}))).toBe(true);
+    expect(traceProcessorAdmissionEnabled(env({ [TP_ADMISSION_CONTROL_ENV]: 'false' }))).toBe(false);
+    expect(traceProcessorAdmissionEnabled(env({ [TP_ADMISSION_CONTROL_ENV]: 'true' }))).toBe(true);
   });
 
   it('subtracts observed processor RSS from explicit RAM budget', () => {

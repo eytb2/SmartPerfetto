@@ -7,16 +7,20 @@ import { getTraceProcessorService } from '../services/traceProcessorService';
 import multer from 'multer';
 import path from 'path';
 import { toSingleString } from '../utils/httpValue';
+import { resolveTraceUploadLimitBytes } from '../services/traceUploadLimit';
 
 // Get the shared TraceProcessorService singleton
 const traceService = getTraceProcessorService();
 
-// Configure multer for file uploads
+// memoryStorage buffers the entire upload in RAM — keep a hard 1 GiB ceiling here
+// regardless of the shared upload limit, otherwise a 5 GiB upload would OOM Node.
+// This legacy route is only mounted by dev scripts; the production path is simpleTraceRoutes.
+const MEMORY_STORAGE_HARD_CAP_BYTES = 1024 * 1024 * 1024;
 const storage = multer.memoryStorage();
 const upload = multer({
   storage,
   limits: {
-    fileSize: 1024 * 1024 * 1024, // 1GB limit
+    fileSize: Math.min(resolveTraceUploadLimitBytes(), MEMORY_STORAGE_HARD_CAP_BYTES),
   },
 });
 

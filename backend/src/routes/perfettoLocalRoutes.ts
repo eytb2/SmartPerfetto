@@ -7,6 +7,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs/promises';
 import { perfettoLocalService } from '../services/perfettoLocalService';
+import { resolveTraceUploadLimitBytes } from '../services/traceUploadLimit';
 
 const router = express.Router();
 
@@ -14,7 +15,7 @@ const router = express.Router();
 const upload = multer({
   dest: path.join(__dirname, '../../uploads'),
   limits: {
-    fileSize: 1024 * 1024 * 1024, // 1GB limit
+    fileSize: resolveTraceUploadLimitBytes(),
   },
   fileFilter: (req, file, cb) => {
     // Accept common trace file extensions

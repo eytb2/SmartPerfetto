@@ -3,7 +3,6 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import os from 'os';
-import { resolveFeatureConfig } from '../config';
 
 export const TP_ADMISSION_CONTROL_ENV = 'SMARTPERFETTO_TP_ADMISSION_CONTROL';
 export const TP_RAM_BUDGET_BYTES_ENV = 'SMARTPERFETTO_TP_RAM_BUDGET_BYTES';
@@ -85,7 +84,7 @@ export function estimateTraceProcessorRssBytes(
 export function traceProcessorAdmissionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const configured = parseFeatureFlag(env[TP_ADMISSION_CONTROL_ENV]);
   if (configured !== null) return configured;
-  return resolveFeatureConfig(env).enterprise;
+  return true;
 }
 
 export function getTraceProcessorRamBudgetStats(

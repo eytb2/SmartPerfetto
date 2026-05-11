@@ -6,6 +6,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import path from 'path';
 import TraceController from '../controllers/traceController';
+import { resolveTraceUploadLimitBytes } from '../services/traceUploadLimit';
 // import { authenticate, checkUsage } from '../middleware/auth';
 
 const router = Router();
@@ -31,7 +32,7 @@ const upload = multer({
   storage,
   fileFilter,
   limits: {
-    fileSize: parseInt(process.env.MAX_FILE_SIZE || '2147483648'), // 2GB default
+    fileSize: resolveTraceUploadLimitBytes(),
   },
 });
 

@@ -8,7 +8,6 @@ import path from 'path';
 import { createWriteStream } from 'fs';
 import fs from 'fs/promises';
 import net from 'net';
-import os from 'os';
 import { Readable, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import { v4 as uuidv4 } from 'uuid';
@@ -60,21 +59,75 @@ import {
   sendForbidden,
   sharesWorkspaceWithContext,
 } from '../services/rbac';
+import { resolveTraceUploadLimitBytes } from '../services/traceUploadLimit';
 
 const router = Router();
-const DEFAULT_UPLOAD_BYTES = 500 * 1024 * 1024;
-const STREAMED_UPLOAD_BYTES_CAP = 1024 * 1024 * 1024;
-export const TRACE_UPLOAD_MAX_BYTES_ENV = 'SMARTPERFETTO_TRACE_UPLOAD_MAX_BYTES';
 const URL_UPLOAD_TIMEOUT_MS = 300000;
 const TEMP_UPLOAD_SUFFIX = '.uploading';
 const CLEANUP_TERMINAL_LEASE_STATES = new Set<TraceProcessorLeaseState>(['released', 'failed']);
 const DELETE_BLOCKING_RUN_STATUSES = new Set(['pending', 'running', 'awaiting_user']);
+// 2x covers the in-flight upload plus the .uploading temp file written alongside the final trace.
+const DISK_SAFETY_MULTIPLIER = 2;
 
 class TraceUploadTooLargeError extends Error {
   constructor(readonly maxBytes: number) {
     super(`Trace file too large. Maximum allowed size is ${maxBytes} bytes`);
     this.name = 'TraceUploadTooLargeError';
   }
+}
+
+async function getAvailableDiskBytes(targetPath: string): Promise<number | null> {
+  let candidate = targetPath;
+  for (let i = 0; i < 8; i++) {
+    try {
+      const stats = await fs.statfs(candidate);
+      return stats.bavail * stats.bsize;
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') {
+        const parent = path.dirname(candidate);
+        if (parent === candidate) return null;
+        candidate = parent;
+        continue;
+      }
+      console.warn(`[Traces] statfs precheck failed (${error?.code ?? 'unknown'}) for ${candidate}; allowing upload to proceed`);
+      return null;
+    }
+  }
+  return null;
+}
+
+function checkUploadDiskSpace(req: Request, res: Response, next: NextFunction): void {
+  const contentLength = Number.parseInt(req.headers['content-length'] ?? '', 10);
+  if (!Number.isFinite(contentLength) || contentLength <= 0) {
+    next();
+    return;
+  }
+
+  let tracesDir: string;
+  try {
+    tracesDir = getWritableTraceDirForContext(requireRequestContext(req));
+  } catch {
+    next();
+    return;
+  }
+
+  getAvailableDiskBytes(tracesDir)
+    .then((available) => {
+      if (available === null) {
+        next();
+        return;
+      }
+      const required = contentLength * DISK_SAFETY_MULTIPLIER;
+      if (available < required) {
+        res.status(507).json({
+          error: 'Insufficient disk space',
+          details: `Need ${required} bytes (declared ${contentLength}, ${DISK_SAFETY_MULTIPLIER}x safety), only ${available} bytes free on trace volume`,
+        });
+        return;
+      }
+      next();
+    })
+    .catch(() => next());
 }
 
 interface FinalizedTraceUploadInfo {
@@ -94,21 +147,6 @@ interface FinalizedTraceUploadInfo {
 interface TraceProcessorLeaseAcquisition {
   lease: TraceProcessorLeaseRecord;
   decision: TraceProcessorLeaseModeDecision;
-}
-
-function parsePositiveInteger(value: string | undefined): number | null {
-  if (!value) return null;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-}
-
-export function resolveTraceUploadLimitBytes(env: NodeJS.ProcessEnv = process.env): number {
-  const configured = parsePositiveInteger(env[TRACE_UPLOAD_MAX_BYTES_ENV]);
-  if (configured) {
-    return Math.min(configured, STREAMED_UPLOAD_BYTES_CAP);
-  }
-  const ramBudget = Math.floor(os.totalmem() * 0.1);
-  return Math.max(DEFAULT_UPLOAD_BYTES, Math.min(STREAMED_UPLOAD_BYTES_CAP, ramBudget));
 }
 
 function requireTracePermission(permission: 'trace:read' | 'trace:write', details: string) {
@@ -683,6 +721,7 @@ const upload = multer({
 router.post(
   '/upload',
   requireTracePermission('trace:write', 'Uploading traces requires trace:write permission'),
+  checkUploadDiskSpace,
   upload.single('file'),
   async (req, res) => {
     try {

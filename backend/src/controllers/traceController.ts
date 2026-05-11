@@ -7,6 +7,7 @@ import path from 'path';
 import fs from 'fs/promises';
 import { ErrorResponse } from '../types';
 import { toSingleString } from '../utils/httpValue';
+import { resolveTraceUploadLimitBytes } from '../services/traceUploadLimit';
 
 class TraceController {
   private uploadDir: string;
@@ -39,8 +40,7 @@ class TraceController {
       // Removed file extension validation - accept all files
       console.log(`Uploading file: ${file.originalname}, size: ${file.size} bytes`);
 
-      // Validate file size (default 2GB)
-      const maxSize = parseInt(process.env.MAX_FILE_SIZE || '2147483648');
+      const maxSize = resolveTraceUploadLimitBytes();
       if (file.size > maxSize) {
         const error: ErrorResponse = {
           error: 'File too large',
