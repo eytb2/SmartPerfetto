@@ -110,6 +110,7 @@ import {
   type AnalyzeSessionRunContext,
 } from '../assistant/application/agentAnalyzeSessionService';
 import { buildAssistantResultContract } from '../assistant/contracts/assistantResultContract';
+import { persistCompletedAnalysisResultSnapshot } from '../services/analysisResultSnapshotPipeline';
 // Agent-Driven Architecture v2.0 - Intervention & Focus
 import type { UserDecision, AnalysisDirective } from '../agent/core/interventionController';
 import type { FocusInteraction } from '../agent/context/focusStore';
@@ -4433,6 +4434,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
   let reportUrl: string | undefined;
   let reportError: string | undefined;
   const reportId = `agent-report-${session.sessionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let resultSnapshotId: string | undefined;
   let reportLease: TraceProcessorLeaseRecord | null = null;
   try {
     if (enterpriseLeasesEnabled()) {
@@ -4537,6 +4539,33 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
     }
   }
 
+  try {
+    const resultSnapshot = persistCompletedAnalysisResultSnapshot({
+      tenantId: session.tenantId,
+      workspaceId: session.workspaceId,
+      userId: session.userId,
+      traceId: session.traceId,
+      sessionId: session.sessionId,
+      runId: session.lastRun?.runId || session.activeRun?.runId,
+      reportId: reportUrl ? reportId : undefined,
+      query: session.query,
+      traceLabel: session.traceId,
+      conclusion: normalizedConclusion,
+      confidence: result.confidence,
+      partial: result.partial,
+      terminationReason: result.terminationReason,
+      terminationMessage: result.terminationMessage,
+      dataEnvelopes: session.dataEnvelopes,
+    });
+    resultSnapshotId = resultSnapshot?.id;
+  } catch (snapshotError: any) {
+    console.warn('[AgentRoutes] Failed to persist analysis result snapshot:', {
+      sessionId: session.sessionId,
+      runId: session.lastRun?.runId || session.activeRun?.runId,
+      error: snapshotError?.message || String(snapshotError),
+    });
+  }
+
   // Send analysis_completed event with full result. Keep it replayable so a
   // reconnect between conclusion and report generation can recover reportUrl.
   sendReplayableSessionEvent(session, res, 'analysis_completed', {
@@ -4567,6 +4596,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       conversationTimeline: session.conversationSteps,
       reportUrl,
       reportError,
+      resultSnapshotId,
       observability,
     },
     timestamp: Date.now(),

@@ -158,3 +158,22 @@
 
 - Snapshot 主表已经具备 owner guard 查询边界。
 - Metrics/evidence 作为 snapshot 子表级联删除，不直接暴露 workspace scoped repository。
+
+## M1.3 `analysis_completed` 后生成 Snapshot
+
+状态：完成。
+
+验收证据：
+
+- 新增 `backend/src/services/analysisResultSnapshotPipeline.ts`。
+- `buildCompletedAnalysisResultSnapshot()` 从 tenant/workspace/session/run/report/query/conclusion/DataEnvelope metadata 构造 `AnalysisResultSnapshot`。
+- 首版生成 `partial` snapshot，原因包含 `No normalized comparison metrics extracted yet`；标准 metric 抽取留给 M1.4。
+- `persistCompletedAnalysisResultSnapshot()` 通过 enterprise DB 与 `AnalysisResultSnapshotRepository` 写入 snapshot。
+- `backend/src/routes/agentRoutes.ts` 在 report 生成结束后、`analysis_completed` SSE 发送前调用 snapshot 持久化。
+- `analysis_completed` payload 增加 `resultSnapshotId`，便于后续前端显示当前窗口最近 snapshot。
+- 新增 `backend/src/services/__tests__/analysisResultSnapshotPipeline.test.ts`。
+
+结论：
+
+- 完成一次 agent run 后，后端会尝试持久化一个可比较的结果快照。
+- 如果缺少 tenant/workspace/run 元数据或 DB 写入失败，当前分析完成链路不会被 snapshot 失败阻断。
