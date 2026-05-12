@@ -377,6 +377,13 @@ export function buildSystemPromptParts(
       : `## 分析方法论\n\n${sceneStrategy}`,
   );
 
+  if (context.sceneType === 'multi_trace_result_comparison') {
+    const comparisonResultMethodology = loadPromptTemplate('comparison-result-methodology');
+    if (comparisonResultMethodology) {
+      push(3, 'comparison_result_methodology', comparisonResultMethodology);
+    }
+  }
+
   if (context.availableAgents && context.availableAgents.length > 0) {
     const hasSystemExpert = context.availableAgents.includes('system-expert');
     const isScrolling = context.sceneType === 'scrolling';

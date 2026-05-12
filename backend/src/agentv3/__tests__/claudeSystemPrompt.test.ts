@@ -22,6 +22,7 @@ jest.mock('../strategyLoader', () => ({
   getStrategyContent: jest.fn((scene: string) => {
     if (scene === 'scrolling') return '滑动分析：检查 frame_timeline 表，关注掉帧根因';
     if (scene === 'startup') return '启动分析：检查 android.startup.startups 表';
+    if (scene === 'multi_trace_result_comparison') return '分析结果对比：先构造 ComparisonMatrix';
     return '通用分析指引';
   }),
   loadPromptTemplate: jest.fn((name: string) => {
@@ -30,6 +31,7 @@ jest.mock('../strategyLoader', () => ({
     if (name === 'prompt-language-en') return '## Output Language\n\nAll user-facing answers MUST be written in English.';
     if (name === 'prompt-quick') return '# 角色\n\n你是 Android 性能 trace 分析专家。\n\n{{outputLanguageSection}}\n\n{{architectureContext}}\n\n{{focusAppContext}}\n\n{{selectionSection}}';
     if (name === 'prompt-methodology') return '## 分析方法论\n\n{{sceneStrategy}}';
+    if (name === 'comparison-result-methodology') return '## 分析结果对比方法论\n\nMatrix First';
     if (name === 'prompt-output-format') return '## 输出格式\n\n使用 Markdown 格式输出。';
     if (name.startsWith('arch-')) return `### ${name} 架构分析指导\n\n专项指导内容`;
     return null;
@@ -158,6 +160,13 @@ describe('buildSystemPrompt', () => {
     it('should use general strategy for general scene', () => {
       const prompt = buildSystemPrompt(makeContext({ sceneType: 'general' }));
       expect(prompt).toContain('通用分析指引');
+    });
+
+    it('should inject result-comparison methodology for multi-trace result comparison scene', () => {
+      const prompt = buildSystemPrompt(makeContext({ sceneType: 'multi_trace_result_comparison' }));
+      expect(prompt).toContain('ComparisonMatrix');
+      expect(prompt).toContain('分析结果对比方法论');
+      expect(prompt).toContain('Matrix First');
     });
   });
 

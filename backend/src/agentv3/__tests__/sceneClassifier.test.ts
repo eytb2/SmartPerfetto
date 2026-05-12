@@ -15,6 +15,15 @@ import { jest, describe, it, expect } from '@jest/globals';
 jest.mock('../strategyLoader', () => ({
   getRegisteredScenes: jest.fn(() => [
     {
+      scene: 'multi_trace_result_comparison',
+      priority: 0,
+      keywords: ['分析结果对比', '结果对比', '多 trace 对比', '另外一个 trace', 'compare analysis results'],
+      compoundPatterns: [
+        /对比.*(?:分析结果|结果|另一个\s*Trace|另外一个\s*Trace|两个\s*Trace|多\s*Trace)/i,
+        /(?:分析结果|结果|snapshot).*(?:对比|compare)/i,
+      ],
+    },
+    {
       scene: 'anr',
       priority: 1,
       keywords: ['anr', '死锁', 'not responding', 'deadlock'],
@@ -81,6 +90,11 @@ describe('classifyScene', () => {
 
     it('should classify overview queries', () => {
       expect(classifyScene('给出概览')).toBe('overview');
+    });
+
+    it('should classify multi-trace result comparison queries', () => {
+      expect(classifyScene('把当前 Trace 的结果与另外一个 Trace 的分析结果进行对比')).toBe('multi_trace_result_comparison');
+      expect(classifyScene('compare analysis results for two snapshots')).toBe('multi_trace_result_comparison');
     });
 
     it('should be case-insensitive for keywords', () => {
