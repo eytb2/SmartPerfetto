@@ -73,4 +73,79 @@ describe('analysis result snapshot pipeline', () => {
       query: 'analyze',
     })).toBeNull();
   });
+
+  test('extracts startup metrics from structured DataEnvelope rows', () => {
+    const snapshot = buildCompletedAnalysisResultSnapshot({
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      traceId: 'trace-a',
+      sessionId: 'session-a',
+      runId: 'run-a',
+      query: 'startup analysis',
+      dataEnvelopes: [{
+        ...envelope(),
+        data: {
+          columns: ['startup_id', 'total_ms', 'first_frame_ms'],
+          rows: [[1, 1450.5, 620]],
+        },
+      }],
+      createdAt: 1234,
+    });
+
+    expect(snapshot?.status).toBe('ready');
+    expect(snapshot?.metrics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: 'startup.total_ms',
+        value: 1450.5,
+        unit: 'ms',
+        source: expect.objectContaining({ skillId: 'startup_analysis' }),
+      }),
+      expect.objectContaining({
+        key: 'startup.first_frame_ms',
+        value: 620,
+      }),
+    ]));
+    expect(snapshot?.summary.partialReasons).toBeUndefined();
+  });
+
+  test('extracts scrolling metrics and normalizes fractional jank rate to percent', () => {
+    const snapshot = buildCompletedAnalysisResultSnapshot({
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      traceId: 'trace-a',
+      sessionId: 'session-a',
+      runId: 'run-a',
+      query: '对比 FPS 和 jank',
+      dataEnvelopes: [{
+        ...envelope(),
+        meta: {
+          ...envelope().meta,
+          source: 'scrolling_analysis',
+          skillId: 'scrolling_analysis',
+          stepId: 'session_jank',
+        },
+        display: {
+          ...envelope().display,
+          title: 'Scrolling summary',
+        },
+        data: {
+          rows: [{
+            avg_fps: '58.5',
+            frame_count: 240,
+            jank_count: 12,
+            jank_rate: 0.05,
+            p95_frame_ms: 28,
+          }],
+        } as any,
+      }],
+      createdAt: 1234,
+    });
+
+    expect(snapshot?.sceneType).toBe('scrolling');
+    expect(snapshot?.metrics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'scrolling.avg_fps', value: 58.5, unit: 'fps' }),
+      expect.objectContaining({ key: 'scrolling.jank_rate_pct', value: 5, unit: '%' }),
+      expect.objectContaining({ key: 'scrolling.p95_frame_ms', value: 28, unit: 'ms' }),
+    ]));
+  });
 });

@@ -502,7 +502,7 @@ Result Picker -> POST /comparisons
 - [x] 新增 TypeScript contract：`AnalysisResultSnapshot`, `NormalizedMetricValue`, `ComparisonMatrix`。
 - [x] 新增 DB migration 与 repository。
 - [x] 在 `analysis_completed` 后生成 snapshot。
-- [ ] 从 startup/scrolling 结果里抽取首批标准 metric。
+- [x] 从 startup/scrolling 结果里抽取首批标准 metric。
 - [ ] 增加 `snapshot_created` SSE event。
 - [ ] 增加 owner guard、visibility、audit。
 

@@ -177,3 +177,22 @@
 
 - 完成一次 agent run 后，后端会尝试持久化一个可比较的结果快照。
 - 如果缺少 tenant/workspace/run 元数据或 DB 写入失败，当前分析完成链路不会被 snapshot 失败阻断。
+
+## M1.4 Startup/Scrolling 标准 Metric 抽取
+
+状态：完成。
+
+验收证据：
+
+- `analysisResultSnapshotPipeline.ts` 新增 DataEnvelope payload rows 解析。
+- 支持从结构化行/列抽取首批标准 metric：
+  - startup: `startup.total_ms`、`startup.first_frame_ms`、`startup.bind_application_ms`、`startup.activity_start_ms`、`startup.main_thread_blocked_ms`
+  - scrolling: `scrolling.avg_fps`、`scrolling.frame_count`、`scrolling.jank_count`、`scrolling.jank_rate_pct`、`scrolling.p50_frame_ms`、`scrolling.p95_frame_ms`、`scrolling.p99_frame_ms`
+  - CPU/trace 环境字段也预留在同一 extractor 中，供后续 backfill/API 复用。
+- `scrolling.jank_rate_pct` 会把 `0..1` 的 fractional rate 转为百分比。
+- 有标准 metric 时 snapshot 状态为 `ready`；抽不到标准 metric 时保持 `partial` 并记录缺失原因。
+- `analysisResultSnapshotPipeline.test.ts` 覆盖 startup metric、scrolling FPS/Jank metric 和 no-metric partial fallback。
+
+结论：
+
+- Snapshot 生成不再只是 report/session/run 索引；已经能从 startup/scrolling DataEnvelope 中提取可比较数值。

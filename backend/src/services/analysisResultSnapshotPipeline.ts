@@ -6,9 +6,13 @@ import crypto from 'crypto';
 import type { DataEnvelope } from '../types/dataContract';
 import {
   ANALYSIS_RESULT_SNAPSHOT_SCHEMA_VERSION,
+  STANDARD_COMPARISON_METRICS,
   type AnalysisResultSceneType,
   type AnalysisResultSnapshot,
   type EvidenceRef,
+  type NormalizedMetricSource,
+  type NormalizedMetricValue,
+  type StandardComparisonMetricKey,
 } from '../types/multiTraceComparison';
 import { openEnterpriseDb } from './enterpriseDb';
 import { createAnalysisResultSnapshotRepository } from './analysisResultSnapshotStore';
@@ -96,6 +100,143 @@ function evidenceRefsFromInput(input: CompletedAnalysisSnapshotInput): EvidenceR
   return refs;
 }
 
+function dataEnvelopeRefId(env: DataEnvelope): string {
+  const source = env.meta?.source || env.meta?.skillId || 'data_envelope';
+  const stepId = env.meta?.stepId || 'step';
+  return `data:${source}:${stepId}:${env.meta?.timestamp || 0}`;
+}
+
+function payloadRows(env: DataEnvelope): Array<Record<string, unknown>> {
+  const data = env.data as any;
+  if (!data || typeof data !== 'object') return [];
+
+  if (Array.isArray(data.rows)) {
+    if (data.rows.length === 0) return [];
+    if (data.rows.every((row: unknown) => row && typeof row === 'object' && !Array.isArray(row))) {
+      return data.rows as Array<Record<string, unknown>>;
+    }
+    const columns: string[] = Array.isArray(data.columns)
+      ? data.columns.filter((col: unknown): col is string => typeof col === 'string')
+      : [];
+    if (columns.length > 0) {
+      return data.rows
+        .filter((row: unknown): row is unknown[] => Array.isArray(row))
+        .map((row: unknown[]) => {
+          const out: Record<string, unknown> = {};
+          columns.forEach((column, index) => {
+            out[column] = row[index];
+          });
+          return out;
+        });
+    }
+  }
+
+  if (data.summary && typeof data.summary === 'object') {
+    const metrics = (data.summary as any).metrics;
+    if (Array.isArray(metrics)) {
+      return metrics
+        .filter((metric: unknown): metric is Record<string, unknown> => !!metric && typeof metric === 'object')
+        .map(metric => ({
+          label: metric.label,
+          value: metric.value,
+          unit: metric.unit,
+        }));
+    }
+  }
+
+  return [data as Record<string, unknown>];
+}
+
+function normalizeFieldName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function toNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'bigint') return Number(value);
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().replace(/,/g, '');
+  if (!normalized) return null;
+  const match = normalized.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getRowNumber(row: Record<string, unknown>, candidates: string[]): number | null {
+  const byNormalizedName = new Map<string, unknown>();
+  for (const [key, value] of Object.entries(row)) {
+    byNormalizedName.set(normalizeFieldName(key), value);
+  }
+  for (const candidate of candidates) {
+    const value = byNormalizedName.get(normalizeFieldName(candidate));
+    const parsed = toNumber(value);
+    if (parsed !== null) return parsed;
+  }
+  return null;
+}
+
+const METRIC_FIELD_CANDIDATES: Record<StandardComparisonMetricKey, string[]> = {
+  'startup.total_ms': ['startup.total_ms', 'startup_total_ms', 'total_ms', 'total_duration_ms', 'duration_ms', 'dur_ms', 'startup_ms'],
+  'startup.first_frame_ms': ['startup.first_frame_ms', 'first_frame_ms', 'time_to_first_frame_ms', 'first_frame_duration_ms'],
+  'startup.bind_application_ms': ['startup.bind_application_ms', 'bind_application_ms', 'bind_app_ms', 'bindApplicationMs'],
+  'startup.activity_start_ms': ['startup.activity_start_ms', 'activity_start_ms', 'activityStartMs', 'activity_launch_ms'],
+  'startup.main_thread_blocked_ms': ['startup.main_thread_blocked_ms', 'main_thread_blocked_ms', 'blocked_ms', 'mainThreadBlockedMs'],
+  'scrolling.avg_fps': ['scrolling.avg_fps', 'avg_fps', 'average_fps', 'fps'],
+  'scrolling.frame_count': ['scrolling.frame_count', 'frame_count', 'frames', 'total_frames'],
+  'scrolling.jank_count': ['scrolling.jank_count', 'jank_count', 'janky_count', 'jank_frames', 'janky_frames'],
+  'scrolling.jank_rate_pct': ['scrolling.jank_rate_pct', 'jank_rate_pct', 'jank_pct', 'jank_rate', 'janky_rate'],
+  'scrolling.p50_frame_ms': ['scrolling.p50_frame_ms', 'p50_frame_ms', 'frame_p50_ms', 'p50_ms'],
+  'scrolling.p95_frame_ms': ['scrolling.p95_frame_ms', 'p95_frame_ms', 'frame_p95_ms', 'p95_ms'],
+  'scrolling.p99_frame_ms': ['scrolling.p99_frame_ms', 'p99_frame_ms', 'frame_p99_ms', 'p99_ms'],
+  'cpu.main_thread_running_ms': ['cpu.main_thread_running_ms', 'main_thread_running_ms', 'running_ms'],
+  'cpu.main_thread_runnable_ms': ['cpu.main_thread_runnable_ms', 'main_thread_runnable_ms', 'runnable_ms'],
+  'cpu.big_core_pct': ['cpu.big_core_pct', 'big_core_pct', 'big_core_percent'],
+  'cpu.avg_freq_mhz': ['cpu.avg_freq_mhz', 'avg_freq_mhz', 'average_freq_mhz'],
+  'trace.duration_ms': ['trace.duration_ms', 'trace_duration_ms', 'duration_ms'],
+  'trace.device_model': ['trace.device_model', 'device_model'],
+  'trace.android_version': ['trace.android_version', 'android_version'],
+  'trace.capture_config_summary': ['trace.capture_config_summary', 'capture_config_summary'],
+};
+
+function metricSourceFromEnvelope(env: DataEnvelope): NormalizedMetricSource {
+  const type = env.meta?.type === 'sql_result' ? 'sql' : 'skill';
+  return {
+    type,
+    ...(env.meta?.skillId ? { skillId: env.meta.skillId } : {}),
+    ...(env.meta?.stepId ? { stepId: env.meta.stepId } : {}),
+    dataEnvelopeId: dataEnvelopeRefId(env),
+  };
+}
+
+function extractStandardMetrics(envelopes: DataEnvelope[] = []): NormalizedMetricValue[] {
+  const byKey = new Map<string, NormalizedMetricValue>();
+  for (const env of envelopes) {
+    for (const row of payloadRows(env)) {
+      for (const definition of STANDARD_COMPARISON_METRICS) {
+        const value = getRowNumber(row, METRIC_FIELD_CANDIDATES[definition.key]);
+        if (value === null) continue;
+        const normalizedValue = definition.key === 'scrolling.jank_rate_pct' && value > 0 && value <= 1
+          ? value * 100
+          : value;
+        if (byKey.has(definition.key)) continue;
+        byKey.set(definition.key, {
+          key: definition.key,
+          label: definition.label,
+          group: definition.group,
+          value: normalizedValue,
+          unit: definition.unit,
+          direction: definition.direction,
+          aggregation: definition.aggregation,
+          confidence: 0.75,
+          source: metricSourceFromEnvelope(env),
+        });
+      }
+    }
+  }
+  return [...byKey.values()];
+}
+
 export function buildCompletedAnalysisResultSnapshot(
   input: CompletedAnalysisSnapshotInput,
 ): AnalysisResultSnapshot | null {
@@ -108,11 +249,14 @@ export function buildCompletedAnalysisResultSnapshot(
   const headline = firstNonEmptyLine(input.conclusion)
     || input.terminationMessage
     || 'Analysis completed';
+  const metrics = extractStandardMetrics(input.dataEnvelopes);
   const partialReasons: string[] = [];
   if (input.partial) {
     partialReasons.push(input.terminationReason || input.terminationMessage || 'Analysis marked partial by runtime');
   }
-  partialReasons.push('No normalized comparison metrics extracted yet');
+  if (metrics.length === 0) {
+    partialReasons.push('No normalized comparison metrics extracted yet');
+  }
 
   return {
     id: `analysis-result-${crypto.randomUUID()}`,
@@ -132,11 +276,11 @@ export function buildCompletedAnalysisResultSnapshot(
     summary: {
       headline,
       ...(input.confidence !== undefined ? { confidence: input.confidence } : {}),
-      partialReasons,
+      ...(partialReasons.length > 0 ? { partialReasons } : {}),
     },
-    metrics: [],
+    metrics,
     evidenceRefs: evidenceRefsFromInput(input),
-    status: 'partial',
+    status: input.partial || metrics.length === 0 ? 'partial' : 'ready',
     schemaVersion: ANALYSIS_RESULT_SNAPSHOT_SCHEMA_VERSION,
     createdAt,
   };
