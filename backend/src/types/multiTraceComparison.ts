@@ -202,6 +202,22 @@ export interface AnalysisResultSnapshot {
   expiresAt?: number;
 }
 
+export interface AnalysisResultWindowState {
+  tenantId: string;
+  workspaceId: string;
+  windowId: string;
+  userId?: string;
+  traceId?: string;
+  backendTraceId?: string;
+  activeSessionId?: string;
+  latestSnapshotId?: string;
+  traceTitle?: string;
+  sceneType?: AnalysisResultSceneType;
+  metadata?: Record<string, unknown>;
+  updatedAt: number;
+  expiresAt: number;
+}
+
 export interface ComparisonMatrixInput {
   snapshotId: string;
   traceId: string;

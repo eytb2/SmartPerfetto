@@ -44,6 +44,7 @@ import enterpriseApiKeyRoutes from './routes/enterpriseApiKeyRoutes';
 import enterpriseTenantRoutes from './routes/enterpriseTenantRoutes';
 import enterpriseRuntimeDashboardRoutes from './routes/enterpriseRuntimeDashboardRoutes';
 import analysisResultRoutes from './routes/analysisResultRoutes';
+import workspaceWindowRoutes from './routes/workspaceWindowRoutes';
 import traceProcessorProxyRoutes, { handleTraceProcessorProxyUpgrade } from './routes/traceProcessorProxyRoutes';
 import {authenticate} from './middleware/auth';
 import {
@@ -204,6 +205,11 @@ app.use(
   '/api/workspaces/:workspaceId/analysis-results',
   ...workspaceRouteContextMiddleware,
   analysisResultRoutes,
+);
+app.use(
+  '/api/workspaces/:workspaceId/windows',
+  ...workspaceRouteContextMiddleware,
+  workspaceWindowRoutes,
 );
 app.use(
   '/api/traces',

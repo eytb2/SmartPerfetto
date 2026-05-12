@@ -518,7 +518,7 @@ Result Picker -> POST /comparisons
 - [x] 前端显示当前窗口最近 snapshot。
 - [x] 新增 Result Picker。
 - [x] 支持把 private snapshot 改成 workspace 可见。
-- [ ] 注册 window heartbeat，用于“另一个 Trace”候选排序。
+- [x] 注册 window heartbeat，用于“另一个 Trace”候选排序。
 
 验收：
 

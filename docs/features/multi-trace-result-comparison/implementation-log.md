@@ -304,3 +304,21 @@
 结论：
 
 - 用户可以把自己的 private 分析结果发布到 workspace 结果目录，供其它窗口或用户作为对比候选。
+
+## M2.5 Window Heartbeat
+
+状态：完成。
+
+验收证据：
+
+- Schema v8 新增 `analysis_result_window_states`，按 `(tenant_id, workspace_id, window_id)` upsert 当前窗口状态。
+- 新增 `POST /api/workspaces/:workspaceId/windows/:windowId/heartbeat`，记录 trace、backend trace、active session、latest snapshot、trace title、scene、TTL。
+- 新增 `GET /api/workspaces/:workspaceId/windows/active`，用于查看同 workspace 内未过期窗口。
+- Heartbeat 返回排除当前窗口后的 active peer windows，供“另一个 Trace”候选排序。
+- 前端 AI Panel 在创建、backend trace ready、snapshot 创建/fallback 后上报 heartbeat，并每 30 秒刷新一次。
+- Result Picker 根据 active peer window 的 `latestSnapshotId` 把其它打开窗口的结果排到普通历史结果之前，并显示 `Open` 标记。
+- 增加 route test 覆盖 heartbeat upsert、active peer 返回、非法 scene 拒绝；schema test 覆盖新表和索引。
+
+结论：
+
+- 多窗口场景已经有稳定的窗口在线信号，后续自然语言里的“另一个 Trace”可以优先解析到仍在打开的窗口结果。

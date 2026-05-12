@@ -41,6 +41,7 @@ export const ENTERPRISE_CORE_SCHEMA_TABLES = [
   'analysis_result_snapshots',
   'analysis_result_metrics',
   'analysis_result_evidence_refs',
+  'analysis_result_window_states',
   'runtime_snapshots',
   'provider_credentials',
   'provider_snapshots',
@@ -595,6 +596,37 @@ const MIGRATIONS: MigrationStep[] = [
         );
         CREATE INDEX IF NOT EXISTS idx_analysis_result_evidence_refs_snapshot
           ON analysis_result_evidence_refs(snapshot_id);
+      `);
+    },
+  },
+  {
+    version: 8,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS analysis_result_window_states (
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          window_id TEXT NOT NULL,
+          user_id TEXT,
+          trace_id TEXT,
+          backend_trace_id TEXT,
+          active_session_id TEXT,
+          latest_snapshot_id TEXT,
+          trace_title TEXT,
+          scene_type TEXT,
+          metadata_json TEXT,
+          updated_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL,
+          PRIMARY KEY (tenant_id, workspace_id, window_id),
+          FOREIGN KEY (tenant_id) REFERENCES organizations(id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id) REFERENCES workspaces(tenant_id, id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_analysis_result_window_states_workspace
+          ON analysis_result_window_states(tenant_id, workspace_id, expires_at, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_analysis_result_window_states_trace
+          ON analysis_result_window_states(tenant_id, workspace_id, trace_id, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_analysis_result_window_states_snapshot
+          ON analysis_result_window_states(tenant_id, workspace_id, latest_snapshot_id, updated_at);
       `);
     },
   },
