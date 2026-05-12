@@ -13,6 +13,8 @@ import {
 } from '../services/comparisonResultService';
 import { generateAiComparisonConclusion } from '../services/comparisonAiConclusionService';
 import { persistComparisonHtmlReport } from '../services/comparisonHtmlReportService';
+import { backfillStandardMetrics } from '../services/standardMetricBackfillService';
+import { getTraceProcessorService } from '../services/traceProcessorService';
 import { hasRbacPermission, sendForbidden } from '../services/rbac';
 import type { AnalysisResultSnapshot, ComparisonMetricKey } from '../types/multiTraceComparison';
 
@@ -57,6 +59,8 @@ router.post('/', async (req, res) => {
   const candidateSnapshotIds = uniqueStrings(stringArray(req.body?.candidateSnapshotIds));
   const query = optionalString(req.body?.query) || 'Compare selected analysis results';
   const providerId = optionalString(req.body?.providerId);
+  const metricKeys = resolveComparisonMetricKeys(stringArray(req.body?.metricKeys) as ComparisonMetricKey[]);
+  const allowTraceBackfill = req.body?.allowTraceBackfill === true;
   const inputSnapshotIds = uniqueStrings([
     ...(baselineSnapshotId ? [baselineSnapshotId] : []),
     ...candidateSnapshotIds,
@@ -91,8 +95,21 @@ router.post('/', async (req, res) => {
       snapshots.push(snapshot);
     }
 
+    if (allowTraceBackfill) {
+      const traceProcessor = getTraceProcessorService();
+      for (const [index, snapshot] of snapshots.entries()) {
+        const backfill = await backfillStandardMetrics({
+          snapshot,
+          metricKeys,
+          traceProcessor,
+          repository: snapshotRepository,
+          scope,
+        });
+        snapshots[index] = backfill.snapshot;
+      }
+    }
+
     const repository = createMultiTraceComparisonRunRepository(db);
-    const metricKeys = resolveComparisonMetricKeys(stringArray(req.body?.metricKeys) as ComparisonMetricKey[]);
     const created = repository.createRun(scope, {
       baselineSnapshotId,
       candidateSnapshotIds,

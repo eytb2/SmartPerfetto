@@ -380,6 +380,93 @@ export class AnalysisResultSnapshotRepository {
     return this.getSnapshot(scope, snapshotId);
   }
 
+  upsertMetrics(
+    scope: SnapshotAccessScope,
+    snapshotId: string,
+    metrics: NormalizedMetricValue[],
+    evidenceRefs: EvidenceRef[] = [],
+  ): AnalysisResultSnapshot | null {
+    if (metrics.length === 0 && evidenceRefs.length === 0) {
+      return this.getSnapshot(scope, snapshotId);
+    }
+    const where = readableClause(scope);
+    const snapshot = this.db.prepare<unknown[], { id: string }>(`
+      SELECT s.id
+      FROM analysis_result_snapshots s
+      WHERE ${where.sql}
+        AND s.id = @snapshotId
+        AND (s.expires_at IS NULL OR s.expires_at > @now)
+      LIMIT 1
+    `).get({
+      ...where.params,
+      snapshotId,
+      now: Date.now(),
+    });
+    if (!snapshot) return null;
+
+    const write = this.db.transaction(() => {
+      const upsertMetric = this.db.prepare(`
+        INSERT INTO analysis_result_metrics
+          (id, snapshot_id, metric_key, metric_group, label, value_json, numeric_value, unit,
+           direction, aggregation, confidence, missing_reason, source_json)
+        VALUES
+          (@id, @snapshotId, @metricKey, @metricGroup, @label, @valueJson, @numericValue, @unit,
+           @direction, @aggregation, @confidence, @missingReason, @sourceJson)
+        ON CONFLICT(snapshot_id, metric_key) DO UPDATE SET
+          metric_group = excluded.metric_group,
+          label = excluded.label,
+          value_json = excluded.value_json,
+          numeric_value = excluded.numeric_value,
+          unit = excluded.unit,
+          direction = excluded.direction,
+          aggregation = excluded.aggregation,
+          confidence = excluded.confidence,
+          missing_reason = excluded.missing_reason,
+          source_json = excluded.source_json
+      `);
+      for (const metric of metrics) {
+        upsertMetric.run({
+          id: crypto.randomUUID(),
+          snapshotId,
+          metricKey: metric.key,
+          metricGroup: metric.group,
+          label: metric.label,
+          valueJson: stringifyJson(metric.value),
+          numericValue: metricNumericValue(metric),
+          unit: metric.unit ?? null,
+          direction: metric.direction ?? null,
+          aggregation: metric.aggregation ?? null,
+          confidence: metric.confidence,
+          missingReason: metric.missingReason ?? null,
+          sourceJson: stringifyJson(metric.source),
+        });
+      }
+
+      const insertEvidence = this.db.prepare(`
+        INSERT OR REPLACE INTO analysis_result_evidence_refs
+          (id, snapshot_id, ref_type, ref_json, created_at)
+        VALUES
+          (@id, @snapshotId, @refType, @refJson, @createdAt)
+      `);
+      for (const evidence of evidenceRefs) {
+        insertEvidence.run({
+          id: evidence.id || crypto.randomUUID(),
+          snapshotId,
+          refType: evidence.type,
+          refJson: stringifyJson(evidence),
+          createdAt: Date.now(),
+        });
+      }
+
+      this.recordReadAudit(scope, snapshotId, 'analysis_result.metrics_backfilled', {
+        metricCount: metrics.length,
+        evidenceCount: evidenceRefs.length,
+      });
+    });
+    write();
+    return this.getSnapshot(scope, snapshotId);
+  }
+
   deleteSnapshot(scope: SnapshotAccessScope, snapshotId: string): boolean {
     const where = writableOwnerClause(scope);
     const result = this.db.prepare(`

@@ -543,7 +543,7 @@ Result Picker -> POST /comparisons
 
 ### M4: Metric Backfill 与新 Skill
 
-- [ ] 实现标准 metric backfill。
+- [x] 实现标准 metric backfill。
 - [ ] 对回填路径接入 TraceProcessorLease。
 - [ ] 新增 `multi_trace_result_comparison` Skill 或等价 Skill DSL 扩展。
 - [ ] 新增 comparison strategy/template。
