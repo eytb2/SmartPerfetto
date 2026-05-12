@@ -19,6 +19,7 @@ import {
   COMPARISON_MATRIX_SCHEMA_VERSION,
   STANDARD_COMPARISON_METRICS,
 } from '../types/multiTraceComparison';
+import { isSignificantComparisonDelta } from './comparisonSignificance';
 
 export interface BuildComparisonMatrixOptions {
   baselineSnapshotId?: string;
@@ -176,10 +177,7 @@ function metricEvidenceRef(snapshot: AnalysisResultSnapshot, metric: NormalizedM
 }
 
 function hasSignificantDelta(row: ComparisonMatrixRow): boolean {
-  return row.deltas.some(delta =>
-    delta.deltaValue !== null &&
-    delta.assessment !== 'same' &&
-    delta.assessment !== 'unknown');
+  return row.deltas.some(delta => isSignificantComparisonDelta(delta, row));
 }
 
 function buildMatrixGroups(rows: ComparisonMatrixRow[]): ComparisonMatrixGroup[] {

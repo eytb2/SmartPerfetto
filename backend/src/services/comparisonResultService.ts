@@ -10,6 +10,7 @@ import type {
   ComparisonResult,
 } from '../types/multiTraceComparison';
 import { buildComparisonMatrix } from './comparisonMatrixService';
+import { isSignificantComparisonDelta } from './comparisonSignificance';
 
 export const DEFAULT_COMPARISON_METRIC_KEYS: readonly ComparisonMetricKey[] = [
   'startup.total_ms',
@@ -40,11 +41,7 @@ export function resolveComparisonMetricKeys(
 
 function collectSignificantChanges(matrix: ComparisonMatrix): ComparisonDelta[] {
   return matrix.rows
-    .flatMap(row => row.deltas)
-    .filter(delta =>
-      delta.deltaValue !== null &&
-      delta.assessment !== 'same' &&
-      delta.assessment !== 'unknown')
+    .flatMap(row => row.deltas.filter(delta => isSignificantComparisonDelta(delta, row)))
     .sort((a, b) => {
       const assessmentWeight = (assessment: ComparisonDelta['assessment']): number =>
         assessment === 'worse' ? 0 : assessment === 'better' ? 1 : 2;

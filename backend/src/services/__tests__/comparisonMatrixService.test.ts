@@ -152,6 +152,34 @@ describe('buildComparisonMatrix', () => {
     expect(matrix.evidenceRefs.map(ref => ref.type)).toContain('snapshot_metric');
   });
 
+  test('does not count tiny metric noise as significant group changes', () => {
+    const matrix = buildComparisonMatrix(
+      [
+        snapshot('baseline', { startupMs: 1200, fps: 55, jankRate: 8 }),
+        snapshot('candidate', { startupMs: 1199, fps: 55.2, jankRate: 7.7 }),
+      ],
+      {
+        baselineSnapshotId: 'baseline',
+        metricKeys: [
+          'startup.total_ms',
+          'scrolling.avg_fps',
+          'scrolling.jank_rate_pct',
+        ],
+      },
+    );
+
+    expect(matrix.rows.map(row => row.deltas[0].assessment)).toEqual([
+      'better',
+      'better',
+      'better',
+    ]);
+    expect(matrix.groups.map(group => group.significantChangeCount)).toEqual([
+      0,
+      0,
+      0,
+    ]);
+  });
+
   test('records missing metrics without dropping comparable rows', () => {
     const matrix = buildComparisonMatrix(
       [

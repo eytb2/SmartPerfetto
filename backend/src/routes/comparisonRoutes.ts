@@ -481,9 +481,10 @@ router.get('/:comparisonId/report/export', (req, res) => {
       return;
     }
 
-    const viewComparison = applyComparisonResponseView(comparison, comparisonResponseView(req));
+    const view = comparisonResponseView(req);
+    const viewComparison = applyComparisonResponseView(comparison, view);
     const reportId = viewComparison.result?.reportId;
-    const cachedReport = reportId ? reportStore.get(reportId) : undefined;
+    const cachedReport = !view.significantOnly && reportId ? reportStore.get(reportId) : undefined;
     const html = cachedReport?.html || renderComparisonHtmlReport({
       comparisonId: viewComparison.id,
       query: viewComparison.query,

@@ -486,6 +486,84 @@ describe('comparison routes', () => {
     ]);
   });
 
+  test('does not treat tiny deltas as significant changes', async () => {
+    const db = openEnterpriseDb(dbPath);
+    const repo = createAnalysisResultSnapshotRepository(db);
+    const scope = {
+      tenantId: DEFAULT_TENANT_ID,
+      workspaceId: 'workspace-a',
+      userId: DEFAULT_DEV_USER_ID,
+    };
+    repo.upsertMetrics(
+      scope,
+      'snapshot-b',
+      metrics({ startupMs: 1199, fps: 55.2, jankRate: 7.7 }),
+      [],
+    );
+    db.close();
+
+    const createResponse = await request(app())
+      .post('/api/workspaces/workspace-a/comparisons')
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .send({
+        baselineSnapshotId: 'snapshot-a',
+        candidateSnapshotIds: ['snapshot-b'],
+        metricKeys: ['startup.total_ms', 'scrolling.avg_fps', 'scrolling.jank_rate_pct'],
+      })
+      .expect(201);
+
+    expect(createResponse.body.comparison.result.significantChanges).toHaveLength(0);
+
+    const filteredResponse = await request(app())
+      .get(`/api/workspaces/workspace-a/comparisons/${createResponse.body.comparison.id}?significantOnly=true`)
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .expect(200);
+    expect(filteredResponse.body.comparison.result.matrix.rows).toHaveLength(0);
+  });
+
+  test('exports filtered comparison report without reusing the unfiltered cached report', async () => {
+    const db = openEnterpriseDb(dbPath);
+    const repo = createAnalysisResultSnapshotRepository(db);
+    const scope = {
+      tenantId: DEFAULT_TENANT_ID,
+      workspaceId: 'workspace-a',
+      userId: DEFAULT_DEV_USER_ID,
+    };
+    repo.upsertMetrics(
+      scope,
+      'snapshot-a',
+      [metrics({ startupMs: 1200, fps: 55, jankRate: 8, renderLatencyMs: 18 })[3]],
+      [],
+    );
+    repo.upsertMetrics(
+      scope,
+      'snapshot-b',
+      [metrics({ startupMs: 900, fps: 60, jankRate: 3, renderLatencyMs: 18 })[3]],
+      [],
+    );
+    db.close();
+
+    const createResponse = await request(app())
+      .post('/api/workspaces/workspace-a/comparisons')
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .send({
+        baselineSnapshotId: 'snapshot-a',
+        candidateSnapshotIds: ['snapshot-b'],
+        metricKeys: ['startup.total_ms', 'custom.render_latency_ms'],
+      })
+      .expect(201);
+    const reportId = createResponse.body.comparison.result.reportId;
+    expect(reportStore.get(reportId)?.html).toContain('custom.render_latency_ms');
+
+    const exportResponse = await request(app())
+      .get(`/api/workspaces/workspace-a/comparisons/${createResponse.body.comparison.id}/report/export?significantOnly=true`)
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .expect(200);
+
+    expect(exportResponse.text).toContain('startup.total_ms');
+    expect(exportResponse.text).not.toContain('custom.render_latency_ms');
+  });
+
   test('exports comparison report from persisted result when artifact cache is empty', async () => {
     const createResponse = await request(app())
       .post('/api/workspaces/workspace-a/comparisons')
