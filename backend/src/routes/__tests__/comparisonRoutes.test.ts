@@ -57,6 +57,7 @@ function metrics(values: {
   startupMs: number;
   fps: number;
   jankRate: number;
+  renderLatencyMs?: number;
 }): NormalizedMetricValue[] {
   return [
     {
@@ -92,7 +93,18 @@ function metrics(values: {
       confidence: 0.9,
       source: { type: 'skill' },
     },
-  ];
+    values.renderLatencyMs === undefined ? undefined : {
+      key: 'custom.render_latency_ms',
+      label: 'Render latency',
+      group: 'custom',
+      value: values.renderLatencyMs,
+      unit: 'ms',
+      direction: 'lower_is_better',
+      aggregation: 'avg',
+      confidence: 0.8,
+      source: { type: 'manual' },
+    },
+  ].filter(Boolean) as NormalizedMetricValue[];
 }
 
 function snapshot(overrides: Partial<AnalysisResultSnapshot>): AnalysisResultSnapshot {
@@ -253,6 +265,60 @@ describe('comparison routes', () => {
         candidateSnapshotIds: [],
       })
       .expect(400);
+  });
+
+  test('creates comparison for explicitly requested custom metric keys', async () => {
+    const db = openEnterpriseDb(dbPath);
+    const repo = createAnalysisResultSnapshotRepository(db);
+    repo.upsertMetrics(
+      {
+        tenantId: DEFAULT_TENANT_ID,
+        workspaceId: 'workspace-a',
+        userId: DEFAULT_DEV_USER_ID,
+      },
+      'snapshot-a',
+      [metrics({ startupMs: 1200, fps: 55, jankRate: 8, renderLatencyMs: 18 })[3]],
+      [],
+    );
+    repo.upsertMetrics(
+      {
+        tenantId: DEFAULT_TENANT_ID,
+        workspaceId: 'workspace-a',
+        userId: DEFAULT_DEV_USER_ID,
+      },
+      'snapshot-b',
+      [metrics({ startupMs: 900, fps: 60, jankRate: 3, renderLatencyMs: 27 })[3]],
+      [],
+    );
+    db.close();
+
+    const createResponse = await request(app())
+      .post('/api/workspaces/workspace-a/comparisons')
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .send({
+        baselineSnapshotId: 'snapshot-a',
+        candidateSnapshotIds: ['snapshot-b'],
+        metricKeys: ['custom.render_latency_ms'],
+      })
+      .expect(201);
+
+    const rows = createResponse.body.comparison.result.matrix.rows as Array<{
+      metricKey: string;
+      label: string;
+      group: string;
+      deltas: Array<{ deltaValue: number; deltaPct: number; assessment: string }>;
+    }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      metricKey: 'custom.render_latency_ms',
+      label: 'Render latency',
+      group: 'custom',
+    });
+    expect(rows[0].deltas[0]).toMatchObject({
+      deltaValue: 9,
+      deltaPct: 50,
+      assessment: 'worse',
+    });
   });
 
   test('streams the current comparison state as SSE', async () => {

@@ -14,6 +14,7 @@ function snapshot(
     startupMs?: number;
     fps?: number;
     jankRate?: number;
+    renderLatencyMs?: number;
   },
 ): AnalysisResultSnapshot {
   return {
@@ -64,6 +65,17 @@ function snapshot(
         aggregation: 'avg',
         confidence: 0.8,
         source: { type: 'skill', dataEnvelopeId: `env-${id}-jank` },
+      },
+      metricValues.renderLatencyMs === undefined ? undefined : {
+        key: 'custom.render_latency_ms',
+        label: 'Render latency',
+        group: 'custom',
+        value: metricValues.renderLatencyMs,
+        unit: 'ms',
+        direction: 'lower_is_better',
+        aggregation: 'avg',
+        confidence: 0.75,
+        source: { type: 'manual', dataEnvelopeId: `env-${id}-render-latency` },
       },
     ].filter(Boolean) as AnalysisResultSnapshot['metrics'],
     evidenceRefs: [],
@@ -139,6 +151,53 @@ describe('buildComparisonMatrix', () => {
       deltaValue: null,
       assessment: 'unknown',
     });
+  });
+
+  test('supports requested custom metric keys from snapshots', () => {
+    const matrix = buildComparisonMatrix(
+      [
+        snapshot('baseline', { renderLatencyMs: 18 }),
+        snapshot('candidate', { renderLatencyMs: 27 }),
+      ],
+      {
+        baselineSnapshotId: 'baseline',
+        metricKeys: ['custom.render_latency_ms'],
+      },
+    );
+
+    expect(matrix.rows).toHaveLength(1);
+    expect(matrix.rows[0]).toMatchObject({
+      metricKey: 'custom.render_latency_ms',
+      label: 'Render latency',
+      group: 'custom',
+      unit: 'ms',
+      direction: 'lower_is_better',
+    });
+    expect(matrix.rows[0].deltas[0]).toMatchObject({
+      deltaValue: 9,
+      deltaPct: 50,
+      assessment: 'worse',
+    });
+  });
+
+  test('marks absent requested custom metric keys separately from standard keys', () => {
+    const matrix = buildComparisonMatrix(
+      [
+        snapshot('baseline', { startupMs: 1200 }),
+        snapshot('candidate', { startupMs: 900 }),
+      ],
+      {
+        baselineSnapshotId: 'baseline',
+        metricKeys: ['custom.render_latency_ms'],
+      },
+    );
+
+    expect(matrix.rows[0].metricKey).toBe('custom.render_latency_ms');
+    expect(matrix.rows[0].group).toBe('custom');
+    expect(matrix.rows[0].missingSnapshotIds).toEqual(['baseline', 'candidate']);
+    expect(matrix.missingMatrix.baseline['custom.render_latency_ms']).toBe('custom_metric_not_found');
+    expect(matrix.missingMatrix.candidate['custom.render_latency_ms']).toBe('custom_metric_not_found');
+    expect(matrix.warnings).toContain('Baseline is missing metric custom.render_latency_ms');
   });
 
   test('rejects invalid baseline input', () => {

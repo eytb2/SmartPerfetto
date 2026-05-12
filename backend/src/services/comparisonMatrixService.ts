@@ -113,6 +113,12 @@ function resolveMetricDefinition(
   };
 }
 
+function missingReasonForMetric(metricKey: ComparisonMetricKey): string {
+  return STANDARD_METRIC_BY_KEY.has(metricKey)
+    ? 'metric_not_found'
+    : 'custom_metric_not_found';
+}
+
 function assessDelta(
   deltaValue: number | null,
   direction: NormalizedMetricDirection,
@@ -206,7 +212,7 @@ export function buildComparisonMatrix(
         missingSnapshotIds.push(snapshot.id);
         missingMatrix[snapshot.id] = {
           ...(missingMatrix[snapshot.id] || {}),
-          [metricKey]: 'metric_not_found',
+          [metricKey]: missingReasonForMetric(metricKey),
         };
         continue;
       }

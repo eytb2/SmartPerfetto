@@ -547,7 +547,7 @@ Result Picker -> POST /comparisons
 - [x] 对回填路径接入 TraceProcessorLease。
 - [x] 新增 `multi_trace_result_comparison` Skill 或等价 Skill DSL 扩展。
 - [x] 新增 comparison strategy/template。
-- [ ] 支持用户要求的自定义 metric keys。
+- [x] 支持用户要求的自定义 metric keys。
 
 验收：
 
