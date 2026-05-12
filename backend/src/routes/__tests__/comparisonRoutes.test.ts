@@ -26,6 +26,7 @@ import { createAnalysisResultSnapshotRepository } from '../../services/analysisR
 import comparisonRoutes from '../comparisonRoutes';
 
 const originalDbPath = process.env.SMARTPERFETTO_ENTERPRISE_DB_PATH;
+const originalComparisonAiDisabled = process.env.SMARTPERFETTO_COMPARISON_AI_DISABLED;
 
 let tempDir: string;
 let dbPath: string;
@@ -166,11 +167,13 @@ beforeEach(async () => {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-comparisons-'));
   dbPath = path.join(tempDir, 'enterprise.db');
   process.env.SMARTPERFETTO_ENTERPRISE_DB_PATH = dbPath;
+  process.env.SMARTPERFETTO_COMPARISON_AI_DISABLED = 'true';
   seedGraph();
 });
 
 afterEach(async () => {
   process.env.SMARTPERFETTO_ENTERPRISE_DB_PATH = originalDbPath;
+  process.env.SMARTPERFETTO_COMPARISON_AI_DISABLED = originalComparisonAiDisabled;
   await fs.rm(tempDir, { recursive: true, force: true });
 });
 

@@ -276,6 +276,9 @@ export interface ComparisonMatrix {
 }
 
 export interface ComparisonConclusion {
+  source?: 'deterministic' | 'ai';
+  model?: string;
+  generatedAt?: number;
   verifiedFacts: string[];
   inferences: string[];
   recommendations: string[];

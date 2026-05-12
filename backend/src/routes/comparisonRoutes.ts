@@ -11,6 +11,7 @@ import {
   buildDeterministicComparisonResult,
   resolveComparisonMetricKeys,
 } from '../services/comparisonResultService';
+import { generateAiComparisonConclusion } from '../services/comparisonAiConclusionService';
 import { hasRbacPermission, sendForbidden } from '../services/rbac';
 import type { AnalysisResultSnapshot, ComparisonMetricKey } from '../types/multiTraceComparison';
 
@@ -39,7 +40,7 @@ function uniqueStrings(values: string[]): string[] {
   return result;
 }
 
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   const context = requireRequestContext(req);
   if (!hasRbacPermission(context, 'comparison:create')) {
     sendForbidden(res, 'comparison:create permission is required');
@@ -49,6 +50,7 @@ router.post('/', (req, res) => {
   const baselineSnapshotId = optionalString(req.body?.baselineSnapshotId);
   const candidateSnapshotIds = uniqueStrings(stringArray(req.body?.candidateSnapshotIds));
   const query = optionalString(req.body?.query) || 'Compare selected analysis results';
+  const providerId = optionalString(req.body?.providerId);
   const inputSnapshotIds = uniqueStrings([
     ...(baselineSnapshotId ? [baselineSnapshotId] : []),
     ...candidateSnapshotIds,
@@ -97,6 +99,12 @@ router.post('/', (req, res) => {
       const result = buildDeterministicComparisonResult(snapshots, {
         baselineSnapshotId,
         metricKeys,
+      });
+      result.conclusion = await generateAiComparisonConclusion({
+        result,
+        query,
+        providerId,
+        providerScope: scope,
       });
       comparison = repository.updateRun(scope, created.id, {
         status: 'completed',

@@ -85,6 +85,8 @@ export function buildDeterministicComparisonResult(
     matrix,
     significantChanges,
     conclusion: {
+      source: 'deterministic',
+      generatedAt: Date.now(),
       verifiedFacts: significantChanges.map(delta => formatDelta(delta, matrix)),
       inferences: [],
       recommendations: [],
