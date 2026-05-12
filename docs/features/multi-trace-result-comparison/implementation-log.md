@@ -100,3 +100,18 @@
 - Snapshot 可以稳定保存 `reportId/sessionId/runId/traceId`：agent run 完成时这些字段都已经在 session、run、report artifact 图中可反查。
 - `report_artifacts` 表本身不直接存 `trace_id`，需要通过 `report_artifacts.session_id -> analysis_sessions.trace_id` 反查；这是可接受的，但 snapshot repository 应在创建时把 `trace_id` 冗余存入 `analysis_result_snapshots`，避免列表查询频繁 join。
 - 从 snapshot 回到 report 的路径应使用 `reportId`，从 snapshot 回到结构化证据的路径应使用 `runId -> agent_events`。
+
+## M0.5 旧功能边界说明
+
+状态：完成。
+
+验收证据：
+
+- 新增 `docs/features/multi-trace-result-comparison/legacy-reference-trace-boundary.md`。
+- `README.md` 文档定位段落已链接该边界文档。
+- 第 9 节 M0 最后一项已勾选。
+
+结论：
+
+- 旧 `referenceTraceId` 功能定义为单 AI Panel、单 run、current/reference raw trace 实时对比。
+- 新功能定义为 backend DB 中的 `snapshotId[]` 分析结果对比，不复用旧产品模型。

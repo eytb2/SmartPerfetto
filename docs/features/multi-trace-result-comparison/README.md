@@ -11,7 +11,8 @@
 这个功能不以旧的单界面 `referenceTraceId` 对比为基础。旧功能是在一个 AI
 Panel 中选择参考 Trace，然后让同一次 agent run 同时访问 current/reference
 两条 Trace。新功能的核心对象不是“另一条 Trace”，而是“另一个窗口、另一次
-AI 分析已经产出的结果快照”。
+AI 分析已经产出的结果快照”。旧功能边界见
+[legacy-reference-trace-boundary.md](legacy-reference-trace-boundary.md)。
 
 ## 2. 目标体验
 
@@ -494,7 +495,7 @@ Result Picker -> POST /comparisons
 - [x] 列出当前 `referenceTraceId` 相关前端源码、后端路由、runtime 工具与 docs。
 - [x] 确认 `agent_events` 中 DataEnvelope 的持久化粒度是否足够生成 snapshot。
 - [x] 确认 report artifact 与 session/run metadata 是否能稳定反查。
-- [ ] 补一份旧功能边界说明，避免后续误把旧 compare 当新功能复用。
+- [x] 补一份旧功能边界说明，避免后续误把旧 compare 当新功能复用。
 
 ### M1: Snapshot Contract 与持久化
 
