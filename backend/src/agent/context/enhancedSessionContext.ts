@@ -875,6 +875,14 @@ export class EnhancedSessionContext {
       // Show severity-prioritized findings
       for (const finding of turn.findings.slice(0, 5)) {
         parts.push(`  - [${finding.severity}] ${finding.title}`);
+        const description = sanitizeWorkingMemoryLine(finding.description);
+        if (description && description !== finding.title) {
+          parts.push(`    描述: ${description}`);
+        }
+        const evidenceText = extractFindingEvidenceText(finding);
+        if (evidenceText) {
+          parts.push(`    证据: ${evidenceText}`);
+        }
       }
 
       // Show referenceable identifiers for drill-down
@@ -1265,6 +1273,29 @@ function sanitizeWorkingMemoryBullets(items: string[], maxItems: number): string
   }
 
   return deduped;
+}
+
+function extractFindingEvidenceText(finding: Finding): string | null {
+  const candidates: string[] = [];
+
+  if (Array.isArray(finding.evidence)) {
+    for (const item of finding.evidence.slice(0, 2)) {
+      if (typeof item === 'string') {
+        candidates.push(item);
+      } else if (item && typeof item === 'object' && typeof (item as any).text === 'string') {
+        candidates.push((item as any).text);
+      }
+    }
+  }
+
+  if (Array.isArray(finding.relatedTimestamps) && finding.relatedTimestamps.length > 0) {
+    candidates.push(`relatedTimestamps=${finding.relatedTimestamps.slice(0, 3).join(',')}`);
+  }
+  if (Array.isArray(finding.timestampsNs) && finding.timestampsNs.length > 0) {
+    candidates.push(`timestampsNs=${finding.timestampsNs.slice(0, 3).join(',')}`);
+  }
+
+  return sanitizeWorkingMemoryLine(candidates.filter(Boolean).join(' | '));
 }
 
 function extractBulletsFromMarkdownSection(markdown: string, headerPattern: RegExp): string[] {

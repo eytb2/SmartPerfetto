@@ -8,6 +8,7 @@ import path from 'path';
 import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../enterpriseDb';
 import {
   CLAUDE_SESSION_MAP_RUNTIME_TYPE,
+  deleteClaudeSessionMapRuntimeSnapshot,
   deleteClaudeSessionMapRuntimeSnapshots,
   loadClaudeSessionMapFromRuntimeSnapshots,
   saveClaudeSessionMapToRuntimeSnapshots,
@@ -174,5 +175,37 @@ describe('runtime snapshot store', () => {
 
     expect(deleteClaudeSessionMapRuntimeSnapshots('session-a')).toBe(2);
     expect(readRuntimeSnapshots()).toHaveLength(0);
+  });
+
+  it('deletes only one Claude session map row by session map key', () => {
+    saveClaudeSessionMapToRuntimeSnapshots({
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      runId: 'run-a',
+      traceId: 'trace-a',
+    }, 'session-a', {
+      sdkSessionId: 'sdk-a',
+      updatedAt: 1_700_000_000_000,
+    });
+    saveClaudeSessionMapToRuntimeSnapshots({
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      sessionId: 'session-a',
+      runId: 'run-a',
+      traceId: 'trace-a',
+    }, 'session-a:ref:trace-b', {
+      sdkSessionId: 'sdk-b',
+      updatedAt: 1_700_000_000_100,
+    });
+
+    expect(deleteClaudeSessionMapRuntimeSnapshot('session-a', 'session-a:ref:trace-b')).toBe(1);
+
+    const rows = readRuntimeSnapshots();
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0].snapshot_json)).toEqual(expect.objectContaining({
+      sessionMapKey: 'session-a',
+      sdkSessionId: 'sdk-a',
+    }));
   });
 });

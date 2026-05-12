@@ -160,6 +160,17 @@ describe('classifyQueryComplexity — hard rules (no keyword match)', () => {
     expect(result.reason).toMatch(/multi-turn continuity/);
   });
 
+  it('implicit frame timeline follow-up after findings → full', async () => {
+    const result = await classifyQueryComplexity(makeInput({
+      query: '能不能在timeline中标出这一帧',
+      hasExistingFindings: true,
+      hasPriorFullAnalysis: true,
+    }));
+    expect(result.complexity).toBe('full');
+    expect(result.source).toBe('hard_rule');
+    expect(result.reason).toMatch(/prior findings/);
+  });
+
   it('selection context overrides prior full continuity for a new scoped lookup', async () => {
     const result = await classifyQueryComplexity(makeInput({
       query: neutralQuery,

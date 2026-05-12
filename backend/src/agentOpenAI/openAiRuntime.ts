@@ -164,6 +164,36 @@ function isAbortLikeError(error: unknown): boolean {
     || message.includes('abort');
 }
 
+function formatOpenAIError(error: unknown): string {
+  if (typeof error === 'string') return error;
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === 'object') {
+    const maybeMessage = (error as { message?: unknown }).message;
+    if (typeof maybeMessage === 'string') return maybeMessage;
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+  return String(error);
+}
+
+function isMissingOpenAIPreviousResponseError(error: unknown, previousResponseId?: string): boolean {
+  if (!previousResponseId) return false;
+  const message = formatOpenAIError(error);
+  const mentionsPreviousResponse = /previous[_\s-]?response|previousResponseId|previous_response_id|lastResponseId/i.test(message);
+  const mentionsResponse = /response/i.test(message);
+  const mentionsId = message.includes(previousResponseId);
+  const isMissing = /not found|no .*found|does not exist|could not find|missing|expired|gone|404/i.test(message);
+
+  return isMissing && (mentionsPreviousResponse || (mentionsResponse && mentionsId));
+}
+
+export const __testing = {
+  isMissingOpenAIPreviousResponseError,
+};
+
 export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
   private readonly traceProcessorService: TraceProcessorService;
   private readonly architectureCache = new Map<string, ArchitectureInfo>();
@@ -184,7 +214,10 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
   }
 
   getSdkSessionId(sessionId: string): string | undefined {
-    return this.sessionMap.get(sessionId)?.lastResponseId;
+    const entry = this.sessionMap.get(sessionId);
+    return entry && Date.now() - (entry.updatedAt || 0) < OPENAI_SESSION_FRESHNESS_MS
+      ? entry.lastResponseId
+      : undefined;
   }
 
   restoreSessionMapping(sessionId: string, sdkSessionId: string): void {
@@ -198,6 +231,50 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
 
   restoreArchitectureCache(traceId: string, architecture: ArchitectureInfo): void {
     this.architectureCache.set(traceId, architecture);
+  }
+
+  private forgetOpenAILastResponseId(sessionMapKey: string, reason: string): void {
+    const existing = this.sessionMap.get(sessionMapKey);
+    if (existing) {
+      this.sessionMap.set(sessionMapKey, {
+        ...existing,
+        lastResponseId: undefined,
+        runState: undefined,
+        updatedAt: Date.now(),
+      });
+    }
+    console.warn(
+      `[OpenAIRuntime] Discarded stale previousResponseId for ${sessionMapKey}` +
+      `${existing ? '' : ' (not present in memory)'}: ${reason}`,
+    );
+  }
+
+  private async retryWithoutPreviousResponse(params: {
+    query: string;
+    sessionId: string;
+    traceId: string;
+    options: AnalysisOptions;
+    sessionMapKey: string;
+    errorMessage: string;
+    outputLanguage: OutputLanguage;
+  }): Promise<AnalysisResult> {
+    this.forgetOpenAILastResponseId(params.sessionMapKey, params.errorMessage);
+    this.emitUpdate({
+      type: 'degraded',
+      content: {
+        module: 'openAiRuntime',
+        fallback: 'fresh_openai_run_after_missing_previous_response',
+        error: 'missing_previous_response',
+        message: localize(
+          params.outputLanguage,
+          'OpenAI 远端 previous response 已不可用，已清理旧 response id 并使用本地持久化上下文重新发起分析...',
+          'OpenAI previous response is no longer available. Retrying with persisted local context without previousResponseId...',
+        ),
+      },
+      timestamp: Date.now(),
+    });
+    this.activeAnalyses.delete(params.sessionId);
+    return this.analyze(params.query, params.sessionId, params.traceId, params.options);
   }
 
   getCachedArchitecture(traceId: string): ArchitectureInfo | undefined {
@@ -306,9 +383,9 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         timestamp: Date.now(),
       });
 
+      let currentPreviousResponseId = usePreviousResponse ? sessionEntry.lastResponseId : undefined;
       try {
         let currentInput: string | AgentInputItem[] = input;
-        let currentPreviousResponseId = usePreviousResponse ? sessionEntry.lastResponseId : undefined;
         let conclusion = '';
         let finalHistory: AgentInputItem[] | undefined;
         let finalLastResponseId: string | undefined;
@@ -506,7 +583,17 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       } catch (error) {
         clearTimeout(timeout);
         await provider.close().catch(() => undefined);
-        if (error instanceof MaxTurnsExceededError) {
+        if (currentPreviousResponseId && isMissingOpenAIPreviousResponseError(error, currentPreviousResponseId)) {
+          return await this.retryWithoutPreviousResponse({
+            query,
+            sessionId,
+            traceId,
+            options,
+            sessionMapKey: context.sessionMapKey,
+            errorMessage: formatOpenAIError(error),
+            outputLanguage: config.outputLanguage,
+          });
+        } else if (error instanceof MaxTurnsExceededError) {
           const partialConclusion = accumulatedAnswer || localize(
             config.outputLanguage,
             '分析达到 OpenAI Agents SDK 轮次上限，尚未形成完整结论。',
@@ -609,6 +696,9 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     const planState = this.sessionPlans.get(sessionId);
     const artifactStore = this.artifactStores.get(sessionId);
     const sessionEntry = this.sessionMap.get(sessionId);
+    const freshSessionEntry = sessionEntry && Date.now() - (sessionEntry.updatedAt || 0) < OPENAI_SESSION_FRESHNESS_MS
+      ? sessionEntry
+      : undefined;
     return {
       version: 1,
       snapshotTimestamp: Date.now(),
@@ -621,13 +711,13 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       uncertaintyFlags: this.sessionUncertaintyFlags.get(sessionId) || [],
       claudeHypotheses: this.sessionHypotheses.get(sessionId) || undefined,
       architecture: this.architectureCache.get(traceId),
-      sdkSessionId: sessionEntry?.lastResponseId,
+      sdkSessionId: freshSessionEntry?.lastResponseId,
       agentRuntimeKind: 'openai-agents-sdk',
       agentRuntimeProviderId: sessionFields.agentRuntimeProviderId,
       agentRuntimeProviderSnapshotHash: sessionFields.agentRuntimeProviderSnapshotHash,
-      openAIHistory: sessionEntry?.history,
-      openAILastResponseId: sessionEntry?.lastResponseId,
-      openAIRunState: sessionEntry?.runState,
+      openAIHistory: freshSessionEntry?.history,
+      openAILastResponseId: freshSessionEntry?.lastResponseId,
+      openAIRunState: freshSessionEntry?.runState,
       artifacts: artifactStore?.serialize(),
     };
   }
@@ -659,7 +749,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         history: snapshot.openAIHistory as AgentInputItem[] | undefined,
         lastResponseId: snapshot.openAILastResponseId || snapshot.sdkSessionId,
         runState: snapshot.openAIRunState,
-        updatedAt: Date.now(),
+        updatedAt: snapshot.snapshotTimestamp || Date.now(),
       });
     }
   }

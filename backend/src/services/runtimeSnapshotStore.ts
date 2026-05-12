@@ -263,3 +263,43 @@ export function deleteClaudeSessionMapRuntimeSnapshots(sessionId: string): numbe
     return deleted;
   });
 }
+
+export function deleteClaudeSessionMapRuntimeSnapshot(
+  sessionId: string,
+  sessionMapKey: string,
+  scope?: Pick<RuntimeSnapshotScope, 'tenantId' | 'workspaceId'>,
+): number {
+  const safeSessionId = assertSafeRuntimeId(sessionId, 'session id');
+  const safeSessionMapKey = assertSafeRuntimeId(sessionMapKey, 'session map key');
+  const safeTenantId = scope?.tenantId ? assertSafeRuntimeId(scope.tenantId, 'tenant id') : undefined;
+  const safeWorkspaceId = scope?.workspaceId ? assertSafeRuntimeId(scope.workspaceId, 'workspace id') : undefined;
+
+  return withRuntimeSnapshotDb((db) => {
+    const scoped = safeTenantId && safeWorkspaceId;
+    const rows = scoped
+      ? db.prepare<unknown[], RuntimeSnapshotRow>(`
+          SELECT *
+          FROM runtime_snapshots
+          WHERE runtime_type = ? AND session_id = ? AND tenant_id = ? AND workspace_id = ?
+        `).all(CLAUDE_SESSION_MAP_RUNTIME_TYPE, safeSessionId, safeTenantId, safeWorkspaceId)
+      : db.prepare<unknown[], RuntimeSnapshotRow>(`
+          SELECT *
+          FROM runtime_snapshots
+          WHERE runtime_type = ? AND session_id = ?
+        `).all(CLAUDE_SESSION_MAP_RUNTIME_TYPE, safeSessionId);
+
+    let deleted = 0;
+    const repo = createEnterpriseWorkspaceRepository<RuntimeSnapshotRow>(db, 'runtime_snapshots');
+    for (const row of rows) {
+      const parsed = parseSnapshotJson(row);
+      if (!parsed) continue;
+      const [rowSessionMapKey] = parsed;
+      if (rowSessionMapKey !== safeSessionMapKey) continue;
+      deleted += repo.deleteById({
+        tenantId: row.tenant_id,
+        workspaceId: row.workspace_id,
+      }, row.id);
+    }
+    return deleted;
+  });
+}

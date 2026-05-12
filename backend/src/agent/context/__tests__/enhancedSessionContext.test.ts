@@ -158,6 +158,24 @@ describe('EnhancedSessionContext', () => {
       expect(promptCtx).toContain('对话历史');
       expect(typeof promptCtx).toBe('string');
     });
+
+    test('should retain finding evidence needed for implicit frame follow-ups', () => {
+      const context = new EnhancedSessionContext('session-1', 'trace-1');
+      context.addTurn('分析这一帧为什么卡顿', mockIntent, undefined, [{
+        ...mockFinding,
+        id: 'finding-frame-1',
+        severity: 'low',
+        title: '单帧卡顿20.5ms(第~5.9秒)',
+        description: '在ts=10076835119592处出现一帧20.5ms的帧间隔，frame 4215-4216之间延迟。',
+        evidence: [{ text: 'UnityGfxDeviceW线程进入12.9ms Sleep，QueuePresentKHR仅0.42ms。' }],
+      }]);
+
+      const promptCtx = context.generatePromptContext(800);
+
+      expect(promptCtx).toContain('ts=10076835119592');
+      expect(promptCtx).toContain('frame 4215-4216');
+      expect(promptCtx).toContain('UnityGfxDeviceW');
+    });
   });
 
   describe('Serialization', () => {

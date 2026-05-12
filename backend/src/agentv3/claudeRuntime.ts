@@ -85,6 +85,7 @@ import {
 } from '../agent/core/entityCapture';
 import { DEFAULT_OUTPUT_LANGUAGE, localize } from './outputLanguage';
 import {
+  deleteClaudeSessionMapRuntimeSnapshot,
   deleteClaudeSessionMapRuntimeSnapshots,
   loadClaudeSessionMapFromRuntimeSnapshots,
   saveClaudeSessionMapToRuntimeSnapshots,
@@ -248,6 +249,41 @@ function isRetryableError(err: Error): boolean {
   return /529|overload|500|server error|503|service unavailable|ECONNRESET|ETIMEDOUT/i.test(msg);
 }
 
+function getSdkResultErrorMessage(msg: any): string | undefined {
+  if (!msg || msg.type !== 'result') return undefined;
+  const subtype = typeof msg.subtype === 'string' ? msg.subtype : 'unknown';
+  if (subtype === 'success' || isSdkMaxTurnsSubtype(subtype)) return undefined;
+
+  const errors = Array.isArray(msg.errors)
+    ? msg.errors.map(formatSdkError).filter(Boolean)
+    : [];
+  return `Claude analysis error (${subtype}): ${errors.join('; ') || 'Unknown error'}`;
+}
+
+function formatSdkError(error: unknown): string {
+  if (typeof error === 'string') return error;
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === 'object') {
+    const maybeMessage = (error as { message?: unknown }).message;
+    if (typeof maybeMessage === 'string') return maybeMessage;
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+  return String(error);
+}
+
+function isMissingSdkConversationError(message: string): boolean {
+  return /No conversation found with session ID/i.test(message);
+}
+
+export const __testing = {
+  getSdkResultErrorMessage,
+  isMissingSdkConversationError,
+};
+
 /** Sleep for the given milliseconds. */
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -409,7 +445,10 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
   /** Get SDK session ID for persistence. */
   getSdkSessionId(smartPerfettoSessionId: string): string | undefined {
-    return this.sessionMap.get(smartPerfettoSessionId)?.sdkSessionId;
+    const entry = this.sessionMap.get(smartPerfettoSessionId);
+    return entry && Date.now() - (entry.updatedAt || 0) < SDK_SESSION_FRESHNESS_MS
+      ? entry.sdkSessionId
+      : undefined;
   }
 
   private buildSessionMapKey(sessionId: string, referenceTraceId?: string): string {
@@ -460,6 +499,61 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     this.persistSessionMapEntry(sessionId, traceId, sessionMapKey, entry, options);
   }
 
+  private forgetSdkSessionMapping(
+    sessionId: string,
+    sessionMapKey: string,
+    reason: string,
+    options: AnalysisOptions = {},
+  ): void {
+    const removed = this.sessionMap.delete(sessionMapKey);
+    if (legacySessionMapWritesEnabled()) {
+      savePersistedSessionMapSync(this.sessionMap);
+    }
+
+    if (enterpriseSessionMapDbWritesEnabled()) {
+      try {
+        deleteClaudeSessionMapRuntimeSnapshot(sessionId, sessionMapKey, providerScopeFromOptions(options));
+      } catch (err) {
+        console.warn('[ClaudeRuntime] Failed to delete stale SDK session map from runtime_snapshots:', (err as Error).message);
+      }
+    }
+
+    console.warn(
+      `[ClaudeRuntime] Discarded stale SDK session mapping for ${sessionMapKey}` +
+      `${removed ? '' : ' (not present in memory)'}: ${reason}`,
+    );
+  }
+
+  private async retryWithoutSdkResume(params: {
+    query: string;
+    sessionId: string;
+    traceId: string;
+    options: AnalysisOptions;
+    sessionMapKey: string;
+    errorMessage: string;
+    mode: 'full' | 'fast';
+  }): Promise<AnalysisResult> {
+    this.forgetSdkSessionMapping(params.sessionId, params.sessionMapKey, params.errorMessage, params.options);
+    this.emitUpdate({
+      type: 'degraded',
+      content: {
+        module: 'claudeRuntime',
+        fallback: 'fresh_sdk_session_after_missing_conversation',
+        error: 'missing_sdk_conversation',
+        mode: params.mode,
+        message: localize(
+          this.config.outputLanguage,
+          'Claude 远端对话已不可用，已清理旧会话并使用本地持久化上下文重新发起分析...',
+          'Claude remote conversation is no longer available. Retrying with persisted local context in a fresh SDK session...',
+        ),
+      },
+      timestamp: Date.now(),
+    });
+    this.activeAnalyses.delete(params.sessionId);
+    runSnapshots.release(params.sessionId);
+    return this.analyze(params.query, params.sessionId, params.traceId, params.options);
+  }
+
   private removeSessionMapEntries(sessionId: string): void {
     const referencePrefix = `${sessionId}:ref:`;
     for (const key of [...this.sessionMap.keys()]) {
@@ -486,6 +580,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     let conclusionText = '';
     let sdkSessionId: string | undefined;
     let rounds = 0;
+    let delegatedRetry = false;
     const metricsCollector = new AgentMetricsCollector(sessionId);
 
     try {
@@ -604,6 +699,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         && (Date.now() - (existingSessionMapEntry.updatedAt || 0) < SDK_SESSION_FRESHNESS_MS)
         ? existingSessionMapEntry.sdkSessionId
         : undefined;
+      let missingSdkConversationError: string | undefined;
       if (existingSessionMapEntry && existingSdkSessionId && enterpriseSessionMapDbWritesEnabled()) {
         this.persistSessionMapEntry(sessionId, traceId, ctx.sessionMapKey, existingSessionMapEntry, options);
       }
@@ -791,6 +887,21 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           if (msg.session_id && !sdkSessionId) {
             sdkSessionId = msg.session_id;
             this.rememberSdkSessionMapping(sessionId, traceId, ctx.sessionMapKey, sdkSessionId, options);
+          }
+
+          const sdkResultError = getSdkResultErrorMessage(msg);
+          if (sdkResultError && existingSdkSessionId && isMissingSdkConversationError(sdkResultError)) {
+            if (msg.type === 'result') {
+              finalizeTurnMetrics();
+              currentTurnMetrics = null;
+              metricsCollector.recordSdkUsage({
+                usage: (msg as any).usage,
+                modelUsage: (msg as any).modelUsage,
+                total_cost_usd: (msg as any).total_cost_usd,
+              });
+            }
+            missingSdkConversationError = sdkResultError;
+            continue;
           }
 
           // Track sub-agent lifecycle for per-agent timeouts
@@ -1132,12 +1243,27 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
             },
             timestamp: Date.now(),
           });
+        } else if (existingSdkSessionId && isMissingSdkConversationError((err as Error).message || '')) {
+          missingSdkConversationError = (err as Error).message || 'No conversation found with SDK session';
         } else {
           throw err;
         }
       } finally {
         if (safetyTimer) clearTimeout(safetyTimer);
         closeSdk();
+      }
+
+      if (missingSdkConversationError && existingSdkSessionId) {
+        delegatedRetry = true;
+        return await this.retryWithoutSdkResume({
+          query,
+          sessionId,
+          traceId,
+          options,
+          sessionMapKey: ctx.sessionMapKey,
+          errorMessage: missingSdkConversationError,
+          mode: 'full',
+        });
       }
 
       // Use SDK terminal result if available; fall back to accumulated streamed answer tokens.
@@ -1593,8 +1719,10 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
       // Persist session metrics (fire-and-forget, non-blocking)
       try {
-        metricsCollector.recordTurn(); // Record final turn
-        persistSessionMetrics(metricsCollector.summarize());
+        if (!delegatedRetry) {
+          metricsCollector.recordTurn(); // Record final turn
+          persistSessionMetrics(metricsCollector.summarize());
+        }
       } catch (metricsErr) {
         console.warn('[ClaudeRuntime] Failed to persist metrics:', (metricsErr as Error).message);
       }
@@ -1622,6 +1750,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     },
   ): Promise<AnalysisResult> {
     const { sceneType, focusResult, cachedArch, sessionContext, previousTurns, metricsCollector, startTime } = precomputed;
+    let delegatedRetry = false;
 
     try {
       let effectivePackageName = options.packageName;
@@ -1760,6 +1889,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       let quickRounds = 0;
       let terminationReason: AnalysisResult['terminationReason'];
       let terminationMessage: string | undefined;
+      let missingSdkConversationError: string | undefined;
 
       // Quick path per-turn budget from env CLAUDE_QUICK_PER_TURN_MS (default 40s/turn).
       const timeoutMs = quickConfig.maxTurns * quickConfig.quickPathPerTurnMs;
@@ -1783,6 +1913,12 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           if (msg.session_id && !quickSdkSessionId) {
             quickSdkSessionId = msg.session_id;
             this.rememberSdkSessionMapping(sessionId, traceId, sessionMapKey, quickSdkSessionId, options);
+          }
+
+          const sdkResultError = getSdkResultErrorMessage(msg);
+          if (sdkResultError && existingSdkSessionId && isMissingSdkConversationError(sdkResultError)) {
+            missingSdkConversationError = sdkResultError;
+            continue;
           }
 
           try { bridge(msg); } catch { /* non-fatal */ }
@@ -1810,12 +1946,27 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       } catch (err) {
         if (timedOut) {
           console.warn('[ClaudeRuntime] Quick analysis timeout reached — SDK subprocess has been closed');
+        } else if (existingSdkSessionId && isMissingSdkConversationError((err as Error).message || '')) {
+          missingSdkConversationError = (err as Error).message || 'No conversation found with SDK session';
         } else {
           throw err;
         }
       } finally {
         if (safetyTimer) clearTimeout(safetyTimer);
         closeSdk();
+      }
+
+      if (missingSdkConversationError && existingSdkSessionId) {
+        delegatedRetry = true;
+        return await this.retryWithoutSdkResume({
+          query,
+          sessionId,
+          traceId,
+          options,
+          sessionMapKey,
+          errorMessage: missingSdkConversationError,
+          mode: 'fast',
+        });
       }
 
       let conclusionText = finalResult || getAccumulatedAnswer() || '';
@@ -1946,8 +2097,10 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     } finally {
       this.activeAnalyses.delete(sessionId);
       try {
-        metricsCollector.recordTurn();
-        persistSessionMetrics(metricsCollector.summarize());
+        if (!delegatedRetry) {
+          metricsCollector.recordTurn();
+          persistSessionMetrics(metricsCollector.summarize());
+        }
       } catch (metricsErr) {
         console.warn('[ClaudeRuntime] Failed to persist quick metrics:', (metricsErr as Error).message);
       }
@@ -2033,7 +2186,10 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     const flags = this.sessionUncertaintyFlags.get(sessionId) || [];
     const artifactStore = this.artifactStores.get(sessionId);
     const architecture = this.architectureCache.get(traceId);
-    const sdkSessionId = this.sessionMap.get(sessionId)?.sdkSessionId;
+    const sessionMapEntry = this.sessionMap.get(sessionId);
+    const sdkSessionId = sessionMapEntry && Date.now() - (sessionMapEntry.updatedAt || 0) < SDK_SESSION_FRESHNESS_MS
+      ? sessionMapEntry.sdkSessionId
+      : undefined;
 
     return {
       version: 1,
@@ -2102,7 +2258,10 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     }
 
     if (snapshot.sdkSessionId) {
-      this.sessionMap.set(sessionId, { sdkSessionId: snapshot.sdkSessionId, updatedAt: Date.now() });
+      this.sessionMap.set(sessionId, {
+        sdkSessionId: snapshot.sdkSessionId,
+        updatedAt: snapshot.snapshotTimestamp || Date.now(),
+      });
     }
   }
 
