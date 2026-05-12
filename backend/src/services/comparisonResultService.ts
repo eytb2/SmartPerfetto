@@ -107,11 +107,26 @@ export function applyComparisonResultViewOptions(
   const significantMetricKeys = new Set(
     result.significantChanges.map(delta => delta.metricKey),
   );
+  const filteredRows = result.matrix.rows.filter(row => significantMetricKeys.has(row.metricKey));
+  const filteredRowsByKey = new Map(filteredRows.map(row => [row.metricKey, row]));
   return {
     ...result,
     matrix: {
       ...result.matrix,
-      rows: result.matrix.rows.filter(row => significantMetricKeys.has(row.metricKey)),
+      rows: filteredRows,
+      groups: (result.matrix.groups || [])
+        .map(group => ({
+          ...group,
+          rowMetricKeys: group.rowMetricKeys.filter(metricKey => filteredRowsByKey.has(metricKey)),
+          rowCount: group.rowMetricKeys.filter(metricKey => filteredRowsByKey.has(metricKey)).length,
+          significantChangeCount: group.rowMetricKeys.filter(metricKey => filteredRowsByKey.has(metricKey)).length,
+          missingMetricCount: group.rowMetricKeys.reduce(
+            (sum, metricKey) => sum + (filteredRowsByKey.get(metricKey)?.missingSnapshotIds.length ?? 0),
+            0,
+          ),
+          defaultCollapsed: false,
+        }))
+        .filter(group => group.rowCount > 0),
     },
   };
 }

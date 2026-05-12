@@ -129,6 +129,26 @@ describe('buildComparisonMatrix', () => {
       deltaValue: -5,
       assessment: 'better',
     });
+    expect(matrix.groups).toEqual([
+      expect.objectContaining({
+        group: 'startup',
+        rowMetricKeys: ['startup.total_ms'],
+        rowCount: 1,
+        significantChangeCount: 1,
+      }),
+      expect.objectContaining({
+        group: 'fps',
+        rowMetricKeys: ['scrolling.avg_fps'],
+        rowCount: 1,
+        significantChangeCount: 1,
+      }),
+      expect.objectContaining({
+        group: 'jank',
+        rowMetricKeys: ['scrolling.jank_rate_pct'],
+        rowCount: 1,
+        significantChangeCount: 1,
+      }),
+    ]);
     expect(matrix.evidenceRefs.map(ref => ref.type)).toContain('snapshot_metric');
   });
 

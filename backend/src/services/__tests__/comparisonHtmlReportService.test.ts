@@ -73,6 +73,8 @@ describe('renderComparisonHtmlReport', () => {
     expect(html).toContain('compare &lt;startup&gt;');
     expect(html).toContain('baseline&lt;script&gt;');
     expect(html).toContain('Startup total duration');
+    expect(html).toContain('<details class="metric-group" open>');
+    expect(html).toContain('<span>startup</span>');
     expect(html).toContain('-300');
     expect(html).toContain('Candidate is 300 ms faster.');
     expect(html).not.toContain('<script>');

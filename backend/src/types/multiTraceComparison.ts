@@ -264,11 +264,21 @@ export interface ComparisonMatrixRow {
   missingSnapshotIds: string[];
 }
 
+export interface ComparisonMatrixGroup {
+  group: string;
+  rowMetricKeys: ComparisonMetricKey[];
+  rowCount: number;
+  significantChangeCount: number;
+  missingMetricCount: number;
+  defaultCollapsed: boolean;
+}
+
 export interface ComparisonMatrix {
   schemaVersion: typeof COMPARISON_MATRIX_SCHEMA_VERSION;
   inputSnapshots: ComparisonMatrixInput[];
   baselineSnapshotId?: string;
   rows: ComparisonMatrixRow[];
+  groups: ComparisonMatrixGroup[];
   evidenceRefs: EvidenceRef[];
   missingMatrix: Record<string, Record<string, string>>;
   warnings: string[];

@@ -89,7 +89,7 @@ function renderMetricTable(result: ComparisonResult): string {
     <th>${escapeHtml(snapshot.title || snapshot.traceLabel || snapshot.snapshotId)}</th>
     <th>Delta</th>
   `).join('');
-  const rows = matrix.rows.map(row => {
+  const renderRows = (rows: ComparisonMatrixRow[]): string => rows.map(row => {
     const candidateCells = candidates.map(snapshot => {
       const delta = deltaFor(row, snapshot.snapshotId);
       return `
@@ -110,7 +110,7 @@ function renderMetricTable(result: ComparisonResult): string {
     `;
   }).join('');
 
-  return `
+  const renderTable = (rows: ComparisonMatrixRow[]): string => `
     <table>
       <thead>
         <tr>
@@ -120,9 +120,30 @@ function renderMetricTable(result: ComparisonResult): string {
           ${candidateHeaders}
         </tr>
       </thead>
-      <tbody>${rows}</tbody>
+      <tbody>${renderRows(rows)}</tbody>
     </table>
   `;
+
+  const groups = matrix.groups || [];
+  if (groups.length === 0) return renderTable(matrix.rows);
+
+  const rowsByMetricKey = new Map(matrix.rows.map(row => [row.metricKey, row]));
+  return groups.map(group => {
+    const groupRows = group.rowMetricKeys
+      .map(metricKey => rowsByMetricKey.get(metricKey))
+      .filter((row): row is ComparisonMatrixRow => Boolean(row));
+    if (groupRows.length === 0) return '';
+    const summary = `${group.rowCount} metrics, ${group.significantChangeCount} significant`;
+    return `
+      <details class="metric-group" ${group.defaultCollapsed ? '' : 'open'}>
+        <summary>
+          <span>${escapeHtml(group.group)}</span>
+          <span class="metric-group-summary">${escapeHtml(summary)}</span>
+        </summary>
+        ${renderTable(groupRows)}
+      </details>
+    `;
+  }).join('');
 }
 
 function renderSnapshots(result: ComparisonResult): string {
@@ -152,6 +173,10 @@ export function renderComparisonHtmlReport(input: RenderComparisonHtmlReportInpu
     .meta { color: #647084; font-size: 13px; }
     .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 20px 0; }
     .snapshot, .panel { background: #fff; border: 1px solid #dfe3ea; border-radius: 8px; padding: 14px; }
+    .metric-group { margin: 12px 0; background: #fff; border: 1px solid #dfe3ea; border-radius: 8px; overflow: hidden; }
+    .metric-group summary { cursor: pointer; display: flex; justify-content: space-between; gap: 16px; padding: 12px 14px; font-weight: 650; background: #f8fafc; }
+    .metric-group table { border: 0; border-top: 1px solid #dfe3ea; border-radius: 0; }
+    .metric-group-summary { color: #718096; font-size: 12px; font-weight: 500; }
     .snapshot-title { font-weight: 650; margin-bottom: 4px; }
     .snapshot-meta, .metric-key, .muted { color: #718096; font-size: 12px; }
     table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #dfe3ea; border-radius: 8px; overflow: hidden; }

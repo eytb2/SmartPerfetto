@@ -7,6 +7,7 @@ import type {
   ComparisonDelta,
   ComparisonMatrix,
   ComparisonMatrixCell,
+  ComparisonMatrixGroup,
   ComparisonMatrixInput,
   ComparisonMatrixRow,
   ComparisonMetricKey,
@@ -174,6 +175,33 @@ function metricEvidenceRef(snapshot: AnalysisResultSnapshot, metric: NormalizedM
   };
 }
 
+function hasSignificantDelta(row: ComparisonMatrixRow): boolean {
+  return row.deltas.some(delta =>
+    delta.deltaValue !== null &&
+    delta.assessment !== 'same' &&
+    delta.assessment !== 'unknown');
+}
+
+function buildMatrixGroups(rows: ComparisonMatrixRow[]): ComparisonMatrixGroup[] {
+  const grouped = new Map<string, ComparisonMatrixRow[]>();
+  for (const row of rows) {
+    const groupRows = grouped.get(row.group) || [];
+    groupRows.push(row);
+    grouped.set(row.group, groupRows);
+  }
+  return [...grouped.entries()].map(([group, groupRows]) => ({
+    group,
+    rowMetricKeys: groupRows.map(row => row.metricKey),
+    rowCount: groupRows.length,
+    significantChangeCount: groupRows.filter(hasSignificantDelta).length,
+    missingMetricCount: groupRows.reduce(
+      (sum, row) => sum + row.missingSnapshotIds.length,
+      0,
+    ),
+    defaultCollapsed: groupRows.length > 3 && !groupRows.some(hasSignificantDelta),
+  }));
+}
+
 export function buildComparisonMatrix(
   snapshots: AnalysisResultSnapshot[],
   options: BuildComparisonMatrixOptions = {},
@@ -258,6 +286,7 @@ export function buildComparisonMatrix(
     inputSnapshots: snapshots.map(snapshotToInput),
     baselineSnapshotId,
     rows,
+    groups: buildMatrixGroups(rows),
     evidenceRefs: [...evidenceRefsById.values()],
     missingMatrix,
     warnings,
