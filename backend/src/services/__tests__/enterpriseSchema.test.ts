@@ -221,6 +221,49 @@ describe('enterprise core schema', () => {
       'payload_json',
       'created_at',
     ]);
+    expectColumns(db!, 'analysis_result_snapshots', [
+      'id',
+      'tenant_id',
+      'workspace_id',
+      'trace_id',
+      'session_id',
+      'run_id',
+      'report_id',
+      'created_by',
+      'visibility',
+      'scene_type',
+      'title',
+      'user_query',
+      'trace_label',
+      'trace_metadata_json',
+      'summary_json',
+      'status',
+      'schema_version',
+      'created_at',
+      'expires_at',
+    ]);
+    expectColumns(db!, 'analysis_result_metrics', [
+      'id',
+      'snapshot_id',
+      'metric_key',
+      'metric_group',
+      'label',
+      'value_json',
+      'numeric_value',
+      'unit',
+      'direction',
+      'aggregation',
+      'confidence',
+      'missing_reason',
+      'source_json',
+    ]);
+    expectColumns(db!, 'analysis_result_evidence_refs', [
+      'id',
+      'snapshot_id',
+      'ref_type',
+      'ref_json',
+      'created_at',
+    ]);
     expectColumns(db!, 'runtime_snapshots', [
       'id',
       'tenant_id',
@@ -331,6 +374,14 @@ describe('enterprise core schema', () => {
       'idx_conversation_turns_run',
       'idx_agent_events_replay',
       'idx_agent_events_owner_guard',
+      'idx_analysis_result_snapshots_trace',
+      'idx_analysis_result_snapshots_scene',
+      'idx_analysis_result_snapshots_visibility',
+      'idx_analysis_result_snapshots_owner_guard',
+      'idx_analysis_result_snapshots_run',
+      'idx_analysis_result_metrics_snapshot',
+      'idx_analysis_result_metrics_key',
+      'idx_analysis_result_evidence_refs_snapshot',
       'idx_runtime_snapshots_session',
       'idx_runtime_snapshots_run',
       'idx_provider_credentials_scope',
@@ -367,6 +418,7 @@ describe('enterprise core schema', () => {
       { version: 4 },
       { version: 5 },
       { version: 6 },
+      { version: 7 },
     ]);
   });
 

@@ -20,6 +20,7 @@ export type EnterpriseWorkspaceScopedTable =
   | 'analysis_runs'
   | 'conversation_turns'
   | 'agent_events'
+  | 'analysis_result_snapshots'
   | 'runtime_snapshots'
   | 'report_artifacts'
   | 'memory_entries'
@@ -32,6 +33,7 @@ export const ENTERPRISE_WORKSPACE_SCOPED_TABLES: readonly EnterpriseWorkspaceSco
   'analysis_runs',
   'conversation_turns',
   'agent_events',
+  'analysis_result_snapshots',
   'runtime_snapshots',
   'report_artifacts',
   'memory_entries',

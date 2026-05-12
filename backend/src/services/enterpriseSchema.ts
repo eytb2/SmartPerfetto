@@ -38,6 +38,9 @@ export const ENTERPRISE_CORE_SCHEMA_TABLES = [
   'analysis_runs',
   'conversation_turns',
   'agent_events',
+  'analysis_result_snapshots',
+  'analysis_result_metrics',
+  'analysis_result_evidence_refs',
   'runtime_snapshots',
   'provider_credentials',
   'provider_snapshots',
@@ -515,6 +518,83 @@ const MIGRATIONS: MigrationStep[] = [
       db.exec(`
         CREATE INDEX IF NOT EXISTS idx_analysis_runs_heartbeat
           ON analysis_runs(tenant_id, workspace_id, status, heartbeat_at);
+      `);
+    },
+  },
+  {
+    version: 7,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS analysis_result_snapshots (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          trace_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          report_id TEXT,
+          created_by TEXT,
+          visibility TEXT NOT NULL,
+          scene_type TEXT NOT NULL,
+          title TEXT NOT NULL,
+          user_query TEXT NOT NULL,
+          trace_label TEXT NOT NULL,
+          trace_metadata_json TEXT NOT NULL,
+          summary_json TEXT NOT NULL,
+          status TEXT NOT NULL,
+          schema_version TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER,
+          FOREIGN KEY (tenant_id) REFERENCES organizations(id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id) REFERENCES workspaces(tenant_id, id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id, trace_id) REFERENCES trace_assets(tenant_id, workspace_id, id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id, session_id) REFERENCES analysis_sessions(tenant_id, workspace_id, id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id, run_id) REFERENCES analysis_runs(tenant_id, workspace_id, id) ON DELETE CASCADE,
+          FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_analysis_result_snapshots_trace
+          ON analysis_result_snapshots(tenant_id, workspace_id, trace_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_analysis_result_snapshots_scene
+          ON analysis_result_snapshots(tenant_id, workspace_id, scene_type, created_at);
+        CREATE INDEX IF NOT EXISTS idx_analysis_result_snapshots_visibility
+          ON analysis_result_snapshots(tenant_id, workspace_id, visibility, created_at);
+        CREATE INDEX IF NOT EXISTS idx_analysis_result_snapshots_owner_guard
+          ON analysis_result_snapshots(tenant_id, workspace_id, id);
+        CREATE INDEX IF NOT EXISTS idx_analysis_result_snapshots_run
+          ON analysis_result_snapshots(tenant_id, workspace_id, run_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS analysis_result_metrics (
+          id TEXT PRIMARY KEY,
+          snapshot_id TEXT NOT NULL,
+          metric_key TEXT NOT NULL,
+          metric_group TEXT NOT NULL,
+          label TEXT NOT NULL,
+          value_json TEXT,
+          numeric_value REAL,
+          unit TEXT,
+          direction TEXT,
+          aggregation TEXT,
+          confidence REAL NOT NULL,
+          missing_reason TEXT,
+          source_json TEXT NOT NULL,
+          FOREIGN KEY(snapshot_id) REFERENCES analysis_result_snapshots(id) ON DELETE CASCADE,
+          UNIQUE(snapshot_id, metric_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_analysis_result_metrics_snapshot
+          ON analysis_result_metrics(snapshot_id);
+        CREATE INDEX IF NOT EXISTS idx_analysis_result_metrics_key
+          ON analysis_result_metrics(snapshot_id, metric_key);
+
+        CREATE TABLE IF NOT EXISTS analysis_result_evidence_refs (
+          id TEXT PRIMARY KEY,
+          snapshot_id TEXT NOT NULL,
+          ref_type TEXT NOT NULL,
+          ref_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY(snapshot_id) REFERENCES analysis_result_snapshots(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_analysis_result_evidence_refs_snapshot
+          ON analysis_result_evidence_refs(snapshot_id);
       `);
     },
   },

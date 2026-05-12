@@ -136,3 +136,25 @@
 结论：
 
 - M1 后续 DB schema、repository、normalizer、API、comparison matrix 服务都应引用该 contract，不再复制临时 shape。
+
+## M1.2 DB Migration 与 Repository
+
+状态：完成。
+
+验收证据：
+
+- `backend/src/services/enterpriseSchema.ts` 新增 migration v7。
+- 新增表：
+  - `analysis_result_snapshots`
+  - `analysis_result_metrics`
+  - `analysis_result_evidence_refs`
+- 新增索引覆盖 trace、scene、visibility、owner guard、run、metric key、evidence refs。
+- `backend/src/services/enterpriseRepository.ts` 的 workspace scoped table 清单已纳入 `analysis_result_snapshots`。
+- 新增 `backend/src/services/analysisResultSnapshotStore.ts`，支持 create/get/list/updateVisibility/delete，并按 tenant/workspace/user/visibility 过滤。
+- 新增 `backend/src/services/__tests__/analysisResultSnapshotStore.test.ts`。
+- 更新 `enterpriseSchema` / `enterpriseRepository` 单元测试覆盖新表和清单。
+
+结论：
+
+- Snapshot 主表已经具备 owner guard 查询边界。
+- Metrics/evidence 作为 snapshot 子表级联删除，不直接暴露 workspace scoped repository。

@@ -135,6 +135,7 @@ describe('enterprise repository scope abstraction', () => {
       'analysis_runs',
       'conversation_turns',
       'agent_events',
+      'analysis_result_snapshots',
       'runtime_snapshots',
       'report_artifacts',
       'memory_entries',
