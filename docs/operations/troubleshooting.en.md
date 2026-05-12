@@ -55,6 +55,15 @@ TRACE_PROCESSOR_DOWNLOAD_URL=https://your-mirror/trace_processor_shell ./start.s
 
 Mirrored downloads are still checked against the SHA256 pinned in `scripts/trace-processor-pin.env`.
 
+## Docker AI Credentials
+
+For Docker runs, check:
+
+- The repository-root `.env` exists. Local source runs use `backend/.env`; Docker uses root `.env`.
+- `ANTHROPIC_API_KEY`, or `ANTHROPIC_BASE_URL` plus `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`, is configured for Claude-compatible providers.
+- `/health` reports the expected `aiEngine.credentialSource`. If it is `provider-manager`, the active Provider Manager profile overrides `.env`.
+- Docker has enough memory and disk.
+
 ## macOS Blocks trace_processor_shell
 
 If macOS says `trace_processor_shell` is from an unidentified developer, the terminal only prints `killed`, or the script reports `--version smoke test failed`, open System Settings -> Privacy & Security -> Security, click Allow Anyway, rerun `./start.sh`, and choose Open if macOS asks again.

@@ -51,13 +51,12 @@ import {
 } from './services/traceAnalysisSkill';
 import {
   getClaudeRuntimeDiagnostics,
-  hasClaudeCredentials,
 } from './agentv3/claudeConfig';
 import {
   getOpenAIRuntimeDiagnostics,
-  hasOpenAICredentials,
 } from './agentOpenAI';
 import { resolveAgentRuntimeSelection } from './agentRuntime';
+import { collectEnvCredentialSources } from './agentRuntime/envCredentialSources';
 import { getProviderService } from './services/providerManager';
 import {
   getLegacyApiUsageSnapshot,
@@ -114,16 +113,22 @@ app.use(express.urlencoded({ extended: true, limit: serverConfig.bodyLimit }));
 // Health check endpoint
 app.get('/health', (req, res) => {
   const runtimeSelection = resolveAgentRuntimeSelection();
-  const claudeDiagnostics = getClaudeRuntimeDiagnostics();
-  const openAIDiagnostics = getOpenAIRuntimeDiagnostics();
   const providerSvc = getProviderService();
   const activeProvider = providerSvc.list().find(p => p.isActive);
-  const aiEngineConfigured = runtimeSelection.kind === 'openai-agents-sdk'
-    ? hasOpenAICredentials()
-    : (activeProvider != null || hasClaudeCredentials());
+  const selectedProviderId = runtimeSelection.source === 'provider'
+    ? runtimeSelection.providerId
+    : null;
+  const claudeDiagnostics = getClaudeRuntimeDiagnostics(
+    runtimeSelection.kind === 'claude-agent-sdk' ? selectedProviderId : null,
+  );
+  const openAIDiagnostics = getOpenAIRuntimeDiagnostics(
+    runtimeSelection.kind === 'openai-agents-sdk' ? selectedProviderId : null,
+  );
   const selectedDiagnostics = runtimeSelection.kind === 'openai-agents-sdk'
     ? openAIDiagnostics
     : claudeDiagnostics;
+  const envSources = collectEnvCredentialSources(process.env, 'health');
+  const providerOverridesEnv = runtimeSelection.source === 'provider' && envSources.length > 0;
 
   res.json({
     status: 'OK',
@@ -135,8 +140,13 @@ app.get('/health', (req, res) => {
       runtime: runtimeSelection.kind,
       model: selectedDiagnostics.model,
       providerMode: selectedDiagnostics.providerMode,
-      configured: aiEngineConfigured,
+      configured: selectedDiagnostics.configured,
       source: runtimeSelection.source,
+      credentialSource: runtimeSelection.source === 'provider'
+        ? 'provider-manager'
+        : 'env-or-default',
+      envCredentialSources: envSources,
+      providerOverridesEnv,
       ...(activeProvider ? {
         activeProvider: {
           id: activeProvider.id,

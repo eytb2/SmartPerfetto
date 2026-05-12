@@ -5,6 +5,7 @@
 import { DEFAULT_OUTPUT_LANGUAGE, outputLanguageDisplayName, parseOutputLanguage, type OutputLanguage } from '../agentv3/outputLanguage';
 import { getProviderService, type OpenAIProtocol, type ProviderScope } from '../services/providerManager';
 import { mergeIsolatedProviderEnv } from '../services/providerManager/envIsolation';
+import { hasConcreteEnvValue } from '../agentRuntime/envCredentialSources';
 
 export interface OpenAIAgentConfig {
   model: string;
@@ -91,7 +92,7 @@ export function hasOpenAICredentials(providerId?: string | null, providerScope?:
   const env = createOpenAIEnv(providerId, providerScope);
   const baseUrl = env.OPENAI_BASE_URL || '';
   return Boolean(
-    env.OPENAI_API_KEY
+    hasConcreteEnvValue(env.OPENAI_API_KEY)
     || baseUrl.includes('localhost')
     || baseUrl.includes('127.0.0.1')
     || baseUrl.includes('0.0.0.0'),
@@ -99,10 +100,11 @@ export function hasOpenAICredentials(providerId?: string | null, providerScope?:
 }
 
 export function getOpenAIRuntimeDiagnostics(providerId?: string | null, providerScope?: ProviderScope) {
+  const env = createOpenAIEnv(providerId, providerScope);
   const config = loadOpenAIConfig(providerId, providerScope);
   const credentialSources: string[] = [];
-  if (config.apiKey) credentialSources.push('openai_api_key');
-  if (config.baseURL) credentialSources.push('openai_base_url');
+  if (hasConcreteEnvValue(env.OPENAI_API_KEY)) credentialSources.push('openai_api_key');
+  if (hasConcreteEnvValue(env.OPENAI_BASE_URL)) credentialSources.push('openai_base_url');
 
   return {
     runtime: 'openai-agents-sdk',
@@ -112,8 +114,8 @@ export function getOpenAIRuntimeDiagnostics(providerId?: string | null, provider
     model: config.model,
     lightModel: config.lightModel,
     protocol: config.protocol,
-    baseUrlConfigured: !!config.baseURL,
-    configured: hasOpenAICredentials(providerId),
+    baseUrlConfigured: hasConcreteEnvValue(env.OPENAI_BASE_URL),
+    configured: hasOpenAICredentials(providerId, providerScope),
     credentialSources,
     outputLanguage: {
       value: config.outputLanguage,

@@ -24,6 +24,13 @@ const ORIGINAL_ANTHROPIC_AUTH_TOKEN = process.env.ANTHROPIC_AUTH_TOKEN;
 const ORIGINAL_CLAUDE_MODEL = process.env.CLAUDE_MODEL;
 const ORIGINAL_CLAUDE_LIGHT_MODEL = process.env.CLAUDE_LIGHT_MODEL;
 const ORIGINAL_CLAUDE_CODE_USE_BEDROCK = process.env.CLAUDE_CODE_USE_BEDROCK;
+const ORIGINAL_AWS_BEARER_TOKEN_BEDROCK = process.env.AWS_BEARER_TOKEN_BEDROCK;
+const ORIGINAL_AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID;
+const ORIGINAL_AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY;
+const ORIGINAL_AWS_PROFILE = process.env.AWS_PROFILE;
+const ORIGINAL_CLAUDE_CODE_USE_VERTEX = process.env.CLAUDE_CODE_USE_VERTEX;
+const ORIGINAL_ANTHROPIC_VERTEX_PROJECT_ID = process.env.ANTHROPIC_VERTEX_PROJECT_ID;
+const ORIGINAL_CLOUD_ML_REGION = process.env.CLOUD_ML_REGION;
 
 afterEach(() => {
   if (ORIGINAL_QUICK_MAX_TURNS === undefined) {
@@ -60,6 +67,41 @@ afterEach(() => {
     delete process.env.CLAUDE_CODE_USE_BEDROCK;
   } else {
     process.env.CLAUDE_CODE_USE_BEDROCK = ORIGINAL_CLAUDE_CODE_USE_BEDROCK;
+  }
+  if (ORIGINAL_AWS_BEARER_TOKEN_BEDROCK === undefined) {
+    delete process.env.AWS_BEARER_TOKEN_BEDROCK;
+  } else {
+    process.env.AWS_BEARER_TOKEN_BEDROCK = ORIGINAL_AWS_BEARER_TOKEN_BEDROCK;
+  }
+  if (ORIGINAL_AWS_ACCESS_KEY_ID === undefined) {
+    delete process.env.AWS_ACCESS_KEY_ID;
+  } else {
+    process.env.AWS_ACCESS_KEY_ID = ORIGINAL_AWS_ACCESS_KEY_ID;
+  }
+  if (ORIGINAL_AWS_SECRET_ACCESS_KEY === undefined) {
+    delete process.env.AWS_SECRET_ACCESS_KEY;
+  } else {
+    process.env.AWS_SECRET_ACCESS_KEY = ORIGINAL_AWS_SECRET_ACCESS_KEY;
+  }
+  if (ORIGINAL_AWS_PROFILE === undefined) {
+    delete process.env.AWS_PROFILE;
+  } else {
+    process.env.AWS_PROFILE = ORIGINAL_AWS_PROFILE;
+  }
+  if (ORIGINAL_CLAUDE_CODE_USE_VERTEX === undefined) {
+    delete process.env.CLAUDE_CODE_USE_VERTEX;
+  } else {
+    process.env.CLAUDE_CODE_USE_VERTEX = ORIGINAL_CLAUDE_CODE_USE_VERTEX;
+  }
+  if (ORIGINAL_ANTHROPIC_VERTEX_PROJECT_ID === undefined) {
+    delete process.env.ANTHROPIC_VERTEX_PROJECT_ID;
+  } else {
+    process.env.ANTHROPIC_VERTEX_PROJECT_ID = ORIGINAL_ANTHROPIC_VERTEX_PROJECT_ID;
+  }
+  if (ORIGINAL_CLOUD_ML_REGION === undefined) {
+    delete process.env.CLOUD_ML_REGION;
+  } else {
+    process.env.CLOUD_ML_REGION = ORIGINAL_CLOUD_ML_REGION;
   }
 });
 
@@ -123,11 +165,67 @@ describe('getClaudeRuntimeDiagnostics', () => {
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.ANTHROPIC_AUTH_TOKEN;
     delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    delete process.env.CLAUDE_CODE_USE_VERTEX;
 
     const diagnostics = getClaudeRuntimeDiagnostics();
 
     expect(diagnostics.providerMode).toBe('unconfigured');
     expect(diagnostics.configured).toBe(false);
+  });
+
+  it('ignores placeholder credential values', () => {
+    delete process.env.ANTHROPIC_BASE_URL;
+    process.env.ANTHROPIC_API_KEY = 'your_anthropic_api_key_here';
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    delete process.env.CLAUDE_CODE_USE_VERTEX;
+
+    const diagnostics = getClaudeRuntimeDiagnostics();
+
+    expect(diagnostics.providerMode).toBe('unconfigured');
+    expect(diagnostics.configured).toBe(false);
+    expect(diagnostics.credentialSources).not.toContain('anthropic_api_key');
+  });
+
+  it('reports Google Vertex mode as configured', () => {
+    delete process.env.ANTHROPIC_BASE_URL;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    process.env.CLAUDE_CODE_USE_VERTEX = '1';
+    process.env.ANTHROPIC_VERTEX_PROJECT_ID = 'smartperfetto-project';
+    process.env.CLOUD_ML_REGION = 'us-central1';
+
+    const diagnostics = getClaudeRuntimeDiagnostics();
+
+    expect(diagnostics.providerMode).toBe('google_vertex');
+    expect(diagnostics.configured).toBe(true);
+    expect(diagnostics.credentialSources).toContain('google_vertex');
+    expect(diagnostics.vertex).toMatchObject({
+      enabled: true,
+      configured: true,
+      projectId: 'smartperfetto-project',
+      region: 'us-central1',
+    });
+  });
+
+  it('does not mark Vertex as configured without a project id', () => {
+    delete process.env.ANTHROPIC_BASE_URL;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    process.env.CLAUDE_CODE_USE_VERTEX = '1';
+    delete process.env.ANTHROPIC_VERTEX_PROJECT_ID;
+
+    const diagnostics = getClaudeRuntimeDiagnostics();
+
+    expect(diagnostics.providerMode).toBe('google_vertex');
+    expect(diagnostics.configured).toBe(false);
+    expect(diagnostics.vertex).toMatchObject({
+      enabled: true,
+      configured: false,
+      missing: ['ANTHROPIC_VERTEX_PROJECT_ID'],
+    });
   });
 });
 
@@ -138,6 +236,34 @@ describe('explainClaudeRuntimeError', () => {
     expect(message).toContain("You're out of extra usage");
     expect(message).toContain('ANTHROPIC_BASE_URL');
     expect(message).toContain('CC Switch');
+  });
+
+  it('explains when active Provider Manager credentials override env fallback', () => {
+    const message = explainClaudeRuntimeError('Not logged in', 'zh-CN', {
+      source: 'provider-manager',
+      providerName: 'DeepSeek',
+      providerType: 'deepseek',
+      providerRuntime: 'claude-agent-sdk',
+      envCredentialSources: ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN'],
+      providerOverridesEnv: true,
+    });
+
+    expect(message).toContain('Provider Manager active provider "DeepSeek (deepseek)", runtime=claude-agent-sdk');
+    expect(message).toContain('active Provider Manager profile 优先级更高');
+    expect(message).toContain('停用 active provider');
+    expect(message).not.toContain('Environment/.env');
+  });
+
+  it('explains env fallback paths for Docker and local source runs', () => {
+    const message = explainClaudeRuntimeError('Unauthorized', 'en', {
+      source: 'env-or-default',
+      envCredentialSources: ['ANTHROPIC_API_KEY'],
+      providerOverridesEnv: false,
+    });
+
+    expect(message).toContain('Current credential source: .env or environment fallback (ANTHROPIC_API_KEY)');
+    expect(message).toContain('Docker Hub compose reads the repository-root .env');
+    expect(message).toContain('local source runs use backend/.env');
   });
 
   it('leaves unrelated errors unchanged', () => {

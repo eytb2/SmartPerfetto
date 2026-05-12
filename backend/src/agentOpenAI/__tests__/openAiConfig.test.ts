@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { promises as fsp } from 'fs';
 import os from 'os';
 import path from 'path';
-import { createOpenAIEnv } from '../openAiConfig';
+import { createOpenAIEnv, getOpenAIRuntimeDiagnostics } from '../openAiConfig';
 import { getProviderService, resetProviderService } from '../../services/providerManager';
 
 const ORIGINAL_ENV = {
@@ -142,5 +142,28 @@ describe('createOpenAIEnv', () => {
     expect(() => createOpenAIEnv(p.id)).toThrow(
       `Provider ${p.id} is configured for claude-agent-sdk, not openai-agents-sdk`,
     );
+  });
+
+  it('does not report the default OpenAI base URL as an env credential source', () => {
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_BASE_URL;
+
+    const diagnostics = getOpenAIRuntimeDiagnostics(null);
+
+    expect(diagnostics.configured).toBe(false);
+    expect(diagnostics.baseUrlConfigured).toBe(false);
+    expect(diagnostics.credentialSources).toEqual([]);
+    expect(diagnostics.model).toBe('gpt-5.5');
+  });
+
+  it('ignores placeholder OpenAI keys in diagnostics', () => {
+    process.env.OPENAI_API_KEY = 'your_openai_api_key_here';
+    process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1';
+
+    const diagnostics = getOpenAIRuntimeDiagnostics(null);
+
+    expect(diagnostics.configured).toBe(false);
+    expect(diagnostics.baseUrlConfigured).toBe(true);
+    expect(diagnostics.credentialSources).toEqual(['openai_base_url']);
   });
 });

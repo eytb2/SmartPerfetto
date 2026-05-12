@@ -6,9 +6,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { SceneType } from './sceneClassifier';
 import { getRegisteredScenes } from './strategyLoader';
-import { DEFAULT_OUTPUT_LANGUAGE, outputLanguageDisplayName, parseOutputLanguage, type OutputLanguage } from './outputLanguage';
+import { DEFAULT_OUTPUT_LANGUAGE, localize, outputLanguageDisplayName, parseOutputLanguage, type OutputLanguage } from './outputLanguage';
 import { mergeIsolatedProviderEnv } from '../services/providerManager/envIsolation';
 import type { ProviderScope } from '../services/providerManager';
+import { collectEnvCredentialSources, hasConcreteEnvValue, isEnabledEnvFlag } from '../agentRuntime/envCredentialSources';
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
 
@@ -116,6 +117,14 @@ export interface BedrockStatus {
   missing?: string[];
 }
 
+export interface VertexStatus {
+  enabled: boolean;
+  configured: boolean;
+  projectId?: string;
+  region?: string;
+  missing?: string[];
+}
+
 /**
  * Detects whether AWS Bedrock is configured and whether its authentication
  * credentials are complete. Supports three auth paths:
@@ -123,22 +132,22 @@ export interface BedrockStatus {
  *   2. IAM credentials: AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (+ optional AWS_SESSION_TOKEN)
  *   3. AWS profile / default credential chain: AWS_PROFILE or implicit chain resolution
  */
-export function detectBedrock(): BedrockStatus {
-  const enabled = Boolean(process.env.CLAUDE_CODE_USE_BEDROCK);
+export function detectBedrock(env: Record<string, string | undefined> = process.env): BedrockStatus {
+  const enabled = isEnabledEnvFlag(env.CLAUDE_CODE_USE_BEDROCK);
   if (!enabled) return { enabled: false, hasAuth: false, region: 'us-east-1' };
 
-  const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1';
-  const baseUrl = process.env.ANTHROPIC_BEDROCK_BASE_URL || undefined;
+  const region = env.AWS_REGION || env.AWS_DEFAULT_REGION || 'us-east-1';
+  const baseUrl = env.ANTHROPIC_BEDROCK_BASE_URL || undefined;
 
-  if (process.env.AWS_BEARER_TOKEN_BEDROCK) {
+  if (hasConcreteEnvValue(env.AWS_BEARER_TOKEN_BEDROCK)) {
     return { enabled: true, hasAuth: true, authMethod: 'bearer_token', region, baseUrl };
   }
 
-  if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
+  if (hasConcreteEnvValue(env.AWS_ACCESS_KEY_ID) && hasConcreteEnvValue(env.AWS_SECRET_ACCESS_KEY)) {
     return { enabled: true, hasAuth: true, authMethod: 'iam_credentials', region, baseUrl };
   }
 
-  if (process.env.AWS_PROFILE) {
+  if (hasConcreteEnvValue(env.AWS_PROFILE)) {
     return { enabled: true, hasAuth: true, authMethod: 'profile_or_chain', region, baseUrl };
   }
 
@@ -146,9 +155,9 @@ export function detectBedrock(): BedrockStatus {
   // The SDK will still attempt the default AWS credential chain (EC2 metadata,
   // ECS task role, ~/.aws/credentials, etc.), so we treat this as potentially valid.
   const missing: string[] = [];
-  if (!process.env.AWS_BEARER_TOKEN_BEDROCK) missing.push('AWS_BEARER_TOKEN_BEDROCK');
-  if (!process.env.AWS_ACCESS_KEY_ID) missing.push('AWS_ACCESS_KEY_ID');
-  if (!process.env.AWS_PROFILE) missing.push('AWS_PROFILE');
+  if (!hasConcreteEnvValue(env.AWS_BEARER_TOKEN_BEDROCK)) missing.push('AWS_BEARER_TOKEN_BEDROCK');
+  if (!hasConcreteEnvValue(env.AWS_ACCESS_KEY_ID)) missing.push('AWS_ACCESS_KEY_ID');
+  if (!hasConcreteEnvValue(env.AWS_PROFILE)) missing.push('AWS_PROFILE');
 
   return {
     enabled: true,
@@ -160,59 +169,87 @@ export function detectBedrock(): BedrockStatus {
   };
 }
 
+export function detectVertex(env: Record<string, string | undefined> = process.env): VertexStatus {
+  const enabled = isEnabledEnvFlag(env.CLAUDE_CODE_USE_VERTEX);
+  if (!enabled) return { enabled: false, configured: false };
+  const projectId = hasConcreteEnvValue(env.ANTHROPIC_VERTEX_PROJECT_ID)
+    ? env.ANTHROPIC_VERTEX_PROJECT_ID
+    : undefined;
+  const region = hasConcreteEnvValue(env.CLOUD_ML_REGION)
+    ? env.CLOUD_ML_REGION
+    : 'us-central1';
+  return {
+    enabled: true,
+    configured: Boolean(projectId),
+    projectId,
+    region,
+    missing: projectId ? undefined : ['ANTHROPIC_VERTEX_PROJECT_ID'],
+  };
+}
+
 /**
  * Returns true when any supported Claude credential source is present:
  * direct API key, proxy base URL, or AWS Bedrock.
  */
-export function hasClaudeCredentials(): boolean {
+export function hasClaudeCredentials(env: Record<string, string | undefined> = process.env): boolean {
   return !!(
-    process.env.ANTHROPIC_API_KEY ||
-    process.env.ANTHROPIC_AUTH_TOKEN ||
-    process.env.ANTHROPIC_BASE_URL ||
-    detectBedrock().enabled
+    hasConcreteEnvValue(env.ANTHROPIC_API_KEY) ||
+    hasConcreteEnvValue(env.ANTHROPIC_AUTH_TOKEN) ||
+    hasConcreteEnvValue(env.ANTHROPIC_BASE_URL) ||
+    detectBedrock(env).enabled ||
+    detectVertex(env).configured
   );
 }
 
-export function getClaudeRuntimeDiagnostics() {
-  const bedrock = detectBedrock();
+export function getClaudeRuntimeDiagnostics(
+  providerId?: string | null,
+  providerScope?: ProviderScope,
+) {
+  const env = createSdkEnv(providerId, providerScope);
+  const bedrock = detectBedrock(env);
+  const vertex = detectVertex(env);
   const credentialSources: string[] = [];
-  if (process.env.ANTHROPIC_API_KEY) credentialSources.push('anthropic_api_key');
-  if (process.env.ANTHROPIC_AUTH_TOKEN) credentialSources.push('anthropic_auth_token');
-  if (process.env.ANTHROPIC_BASE_URL) credentialSources.push('anthropic_compatible_proxy');
+  if (hasConcreteEnvValue(env.ANTHROPIC_API_KEY)) credentialSources.push('anthropic_api_key');
+  if (hasConcreteEnvValue(env.ANTHROPIC_AUTH_TOKEN)) credentialSources.push('anthropic_auth_token');
+  if (hasConcreteEnvValue(env.ANTHROPIC_BASE_URL)) credentialSources.push('anthropic_compatible_proxy');
   if (bedrock.enabled) credentialSources.push(`bedrock:${bedrock.authMethod}`);
+  if (vertex.enabled) credentialSources.push('google_vertex');
 
-  const providerMode = process.env.ANTHROPIC_BASE_URL
+  const providerMode = hasConcreteEnvValue(env.ANTHROPIC_BASE_URL)
     ? 'anthropic_compatible_proxy'
     : bedrock.enabled
       ? 'aws_bedrock'
-      : (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN)
-        ? 'anthropic_direct'
-        : 'unconfigured';
+      : vertex.enabled
+        ? 'google_vertex'
+        : (hasConcreteEnvValue(env.ANTHROPIC_API_KEY) || hasConcreteEnvValue(env.ANTHROPIC_AUTH_TOKEN))
+          ? 'anthropic_direct'
+          : 'unconfigured';
 
   return {
     runtime: 'claude-agent-sdk',
     providerMode,
-    model: process.env.CLAUDE_MODEL || DEFAULT_MODEL,
-    lightModel: process.env.CLAUDE_LIGHT_MODEL || DEFAULT_LIGHT_MODEL,
+    model: env.CLAUDE_MODEL || DEFAULT_MODEL,
+    lightModel: env.CLAUDE_LIGHT_MODEL || DEFAULT_LIGHT_MODEL,
     outputLanguage: {
-      value: parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE),
-      displayName: outputLanguageDisplayName(parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE)),
+      value: parseOutputLanguage(env.SMARTPERFETTO_OUTPUT_LANGUAGE),
+      displayName: outputLanguageDisplayName(parseOutputLanguage(env.SMARTPERFETTO_OUTPUT_LANGUAGE)),
       env: 'SMARTPERFETTO_OUTPUT_LANGUAGE',
       default: DEFAULT_OUTPUT_LANGUAGE,
     },
-    configured: hasClaudeCredentials(),
+    configured: hasClaudeCredentials(env),
     credentialSources,
-    baseUrlConfigured: !!process.env.ANTHROPIC_BASE_URL,
+    baseUrlConfigured: hasConcreteEnvValue(env.ANTHROPIC_BASE_URL),
     bedrock: {
       enabled: bedrock.enabled,
       authMethod: bedrock.authMethod,
       region: bedrock.region,
       baseUrlConfigured: !!bedrock.baseUrl,
     },
-    configHint: process.env.ANTHROPIC_BASE_URL
+    vertex,
+    configHint: hasConcreteEnvValue(env.ANTHROPIC_BASE_URL)
       ? 'Using Anthropic-compatible proxy. Ensure the mapped model supports streaming and tool/function calling.'
       : 'Set ANTHROPIC_API_KEY for Anthropic direct access, or ANTHROPIC_BASE_URL plus ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN for a third-party Anthropic-compatible provider.',
-    sdkBinary: getClaudeSdkBinaryDiagnostics(),
+    sdkBinary: getClaudeSdkBinaryDiagnostics(env),
   };
 }
 
@@ -250,9 +287,78 @@ function nativeBinaryHint(message: string, lang: OutputLanguage): string {
   return `${message}\n\n${t.intro}\n${t.cause}\n${t.fix}\n  CLAUDE_BINARY_PATH=${NATIVE_BINARY_HINT_EXAMPLE}\n${t.inspectLabel} ${NATIVE_BINARY_HINT_INSPECT}`;
 }
 
+export interface CredentialSourceHint {
+  source: 'provider-manager' | 'env-or-default';
+  providerName?: string;
+  providerType?: string;
+  providerRuntime?: string;
+  envCredentialSources: string[];
+  providerOverridesEnv: boolean;
+}
+
+export function getCredentialSourceHint(
+  providerId?: string | null,
+  providerScope?: ProviderScope,
+): CredentialSourceHint {
+  const envCredentialSources = collectEnvCredentialSources(process.env, 'env');
+  const { getProviderService } = require('../services/providerManager');
+  const svc = getProviderService();
+  const provider = typeof providerId === 'string'
+    ? svc.getRawProvider(providerId, providerScope)
+    : providerId === null
+      ? undefined
+      : svc.getRawEffectiveProvider(providerScope);
+
+  if (provider) {
+    return {
+      source: 'provider-manager',
+      providerName: provider.name,
+      providerType: provider.type,
+      providerRuntime: svc.resolveAgentRuntime(provider),
+      envCredentialSources,
+      providerOverridesEnv: envCredentialSources.length > 0,
+    };
+  }
+
+  return {
+    source: 'env-or-default',
+    envCredentialSources,
+    providerOverridesEnv: false,
+  };
+}
+
+function credentialSourceHintText(hint: CredentialSourceHint | undefined, lang: OutputLanguage): string {
+  if (!hint) return '';
+  if (hint.source === 'provider-manager') {
+    const providerLabel = `${hint.providerName || 'unnamed'}${hint.providerType ? ` (${hint.providerType})` : ''}`;
+    const overrideText = hint.providerOverridesEnv
+      ? localize(
+        lang,
+        '检测到 env 凭证，但当前 active Provider Manager profile 优先级更高；如果想用 .env，请在 AI Assistant 设置里停用 active provider。',
+        'Env credentials are also present, but the active Provider Manager profile has priority. To use .env, deactivate the active provider in AI Assistant settings.',
+      )
+      : '';
+    return '\n\n' + localize(
+      lang,
+      `当前凭证来源: Provider Manager active provider "${providerLabel}"${hint.providerRuntime ? `, runtime=${hint.providerRuntime}` : ''}。${overrideText}`,
+      `Current credential source: Provider Manager active provider "${providerLabel}"${hint.providerRuntime ? `, runtime=${hint.providerRuntime}` : ''}. ${overrideText}`,
+    );
+  }
+
+  const envText = hint.envCredentialSources.length > 0
+    ? hint.envCredentialSources.join(', ')
+    : localize(lang, '未检测到显式 env 凭证', 'no explicit env credentials detected');
+  return '\n\n' + localize(
+    lang,
+    `当前凭证来源: .env 或环境变量 fallback (${envText})。Docker Hub compose 读取仓库根目录 .env；本地源码运行才默认使用 backend/.env。`,
+    `Current credential source: .env or environment fallback (${envText}). Docker Hub compose reads the repository-root .env; local source runs use backend/.env by default.`,
+  );
+}
+
 export function explainClaudeRuntimeError(
   message: string,
   outputLanguage: OutputLanguage = parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE),
+  credentialSourceHint?: CredentialSourceHint,
 ): string {
   const lower = message.toLowerCase();
 
@@ -275,8 +381,11 @@ export function explainClaudeRuntimeError(
   return `${message}\n\n` +
     'SmartPerfetto is currently using the Claude Agent SDK runtime. ' +
     'If your Claude subscription/API quota is unavailable, configure an Anthropic-compatible proxy instead: ' +
-    'set ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN, CLAUDE_MODEL, and CLAUDE_LIGHT_MODEL in backend/.env, then restart the backend. ' +
-    'Provider switchers such as CC Switch manage Claude Code/Codex/Gemini CLI configs, but SmartPerfetto does not automatically read Codex CLI or Gemini CLI credentials.';
+    'set ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN, CLAUDE_MODEL, and CLAUDE_LIGHT_MODEL in the env file for your run mode, then restart the backend. ' +
+    'Docker uses the repository-root .env; local source runs use backend/.env by default. ' +
+    'Provider Manager active profiles take priority over env fallback. ' +
+    'Provider switchers such as CC Switch manage Claude Code/Codex/Gemini CLI configs, but SmartPerfetto does not automatically read Codex CLI or Gemini CLI credentials.' +
+    credentialSourceHintText(credentialSourceHint, outputLanguage);
 }
 
 /**

@@ -31,7 +31,7 @@ Step 1: Choose your run mode and credential file.
 | Local source checkout where Claude Code already works in the same terminal | No `.env` required | Verify with `claude`; then run `./start.sh`, which starts both backend and the pre-built frontend |
 | Local source checkout with explicit API key or compatible proxy | `backend/.env` | Create it with `cp backend/.env.example backend/.env` |
 | Docker Hub image | `.env` in the repository root | Create it with `cp backend/.env.example .env`; Docker cannot see the host Claude Code login |
-| Source Docker build | `backend/.env` | Read by `docker-compose.yml` |
+| Source Docker build | `.env` in the repository root | Read by `docker-compose.yml`; same credential file as the Docker Hub path |
 
 Step 2: Choose the runtime and provider settings. Claude Agent SDK is for Claude Code / Anthropic-compatible providers; OpenAI Agents SDK is for OpenAI / OpenAI-compatible providers. If both credential families are present, `SMARTPERFETTO_AGENT_RUNTIME` or the active UI provider decides; otherwise the default is Claude Agent SDK.
 
@@ -99,6 +99,8 @@ Both the Docker Hub image and source Docker builds serve the committed pre-built
 The container starts without a local `.env` file for health/UI smoke checks, but AI analysis needs one explicit provider block, for example `ANTHROPIC_API_KEY` for Anthropic direct, `ANTHROPIC_BASE_URL` plus `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` for a Claude-compatible provider, or `SMARTPERFETTO_AGENT_RUNTIME=openai-agents-sdk` plus `OPENAI_*` fields for an OpenAI-compatible provider.
 
 Provider profiles created in the UI are stored in the `provider-data` Docker volume. They survive container restarts and normal `docker compose down`; they are removed by `docker compose down -v`.
+
+An active Provider Manager profile has priority over Docker `.env` credentials. The container startup log and [http://localhost:3000/health](http://localhost:3000/health) show whether the current credential source is `provider-manager` or `env-or-default`. To force Docker `.env` fallback, deactivate the active provider in AI Assistant settings.
 
 Windows users should use Docker Desktop with the WSL2 backend. The published image is a Linux container image and runs through Docker Desktop; no separate Windows build is required.
 
@@ -180,7 +182,7 @@ On Linux, if analysis fails with `Claude Code native binary not found at .../nod
 
 ### Source Docker Build
 
-Use this only when testing Docker changes or building an unreleased local checkout. Step 1: run `cp backend/.env.example backend/.env` and edit the provider if needed. Step 2: run `docker compose up --build`.
+Use this only when testing Docker changes or building an unreleased local checkout. Step 1: run `cp backend/.env.example .env` and edit the provider if needed. Step 2: run `docker compose up --build`.
 
 The source build uses the committed `frontend/` bundle and does not rebuild the `perfetto/` submodule.
 
@@ -192,7 +194,7 @@ After verifying your changes in the browser, Step 1: run `./scripts/update-front
 
 ## Runtime Settings
 
-The quick setup above covers where credentials live. Detailed provider setup, model IDs, regional Base URL variants, OpenAI-compatible runtime fields, Anthropic-compatible presets, proxy guidance, and troubleshooting live in [docs/getting-started/configuration.en.md](docs/getting-started/configuration.en.md). Use `GET /health` to confirm `aiEngine.runtime`, `aiEngine.providerMode`, and `aiEngine.diagnostics` after changing provider settings.
+The quick setup above covers where credentials live. Detailed provider setup, model IDs, regional Base URL variants, OpenAI-compatible runtime fields, Anthropic-compatible presets, proxy guidance, and troubleshooting live in [docs/getting-started/configuration.en.md](docs/getting-started/configuration.en.md). Use `GET /health` to confirm `aiEngine.runtime`, `aiEngine.credentialSource`, `aiEngine.providerMode`, and `aiEngine.diagnostics` after changing provider settings.
 
 Claude Code local auth/config is only available to local source runs, not Docker. Separate tools such as Codex CLI, Gemini CLI, and OpenCode manage their own configuration files and login state; SmartPerfetto does not automatically read those credentials. The frontend settings dialog's `Connection` tab only stores the backend URL and optional `SMARTPERFETTO_API_KEY` for SmartPerfetto backend auth; the `Providers` tab can write model-provider profiles to the backend Provider Manager.
 

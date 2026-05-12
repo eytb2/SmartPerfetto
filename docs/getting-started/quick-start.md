@@ -24,11 +24,13 @@
 
 步骤 2：编辑 `backend/.env`。Anthropic 直连时解注释 `ANTHROPIC_API_KEY`；第三方 Claude Code / Anthropic-compatible provider 解注释一个 provider block，只替换 API key/token；OpenAI / OpenAI-compatible provider 使用 OpenAI Agents SDK 相关字段。
 
-`backend/.env.example` 已经内置 DeepSeek、GLM、Qwen、Kimi、Doubao、MiniMax 等常见 Claude Code 兼容 Base URL 和推荐主/轻模型。Docker Hub 镜像使用仓库根目录 `.env`：
+`backend/.env.example` 已经内置 DeepSeek、GLM、Qwen、Kimi、Doubao、MiniMax 等常见 Claude Code 兼容 Base URL 和推荐主/轻模型。Docker 使用仓库根目录 `.env`，包括 Docker Hub 镜像和本地 source Docker build：
 
 步骤 1：运行 `cp backend/.env.example .env`。
 
 步骤 2：编辑 `.env` 并解注释一个 provider block。只做 health/UI smoke check 可以跳过；真正执行 AI 分析必须配置 provider。
+
+如果 UI 里已经激活了 Provider Manager profile，它会覆盖 `.env` fallback。当前来源可以在容器启动日志或 `http://localhost:3000/health` 的 `aiEngine.credentialSource` 里确认。
 
 ## 3. Docker 运行
 

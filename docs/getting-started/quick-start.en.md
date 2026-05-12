@@ -24,11 +24,13 @@ Step 1: run `cp backend/.env.example backend/.env`.
 
 Step 2: edit `backend/.env`. Uncomment `ANTHROPIC_API_KEY` for direct Anthropic access, uncomment one Claude Code / Anthropic-compatible provider block for compatible providers, or use the OpenAI Agents SDK fields for OpenAI / OpenAI-compatible providers.
 
-`backend/.env.example` includes presets for common Claude-compatible and OpenAI-compatible providers such as DeepSeek, GLM, Qwen, Kimi, Doubao, MiniMax, MiMo, and TokenHub. Docker Hub images read the root `.env` file instead:
+`backend/.env.example` includes presets for common Claude-compatible and OpenAI-compatible providers such as DeepSeek, GLM, Qwen, Kimi, Doubao, MiniMax, MiMo, and TokenHub. Docker reads the repository-root `.env` file, including both Docker Hub images and local source Docker builds:
 
 Step 1: run `cp backend/.env.example .env`.
 
 Step 2: edit `.env` and uncomment one provider block. You can skip this for a health/UI smoke check; real AI analysis requires a provider.
+
+If a Provider Manager profile is active in the UI, it overrides `.env` fallback. Confirm the active source in the container startup log or `aiEngine.credentialSource` from `http://localhost:3000/health`.
 
 ## 3. Run with Docker
 

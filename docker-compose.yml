@@ -12,7 +12,8 @@ services:
       - FRONTEND_URL=http://localhost:10000
       - PROVIDER_DATA_DIR_OVERRIDE=/app/backend/provider-data
     env_file:
-      - backend/.env
+      - path: .env
+        required: false
     volumes:
       # Persist uploads, logs, and UI-created provider profiles across restarts
       - uploads:/app/backend/uploads

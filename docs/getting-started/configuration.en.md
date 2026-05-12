@@ -14,6 +14,12 @@ For local source runs, backend configuration lives in `backend/.env`. Start from
 cp backend/.env.example backend/.env
 ```
 
+Docker runs always read the repository-root `.env`, including both Docker Hub images and local source Docker builds:
+
+```bash
+cp backend/.env.example .env
+```
+
 ## LLM Configuration
 
 SmartPerfetto has two first-class SDK runtimes:
@@ -21,7 +27,7 @@ SmartPerfetto has two first-class SDK runtimes:
 - `claude-agent-sdk`: the default runtime. Use it for Anthropic, Claude Code local auth, Bedrock, Vertex, and Anthropic/Claude Code-compatible providers.
 - `openai-agents-sdk`: the OpenAI runtime. Use it for OpenAI Responses API, Ollama, and OpenAI-compatible gateways that support streaming function/tool calling.
 
-Runtime selection priority is: request/session `providerId`, active Provider Manager profile, `SMARTPERFETTO_AGENT_RUNTIME`, then the default `claude-agent-sdk`. If `.env` contains both `ANTHROPIC_*` and `OPENAI_*` without `SMARTPERFETTO_AGENT_RUNTIME=openai-agents-sdk`, analysis still uses Claude Agent SDK.
+Runtime selection priority is: request/session `providerId`, active Provider Manager profile, `SMARTPERFETTO_AGENT_RUNTIME`, then the default `claude-agent-sdk`. If `.env` contains both `ANTHROPIC_*` and `OPENAI_*` without `SMARTPERFETTO_AGENT_RUNTIME=openai-agents-sdk`, analysis still uses Claude Agent SDK. An active Provider Manager profile overrides `.env` fallback; confirm the current source with `aiEngine.credentialSource` and `aiEngine.providerOverridesEnv` from `/health`.
 
 Perfetto UI Provider Management can store both endpoint families for the same provider: `claudeBaseUrl` / `claudeApiKey` / `claudeAuthToken` for Claude Code SDK, and `openaiBaseUrl` / `openaiApiKey` / `openaiProtocol` for OpenAI SDK. The provider switcher beside the AI input shows the active SDK runtime.
 
@@ -126,6 +132,7 @@ curl http://localhost:3000/health
 | `anthropic_direct` | Uses `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` without a custom Base URL |
 | `anthropic_compatible_proxy` | Uses `ANTHROPIC_BASE_URL` for a Claude Code / Anthropic-compatible provider or proxy |
 | `aws_bedrock` | Uses AWS Bedrock |
+| `google_vertex` | Uses Google Vertex AI |
 | `openai_responses` | Uses OpenAI Agents SDK + Responses API |
 | `openai_chat_completions_compatible` | Uses OpenAI Agents SDK + Chat Completions-compatible endpoint |
 | `unconfigured` | No explicit env credentials; if local `claude` works, the SDK can still use Claude Code local auth/config during analysis |
