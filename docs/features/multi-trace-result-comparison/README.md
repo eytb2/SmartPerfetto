@@ -504,7 +504,7 @@ Result Picker -> POST /comparisons
 - [x] 在 `analysis_completed` 后生成 snapshot。
 - [x] 从 startup/scrolling 结果里抽取首批标准 metric。
 - [x] 增加 `snapshot_created` SSE event。
-- [ ] 增加 owner guard、visibility、audit。
+- [x] 增加 owner guard、visibility、audit。
 
 验收：
 

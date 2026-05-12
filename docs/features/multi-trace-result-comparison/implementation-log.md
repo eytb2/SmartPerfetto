@@ -212,3 +212,26 @@
 结论：
 
 - 前端后续可以通过 `snapshot_created` 更新“当前窗口最近 snapshot”，刷新或 SSE 重连也可以通过 `agent_events` replay 恢复该事件。
+
+## M1.6 Owner Guard、Visibility、Audit
+
+状态：完成。
+
+验收证据：
+
+- `AnalysisResultSnapshotRepository` 所有读写都带 `tenantId/workspaceId/userId` scope。
+- private snapshot 只有创建者或 system-owned 结果可读；workspace snapshot 对同 workspace 可读用户可见。
+- `createSnapshot()`、`getSnapshot()`、`listSnapshots()`、`updateVisibility()`、`deleteSnapshot()` 都会写入 audit event。
+- `backend/src/services/rbac.ts` 新增权限：
+  - `analysis_result:read`
+  - `analysis_result:create`
+  - `analysis_result:share`
+  - `analysis_result:delete`
+  - `comparison:create`
+  - `comparison:read`
+- RBAC helper 新增 analysis result read/create/share/delete 判定。
+- `rbac.test.ts` 覆盖 role 权限、scope implication、private/workspace visibility owner guard。
+
+结论：
+
+- M2 API 层可以直接复用 repository + RBAC helper，避免在 route 中重新手写隔离规则。

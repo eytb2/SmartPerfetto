@@ -4,6 +4,9 @@
 
 import type { RequestContext } from '../../middleware/auth';
 import {
+  canCreateAnalysisResultResource,
+  canReadAnalysisResultResource,
+  canShareAnalysisResultResource,
   canDeleteTraceResource,
   canReadTraceResource,
   hasRbacPermission,
@@ -25,14 +28,19 @@ function context(role: string, scopes: string[] = []): RequestContext {
 describe('enterprise RBAC matrix', () => {
   test('maps viewer, analyst, workspace admin, and org admin role permissions', () => {
     expect(hasRbacPermission(context('viewer'), 'trace:read')).toBe(true);
+    expect(hasRbacPermission(context('viewer'), 'analysis_result:read')).toBe(true);
+    expect(hasRbacPermission(context('viewer'), 'analysis_result:create')).toBe(false);
     expect(hasRbacPermission(context('viewer'), 'trace:write')).toBe(false);
     expect(hasRbacPermission(context('viewer'), 'agent:run')).toBe(false);
 
     expect(hasRbacPermission(context('analyst'), 'trace:write')).toBe(true);
     expect(hasRbacPermission(context('analyst'), 'agent:run')).toBe(true);
+    expect(hasRbacPermission(context('analyst'), 'analysis_result:create')).toBe(true);
+    expect(hasRbacPermission(context('analyst'), 'comparison:create')).toBe(true);
     expect(hasRbacPermission(context('analyst'), 'trace:delete_any')).toBe(false);
 
     expect(hasRbacPermission(context('workspace_admin'), 'trace:delete_any')).toBe(true);
+    expect(hasRbacPermission(context('workspace_admin'), 'analysis_result:delete')).toBe(true);
     expect(hasRbacPermission(context('workspace_admin'), 'provider:manage_workspace')).toBe(true);
     expect(hasRbacPermission(context('workspace_admin'), 'provider:manage_org')).toBe(false);
     expect(hasRbacPermission(context('workspace_admin'), 'runtime:manage')).toBe(true);
@@ -54,6 +62,10 @@ describe('enterprise RBAC matrix', () => {
 
     expect(hasRbacPermission(apiKeyContext, 'trace:read')).toBe(true);
     expect(hasRbacPermission(apiKeyContext, 'agent:run')).toBe(true);
+    expect(hasRbacPermission({
+      ...apiKeyContext,
+      scopes: ['analysis_result:write'],
+    }, 'analysis_result:share')).toBe(true);
     expect(hasRbacPermission(apiKeyContext, 'trace:write')).toBe(false);
   });
 
@@ -75,5 +87,34 @@ describe('enterprise RBAC matrix', () => {
       ...peerTrace,
       tenantId: 'tenant-b',
     }, admin)).toBe(false);
+  });
+
+  test('combines owner guard, visibility, and role permissions for analysis results', () => {
+    const analyst = context('analyst');
+    const viewer = context('viewer');
+    const ownPrivateResult = {
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: analyst.userId,
+      visibility: 'private',
+    };
+    const peerPrivateResult = {
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'peer-user',
+      visibility: 'private',
+    };
+    const peerWorkspaceResult = {
+      ...peerPrivateResult,
+      visibility: 'workspace',
+    };
+
+    expect(canCreateAnalysisResultResource(analyst)).toBe(true);
+    expect(canCreateAnalysisResultResource(viewer)).toBe(false);
+    expect(canReadAnalysisResultResource(ownPrivateResult, analyst)).toBe(true);
+    expect(canReadAnalysisResultResource(peerPrivateResult, analyst)).toBe(false);
+    expect(canReadAnalysisResultResource(peerWorkspaceResult, viewer)).toBe(true);
+    expect(canShareAnalysisResultResource(ownPrivateResult, analyst)).toBe(true);
+    expect(canShareAnalysisResultResource(peerPrivateResult, analyst)).toBe(false);
   });
 });

@@ -19,13 +19,19 @@ export type RbacPermission =
   | 'agent:run'
   | 'report:read'
   | 'report:delete'
+  | 'analysis_result:read'
+  | 'analysis_result:create'
+  | 'analysis_result:share'
+  | 'analysis_result:delete'
+  | 'comparison:create'
+  | 'comparison:read'
   | 'provider:manage_workspace'
   | 'provider:manage_org'
   | 'audit:read'
   | 'runtime:manage';
 
 const ROLE_PERMISSIONS: Record<string, RbacPermission[]> = {
-  viewer: ['trace:read', 'report:read'],
+  viewer: ['trace:read', 'report:read', 'analysis_result:read', 'comparison:read'],
   analyst: [
     'trace:read',
     'trace:write',
@@ -33,6 +39,11 @@ const ROLE_PERMISSIONS: Record<string, RbacPermission[]> = {
     'trace:delete_own',
     'agent:run',
     'report:read',
+    'analysis_result:read',
+    'analysis_result:create',
+    'analysis_result:share',
+    'comparison:create',
+    'comparison:read',
   ],
   workspace_admin: [
     'trace:read',
@@ -43,6 +54,12 @@ const ROLE_PERMISSIONS: Record<string, RbacPermission[]> = {
     'agent:run',
     'report:read',
     'report:delete',
+    'analysis_result:read',
+    'analysis_result:create',
+    'analysis_result:share',
+    'analysis_result:delete',
+    'comparison:create',
+    'comparison:read',
     'provider:manage_workspace',
     'audit:read',
     'runtime:manage',
@@ -56,6 +73,12 @@ const ROLE_PERMISSIONS: Record<string, RbacPermission[]> = {
     'agent:run',
     'report:read',
     'report:delete',
+    'analysis_result:read',
+    'analysis_result:create',
+    'analysis_result:share',
+    'analysis_result:delete',
+    'comparison:create',
+    'comparison:read',
     'provider:manage_workspace',
     'provider:manage_org',
     'audit:read',
@@ -67,6 +90,8 @@ const SCOPE_IMPLICATIONS: Partial<Record<RbacPermission, string[]>> = {
   'trace:delete_own': ['trace:write', 'trace:delete'],
   'trace:delete_any': ['trace:delete:any'],
   'report:delete': ['report:write'],
+  'analysis_result:share': ['analysis_result:write'],
+  'analysis_result:delete': ['analysis_result:write', 'analysis_result:delete_any'],
 };
 
 export function hasRbacPermission(context: RequestContext, permission: RbacPermission): boolean {
@@ -122,6 +147,39 @@ export function canDeleteReportResource(
   if (!sharesWorkspaceWithContext(resource, context)) return false;
   if (hasRbacPermission(context, 'report:delete')) return true;
   return isOwnedByContext(resource, context) && hasRbacPermission(context, 'report:delete');
+}
+
+export function canReadAnalysisResultResource(
+  resource: (ResourceOwnerFields & { visibility?: string | null }) | null | undefined,
+  context: RequestContext,
+): boolean {
+  if (!sharesWorkspaceWithContext(resource, context)) return false;
+  if (!hasRbacPermission(context, 'analysis_result:read')) return false;
+  if (resource?.visibility === 'workspace') return true;
+  return isOwnedByContext(resource, context);
+}
+
+export function canCreateAnalysisResultResource(context: RequestContext): boolean {
+  return hasRbacPermission(context, 'analysis_result:create');
+}
+
+export function canShareAnalysisResultResource(
+  resource: ResourceOwnerFields | null | undefined,
+  context: RequestContext,
+): boolean {
+  if (!sharesWorkspaceWithContext(resource, context)) return false;
+  if (!hasRbacPermission(context, 'analysis_result:share')) return false;
+  if (isOwnedByContext(resource, context)) return true;
+  return hasRbacPermission(context, 'analysis_result:delete');
+}
+
+export function canDeleteAnalysisResultResource(
+  resource: ResourceOwnerFields | null | undefined,
+  context: RequestContext,
+): boolean {
+  if (!sharesWorkspaceWithContext(resource, context)) return false;
+  if (hasRbacPermission(context, 'analysis_result:delete')) return true;
+  return false;
 }
 
 export function sendForbidden(res: Response, details = 'Forbidden'): Response {
