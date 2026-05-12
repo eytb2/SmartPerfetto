@@ -499,7 +499,7 @@ Result Picker -> POST /comparisons
 
 ### M1: Snapshot Contract 与持久化
 
-- [ ] 新增 TypeScript contract：`AnalysisResultSnapshot`, `NormalizedMetricValue`, `ComparisonMatrix`。
+- [x] 新增 TypeScript contract：`AnalysisResultSnapshot`, `NormalizedMetricValue`, `ComparisonMatrix`。
 - [ ] 新增 DB migration 与 repository。
 - [ ] 在 `analysis_completed` 后生成 snapshot。
 - [ ] 从 startup/scrolling 结果里抽取首批标准 metric。

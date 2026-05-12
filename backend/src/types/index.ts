@@ -45,3 +45,5 @@ export interface ErrorResponse {
   error: string;
   details?: string;
 }
+
+export * from './multiTraceComparison';

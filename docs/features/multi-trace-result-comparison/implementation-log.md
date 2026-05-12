@@ -115,3 +115,24 @@
 
 - 旧 `referenceTraceId` 功能定义为单 AI Panel、单 run、current/reference raw trace 实时对比。
 - 新功能定义为 backend DB 中的 `snapshotId[]` 分析结果对比，不复用旧产品模型。
+
+## M1.1 TypeScript Contract
+
+状态：完成。
+
+验收证据：
+
+- 新增 `backend/src/types/multiTraceComparison.ts`。
+- 新增并导出：
+  - `AnalysisResultSnapshot`
+  - `NormalizedMetricValue`
+  - `EvidenceRef`
+  - `ComparisonMatrix`
+  - `ComparisonResult`
+  - `MultiTraceComparisonRun`
+- 定义首批标准 metric key 与 `STANDARD_COMPARISON_METRICS`，覆盖 startup、scrolling/FPS/Jank、CPU、trace environment。
+- `backend/src/types/index.ts` 已导出该 contract。
+
+结论：
+
+- M1 后续 DB schema、repository、normalizer、API、comparison matrix 服务都应引用该 contract，不再复制临时 shape。
