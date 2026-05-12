@@ -10,6 +10,7 @@ import request from 'supertest';
 import {
   ANALYSIS_RESULT_SNAPSHOT_SCHEMA_VERSION,
   type AnalysisResultSnapshot,
+  type NormalizedMetricValue,
 } from '../../types/multiTraceComparison';
 import {
   authenticate,
@@ -42,6 +43,48 @@ function app(): express.Express {
   return server;
 }
 
+function metrics(values: {
+  startupMs: number;
+  fps: number;
+  jankRate: number;
+}): NormalizedMetricValue[] {
+  return [
+    {
+      key: 'startup.total_ms',
+      label: 'Startup total duration',
+      group: 'startup',
+      value: values.startupMs,
+      unit: 'ms',
+      direction: 'lower_is_better',
+      aggregation: 'single',
+      confidence: 0.9,
+      source: { type: 'skill' },
+    },
+    {
+      key: 'scrolling.avg_fps',
+      label: 'Average FPS',
+      group: 'fps',
+      value: values.fps,
+      unit: 'fps',
+      direction: 'higher_is_better',
+      aggregation: 'avg',
+      confidence: 0.9,
+      source: { type: 'skill' },
+    },
+    {
+      key: 'scrolling.jank_rate_pct',
+      label: 'Jank rate',
+      group: 'jank',
+      value: values.jankRate,
+      unit: '%',
+      direction: 'lower_is_better',
+      aggregation: 'avg',
+      confidence: 0.9,
+      source: { type: 'skill' },
+    },
+  ];
+}
+
 function snapshot(overrides: Partial<AnalysisResultSnapshot>): AnalysisResultSnapshot {
   const id = overrides.id || 'snapshot-a';
   return {
@@ -59,17 +102,7 @@ function snapshot(overrides: Partial<AnalysisResultSnapshot>): AnalysisResultSna
     traceLabel: 'trace-a',
     traceMetadata: {},
     summary: { headline: 'ok' },
-    metrics: [{
-      key: 'startup.total_ms',
-      label: 'Startup total duration',
-      group: 'startup',
-      value: 123,
-      unit: 'ms',
-      direction: 'lower_is_better',
-      aggregation: 'single',
-      confidence: 0.9,
-      source: { type: 'skill' },
-    }],
+    metrics: metrics({ startupMs: 1200, fps: 55, jankRate: 8 }),
     evidenceRefs: [],
     status: 'ready',
     schemaVersion: ANALYSIS_RESULT_SNAPSHOT_SCHEMA_VERSION,
@@ -124,6 +157,7 @@ function seedGraph(): void {
     sessionId: 'session-b',
     runId: 'run-b',
     visibility: 'workspace',
+    metrics: metrics({ startupMs: 900, fps: 60, jankRate: 3 }),
   }));
   db.close();
 }
@@ -141,7 +175,7 @@ afterEach(async () => {
 });
 
 describe('comparison routes', () => {
-  test('creates and reads a comparison run for readable snapshots', async () => {
+  test('creates completed startup/fps/jank comparison result for two readable snapshots', async () => {
     const createResponse = await request(app())
       .post('/api/workspaces/workspace-a/comparisons')
       .set('x-tenant-id', DEFAULT_TENANT_ID)
@@ -153,11 +187,35 @@ describe('comparison routes', () => {
       .expect(201);
 
     expect(createResponse.body.success).toBe(true);
-    expect(createResponse.body.comparison.status).toBe('pending');
+    expect(createResponse.body.comparison.status).toBe('completed');
     expect(createResponse.body.comparison.inputSnapshotIds).toEqual([
       'snapshot-a',
       'snapshot-b',
     ]);
+    expect(createResponse.body.comparison.result.matrix.rows.map((row: { metricKey: string }) => row.metricKey)).toEqual([
+      'startup.total_ms',
+      'scrolling.avg_fps',
+      'scrolling.jank_rate_pct',
+    ]);
+
+    const rows = createResponse.body.comparison.result.matrix.rows as Array<{
+      metricKey: string;
+      deltas: Array<{ deltaValue: number; deltaPct: number; assessment: string }>;
+    }>;
+    expect(rows.find(row => row.metricKey === 'startup.total_ms')?.deltas[0]).toMatchObject({
+      deltaValue: -300,
+      deltaPct: -25,
+      assessment: 'better',
+    });
+    expect(rows.find(row => row.metricKey === 'scrolling.avg_fps')?.deltas[0]).toMatchObject({
+      deltaValue: 5,
+      assessment: 'better',
+    });
+    expect(rows.find(row => row.metricKey === 'scrolling.jank_rate_pct')?.deltas[0]).toMatchObject({
+      deltaValue: -5,
+      assessment: 'better',
+    });
+    expect(createResponse.body.comparison.result.significantChanges).toHaveLength(3);
 
     const comparisonId = createResponse.body.comparison.id;
     const readResponse = await request(app())
@@ -166,6 +224,8 @@ describe('comparison routes', () => {
       .expect(200);
 
     expect(readResponse.body.comparison.id).toBe(comparisonId);
+    expect(readResponse.body.comparison.status).toBe('completed');
+    expect(readResponse.body.comparison.result.matrix.rows).toHaveLength(3);
   });
 
   test('rejects missing candidate snapshots', async () => {

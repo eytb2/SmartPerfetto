@@ -7,8 +7,12 @@ import { requireRequestContext } from '../middleware/auth';
 import { openEnterpriseDb } from '../services/enterpriseDb';
 import { createAnalysisResultSnapshotRepository } from '../services/analysisResultSnapshotStore';
 import { createMultiTraceComparisonRunRepository } from '../services/multiTraceComparisonStore';
+import {
+  buildDeterministicComparisonResult,
+  resolveComparisonMetricKeys,
+} from '../services/comparisonResultService';
 import { hasRbacPermission, sendForbidden } from '../services/rbac';
-import type { ComparisonMetricKey } from '../types/multiTraceComparison';
+import type { AnalysisResultSnapshot, ComparisonMetricKey } from '../types/multiTraceComparison';
 
 const router = express.Router();
 
@@ -65,6 +69,7 @@ router.post('/', (req, res) => {
       workspaceId: context.workspaceId,
       userId: context.userId,
     };
+    const snapshots: AnalysisResultSnapshot[] = [];
     for (const snapshotId of inputSnapshotIds) {
       const snapshot = snapshotRepository.getSnapshot(scope, snapshotId);
       if (!snapshot) {
@@ -75,16 +80,35 @@ router.post('/', (req, res) => {
         });
         return;
       }
+      snapshots.push(snapshot);
     }
 
     const repository = createMultiTraceComparisonRunRepository(db);
-    const comparison = repository.createRun(scope, {
+    const metricKeys = resolveComparisonMetricKeys(stringArray(req.body?.metricKeys) as ComparisonMetricKey[]);
+    const created = repository.createRun(scope, {
       baselineSnapshotId,
       candidateSnapshotIds,
       query,
-      metricKeys: stringArray(req.body?.metricKeys) as ComparisonMetricKey[],
-      status: 'pending',
+      metricKeys,
+      status: 'running',
     });
+    let comparison = created;
+    try {
+      const result = buildDeterministicComparisonResult(snapshots, {
+        baselineSnapshotId,
+        metricKeys,
+      });
+      comparison = repository.updateRun(scope, created.id, {
+        status: 'completed',
+        result,
+      }) || created;
+    } catch (error) {
+      repository.updateRun(scope, created.id, {
+        status: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
     res.status(201).json({
       success: true,
       comparison,
