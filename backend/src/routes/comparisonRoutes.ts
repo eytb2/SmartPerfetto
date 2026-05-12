@@ -12,6 +12,7 @@ import {
   resolveComparisonMetricKeys,
 } from '../services/comparisonResultService';
 import { generateAiComparisonConclusion } from '../services/comparisonAiConclusionService';
+import { persistComparisonHtmlReport } from '../services/comparisonHtmlReportService';
 import { hasRbacPermission, sendForbidden } from '../services/rbac';
 import type { AnalysisResultSnapshot, ComparisonMetricKey } from '../types/multiTraceComparison';
 
@@ -38,6 +39,11 @@ function uniqueStrings(values: string[]): string[] {
     result.push(value);
   }
   return result;
+}
+
+function reportArtifactExists(db: ReturnType<typeof openEnterpriseDb>, reportId: string): boolean {
+  const row = db.prepare('SELECT 1 FROM report_artifacts WHERE id = ? LIMIT 1').get(reportId);
+  return Boolean(row);
 }
 
 router.post('/', async (req, res) => {
@@ -106,9 +112,19 @@ router.post('/', async (req, res) => {
         providerId,
         providerScope: scope,
       });
+      const report = persistComparisonHtmlReport({
+        comparison: created,
+        result,
+        scope,
+      });
+      result.reportId = report.reportId;
+      const persistedReportId = reportArtifactExists(db, report.reportId)
+        ? report.reportId
+        : undefined;
       comparison = repository.updateRun(scope, created.id, {
         status: 'completed',
         result,
+        ...(persistedReportId ? { reportId: persistedReportId } : {}),
       }) || created;
     } catch (error) {
       repository.updateRun(scope, created.id, {

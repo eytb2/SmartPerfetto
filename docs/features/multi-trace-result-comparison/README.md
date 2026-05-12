@@ -532,7 +532,7 @@ Result Picker -> POST /comparisons
 - [x] 新增 `build_comparison_matrix` 服务。
 - [x] 支持 2 个 snapshot 的启动/FPS/Jank metric 对比。
 - [x] 生成 AI comparison conclusion。
-- [ ] 生成 HTML comparison report。
+- [x] 生成 HTML comparison report。
 
 验收：
 

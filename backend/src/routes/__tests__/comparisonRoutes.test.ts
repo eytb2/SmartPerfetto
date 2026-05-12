@@ -24,12 +24,21 @@ import {
 import { openEnterpriseDb } from '../../services/enterpriseDb';
 import { createAnalysisResultSnapshotRepository } from '../../services/analysisResultSnapshotStore';
 import comparisonRoutes from '../comparisonRoutes';
+import { reportStore } from '../reportRoutes';
 
 const originalDbPath = process.env.SMARTPERFETTO_ENTERPRISE_DB_PATH;
 const originalComparisonAiDisabled = process.env.SMARTPERFETTO_COMPARISON_AI_DISABLED;
 
 let tempDir: string;
 let dbPath: string;
+
+function restoreEnvValue(key: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+}
 
 function app(): express.Express {
   const server = express();
@@ -168,12 +177,14 @@ beforeEach(async () => {
   dbPath = path.join(tempDir, 'enterprise.db');
   process.env.SMARTPERFETTO_ENTERPRISE_DB_PATH = dbPath;
   process.env.SMARTPERFETTO_COMPARISON_AI_DISABLED = 'true';
+  reportStore.clear();
   seedGraph();
 });
 
 afterEach(async () => {
-  process.env.SMARTPERFETTO_ENTERPRISE_DB_PATH = originalDbPath;
-  process.env.SMARTPERFETTO_COMPARISON_AI_DISABLED = originalComparisonAiDisabled;
+  restoreEnvValue('SMARTPERFETTO_ENTERPRISE_DB_PATH', originalDbPath);
+  restoreEnvValue('SMARTPERFETTO_COMPARISON_AI_DISABLED', originalComparisonAiDisabled);
+  reportStore.clear();
   await fs.rm(tempDir, { recursive: true, force: true });
 });
 
@@ -219,6 +230,8 @@ describe('comparison routes', () => {
       assessment: 'better',
     });
     expect(createResponse.body.comparison.result.significantChanges).toHaveLength(3);
+    expect(createResponse.body.comparison.result.reportId).toMatch(/^comparison-report-/);
+    expect(reportStore.get(createResponse.body.comparison.result.reportId)?.html).toContain('Metric Delta Matrix');
 
     const comparisonId = createResponse.body.comparison.id;
     const readResponse = await request(app())
