@@ -340,3 +340,20 @@
 结论：
 
 - comparison run 的持久化、API 入口和 SSE 读取通道已经具备，下一步可以把矩阵构建和 AI 结论接到 run 更新流程。
+
+## M3.2 build_comparison_matrix 服务
+
+状态：完成。
+
+验收证据：
+
+- 新增 `comparisonMatrixService.ts`，导出 `buildComparisonMatrix`。
+- 服务输入为一组 `AnalysisResultSnapshot`，支持指定 baseline snapshot 和 metric keys。
+- 输出 `ComparisonMatrix`，包含 input snapshots、rows、baseline cell、candidate cells、deltas、missing matrix、warnings、snapshot_metric evidence refs。
+- Delta 计算支持 `lower_is_better` / `higher_is_better` / `neutral`，输出 `better/worse/same/unknown`。
+- 未指定 metric keys 时，优先覆盖标准 metric，再补充 snapshot 中的自定义 metric。
+- 增加 service test 覆盖 startup/FPS/jank delta、missing metric、非法 baseline。
+
+结论：
+
+- comparison run 已有可复用的结构化矩阵构建器，后续 API 可以把 snapshot 输入直接转成可报告、可给 AI 的矩阵。

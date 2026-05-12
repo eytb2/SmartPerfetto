@@ -529,7 +529,7 @@ Result Picker -> POST /comparisons
 ### M3: Comparison Run MVP
 
 - [x] 新增 comparison repository/API/SSE。
-- [ ] 新增 `build_comparison_matrix` 服务。
+- [x] 新增 `build_comparison_matrix` 服务。
 - [ ] 支持 2 个 snapshot 的启动/FPS/Jank metric 对比。
 - [ ] 生成 AI comparison conclusion。
 - [ ] 生成 HTML comparison report。
