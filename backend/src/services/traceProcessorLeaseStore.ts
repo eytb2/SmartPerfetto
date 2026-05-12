@@ -24,6 +24,7 @@ export type TraceProcessorHolderType =
   | 'frontend_http_rpc'
   | 'agent_run'
   | 'report_generation'
+  | 'metric_backfill'
   | 'manual_register';
 
 export type FrontendHolderVisibility = 'visible' | 'hidden' | 'offline';
@@ -179,6 +180,13 @@ export function resolveHolderTtlPolicy(holder: TraceProcessorHolderInput): Trace
     return {
       heartbeatTtlMs: 5 * 60 * 1000,
       idleTtlMs: 60 * 60 * 1000,
+    };
+  }
+
+  if (holder.holderType === 'metric_backfill') {
+    return {
+      heartbeatTtlMs: 5 * 60 * 1000,
+      idleTtlMs: 30 * 60 * 1000,
     };
   }
 

@@ -50,7 +50,7 @@ describe('TraceProcessorLeaseStore', () => {
     db.close();
   });
 
-  it('defines graded TTL policies for frontend, agent, report, and manual holders', () => {
+  it('defines graded TTL policies for frontend, agent, report, metric backfill, and manual holders', () => {
     expect(resolveHolderTtlPolicy({
       holderType: 'frontend_http_rpc',
       holderRef: 'window-a',
@@ -81,13 +81,18 @@ describe('TraceProcessorLeaseStore', () => {
       holderType: 'report_generation',
       holderRef: 'report-a',
     }).heartbeatTtlMs).toBe(5 * 60 * 1000);
+    expect(resolveHolderTtlPolicy({
+      holderType: 'metric_backfill',
+      holderRef: 'comparison-a',
+    }).idleTtlMs).toBe(30 * 60 * 1000);
   });
 
-  it('acquires all four holder classes on one scoped lease', () => {
+  it('acquires all five holder classes on one scoped lease', () => {
     const holders: Array<{ holderType: TraceProcessorHolderType; holderRef: string; windowId?: string }> = [
       { holderType: 'frontend_http_rpc', holderRef: 'window-a', windowId: 'window-a' },
       { holderType: 'agent_run', holderRef: 'run-a' },
       { holderType: 'report_generation', holderRef: 'report-a' },
+      { holderType: 'metric_backfill', holderRef: 'comparison-a' },
       { holderType: 'manual_register', holderRef: 'port:9100' },
     ];
 
@@ -99,11 +104,12 @@ describe('TraceProcessorLeaseStore', () => {
     }
 
     expect(lease.state).toBe('active');
-    expect(lease.holderCount).toBe(4);
+    expect(lease.holderCount).toBe(5);
     expect(lease.holders.map(holder => holder.holderType).sort()).toEqual([
       'agent_run',
       'frontend_http_rpc',
       'manual_register',
+      'metric_backfill',
       'report_generation',
     ]);
   });
