@@ -373,6 +373,81 @@ describe('comparison routes', () => {
     expect((html.match(/<th>Delta<\/th>/g) || []).length).toBe(2);
   });
 
+  test('switches baseline and recalculates deltas for an existing comparison', async () => {
+    const createResponse = await request(app())
+      .post('/api/workspaces/workspace-a/comparisons')
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .send({
+        baselineSnapshotId: 'snapshot-a',
+        candidateSnapshotIds: ['snapshot-b', 'snapshot-c'],
+        metricKeys: ['startup.total_ms'],
+        query: 'compare three startups',
+      })
+      .expect(201);
+
+    const comparisonId = createResponse.body.comparison.id;
+    const originalReportId = createResponse.body.comparison.result.reportId;
+    const updateResponse = await request(app())
+      .patch(`/api/workspaces/workspace-a/comparisons/${comparisonId}/baseline`)
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .send({
+        baselineSnapshotId: 'snapshot-b',
+      })
+      .expect(200);
+
+    expect(updateResponse.body.comparison.id).toBe(comparisonId);
+    expect(updateResponse.body.comparison.baselineSnapshotId).toBe('snapshot-b');
+    expect(updateResponse.body.comparison.inputSnapshotIds).toEqual([
+      'snapshot-a',
+      'snapshot-b',
+      'snapshot-c',
+    ]);
+    expect(updateResponse.body.comparison.result.matrix.baselineSnapshotId).toBe('snapshot-b');
+
+    const row = updateResponse.body.comparison.result.matrix.rows[0] as {
+      baseline: { snapshotId: string; numericValue: number };
+      deltas: Array<{ snapshotId: string; deltaValue: number; assessment: string }>;
+    };
+    expect(row.baseline).toMatchObject({
+      snapshotId: 'snapshot-b',
+      numericValue: 900,
+    });
+    expect(row.deltas).toEqual([
+      expect.objectContaining({
+        snapshotId: 'snapshot-a',
+        deltaValue: 300,
+        assessment: 'worse',
+      }),
+      expect.objectContaining({
+        snapshotId: 'snapshot-c',
+        deltaValue: 500,
+        assessment: 'worse',
+      }),
+    ]);
+    expect(updateResponse.body.comparison.result.reportId).not.toBe(originalReportId);
+    const html = reportStore.get(updateResponse.body.comparison.result.reportId)?.html || '';
+    expect(html).toContain('Baseline: snapshot-b');
+  });
+
+  test('rejects baseline switch outside comparison inputs', async () => {
+    const createResponse = await request(app())
+      .post('/api/workspaces/workspace-a/comparisons')
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .send({
+        baselineSnapshotId: 'snapshot-a',
+        candidateSnapshotIds: ['snapshot-b'],
+      })
+      .expect(201);
+
+    await request(app())
+      .patch(`/api/workspaces/workspace-a/comparisons/${createResponse.body.comparison.id}/baseline`)
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .send({
+        baselineSnapshotId: 'snapshot-c',
+      })
+      .expect(400);
+  });
+
   test('streams the current comparison state as SSE', async () => {
     const createResponse = await request(app())
       .post('/api/workspaces/workspace-a/comparisons')

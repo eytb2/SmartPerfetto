@@ -49,6 +49,7 @@ export interface CreateComparisonRunInput {
 
 export interface UpdateComparisonRunInput {
   status: MultiTraceComparisonRunStatus;
+  baselineSnapshotId?: string;
   result?: ComparisonResult;
   reportId?: string;
   error?: string;
@@ -208,28 +209,53 @@ export class MultiTraceComparisonRunRepository {
         ? Date.now()
         : null);
     const resultJson = input.result ? JSON.stringify(input.result) : null;
-    const update = this.db.prepare(`
-      UPDATE multi_trace_comparison_runs
-      SET status = @status,
-          result_json = @resultJson,
-          report_id = @reportId,
-          error = @error,
-          completed_at = @completedAt
-      WHERE tenant_id = @tenantId
-        AND workspace_id = @workspaceId
-        AND id = @comparisonId
-        AND (created_by = @userId OR created_by IS NULL)
-    `).run({
-      tenantId: scope.tenantId,
-      workspaceId: scope.workspaceId,
-      userId: scope.userId ?? null,
-      comparisonId,
-      status: input.status,
-      resultJson,
-      reportId: input.reportId ?? null,
-      error: input.error ?? null,
-      completedAt,
-    });
+    const hasBaselineSnapshotId = input.baselineSnapshotId !== undefined;
+    const update = this.db.transaction(() => {
+      const result = this.db.prepare(`
+        UPDATE multi_trace_comparison_runs
+        SET status = @status,
+            baseline_snapshot_id = CASE
+              WHEN @hasBaselineSnapshotId = 1 THEN @baselineSnapshotId
+              ELSE baseline_snapshot_id
+            END,
+            result_json = @resultJson,
+            report_id = @reportId,
+            error = @error,
+            completed_at = @completedAt
+        WHERE tenant_id = @tenantId
+          AND workspace_id = @workspaceId
+          AND id = @comparisonId
+          AND (created_by = @userId OR created_by IS NULL)
+      `).run({
+        tenantId: scope.tenantId,
+        workspaceId: scope.workspaceId,
+        userId: scope.userId ?? null,
+        comparisonId,
+        status: input.status,
+        hasBaselineSnapshotId: hasBaselineSnapshotId ? 1 : 0,
+        baselineSnapshotId: input.baselineSnapshotId ?? null,
+        resultJson,
+        reportId: input.reportId ?? null,
+        error: input.error ?? null,
+        completedAt,
+      });
+
+      if (result.changes > 0 && hasBaselineSnapshotId) {
+        this.db.prepare(`
+          UPDATE multi_trace_comparison_inputs
+          SET role = CASE
+            WHEN snapshot_id = @baselineSnapshotId THEN 'baseline'
+            ELSE 'candidate'
+          END
+          WHERE comparison_id = @comparisonId
+        `).run({
+          comparisonId,
+          baselineSnapshotId: input.baselineSnapshotId,
+        });
+      }
+
+      return result;
+    })();
     if (update.changes === 0) return null;
     recordEnterpriseAuditEvent(this.db, {
       tenantId: scope.tenantId,
@@ -240,6 +266,7 @@ export class MultiTraceComparisonRunRepository {
       resourceId: comparisonId,
       metadata: {
         status: input.status,
+        baselineSnapshotId: input.baselineSnapshotId ?? null,
         reportId: input.reportId ?? null,
       },
     });

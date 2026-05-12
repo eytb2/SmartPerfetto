@@ -25,8 +25,13 @@ import { buildTraceProcessorLeaseModeDecision } from '../services/traceProcessor
 import { estimateTraceProcessorRssBytes } from '../services/traceProcessorRamBudget';
 import { TraceProcessorFactory } from '../services/workingTraceProcessor';
 import { hasRbacPermission, sendForbidden } from '../services/rbac';
-import type { AnalysisResultSnapshot, ComparisonMetricKey } from '../types/multiTraceComparison';
+import type {
+  AnalysisResultSnapshot,
+  ComparisonMetricKey,
+  MultiTraceComparisonRun,
+} from '../types/multiTraceComparison';
 import type { AnalysisResultSnapshotRepository } from '../services/analysisResultSnapshotStore';
+import type { MultiTraceComparisonRunRepository } from '../services/multiTraceComparisonStore';
 import type { EnterpriseRepositoryScope } from '../services/enterpriseRepository';
 
 const router = express.Router();
@@ -166,6 +171,46 @@ async function backfillSnapshotMetrics(
   }
 }
 
+async function completeComparisonRun(
+  input: {
+    db: ReturnType<typeof openEnterpriseDb>;
+    repository: MultiTraceComparisonRunRepository;
+    comparison: MultiTraceComparisonRun;
+    snapshots: AnalysisResultSnapshot[];
+    baselineSnapshotId: string;
+    metricKeys: ComparisonMetricKey[];
+    query: string;
+    providerId?: string;
+    scope: EnterpriseRepositoryScope;
+  },
+): Promise<MultiTraceComparisonRun> {
+  const result = buildDeterministicComparisonResult(input.snapshots, {
+    baselineSnapshotId: input.baselineSnapshotId,
+    metricKeys: input.metricKeys,
+  });
+  result.conclusion = await generateAiComparisonConclusion({
+    result,
+    query: input.query,
+    providerId: input.providerId,
+    providerScope: input.scope,
+  });
+  const report = persistComparisonHtmlReport({
+    comparison: input.comparison,
+    result,
+    scope: input.scope,
+  });
+  result.reportId = report.reportId;
+  const persistedReportId = reportArtifactExists(input.db, report.reportId)
+    ? report.reportId
+    : undefined;
+  return input.repository.updateRun(input.scope, input.comparison.id, {
+    status: 'completed',
+    baselineSnapshotId: input.baselineSnapshotId,
+    result,
+    ...(persistedReportId ? { reportId: persistedReportId } : {}),
+  }) || input.comparison;
+}
+
 router.post('/', async (req, res) => {
   const context = requireRequestContext(req);
   if (!hasRbacPermission(context, 'comparison:create')) {
@@ -246,30 +291,17 @@ router.post('/', async (req, res) => {
     });
     let comparison = created;
     try {
-      const result = buildDeterministicComparisonResult(snapshots, {
+      comparison = await completeComparisonRun({
+        db,
+        repository,
+        comparison: created,
+        snapshots,
         baselineSnapshotId,
         metricKeys,
-      });
-      result.conclusion = await generateAiComparisonConclusion({
-        result,
         query,
         providerId,
-        providerScope: scope,
-      });
-      const report = persistComparisonHtmlReport({
-        comparison: created,
-        result,
         scope,
       });
-      result.reportId = report.reportId;
-      const persistedReportId = reportArtifactExists(db, report.reportId)
-        ? report.reportId
-        : undefined;
-      comparison = repository.updateRun(scope, created.id, {
-        status: 'completed',
-        result,
-        ...(persistedReportId ? { reportId: persistedReportId } : {}),
-      }) || created;
     } catch (error) {
       repository.updateRun(scope, created.id, {
         status: 'failed',
@@ -286,6 +318,95 @@ router.post('/', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to create comparison',
+    });
+  } finally {
+    db.close();
+  }
+});
+
+router.patch('/:comparisonId/baseline', async (req, res) => {
+  const context = requireRequestContext(req);
+  if (!hasRbacPermission(context, 'comparison:create')) {
+    sendForbidden(res, 'comparison:create permission is required');
+    return;
+  }
+
+  const comparisonId = optionalString(req.params.comparisonId);
+  const baselineSnapshotId = optionalString(req.body?.baselineSnapshotId);
+  const providerId = optionalString(req.body?.providerId);
+  if (!comparisonId || !baselineSnapshotId) {
+    res.status(400).json({
+      success: false,
+      error: 'comparisonId and baselineSnapshotId are required',
+    });
+    return;
+  }
+
+  const db = openEnterpriseDb();
+  try {
+    const scope = {
+      tenantId: context.tenantId,
+      workspaceId: context.workspaceId,
+      userId: context.userId,
+    };
+    const repository = createMultiTraceComparisonRunRepository(db);
+    const comparison = repository.getRun(scope, comparisonId);
+    if (!comparison) {
+      res.status(404).json({
+        success: false,
+        error: 'Comparison run not found',
+      });
+      return;
+    }
+    if (!comparison.inputSnapshotIds.includes(baselineSnapshotId)) {
+      res.status(400).json({
+        success: false,
+        error: 'baselineSnapshotId must be one of the comparison input snapshots',
+      });
+      return;
+    }
+
+    const snapshotRepository = createAnalysisResultSnapshotRepository(db);
+    const snapshots: AnalysisResultSnapshot[] = [];
+    for (const snapshotId of comparison.inputSnapshotIds) {
+      const snapshot = snapshotRepository.getSnapshot(scope, snapshotId);
+      if (!snapshot) {
+        res.status(404).json({
+          success: false,
+          error: 'Analysis result snapshot not found',
+          snapshotId,
+        });
+        return;
+      }
+      snapshots.push(snapshot);
+    }
+    const requestedMetricKeys = stringArray(req.body?.metricKeys) as ComparisonMetricKey[];
+    const metricKeys = resolveComparisonMetricKeys(
+      requestedMetricKeys.length > 0
+        ? requestedMetricKeys
+        : comparison.result?.matrix.rows.map(row => row.metricKey),
+    );
+    const updated = await completeComparisonRun({
+      db,
+      repository,
+      comparison,
+      snapshots,
+      baselineSnapshotId,
+      metricKeys,
+      query: comparison.query,
+      providerId,
+      scope,
+    });
+
+    res.json({
+      success: true,
+      comparison: updated,
+    });
+  } catch (error) {
+    console.error('[ComparisonRoutes] Failed to switch comparison baseline:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to switch comparison baseline',
     });
   } finally {
     db.close();
