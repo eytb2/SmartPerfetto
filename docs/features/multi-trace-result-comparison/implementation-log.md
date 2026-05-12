@@ -252,3 +252,20 @@
 结论：
 
 - M2 前端 Result Picker 已有后端结果目录接口可接入。
+
+## M2.2 前端显示当前窗口最近 Snapshot
+
+状态：完成。
+
+验收证据：
+
+- `types.ts` 新增 `LatestAnalysisSnapshot` 与 `AIPanelState.latestAnalysisSnapshot`。
+- `ai_panel.ts` 初始化和 trace/workspace reset 时会清空 latest snapshot。
+- `ai_panel.ts` 处理 `snapshot_created` SSE event，保存 `snapshotId/status/sceneType/metricCount/evidenceRefCount/trace/session/run/report/visibility/createdAt`。
+- `analysis_completed.resultSnapshotId` 作为 fallback，避免客户端错过 `snapshot_created` 时完全丢失 snapshot id。
+- Header 状态区新增 `Ready result` / `Partial result` chip，tooltip 展示 snapshot id、scene、metric count、visibility。
+- `styles.scss` 新增 snapshot 状态 chip 样式。
+
+结论：
+
+- 当前窗口完成分析后，用户能在 AI Panel 顶部看到最近一次可比较分析结果是否已经持久化。
