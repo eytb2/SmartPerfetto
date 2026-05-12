@@ -395,6 +395,10 @@ Run:
   2. Double-click SmartPerfetto.app.
   3. Open http://localhost:10000 if the browser does not open automatically.
 
+If macOS blocks this non-notarized build, Control-click SmartPerfetto.app and
+choose Open. For a package you trust, you can also remove quarantine with:
+  xattr -dr com.apple.quarantine SmartPerfetto.app
+
 User data:
   ~/Library/Application Support/SmartPerfetto
 
@@ -470,15 +474,17 @@ PLIST
 sign_macos_app() {
   local app_dir="$1"
   local identity="${SMARTPERFETTO_MACOS_SIGN_IDENTITY:-}"
-  if [ -z "$identity" ]; then
-    return 0
-  fi
   require_command codesign
-  echo "Signing macOS app with identity: $identity"
-  while IFS= read -r -d '' file; do
-    codesign --force --timestamp --options runtime --sign "$identity" "$file"
-  done < <(find "$app_dir/Contents" -type f \( -perm -111 -o -name '*.node' -o -name '*.dylib' \) -print0)
-  codesign --force --timestamp --options runtime --sign "$identity" "$app_dir"
+  if [ -n "$identity" ]; then
+    echo "Signing macOS app with identity: $identity"
+    while IFS= read -r -d '' file; do
+      codesign --force --timestamp --options runtime --sign "$identity" "$file"
+    done < <(find "$app_dir/Contents" -type f \( -perm -111 -o -name '*.node' -o -name '*.dylib' \) -print0)
+    codesign --force --timestamp --options runtime --sign "$identity" "$app_dir"
+  else
+    echo "Ad-hoc signing macOS app bundle..."
+    codesign --force --deep --options runtime --sign - "$app_dir"
+  fi
   codesign --verify --deep --strict "$app_dir"
 }
 
@@ -547,9 +553,7 @@ package_target() {
   if [ "$target" = "macos-arm64" ]; then
     create_macos_app_bundle "$package_dir"
     resources_dir="$package_dir/SmartPerfetto.app/Contents/Resources"
-    if [ -n "${SMARTPERFETTO_MACOS_SIGN_IDENTITY:-}" ]; then
-      signed=true
-    fi
+    signed=true
     if [ -n "${SMARTPERFETTO_MACOS_NOTARY_PROFILE:-}" ]; then
       notarized=true
     fi

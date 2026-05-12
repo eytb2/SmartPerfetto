@@ -74,8 +74,11 @@ existing asset was freshly built for the exact version and commit.
 
 ## macOS Signing and Notarization
 
-Without signing variables, the script creates an unsigned app for local testing.
-For public macOS releases, configure:
+Without signing variables, the script creates an ad-hoc signed app so macOS
+does not classify the bundle as damaged. Ad-hoc signing does not pass
+Gatekeeper notarization checks; it is only suitable for local testing or
+packages where users can Control-click -> Open. For public macOS releases,
+configure:
 
 ```bash
 export SMARTPERFETTO_MACOS_SIGN_IDENTITY="Developer ID Application: ..."

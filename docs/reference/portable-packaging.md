@@ -73,8 +73,9 @@ commit 刚刚打过包的情况。
 
 ## macOS 签名和公证
 
-未设置签名变量时，脚本会生成 unsigned app，适合本地测试，不适合作为低摩擦公开
-发布。正式 macOS 包建议设置：
+未设置签名变量时，脚本会生成 ad-hoc signed app，避免 macOS 把 bundle 判定为
+damaged；但 ad-hoc 签名不会通过 Gatekeeper 公证检查，只适合本地测试或需要用户
+手动 Control-click → Open 的包。正式 macOS 包建议设置：
 
 ```bash
 export SMARTPERFETTO_MACOS_SIGN_IDENTITY="Developer ID Application: ..."

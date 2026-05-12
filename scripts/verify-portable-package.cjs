@@ -6,6 +6,8 @@
 'use strict';
 
 const { execFileSync } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const TARGETS = {
@@ -192,6 +194,38 @@ function readJsonEntry(assetPath, ext, entry) {
   }
 }
 
+function commandExists(command) {
+  try {
+    execFileSync('sh', ['-c', 'command -v "$1"', 'sh', command], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function verifyMacosCodeSignature(assetPath, packageName) {
+  if (!commandExists('codesign')) return;
+
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'smartperfetto-macos-verify-'));
+  try {
+    execFileSync('unzip', ['-q', assetPath, '-d', tmpRoot], { stdio: 'pipe' });
+    const appPath = path.join(tmpRoot, packageName, 'SmartPerfetto.app');
+    execFileSync('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath], {
+      stdio: 'pipe',
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } catch (error) {
+    const output = [error.stdout, error.stderr]
+      .filter(Boolean)
+      .map(buffer => buffer.toString())
+      .join('\n')
+      .trim();
+    throw new Error(`macOS app code signature verification failed${output ? `:\n${output}` : ''}`);
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+}
+
 function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -252,6 +286,9 @@ function main() {
   }
   if (opts.requireClean) {
     assert(manifest.gitDirty === false, 'Package was built from a dirty worktree');
+  }
+  if (target.os === 'macos') {
+    verifyMacosCodeSignature(assetPath, packageName);
   }
 
   console.log(`Portable package verified: ${expectedAsset}`);
