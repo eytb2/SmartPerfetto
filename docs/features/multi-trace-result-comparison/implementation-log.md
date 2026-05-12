@@ -235,3 +235,20 @@
 结论：
 
 - M2 API 层可以直接复用 repository + RBAC helper，避免在 route 中重新手写隔离规则。
+
+## M2.1 `GET /analysis-results` API
+
+状态：完成。
+
+验收证据：
+
+- 新增 `backend/src/routes/analysisResultRoutes.ts`。
+- 新增 workspace-scoped route：`GET /api/workspaces/:workspaceId/analysis-results`。
+- API 支持 `traceId`、`sceneType`、`visibility`、`createdBy`、`limit` 查询参数。
+- API 要求 `analysis_result:read` 权限，并通过 `AnalysisResultSnapshotRepository` 执行 tenant/workspace/user/visibility 过滤。
+- `backend/src/index.ts` 已注册该 workspace-scoped route。
+- 新增 `backend/src/routes/__tests__/analysisResultRoutes.test.ts` 覆盖列表、过滤、非法参数。
+
+结论：
+
+- M2 前端 Result Picker 已有后端结果目录接口可接入。

@@ -514,7 +514,7 @@ Result Picker -> POST /comparisons
 
 ### M2: 结果目录与 Picker
 
-- [ ] 新增 `GET /analysis-results` API。
+- [x] 新增 `GET /analysis-results` API。
 - [ ] 前端显示当前窗口最近 snapshot。
 - [ ] 新增 Result Picker。
 - [ ] 支持把 private snapshot 改成 workspace 可见。
