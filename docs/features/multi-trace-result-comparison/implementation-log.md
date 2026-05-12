@@ -54,3 +54,27 @@
 
 - 旧功能是“同一次 agent run 访问 current/reference 两条 raw trace”的能力，不是“多个窗口、多用户、已完成分析结果快照”的能力。
 - 新功能可以借鉴权限校验、工具注册和 UI 入口命名，但不能复用旧 `referenceTraceId` 作为产品模型或持久化模型。
+
+## M0.3 DataEnvelope 持久化粒度
+
+状态：完成。
+
+验收证据：
+
+- `backend/src/services/enterpriseSchema.ts` 已有 `agent_events` 表，字段包含 `tenant_id`、`workspace_id`、`run_id`、`cursor`、`event_type`、`payload_json`、`created_at`，并有 `idx_agent_events_replay(run_id, cursor)` 与 `idx_agent_events_owner_guard(tenant_id, workspace_id, run_id, cursor)`。
+- `backend/src/routes/agentRoutes.ts` 的 `broadcastToAgentDrivenClients()` 会为每个 streaming update 分配单调递增 `seqId`，通过 `streamProjector.broadcastStreamingUpdate()` 形成 SSE payload 后，在 `onBufferedEvent` 中调用 `persistBufferedAgentEvent()` 写入 DB。
+- `backend/src/services/agentEventStore.ts` 的 `persistSerializedAgentEvent()` 以 `INSERT OR IGNORE` 写入完整 `payload_json`，terminal event 还会同步更新 `analysis_runs` / `analysis_sessions` 状态。
+- `backend/src/assistant/stream/streamProjector.ts` 对 `data` event 的序列化格式为：
+  - `type: 'data'`
+  - `id`
+  - `envelope: update.content`
+  - `timestamp`
+  - observability metadata
+- `backend/src/types/dataContract.ts` 明确 `DataEvent.envelope` 是单个 `DataEnvelope` 或 `DataEnvelope[]`。
+- `broadcastToAgentDrivenClients()` 同时会把有效 DataEnvelope 加入 `session.dataEnvelopes`，但该数组会被 `MAX_SESSION_DATA_ENVELOPES` 裁剪，只适合运行期 UI/report 派生，不适合作为持久化 snapshot 的唯一来源。
+
+结论：
+
+- `agent_events` 的粒度足够生成 snapshot：可以按 `tenant_id/workspace_id/run_id` 读取所有 `event_type = 'data'` 事件，再从 `payload_json.envelope` 恢复完整 DataEnvelope 和 display/source metadata。
+- Snapshot normalizer 应优先读取 DB 中的 `agent_events`，只把内存 `session.dataEnvelopes` 当作当前 run 内的快速路径或 fallback。
+- 需要新增一个按 `runId` 读取完整 DataEnvelope 的 helper，避免直接依赖 SSE ring buffer 或前端消息。
