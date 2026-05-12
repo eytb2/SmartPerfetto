@@ -196,3 +196,19 @@
 结论：
 
 - Snapshot 生成不再只是 report/session/run 索引；已经能从 startup/scrolling DataEnvelope 中提取可比较数值。
+
+## M1.5 `snapshot_created` SSE Event
+
+状态：完成。
+
+验收证据：
+
+- `backend/src/types/dataContract.ts` 的 `SSE_EVENT_TYPES` 新增 `snapshot_created`。
+- `backend/src/types/analysis.ts` 的 `SSEEventType` 新增 `SNAPSHOT_CREATED`。
+- `backend/src/routes/agentRoutes.ts` 在 snapshot 持久化成功后发送可重放 `snapshot_created` event。
+- `snapshot_created` payload 包含 `snapshotId`、`status`、`sceneType`、`metricCount`、`evidenceRefCount`、`traceId`、`sessionId`、`runId`、`reportId`、`visibility`、`createdAt`。
+- `analysis_completed` 仍保留 `resultSnapshotId`，兼容只监听 terminal event 的客户端。
+
+结论：
+
+- 前端后续可以通过 `snapshot_created` 更新“当前窗口最近 snapshot”，刷新或 SSE 重连也可以通过 `agent_events` replay 恢复该事件。

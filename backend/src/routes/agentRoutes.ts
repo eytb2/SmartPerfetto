@@ -4435,6 +4435,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
   let reportError: string | undefined;
   const reportId = `agent-report-${session.sessionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   let resultSnapshotId: string | undefined;
+  let resultSnapshotEventData: Record<string, unknown> | undefined;
   let reportLease: TraceProcessorLeaseRecord | null = null;
   try {
     if (enterpriseLeasesEnabled()) {
@@ -4558,11 +4559,36 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       dataEnvelopes: session.dataEnvelopes,
     });
     resultSnapshotId = resultSnapshot?.id;
+    if (resultSnapshot) {
+      resultSnapshotEventData = {
+        snapshotId: resultSnapshot.id,
+        status: resultSnapshot.status,
+        sceneType: resultSnapshot.sceneType,
+        metricCount: resultSnapshot.metrics.length,
+        evidenceRefCount: resultSnapshot.evidenceRefs.length,
+        traceId: resultSnapshot.traceId,
+        sessionId: resultSnapshot.sessionId,
+        runId: resultSnapshot.runId,
+        reportId: resultSnapshot.reportId,
+        visibility: resultSnapshot.visibility,
+        createdAt: resultSnapshot.createdAt,
+      };
+    }
   } catch (snapshotError: any) {
     console.warn('[AgentRoutes] Failed to persist analysis result snapshot:', {
       sessionId: session.sessionId,
       runId: session.lastRun?.runId || session.activeRun?.runId,
       error: snapshotError?.message || String(snapshotError),
+    });
+  }
+
+  if (resultSnapshotEventData) {
+    sendReplayableSessionEvent(session, res, 'snapshot_created', {
+      type: 'snapshot_created',
+      architecture: 'agent-driven',
+      ...observability,
+      data: resultSnapshotEventData,
+      timestamp: Date.now(),
     });
   }
 

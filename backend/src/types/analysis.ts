@@ -249,6 +249,7 @@ export enum SSEEventType {
   CIRCUIT_BREAKER = 'circuit_breaker',
 
   // === Terminal Events ===
+  SNAPSHOT_CREATED = 'snapshot_created',
   ANALYSIS_COMPLETED = 'analysis_completed',
   ERROR = 'error',
 

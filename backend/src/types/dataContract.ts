@@ -502,6 +502,7 @@ export type DisplayFormat = typeof VALID_DISPLAY_FORMATS[number];
  * - finding: Individual finding/diagnostic
  * - progress: Phase/step progress update
  * - error: Error message
+ * - snapshot_created: Analysis result snapshot persisted for comparison
  * - analysis_completed: Final result with report URL
  */
 export const SSE_EVENT_TYPES = [
@@ -515,6 +516,7 @@ export const SSE_EVENT_TYPES = [
   'progress',
   'conversation_step',
   'error',
+  'snapshot_created',
   'analysis_completed',
   'thought',
   'tool_call',
