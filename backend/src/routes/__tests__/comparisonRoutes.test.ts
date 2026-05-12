@@ -252,6 +252,7 @@ describe('comparison routes', () => {
     });
     expect(createResponse.body.comparison.result.significantChanges).toHaveLength(3);
     expect(createResponse.body.comparison.result.reportId).toMatch(/^comparison-report-/);
+    expect(createResponse.body.comparison.result.reportExportUrl).toMatch(/\/api\/reports\/comparison-report-.*\/export/);
     expect(reportStore.get(createResponse.body.comparison.result.reportId)?.html).toContain('Metric Delta Matrix');
 
     const comparisonId = createResponse.body.comparison.id;
@@ -483,6 +484,35 @@ describe('comparison routes', () => {
       'startup.total_ms',
       'custom.render_latency_ms',
     ]);
+  });
+
+  test('exports comparison report from persisted result when artifact cache is empty', async () => {
+    const createResponse = await request(app())
+      .post('/api/workspaces/workspace-a/comparisons')
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .send({
+        baselineSnapshotId: 'snapshot-a',
+        candidateSnapshotIds: ['snapshot-b'],
+        metricKeys: ['startup.total_ms'],
+        query: 'export this comparison',
+      })
+      .expect(201);
+
+    const comparisonId = createResponse.body.comparison.id;
+    reportStore.clear();
+
+    const exportResponse = await request(app())
+      .get(`/api/workspaces/workspace-a/comparisons/${comparisonId}/report/export`)
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .expect(200);
+
+    expect(exportResponse.headers['content-type']).toContain('text/html');
+    expect(exportResponse.headers['content-disposition']).toContain(
+      `attachment; filename="smartperfetto-comparison-${comparisonId}.html"`,
+    );
+    expect(exportResponse.text).toContain(`data-comparison-id="${comparisonId}"`);
+    expect(exportResponse.text).toContain('Metric Delta Matrix');
+    expect(exportResponse.text).toContain('export this comparison');
   });
 
   test('rejects baseline switch outside comparison inputs', async () => {

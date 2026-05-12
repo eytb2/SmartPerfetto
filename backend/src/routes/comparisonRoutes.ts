@@ -14,7 +14,11 @@ import {
   resolveComparisonMetricKeys,
 } from '../services/comparisonResultService';
 import { generateAiComparisonConclusion } from '../services/comparisonAiConclusionService';
-import { persistComparisonHtmlReport } from '../services/comparisonHtmlReportService';
+import {
+  persistComparisonHtmlReport,
+  renderComparisonHtmlReport,
+} from '../services/comparisonHtmlReportService';
+import { reportStore } from './reportRoutes';
 import { backfillStandardMetrics } from '../services/standardMetricBackfillService';
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import type { TraceProcessorService } from '../services/traceProcessorService';
@@ -79,6 +83,11 @@ function applyComparisonResponseView(
     ...comparison,
     result: applyComparisonResultViewOptions(comparison.result, view),
   };
+}
+
+function exportFilename(comparisonId: string): string {
+  const safeId = comparisonId.replace(/[^a-zA-Z0-9._-]/g, '_');
+  return `smartperfetto-comparison-${safeId}.html`;
 }
 
 function reportArtifactExists(db: ReturnType<typeof openEnterpriseDb>, reportId: string): boolean {
@@ -222,6 +231,8 @@ async function completeComparisonRun(
     scope: input.scope,
   });
   result.reportId = report.reportId;
+  result.reportUrl = report.reportUrl;
+  result.reportExportUrl = `${report.reportUrl}/export`;
   const persistedReportId = reportArtifactExists(input.db, report.reportId)
     ? report.reportId
     : undefined;
@@ -429,6 +440,67 @@ router.patch('/:comparisonId/baseline', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to switch comparison baseline',
+    });
+  } finally {
+    db.close();
+  }
+});
+
+router.get('/:comparisonId/report/export', (req, res) => {
+  const context = requireRequestContext(req);
+  if (!hasRbacPermission(context, 'comparison:read')) {
+    sendForbidden(res, 'comparison:read permission is required');
+    return;
+  }
+
+  const comparisonId = optionalString(req.params.comparisonId);
+  if (!comparisonId) {
+    res.status(400).json({
+      success: false,
+      error: 'comparisonId is required',
+    });
+    return;
+  }
+
+  const db = openEnterpriseDb();
+  try {
+    const repository = createMultiTraceComparisonRunRepository(db);
+    const comparison = repository.getRun(
+      {
+        tenantId: context.tenantId,
+        workspaceId: context.workspaceId,
+        userId: context.userId,
+      },
+      comparisonId,
+    );
+    if (!comparison?.result) {
+      res.status(404).json({
+        success: false,
+        error: 'Comparison report not found',
+      });
+      return;
+    }
+
+    const viewComparison = applyComparisonResponseView(comparison, comparisonResponseView(req));
+    const reportId = viewComparison.result?.reportId;
+    const cachedReport = reportId ? reportStore.get(reportId) : undefined;
+    const html = cachedReport?.html || renderComparisonHtmlReport({
+      comparisonId: viewComparison.id,
+      query: viewComparison.query,
+      result: viewComparison.result!,
+    });
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${exportFilename(viewComparison.id)}"`);
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.send(html);
+  } catch (error) {
+    console.error('[ComparisonRoutes] Failed to export comparison report:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to export comparison report',
     });
   } finally {
     db.close();

@@ -300,6 +300,8 @@ export interface ComparisonResult {
   conclusion: ComparisonConclusion;
   significantChanges: ComparisonDelta[];
   reportId?: string;
+  reportUrl?: string;
+  reportExportUrl?: string;
 }
 
 export type MultiTraceComparisonRunStatus =
