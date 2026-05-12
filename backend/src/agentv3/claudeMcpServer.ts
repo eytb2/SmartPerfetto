@@ -635,17 +635,18 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         return { content: [{ type: 'text' as const, text: skillPlanError }] };
       }
 
-      // Guard: pipeline_definition skills are not executable analysis skills
+      // Guard: metadata-only skills are not executable single-trace analysis skills
       const skillDef = skillRegistry.getSkill(skillId);
-      if (skillDef?.type === 'pipeline_definition') {
+      if (skillDef?.type === 'pipeline_definition' || skillDef?.type === 'comparison') {
+        const useHint = skillDef.type === 'comparison'
+          ? 'It describes analysis result comparison. Use the multi-trace comparison API/tools instead.'
+          : 'Use `detect_architecture` to detect the rendering pipeline, or call a composite analysis skill like `scrolling_analysis`, `gpu_analysis`, etc.';
         return {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({
               success: false,
-              error: `Skill "${skillId}" is a rendering pipeline definition used by \`detect_architecture\`. ` +
-                'It cannot be used for analysis. Use `detect_architecture` to detect the rendering pipeline, ' +
-                'or call a composite analysis skill like `scrolling_analysis`, `gpu_analysis`, etc.',
+              error: `Skill "${skillId}" is metadata-only and cannot be used for single-trace analysis. ${useHint}`,
             }),
           }],
         };

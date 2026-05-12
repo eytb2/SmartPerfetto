@@ -1360,6 +1360,7 @@ export class SkillExecutor {
           break;
 
         case 'pipeline_definition':
+        case 'comparison':
           return {
             skillId,
             skillName: skill.meta.display_name,
@@ -1367,7 +1368,7 @@ export class SkillExecutor {
             displayResults: [],
             diagnostics: [],
             executionTimeMs: Date.now() - startTime,
-            error: `Skill type 'pipeline_definition' is metadata-only and not executable: ${skillId}`,
+            error: `Skill type '${skill.type}' is metadata-only and not executable by the single-trace SkillExecutor: ${skillId}`,
           };
       }
 

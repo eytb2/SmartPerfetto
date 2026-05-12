@@ -359,6 +359,13 @@ export class SkillRegistry {
       await this.loadSkillsFromDir(systemDir);
     }
 
+    // 加载结果对比 skills。它们描述 analysis_result_snapshot 的对比能力，
+    // 由 comparison services 执行，不进入单 Trace SQL executor。
+    const comparisonDir = path.join(skillsDir, 'comparison');
+    if (fs.existsSync(comparisonDir)) {
+      await this.loadSkillsFromDir(comparisonDir);
+    }
+
     // 加载模块专家 skills (Cross-Domain Expert System)
     const modulesDir = path.join(skillsDir, 'modules');
     if (fs.existsSync(modulesDir)) {

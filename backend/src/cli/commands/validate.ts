@@ -88,6 +88,10 @@ function validateTierAndStdlib(skill: SkillDefinition): { errors: string[]; warn
   const errors: string[] = [];
   const warnings: string[] = [];
 
+  if (skill.type === 'comparison') {
+    return { errors, warnings };
+  }
+
   const declaredTier = (skill as any).tier as 'S' | 'A' | 'B' | undefined;
   const prereqModules: string[] = Array.isArray((skill as any).prerequisites?.modules)
     ? (skill as any).prerequisites.modules.filter((m: unknown) => typeof m === 'string')
@@ -271,11 +275,34 @@ function validateSkillDefinition(skill: SkillDefinition, filePath: string): Vali
   // Execution shape validation:
   // - atomic: allow either root-level `sql` OR step-based `steps`
   // - composite/iterator/diagnostic: require `steps`
+  // - comparison: metadata contract executed by comparison services
   const hasSteps = Array.isArray(skill.steps) && skill.steps.length > 0;
   const hasRootSql = typeof (skill as any).sql === 'string' && String((skill as any).sql).trim().length > 0;
   if (skill.type === 'atomic') {
     if (!hasRootSql && !hasSteps) {
       errors.push('Atomic skill must define either `sql` or non-empty `steps`');
+    }
+  } else if (skill.type === 'comparison') {
+    const source = (skill as any).source;
+    const comparison = (skill as any).comparison;
+    if (source !== 'analysis_result_snapshot') {
+      errors.push("comparison skill must define source: 'analysis_result_snapshot'");
+    }
+    if (!comparison || typeof comparison !== 'object') {
+      errors.push('comparison skill must define comparison contract');
+    } else {
+      if (comparison.source !== 'analysis_result_snapshot') {
+        errors.push("comparison.source must be 'analysis_result_snapshot'");
+      }
+      if (comparison.operation !== 'build_comparison_matrix') {
+        errors.push("comparison.operation must be 'build_comparison_matrix'");
+      }
+      if (comparison.output_contract && comparison.output_contract !== 'ComparisonMatrix') {
+        errors.push("comparison.output_contract must be 'ComparisonMatrix' when provided");
+      }
+      if (comparison.required_inputs !== undefined && !Array.isArray(comparison.required_inputs)) {
+        errors.push('comparison.required_inputs must be an array when provided');
+      }
     }
   } else {
     if (!hasSteps) {
@@ -728,7 +755,7 @@ function validateStrategySkillReferences(): number {
 
   // Build skill name set from YAML files on disk (no runtime loader needed)
   const skillNames = new Set<string>();
-  const skillDirs = ['atomic', 'composite', 'deep', 'system', 'modules', 'pipelines'];
+  const skillDirs = ['atomic', 'composite', 'deep', 'system', 'comparison', 'modules', 'pipelines'];
   for (const dir of skillDirs) {
     const dirPath = path.join(SKILLS_DIR, dir);
     if (!fs.existsSync(dirPath)) continue;
@@ -820,6 +847,7 @@ export const validateCommand = new Command('validate')
         path.join(SKILLS_DIR, 'composite', `${skillId}.skill.yaml`),
         path.join(SKILLS_DIR, 'atomic', `${skillId}.skill.yaml`),
         path.join(SKILLS_DIR, 'deep', `${skillId}.skill.yaml`),
+        path.join(SKILLS_DIR, 'comparison', `${skillId}.skill.yaml`),
         path.join(SKILLS_DIR, 'custom', `${skillId}.skill.yaml`),
       ];
 
@@ -835,6 +863,7 @@ export const validateCommand = new Command('validate')
       files = findSkillFiles(path.join(SKILLS_DIR, 'composite'), /\.skill\.ya?ml$/);
       files.push(...findSkillFiles(path.join(SKILLS_DIR, 'atomic'), /\.skill\.ya?ml$/));
       files.push(...findSkillFiles(path.join(SKILLS_DIR, 'deep'), /\.skill\.ya?ml$/));
+      files.push(...findSkillFiles(path.join(SKILLS_DIR, 'comparison'), /\.skill\.ya?ml$/));
 
       if (options.all) {
         files.push(...findSkillFiles(path.join(SKILLS_DIR, 'vendors'), /\.override\.ya?ml$/));

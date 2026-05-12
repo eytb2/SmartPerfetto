@@ -28,7 +28,8 @@ export type SkillType =
   | 'ai_summary'
   | 'conditional'
   | 'pipeline'
-  | 'pipeline_definition';
+  | 'pipeline_definition'
+  | 'comparison';
 
 export type DisplayLevel = 'none' | 'debug' | 'detail' | 'summary' | 'key' | 'hidden';
 
@@ -373,10 +374,20 @@ export interface SkillOutputConfig {
   }[];
 }
 
+export type SkillSource = 'trace' | 'analysis_result_snapshot';
+
+export interface ComparisonSkillConfig {
+  operation: 'build_comparison_matrix';
+  source: 'analysis_result_snapshot';
+  supports_backfill?: boolean;
+  required_inputs?: string[];
+  output_contract?: 'ComparisonMatrix';
+}
+
 export interface SkillDefinition {
   name: string;
   version: string;
-  type: SkillType;           // 'atomic' | 'composite' | 'iterator' | 'diagnostic'
+  type: SkillType;           // 'atomic' | 'composite' | 'iterator' | 'diagnostic' | 'comparison'
   category?: string;
   priority?: string;
 
@@ -395,6 +406,13 @@ export interface SkillDefinition {
 
   // 原子 skill 的 SQL（atomic 使用）
   sql?: string;
+
+  // 数据来源。默认 trace；comparison skills 使用 analysis_result_snapshot。
+  source?: SkillSource;
+
+  // Comparison skills are metadata contracts executed by comparison services,
+  // not by the single-trace SQL SkillExecutor.
+  comparison?: ComparisonSkillConfig;
 
   // 诊断规则（diagnostic 使用）
   rules?: DiagnosticRule[];
