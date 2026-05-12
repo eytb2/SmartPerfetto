@@ -181,4 +181,24 @@ describe('analysis result routes', () => {
       .set('x-tenant-id', DEFAULT_TENANT_ID)
       .expect(400);
   });
+
+  test('updates owned snapshot visibility', async () => {
+    const response = await request(app())
+      .patch('/api/workspaces/workspace-a/analysis-results/snapshot-a')
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .send({ visibility: 'workspace' })
+      .expect(200);
+
+    expect(response.body.success).toBe(true);
+    expect(response.body.snapshot.visibility).toBe('workspace');
+    expect(response.body.snapshot.id).toBe('snapshot-a');
+  });
+
+  test('rejects invalid visibility updates', async () => {
+    await request(app())
+      .patch('/api/workspaces/workspace-a/analysis-results/snapshot-a')
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .send({ visibility: 'org' })
+      .expect(400);
+  });
 });

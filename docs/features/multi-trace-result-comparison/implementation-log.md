@@ -287,3 +287,20 @@
 结论：
 
 - 多窗口/多用户场景下，用户已经可以从 workspace 分析结果目录中选择一组待对比 snapshot。
+
+## M2.4 Private Snapshot 改成 Workspace 可见
+
+状态：完成。
+
+验收证据：
+
+- 后端新增 `PATCH /api/workspaces/:workspaceId/analysis-results/:snapshotId`。
+- PATCH body 支持 `{ "visibility": "workspace" }` 和 `{ "visibility": "private" }`，非法 visibility 返回 400。
+- 路由复用 `analysis_result:share` RBAC，并要求当前用户对目标 snapshot 有 owner 级写权限。
+- Snapshot repository 复用 `updateVisibility`，更新后返回完整 snapshot 并记录审计事件。
+- Result Picker 对 private snapshot 显示“共享”动作，成功后局部刷新 item，并同步 header latest snapshot 的 visibility。
+- 增加 route test 覆盖成功更新和非法 visibility。
+
+结论：
+
+- 用户可以把自己的 private 分析结果发布到 workspace 结果目录，供其它窗口或用户作为对比候选。

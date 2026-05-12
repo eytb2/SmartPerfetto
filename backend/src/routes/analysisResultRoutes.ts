@@ -6,7 +6,11 @@ import express from 'express';
 import { requireRequestContext } from '../middleware/auth';
 import { openEnterpriseDb } from '../services/enterpriseDb';
 import { createAnalysisResultSnapshotRepository } from '../services/analysisResultSnapshotStore';
-import { hasRbacPermission, sendForbidden } from '../services/rbac';
+import {
+  canShareAnalysisResultResource,
+  hasRbacPermission,
+  sendForbidden,
+} from '../services/rbac';
 import type {
   AnalysisResultSceneType,
   AnalysisResultVisibility,
@@ -101,6 +105,87 @@ router.get('/', (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to list analysis results',
+    });
+  } finally {
+    db.close();
+  }
+});
+
+router.patch('/:snapshotId', (req, res) => {
+  const context = requireRequestContext(req);
+  const snapshotId = optionalString(req.params.snapshotId);
+  if (!snapshotId) {
+    res.status(400).json({
+      success: false,
+      error: 'snapshotId is required',
+    });
+    return;
+  }
+
+  const visibility = optionalString(req.body?.visibility);
+  if (!visibility || !VALID_VISIBILITIES.has(visibility as AnalysisResultVisibility)) {
+    res.status(400).json({
+      success: false,
+      error: 'Invalid visibility',
+    });
+    return;
+  }
+
+  const db = openEnterpriseDb();
+  try {
+    const repository = createAnalysisResultSnapshotRepository(db);
+    const existing = repository.getSnapshot(
+      {
+        tenantId: context.tenantId,
+        workspaceId: context.workspaceId,
+        userId: context.userId,
+      },
+      snapshotId,
+    );
+    if (!existing) {
+      res.status(404).json({
+        success: false,
+        error: 'Analysis result snapshot not found',
+      });
+      return;
+    }
+
+    if (!canShareAnalysisResultResource({
+      tenantId: existing.tenantId,
+      workspaceId: existing.workspaceId,
+      userId: existing.createdBy,
+    }, context)) {
+      sendForbidden(res, 'analysis_result:share permission is required');
+      return;
+    }
+
+    const updated = repository.updateVisibility(
+      {
+        tenantId: context.tenantId,
+        workspaceId: context.workspaceId,
+        userId: context.userId,
+        auditActorUserId: context.userId,
+      },
+      snapshotId,
+      visibility as AnalysisResultVisibility,
+    );
+    if (!updated) {
+      res.status(404).json({
+        success: false,
+        error: 'Analysis result snapshot not found',
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      snapshot: updated,
+    });
+  } catch (error) {
+    console.error('[AnalysisResultRoutes] Failed to update analysis result:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update analysis result',
     });
   } finally {
     db.close();
