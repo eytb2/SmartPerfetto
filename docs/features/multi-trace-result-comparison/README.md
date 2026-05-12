@@ -559,7 +559,7 @@ Result Picker -> POST /comparisons
 
 - [x] 支持 3 个以上 snapshot。
 - [x] 支持 baseline 切换。
-- [ ] 支持“只看显著变化”。
+- [x] 支持“只看显著变化”。
 - [ ] 支持按 metric group 折叠。
 - [ ] 支持导出 comparison report。
 

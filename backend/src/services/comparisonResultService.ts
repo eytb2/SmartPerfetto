@@ -22,6 +22,10 @@ export interface BuildDeterministicComparisonResultOptions {
   metricKeys?: ComparisonMetricKey[];
 }
 
+export interface ComparisonResultViewOptions {
+  significantOnly?: boolean;
+}
+
 export function resolveComparisonMetricKeys(
   requestedMetricKeys: ComparisonMetricKey[] | undefined,
 ): ComparisonMetricKey[] {
@@ -91,6 +95,23 @@ export function buildDeterministicComparisonResult(
       inferences: [],
       recommendations: [],
       uncertainty: buildUncertainty(matrix),
+    },
+  };
+}
+
+export function applyComparisonResultViewOptions(
+  result: ComparisonResult,
+  options: ComparisonResultViewOptions = {},
+): ComparisonResult {
+  if (!options.significantOnly) return result;
+  const significantMetricKeys = new Set(
+    result.significantChanges.map(delta => delta.metricKey),
+  );
+  return {
+    ...result,
+    matrix: {
+      ...result.matrix,
+      rows: result.matrix.rows.filter(row => significantMetricKeys.has(row.metricKey)),
     },
   };
 }

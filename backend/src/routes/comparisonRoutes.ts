@@ -9,6 +9,7 @@ import { openEnterpriseDb } from '../services/enterpriseDb';
 import { createAnalysisResultSnapshotRepository } from '../services/analysisResultSnapshotStore';
 import { createMultiTraceComparisonRunRepository } from '../services/multiTraceComparisonStore';
 import {
+  applyComparisonResultViewOptions,
   buildDeterministicComparisonResult,
   resolveComparisonMetricKeys,
 } from '../services/comparisonResultService';
@@ -57,6 +58,27 @@ function uniqueStrings(values: string[]): string[] {
     result.push(value);
   }
   return result;
+}
+
+function optionalBoolean(value: unknown): boolean {
+  return value === true || value === 'true' || value === '1';
+}
+
+function comparisonResponseView(req: express.Request): { significantOnly?: boolean } {
+  return {
+    significantOnly: optionalBoolean(req.body?.significantOnly) || optionalBoolean(req.query?.significantOnly),
+  };
+}
+
+function applyComparisonResponseView(
+  comparison: MultiTraceComparisonRun,
+  view: { significantOnly?: boolean },
+): MultiTraceComparisonRun {
+  if (!comparison.result || !view.significantOnly) return comparison;
+  return {
+    ...comparison,
+    result: applyComparisonResultViewOptions(comparison.result, view),
+  };
 }
 
 function reportArtifactExists(db: ReturnType<typeof openEnterpriseDb>, reportId: string): boolean {
@@ -311,7 +333,7 @@ router.post('/', async (req, res) => {
     }
     res.status(201).json({
       success: true,
-      comparison,
+      comparison: applyComparisonResponseView(comparison, comparisonResponseView(req)),
     });
   } catch (error) {
     console.error('[ComparisonRoutes] Failed to create comparison:', error);
@@ -400,7 +422,7 @@ router.patch('/:comparisonId/baseline', async (req, res) => {
 
     res.json({
       success: true,
-      comparison: updated,
+      comparison: applyComparisonResponseView(updated, comparisonResponseView(req)),
     });
   } catch (error) {
     console.error('[ComparisonRoutes] Failed to switch comparison baseline:', error);
@@ -449,7 +471,7 @@ router.get('/:comparisonId', (req, res) => {
     }
     res.json({
       success: true,
-      comparison,
+      comparison: applyComparisonResponseView(comparison, comparisonResponseView(req)),
     });
   } catch (error) {
     console.error('[ComparisonRoutes] Failed to read comparison:', error);
@@ -504,7 +526,7 @@ router.get('/:comparisonId/stream', (req, res) => {
     });
     res.write('retry: 3000\n');
     res.write(`event: comparison_state\n`);
-    res.write(`data: ${JSON.stringify({ comparison })}\n\n`);
+    res.write(`data: ${JSON.stringify({ comparison: applyComparisonResponseView(comparison, comparisonResponseView(req)) })}\n\n`);
     res.end();
   } catch (error) {
     console.error('[ComparisonRoutes] Failed to stream comparison:', error);

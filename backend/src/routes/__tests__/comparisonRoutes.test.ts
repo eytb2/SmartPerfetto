@@ -429,6 +429,62 @@ describe('comparison routes', () => {
     expect(html).toContain('Baseline: snapshot-b');
   });
 
+  test('filters API response to significant changes without mutating persisted matrix', async () => {
+    const db = openEnterpriseDb(dbPath);
+    const repo = createAnalysisResultSnapshotRepository(db);
+    const scope = {
+      tenantId: DEFAULT_TENANT_ID,
+      workspaceId: 'workspace-a',
+      userId: DEFAULT_DEV_USER_ID,
+    };
+    repo.upsertMetrics(
+      scope,
+      'snapshot-a',
+      [metrics({ startupMs: 1200, fps: 55, jankRate: 8, renderLatencyMs: 18 })[3]],
+      [],
+    );
+    repo.upsertMetrics(
+      scope,
+      'snapshot-b',
+      [metrics({ startupMs: 900, fps: 60, jankRate: 3, renderLatencyMs: 18 })[3]],
+      [],
+    );
+    db.close();
+
+    const createResponse = await request(app())
+      .post('/api/workspaces/workspace-a/comparisons')
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .send({
+        baselineSnapshotId: 'snapshot-a',
+        candidateSnapshotIds: ['snapshot-b'],
+        metricKeys: ['startup.total_ms', 'custom.render_latency_ms'],
+      })
+      .expect(201);
+
+    const comparisonId = createResponse.body.comparison.id;
+    expect(createResponse.body.comparison.result.matrix.rows.map((row: { metricKey: string }) => row.metricKey)).toEqual([
+      'startup.total_ms',
+      'custom.render_latency_ms',
+    ]);
+
+    const filteredResponse = await request(app())
+      .get(`/api/workspaces/workspace-a/comparisons/${comparisonId}?significantOnly=true`)
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .expect(200);
+    expect(filteredResponse.body.comparison.result.matrix.rows.map((row: { metricKey: string }) => row.metricKey)).toEqual([
+      'startup.total_ms',
+    ]);
+
+    const fullResponse = await request(app())
+      .get(`/api/workspaces/workspace-a/comparisons/${comparisonId}`)
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .expect(200);
+    expect(fullResponse.body.comparison.result.matrix.rows.map((row: { metricKey: string }) => row.metricKey)).toEqual([
+      'startup.total_ms',
+      'custom.render_latency_ms',
+    ]);
+  });
+
   test('rejects baseline switch outside comparison inputs', async () => {
     const createResponse = await request(app())
       .post('/api/workspaces/workspace-a/comparisons')
