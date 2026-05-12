@@ -77,4 +77,30 @@ describe('renderComparisonHtmlReport', () => {
     expect(html).toContain('Candidate is 300 ms faster.');
     expect(html).not.toContain('<script>');
   });
+
+  test('renders more than one candidate column pair', () => {
+    const result = buildDeterministicComparisonResult(
+      [
+        snapshot('baseline', 1200),
+        snapshot('candidate-fast', 900),
+        snapshot('candidate-slow', 1500),
+      ],
+      {
+        baselineSnapshotId: 'baseline',
+        metricKeys: ['startup.total_ms'],
+      },
+    );
+
+    const html = renderComparisonHtmlReport({
+      comparisonId: 'comparison-n',
+      query: 'compare three startups',
+      result,
+    });
+
+    expect(html).toContain('candidate-fast&lt;script&gt;');
+    expect(html).toContain('candidate-slow&lt;script&gt;');
+    expect(html).toContain('-300');
+    expect(html).toContain('+300');
+    expect((html.match(/<th>Delta<\/th>/g) || []).length).toBe(2);
+  });
 });

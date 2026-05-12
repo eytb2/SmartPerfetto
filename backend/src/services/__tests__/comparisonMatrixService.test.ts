@@ -153,6 +153,40 @@ describe('buildComparisonMatrix', () => {
     });
   });
 
+  test('builds deltas for more than two snapshots', () => {
+    const matrix = buildComparisonMatrix(
+      [
+        snapshot('baseline', { startupMs: 1200 }),
+        snapshot('candidate-fast', { startupMs: 900 }),
+        snapshot('candidate-slow', { startupMs: 1500 }),
+      ],
+      {
+        baselineSnapshotId: 'baseline',
+        metricKeys: ['startup.total_ms'],
+      },
+    );
+
+    const startup = matrix.rows[0];
+    expect(matrix.inputSnapshots.map(item => item.snapshotId)).toEqual([
+      'baseline',
+      'candidate-fast',
+      'candidate-slow',
+    ]);
+    expect(startup.deltas).toHaveLength(2);
+    expect(startup.deltas[0]).toMatchObject({
+      snapshotId: 'candidate-fast',
+      deltaValue: -300,
+      deltaPct: -25,
+      assessment: 'better',
+    });
+    expect(startup.deltas[1]).toMatchObject({
+      snapshotId: 'candidate-slow',
+      deltaValue: 300,
+      deltaPct: 25,
+      assessment: 'worse',
+    });
+  });
+
   test('supports requested custom metric keys from snapshots', () => {
     const matrix = buildComparisonMatrix(
       [

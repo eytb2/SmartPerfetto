@@ -151,6 +151,7 @@ function seedGraph(): void {
   for (const [traceId, sessionId, runId] of [
     ['trace-a', 'session-a', 'run-a'],
     ['trace-b', 'session-b', 'run-b'],
+    ['trace-c', 'session-c', 'run-c'],
   ]) {
     db.prepare(`
       INSERT INTO trace_assets
@@ -180,6 +181,14 @@ function seedGraph(): void {
     runId: 'run-b',
     visibility: 'workspace',
     metrics: metrics({ startupMs: 900, fps: 60, jankRate: 3 }),
+  }));
+  repo.createSnapshot(snapshot({
+    id: 'snapshot-c',
+    traceId: 'trace-c',
+    sessionId: 'session-c',
+    runId: 'run-c',
+    visibility: 'workspace',
+    metrics: metrics({ startupMs: 1400, fps: 50, jankRate: 12 }),
   }));
   db.close();
 }
@@ -319,6 +328,49 @@ describe('comparison routes', () => {
       deltaPct: 50,
       assessment: 'worse',
     });
+  });
+
+  test('creates comparison for more than two snapshots', async () => {
+    const createResponse = await request(app())
+      .post('/api/workspaces/workspace-a/comparisons')
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .send({
+        baselineSnapshotId: 'snapshot-a',
+        candidateSnapshotIds: ['snapshot-b', 'snapshot-c'],
+        metricKeys: ['startup.total_ms'],
+        query: 'compare three startups',
+      })
+      .expect(201);
+
+    expect(createResponse.body.comparison.inputSnapshotIds).toEqual([
+      'snapshot-a',
+      'snapshot-b',
+      'snapshot-c',
+    ]);
+
+    const rows = createResponse.body.comparison.result.matrix.rows as Array<{
+      metricKey: string;
+      deltas: Array<{ snapshotId: string; deltaValue: number; assessment: string }>;
+    }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].metricKey).toBe('startup.total_ms');
+    expect(rows[0].deltas).toHaveLength(2);
+    expect(rows[0].deltas[0]).toMatchObject({
+      snapshotId: 'snapshot-b',
+      deltaValue: -300,
+      assessment: 'better',
+    });
+    expect(rows[0].deltas[1]).toMatchObject({
+      snapshotId: 'snapshot-c',
+      deltaValue: 200,
+      assessment: 'worse',
+    });
+    expect(createResponse.body.comparison.result.significantChanges).toHaveLength(2);
+
+    const html = reportStore.get(createResponse.body.comparison.result.reportId)?.html || '';
+    expect(html).toContain('snapshot-b');
+    expect(html).toContain('snapshot-c');
+    expect((html.match(/<th>Delta<\/th>/g) || []).length).toBe(2);
   });
 
   test('streams the current comparison state as SSE', async () => {

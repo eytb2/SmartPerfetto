@@ -557,7 +557,7 @@ Result Picker -> POST /comparisons
 
 ### M5: N Trace 与高级 UX
 
-- [ ] 支持 3 个以上 snapshot。
+- [x] 支持 3 个以上 snapshot。
 - [ ] 支持 baseline 切换。
 - [ ] 支持“只看显著变化”。
 - [ ] 支持按 metric group 折叠。
