@@ -279,6 +279,27 @@ describe('enterprise core schema', () => {
       'updated_at',
       'expires_at',
     ]);
+    expectColumns(db!, 'multi_trace_comparison_runs', [
+      'id',
+      'tenant_id',
+      'workspace_id',
+      'created_by',
+      'baseline_snapshot_id',
+      'query',
+      'status',
+      'result_json',
+      'report_id',
+      'error',
+      'schema_version',
+      'created_at',
+      'completed_at',
+    ]);
+    expectColumns(db!, 'multi_trace_comparison_inputs', [
+      'comparison_id',
+      'snapshot_id',
+      'role',
+      'ordinal',
+    ]);
     expectColumns(db!, 'runtime_snapshots', [
       'id',
       'tenant_id',
@@ -400,6 +421,9 @@ describe('enterprise core schema', () => {
       'idx_analysis_result_window_states_workspace',
       'idx_analysis_result_window_states_trace',
       'idx_analysis_result_window_states_snapshot',
+      'idx_multi_trace_comparison_runs_workspace',
+      'idx_multi_trace_comparison_runs_status',
+      'idx_multi_trace_comparison_inputs_snapshot',
       'idx_runtime_snapshots_session',
       'idx_runtime_snapshots_run',
       'idx_provider_credentials_scope',
@@ -438,6 +462,7 @@ describe('enterprise core schema', () => {
       { version: 6 },
       { version: 7 },
       { version: 8 },
+      { version: 9 },
     ]);
   });
 

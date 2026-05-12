@@ -322,3 +322,21 @@
 结论：
 
 - 多窗口场景已经有稳定的窗口在线信号，后续自然语言里的“另一个 Trace”可以优先解析到仍在打开的窗口结果。
+
+## M3.1 Comparison Repository/API/SSE
+
+状态：完成。
+
+验收证据：
+
+- Schema v9 新增 `multi_trace_comparison_runs` 和 `multi_trace_comparison_inputs`。
+- 新增 `MultiTraceComparisonRunRepository`，支持 create/get/update，并记录 comparison audit event。
+- 新增 `POST /api/workspaces/:workspaceId/comparisons`，创建 pending comparison run，创建前校验 baseline/candidate snapshots 可读。
+- 新增 `GET /api/workspaces/:workspaceId/comparisons/:comparisonId`。
+- 新增 `GET /api/workspaces/:workspaceId/comparisons/:comparisonId/stream`，以 SSE 发送当前 `comparison_state`。
+- 路由使用 `comparison:create` / `comparison:read` RBAC。
+- 增加 route test 覆盖创建、读取、缺少 candidate、SSE state；schema test 覆盖新表、索引和 migration v9。
+
+结论：
+
+- comparison run 的持久化、API 入口和 SSE 读取通道已经具备，下一步可以把矩阵构建和 AI 结论接到 run 更新流程。

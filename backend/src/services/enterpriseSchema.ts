@@ -42,6 +42,8 @@ export const ENTERPRISE_CORE_SCHEMA_TABLES = [
   'analysis_result_metrics',
   'analysis_result_evidence_refs',
   'analysis_result_window_states',
+  'multi_trace_comparison_runs',
+  'multi_trace_comparison_inputs',
   'runtime_snapshots',
   'provider_credentials',
   'provider_snapshots',
@@ -627,6 +629,48 @@ const MIGRATIONS: MigrationStep[] = [
           ON analysis_result_window_states(tenant_id, workspace_id, trace_id, updated_at);
         CREATE INDEX IF NOT EXISTS idx_analysis_result_window_states_snapshot
           ON analysis_result_window_states(tenant_id, workspace_id, latest_snapshot_id, updated_at);
+      `);
+    },
+  },
+  {
+    version: 9,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS multi_trace_comparison_runs (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          created_by TEXT,
+          baseline_snapshot_id TEXT,
+          query TEXT NOT NULL,
+          status TEXT NOT NULL,
+          result_json TEXT,
+          report_id TEXT,
+          error TEXT,
+          schema_version TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          completed_at INTEGER,
+          FOREIGN KEY (tenant_id) REFERENCES organizations(id) ON DELETE CASCADE,
+          FOREIGN KEY (tenant_id, workspace_id) REFERENCES workspaces(tenant_id, id) ON DELETE CASCADE,
+          FOREIGN KEY (baseline_snapshot_id) REFERENCES analysis_result_snapshots(id) ON DELETE SET NULL,
+          FOREIGN KEY (report_id) REFERENCES report_artifacts(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_multi_trace_comparison_runs_workspace
+          ON multi_trace_comparison_runs(tenant_id, workspace_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_multi_trace_comparison_runs_status
+          ON multi_trace_comparison_runs(tenant_id, workspace_id, status, created_at);
+
+        CREATE TABLE IF NOT EXISTS multi_trace_comparison_inputs (
+          comparison_id TEXT NOT NULL,
+          snapshot_id TEXT NOT NULL,
+          role TEXT NOT NULL,
+          ordinal INTEGER NOT NULL,
+          PRIMARY KEY(comparison_id, snapshot_id),
+          FOREIGN KEY(comparison_id) REFERENCES multi_trace_comparison_runs(id) ON DELETE CASCADE,
+          FOREIGN KEY(snapshot_id) REFERENCES analysis_result_snapshots(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_multi_trace_comparison_inputs_snapshot
+          ON multi_trace_comparison_inputs(snapshot_id, comparison_id);
       `);
     },
   },
