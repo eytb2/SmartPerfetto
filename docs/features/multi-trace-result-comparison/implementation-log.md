@@ -269,3 +269,21 @@
 结论：
 
 - 当前窗口完成分析后，用户能在 AI Panel 顶部看到最近一次可比较分析结果是否已经持久化。
+
+## M2.3 Result Picker
+
+状态：完成。
+
+验收证据：
+
+- `buildSmartPerfettoWorkspaceApiUrl` 支持 `analysis-results` workspace resource。
+- `types.ts` 新增 `AnalysisResultPickerItem`，并在 `AIPanelState` 中独立维护 Result Picker 可见性、加载错误、baseline、candidate 选择状态。
+- AI Panel 顶部新增 `fact_check` 入口，和旧 `compare_arrows` Trace Picker 分离。
+- Result Picker 拉取 `GET /api/workspaces/:workspaceId/analysis-results?limit=100`。
+- Picker 列表展示 title、query、scene、trace label、完成时间、owner、visibility、metric/evidence 覆盖数量。
+- Picker 支持 1 个 baseline 和多个 candidates，默认优先把当前窗口 latest snapshot 作为 baseline。
+- 当前 M2 阶段只完成选择器与选择状态；真正创建 comparison run 留到 M3。
+
+结论：
+
+- 多窗口/多用户场景下，用户已经可以从 workspace 分析结果目录中选择一组待对比 snapshot。
