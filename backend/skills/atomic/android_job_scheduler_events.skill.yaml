@@ -31,8 +31,8 @@ steps:
     type: atomic
     name: "Job 事件列表"
     display:
-      level: list
-      layer: number
+      level: detail
+      layer: list
       title: "JobScheduler 任务"
       columns:
         - name: ts

@@ -22,6 +22,10 @@ import yaml from 'js-yaml';
 import { SkillDefinition } from '../../services/skillEngine/types';
 import { validateSkillConditions } from '../../services/skillEngine/skillValidator';
 import { getPerfettoStdlibSymbolIndex } from '../../services/perfettoStdlibScanner';
+import {
+  formatDisplayContractIssue,
+  validateSkillDisplayContract,
+} from '../../services/skillEngine/displayContractValidator';
 
 // ANSI color codes (fallback for chalk ESM issues)
 const colors = {
@@ -531,6 +535,12 @@ function validateVendorOverrideDefinition(override: VendorOverrideDefinition, fi
     }
   }
 
+  const displayIssues = validateSkillDisplayContract({
+    name: override.extends || path.basename(filePath),
+    steps: override.additional_steps || [],
+  } as any, { filePath });
+  errors.push(...displayIssues.map(formatDisplayContractIssue));
+
   if (override.thresholds_override) {
     for (const [name, threshold] of Object.entries(override.thresholds_override)) {
       if (!threshold?.levels) {
@@ -597,7 +607,7 @@ function validateSql(sql: string): { errors: string[]; warnings: string[] } {
 /**
  * Contract validation: input declarations, condition references, iterator sources
  */
-function validateContracts(skill: SkillDefinition): { errors: string[]; warnings: string[] } {
+export function validateContracts(skill: SkillDefinition, filePath?: string): { errors: string[]; warnings: string[] } {
   const errors: string[] = [];
   const warnings: string[] = [];
 
@@ -623,6 +633,11 @@ function validateContracts(skill: SkillDefinition): { errors: string[]; warnings
   for (const w of condWarnings) {
     warnings.push(`${w.stepId}: ${w.message}`);
   }
+
+  // 3. Display contract checks. These are errors in the CLI gate because
+  // invalid display.layer/level values produce broken DataEnvelopes in agentv3.
+  const displayIssues = validateSkillDisplayContract(skill, { filePath });
+  errors.push(...displayIssues.map(formatDisplayContractIssue));
 
   return { errors, warnings };
 }
@@ -847,7 +862,7 @@ export const validateCommand = new Command('validate')
           const content = fs.readFileSync(file, 'utf-8');
           const skill = yaml.load(content) as SkillDefinition;
           if (skill) {
-            const contracts = validateContracts(skill);
+            const contracts = validateContracts(skill, file);
             result.errors.push(...contracts.errors);
             result.warnings.push(...contracts.warnings);
             if (contracts.errors.length > 0) {

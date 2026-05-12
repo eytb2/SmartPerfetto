@@ -36,8 +36,8 @@ steps:
     type: atomic
     name: "{{获取 X 数据}}"
     display:
-      level: list
-      layer: duration | number
+      level: detail
+      layer: list
       title: "{{标题}}"
       columns:                         # B 级强制 columns 完整定义
         - name: ts

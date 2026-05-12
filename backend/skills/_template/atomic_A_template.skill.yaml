@@ -32,8 +32,8 @@ steps:
     type: atomic
     name: "{{查询说明}}"
     display:
-      level: list                      # 通常 list 或 detail
-      layer: duration | number | percent
+      level: detail
+      layer: list
       title: "{{标题}}"
       columns:                         # A 级强制 columns 完整定义
         - name: id
@@ -62,7 +62,7 @@ steps:
     name: "{{聚合}}"
     display:
       level: summary
-      layer: number
+      layer: list
       title: "{{摘要}}"
       columns:
         - name: total

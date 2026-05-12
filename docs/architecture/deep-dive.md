@@ -541,7 +541,7 @@ hidden   — 辅助数据（中间计算结果，默认折叠）
                按需展开查看
 ```
 
-Skill 的每个 step 通过 `display.level` 声明自己的展示层级（实际使用最多的是 `detail` — 240 处、`key` — 170 处、`summary` — 81 处）。前端根据 `DataEnvelope` 中的列类型（`timestamp`、`duration`、`percentage`、`bytes` 等）和交互动作（`navigate_timeline` 跳转到 trace 位置、`navigate_range` 选中时间范围、`copy` 复制数据）自动渲染表格和图表——新增一个 Skill，前端不需要写额外的代码。这是 164 个 Skill 而前端代码量仍然可控的关键。
+Skill 的每个 step 通过 `display.layer` 声明展示位置（`overview`、`list`、`session`、`deep`、`diagnosis`），通过 `display.level` 声明可见性和重要性（实际使用最多的是 `detail`、`key`、`summary`）。前端根据 `DataEnvelope` 中的列类型（`timestamp`、`duration`、`percentage`、`bytes` 等）和交互动作（`navigate_timeline` 跳转到 trace 位置、`navigate_range` 选中时间范围、`copy` 复制数据）自动渲染表格和图表——新增一个 Skill，前端不需要写额外的代码。这是 164 个 Skill 而前端代码量仍然可控的关键。
 
 ### Step 类型
 

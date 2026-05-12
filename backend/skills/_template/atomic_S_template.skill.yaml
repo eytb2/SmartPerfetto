@@ -40,7 +40,7 @@ steps:
     name: "{{主查询}}"
     display:
       level: key                       # L1 + 关键指标
-      layer: duration
+      layer: overview
       title: "{{标题}}"
       columns:
         - name: id
@@ -62,8 +62,8 @@ steps:
     name: "{{多原因检测}}"
     description: "{{在单条 SQL 中检测 N 种已知原因，UNION ALL 模式}}"
     display:
-      level: list
-      layer: number
+      level: detail
+      layer: list
       title: "{{已知原因检测结果}}"
       columns:
         - name: reason_code

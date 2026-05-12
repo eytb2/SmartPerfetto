@@ -143,7 +143,7 @@ steps:
     name: "queueBuffer → Transaction 到达延迟"
     display:
       level: detail
-      layer: detail
+      layer: list
       title: "App queueBuffer 到 SF Transaction 真实到达的延迟"
       columns:
         - name: bucket
@@ -211,7 +211,7 @@ steps:
     type: atomic
     name: "按 Layer 分组的 Transaction 计数"
     display:
-      level: list
+      level: detail
       layer: list
       title: "Per-layer Transaction 分布"
       columns:

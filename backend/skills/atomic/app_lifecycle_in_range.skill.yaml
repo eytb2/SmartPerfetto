@@ -39,7 +39,7 @@ inputs:
 
 display:
   level: detail
-  layer: detail
+  layer: list
   title: "应用生命周期事件"
   columns:
     - name: ts

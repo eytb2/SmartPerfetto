@@ -43,8 +43,8 @@ steps:
     type: atomic
     name: "线程 CPU 利用率"
     display:
-      level: list
-      layer: percent
+      level: detail
+      layer: list
       title: "Top 高利用率线程"
       columns:
         - name: process_name

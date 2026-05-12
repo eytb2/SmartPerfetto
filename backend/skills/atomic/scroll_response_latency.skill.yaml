@@ -54,7 +54,7 @@ inputs:
 
 display:
   level: key
-  layer: detail
+  layer: list
   title: "滚动响应延迟"
   columns:
     - name: gesture_ts

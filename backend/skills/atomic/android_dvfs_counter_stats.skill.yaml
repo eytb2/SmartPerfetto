@@ -31,8 +31,8 @@ steps:
     type: atomic
     name: "DVFS 频率统计"
     display:
-      level: list
-      layer: number
+      level: detail
+      layer: list
       title: "DVFS Counter 统计"
       columns:
         - name: name

@@ -31,8 +31,8 @@ steps:
     type: atomic
     name: "系统 CPU 利用率"
     display:
-      level: list
-      layer: number
+      level: detail
+      layer: list
       title: "周期 CPU 利用率"
       columns:
         - name: ts

@@ -31,8 +31,8 @@ steps:
     type: atomic
     name: "Wakelock 汇总"
     display:
-      level: list
-      layer: number
+      level: detail
+      layer: list
       title: "Kernel Wakelock 持有时长"
       columns:
         - name: name

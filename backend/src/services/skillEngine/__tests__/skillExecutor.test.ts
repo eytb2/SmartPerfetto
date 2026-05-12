@@ -8,7 +8,7 @@
  * 测试技能执行引擎的核心功能：
  * 1. YAML 解析和加载
  * 2. 各类步骤执行 (atomic, composite, iterator, diagnostic, etc.)
- * 3. 层级结果生成 (overview/list/session/deep)
+ * 3. 层级结果生成 (overview/list/session/deep/diagnosis)
  * 4. 条件表达式评估
  * 5. 变量替换和上下文管理
  * 6. 错误处理
@@ -34,6 +34,7 @@ import {
   SynthesizeData,
   createSkillExecutor,
 } from '../skillExecutor';
+import { validateDataEnvelope } from '../../../types/dataContract';
 
 // =============================================================================
 // Mock Setup
@@ -77,6 +78,7 @@ describe('normalizeLayer', () => {
     expect(normalizeLayer('list')).toBe('list');
     expect(normalizeLayer('session')).toBe('session');
     expect(normalizeLayer('deep')).toBe('deep');
+    expect(normalizeLayer('diagnosis')).toBe('diagnosis');
   });
 
   it('应该对无效 layer 返回 undefined', () => {
@@ -2100,8 +2102,8 @@ describe('Display 配置', () => {
   });
 
   it('应该正确解析 display.level', () => {
-    // DisplayConfig.level is DisplayLevel: 'none' | 'debug' | 'detail' | 'summary' | 'key'
-    // DisplayConfig.layer is DisplayLayer: 'overview' | 'list' | 'session' | 'deep'
+    // DisplayConfig.level is DisplayLevel: 'none' | 'debug' | 'detail' | 'summary' | 'key' | 'hidden'
+    // DisplayConfig.layer is DisplayLayer: 'overview' | 'list' | 'session' | 'deep' | 'diagnosis'
     const config: DisplayConfig = {
       title: '测试',
       level: 'summary',
@@ -2195,6 +2197,63 @@ describe('Display 配置', () => {
     expect(result.displayResults[0].title).toBe('自定义标题');
     expect(result.displayResults[0].level).toBe('key');
     expect(result.displayResults[0].layer).toBe('overview');
+  });
+
+  it('应该在运行时清洗无效 display 配置，避免生成非法 DataEnvelope', async () => {
+    mockTraceProcessor.query.mockResolvedValue({
+      columns: ['ts', 'duration_ns', 'ignored'],
+      rows: [[1000, 16_000_000, 'internal']],
+    });
+
+    const skill: SkillDefinition = {
+      name: 'display_runtime_sanitize',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Display Runtime Sanitize'),
+      steps: [
+        {
+          id: 'bad_display',
+          type: 'atomic',
+          sql: 'SELECT ts, duration_ns, ignored FROM slices',
+          display: {
+            title: 'Bad Display',
+            layer: 'number',
+            level: 'list',
+            format: 'grid',
+            columns: [
+              'ts',
+              {
+                name: 'duration_ns',
+                type: 'integer',
+                format: 'bad_format',
+                clickAction: 'jump',
+                unit: 'minute',
+                width: 'huge',
+              },
+              { label: 'Missing name' },
+            ],
+          },
+        } as any,
+      ],
+    };
+    executor.registerSkill(skill);
+
+    const result = await executor.execute('display_runtime_sanitize', 'trace-1');
+    expect(result.success).toBe(true);
+
+    const display = result.displayResults[0];
+    expect(display.layer).toBe('list');
+    expect(display.level).toBe('detail');
+    expect(display.format).toBe('table');
+    expect((display as any).data.columns).toEqual(['ts', 'duration_ns']);
+
+    const envelopes = SkillExecutor.toDataEnvelopes(result);
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0].display.layer).toBe('list');
+    expect(envelopes[0].display.level).toBe('detail');
+    expect(envelopes[0].display.format).toBe('table');
+    expect(envelopes[0].display.columns?.map(c => c.name)).toEqual(['ts', 'duration_ns']);
+    expect(validateDataEnvelope(envelopes[0])).toEqual([]);
   });
 });
 

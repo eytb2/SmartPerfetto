@@ -37,8 +37,8 @@ steps:
     type: atomic
     name: "电池采样序列"
     display:
-      level: list
-      layer: number
+      level: detail
+      layer: list
       title: "电池电量/电压/电流"
       columns:
         - name: ts

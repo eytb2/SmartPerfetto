@@ -3,7 +3,13 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import {describe, it, expect} from '@jest/globals';
-import {inferColumnDefinition} from '../dataContract';
+import {
+  buildColumnDefinitions,
+  createDataEnvelope,
+  displayResultToEnvelope,
+  inferColumnDefinition,
+  validateDataEnvelope,
+} from '../dataContract';
 
 describe('dataContract column inference', () => {
   it('infers start timestamp columns as range-navigable', () => {
@@ -46,5 +52,101 @@ describe('dataContract column inference', () => {
     const refreshRate = inferColumnDefinition('refresh_rate');
 
     expect(refreshRate.type).not.toBe('percentage');
+  });
+
+  it('normalizes invalid display values when creating envelopes', () => {
+    const env = createDataEnvelope(
+      {columns: ['value'], rows: [[1]]},
+      {
+        type: 'skill_result',
+        source: 'test:rows',
+        title: 'Rows',
+        layer: 'duration' as any,
+        format: 'detail' as any,
+        level: 'list' as any,
+      },
+    );
+
+    expect(env.display.layer).toBe('list');
+    expect(env.display.format).toBe('table');
+    expect(env.display.level).toBe('detail');
+    expect(validateDataEnvelope(env)).toEqual([]);
+  });
+
+  it('sanitizes invalid explicit column definitions before DataEnvelope output', () => {
+    const columns = buildColumnDefinitions(['ts', 'value'], [
+      {
+        name: 'ts',
+        type: 'bad_type' as any,
+        format: 'bad_format' as any,
+        clickAction: 'bad_action' as any,
+        unit: 'frames' as any,
+        width: 'giant' as any,
+      },
+      {
+        name: 'value',
+        type: 'number',
+        width: 'narrow',
+      },
+    ]);
+
+    expect(columns[0]).toMatchObject({
+      name: 'ts',
+      type: 'timestamp',
+      format: 'timestamp_relative',
+      clickAction: 'navigate_range',
+      unit: 'ns',
+    });
+    expect((columns[0] as any).width).toBeUndefined();
+    expect(columns[1]).toMatchObject({
+      name: 'value',
+      type: 'number',
+      width: 'narrow',
+    });
+  });
+
+  it('keeps DisplayResult to DataEnvelope conversion valid even with invalid display metadata', () => {
+    const env = displayResultToEnvelope({
+      stepId: 'rows',
+      title: 'Rows',
+      layer: 'bytes' as any,
+      level: 'overview' as any,
+      format: 'detail' as any,
+      data: {columns: ['ts'], rows: [[123]]},
+      columnDefinitions: [
+        {
+          name: 'ts',
+          type: 'bad_type',
+          format: 'bad_format',
+          clickAction: 'bad_action',
+        },
+      ],
+      metadataConfig: {fields: ['process_name', 123]},
+    } as any, 'test_skill', undefined);
+
+    expect(env.display.layer).toBe('list');
+    expect(env.display.format).toBe('table');
+    expect(env.display.level).toBe('detail');
+    expect(env.display.metadataFields).toEqual(['process_name']);
+    expect(validateDataEnvelope(env)).toEqual([]);
+  });
+
+  it('rejects malformed display columns and metadata fields during validation', () => {
+    const env = createDataEnvelope(
+      {columns: ['value'], rows: [[1]]},
+      {
+        type: 'skill_result',
+        source: 'test:rows',
+        title: 'Rows',
+      },
+    );
+
+    (env.display as any).columns = {name: 'value'};
+    (env.display as any).metadataFields = ['process_name', 42];
+
+    const errors = validateDataEnvelope(env);
+    expect(errors.map(error => error.path)).toEqual(
+      expect.arrayContaining(['display.columns', 'display.metadataFields[1]']),
+    );
   });
 });

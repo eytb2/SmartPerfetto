@@ -67,7 +67,7 @@ inputs:
 
 display:
   level: detail
-  layer: detail
+  layer: list
   title: "逐帧 Input-to-Display 延迟"
   columns:
     - name: input_ts
@@ -201,7 +201,7 @@ steps:
     name: "逐帧延迟"
     display:
       level: detail
-      layer: detail
+      layer: list
       title: "逐帧 Input-to-Display 延迟"
       columns:
         - name: input_ts
@@ -373,8 +373,8 @@ steps:
     type: atomic
     name: "延迟飙升检测"
     display:
-      level: list
-      layer: detail
+      level: detail
+      layer: list
       title: "延迟飙升点"
       columns:
         - name: input_ts

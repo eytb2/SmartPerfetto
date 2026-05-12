@@ -39,8 +39,8 @@ steps:
     type: atomic
     name: "每帧 CPU 时间"
     display:
-      level: list
-      layer: number
+      level: detail
+      layer: list
       title: "Frame × CPU 时间"
       columns:
         - name: frame_id

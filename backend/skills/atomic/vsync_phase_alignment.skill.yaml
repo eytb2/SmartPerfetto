@@ -50,7 +50,7 @@ inputs:
 
 display:
   level: detail
-  layer: detail
+  layer: list
   title: "VSync 相位对齐"
   columns:
     - name: input_ts
@@ -113,7 +113,7 @@ steps:
     name: "相位偏移分析"
     display:
       level: detail
-      layer: detail
+      layer: list
       title: "Input-VSync 相位偏移"
       columns:
         - name: input_ts

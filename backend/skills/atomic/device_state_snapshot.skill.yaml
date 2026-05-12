@@ -35,7 +35,7 @@ inputs:
     description: "分析结束时间戳(ns)"
 
 display:
-  level: overview
+  level: summary
   layer: overview
   title: "设备环境状态"
   columns:

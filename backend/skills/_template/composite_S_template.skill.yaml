@@ -46,8 +46,8 @@ steps:
     type: atomic
     name: "{{步骤 1 中文名 — overview}}"
     display:
-      level: overview                  # L1
-      layer: number | percent | duration
+      level: summary                  # L1
+      layer: overview
       title: "{{标题}}"
       columns:
         - name: {{col1}}
@@ -74,8 +74,8 @@ steps:
     type: atomic
     name: "{{步骤 2 中文名 — list}}"
     display:
-      level: list                      # L2
-      layer: duration
+      level: detail                      # L2
+      layer: list
       title: "{{标题}}"
       columns:
         - name: id
@@ -109,7 +109,7 @@ steps:
     name: "{{每行详情}}"
     display:
       level: detail                    # L3
-      layer: duration
+      layer: deep
       title: "{{标题 — ${item.id}}}"
       columns:
         - name: phase
@@ -136,7 +136,7 @@ steps:
     name: "{{诊断摘要}}"
     display:
       level: summary                   # L1 + diagnosis
-      layer: percent
+      layer: diagnosis
       title: "{{诊断结论}}"
       columns:
         - name: severity
@@ -172,8 +172,8 @@ steps:
     type: atomic
     name: "{{深度根因 — 可选}}"
     display:
-      level: deep                      # L4
-      layer: duration
+      level: detail                    # L4
+      layer: deep
       title: "{{标题}}"
       columns:
         - name: root_cause

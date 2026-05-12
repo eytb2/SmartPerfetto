@@ -31,8 +31,8 @@ steps:
     type: atomic
     name: "Mali 状态时间线"
     display:
-      level: list
-      layer: number
+      level: detail
+      layer: list
       title: "Mali GPU 电源状态"
       columns:
         - name: ts

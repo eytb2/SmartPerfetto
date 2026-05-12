@@ -38,8 +38,8 @@ steps:
     type: atomic
     name: "Deep Idle 区间"
     display:
-      level: list
-      layer: duration
+      level: detail
+      layer: list
       title: "Deep Idle 时间段"
       columns:
         - name: ts
@@ -62,8 +62,8 @@ steps:
     type: atomic
     name: "Light Idle 区间"
     display:
-      level: list
-      layer: duration
+      level: detail
+      layer: list
       title: "Light Idle 时间段"
       columns:
         - name: ts

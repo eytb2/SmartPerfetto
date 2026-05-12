@@ -149,9 +149,9 @@ steps:
 # === 输出声明 (可选) ===
 outputs:
   - stepId: jank_frames
-    layer: L2
+    layer: list
   - stepId: jank_summary
-    layer: L1
+    layer: overview
 ```
 
 ### 输入参数类型

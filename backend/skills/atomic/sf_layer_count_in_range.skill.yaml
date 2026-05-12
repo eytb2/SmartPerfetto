@@ -114,7 +114,7 @@ steps:
     type: atomic
     name: "图层列表"
     display:
-      level: list
+      level: detail
       layer: list
       title: "活跃图层列表"
       columns:

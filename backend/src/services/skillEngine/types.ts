@@ -30,9 +30,9 @@ export type SkillType =
   | 'pipeline'
   | 'pipeline_definition';
 
-export type DisplayLevel = 'none' | 'debug' | 'detail' | 'summary' | 'key';
+export type DisplayLevel = 'none' | 'debug' | 'detail' | 'summary' | 'key' | 'hidden';
 
-export type DisplayFormat = 'table' | 'chart' | 'text' | 'timeline' | 'summary';
+export type DisplayFormat = 'table' | 'chart' | 'text' | 'timeline' | 'summary' | 'metric';
 
 /**
  * Display Layer - 控制结果在 UI 中的层级展示
@@ -42,8 +42,9 @@ export type DisplayFormat = 'table' | 'chart' | 'text' | 'timeline' | 'summary';
  * - list: 列表级数据（如滑动会话列表、启动事件列表）
  * - session: 会话级详情（如单个滑动会话的详细数据）
  * - deep: 深度分析数据（如帧级分析、调用栈）
+ * - diagnosis: 诊断结论与根因证据
  */
-export type DisplayLayer = 'overview' | 'list' | 'session' | 'deep';
+export type DisplayLayer = 'overview' | 'list' | 'session' | 'deep' | 'diagnosis';
 
 export type ConfidenceLevel = 'high' | 'medium' | 'low';
 

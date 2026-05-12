@@ -205,7 +205,7 @@ steps:
     type: atomic
     name: "帧 Gap 列表"
     display:
-      level: list
+      level: detail
       layer: list
       title: "帧 Gap 列表"
       columns:

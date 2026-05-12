@@ -31,8 +31,8 @@ steps:
     type: atomic
     name: "IRQ 汇总"
     display:
-      level: list
-      layer: number
+      level: detail
+      layer: list
       title: "硬/软 IRQ 次数与耗时"
       columns:
         - name: name

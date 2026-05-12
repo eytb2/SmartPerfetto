@@ -51,7 +51,7 @@ steps:
     type: atomic
     name: "Binder 调用密度"
     display:
-      level: overview
+      level: summary
       layer: overview
       title: "Binder 调用密度（100ms 窗口）"
       columns:

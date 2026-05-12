@@ -797,4 +797,4 @@ steps:
 output:
   display:
     level: key
-    format: detail
+    format: summary

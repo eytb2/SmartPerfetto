@@ -39,8 +39,8 @@ steps:
     type: atomic
     name: "Overrun 帧列表"
     display:
-      level: list
-      layer: number
+      level: detail
+      layer: list
       title: "超 budget 帧列表"
       columns:
         - name: frame_id

@@ -56,7 +56,7 @@ inputs:
 
 display:
   level: detail
-  layer: detail
+  layer: list
   title: "输入事件列表"
   columns:
     - name: event_ts

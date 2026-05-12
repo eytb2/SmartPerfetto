@@ -201,6 +201,74 @@ export function inferColumnDefinition(columnName: string): ColumnDefinition {
   return { name: columnName, type: 'string' };
 }
 
+const VALID_COLUMN_UNITS = ['ns', 'us', 'ms', 's'] as const;
+const VALID_COLUMN_WIDTHS = ['narrow', 'medium', 'wide', 'auto'] as const;
+
+function normalizeDisplayLayer(layer: unknown): DisplayLayer {
+  return typeof layer === 'string' && isValidDisplayLayer(layer) ? layer : 'list';
+}
+
+function normalizeDisplayFormat(format: unknown): DisplayFormat {
+  return typeof format === 'string' && VALID_DISPLAY_FORMATS.includes(format as DisplayFormat)
+    ? format as DisplayFormat
+    : 'table';
+}
+
+function normalizeDisplayLevel(level: unknown): DisplayLevel {
+  return typeof level === 'string' && VALID_DISPLAY_LEVELS.includes(level as DisplayLevel)
+    ? level as DisplayLevel
+    : 'detail';
+}
+
+function sanitizeColumnDefinition(name: string, explicit?: Partial<ColumnDefinition>): ColumnDefinition {
+  const inferred = inferColumnDefinition(name);
+  if (!explicit || typeof explicit !== 'object') return inferred;
+
+  const column: ColumnDefinition = { ...inferred, name };
+
+  if (typeof explicit.label === 'string') column.label = explicit.label;
+  if (VALID_COLUMN_TYPES.includes(explicit.type as ColumnType)) column.type = explicit.type as ColumnType;
+  if (VALID_COLUMN_FORMATS.includes(explicit.format as ColumnFormat)) column.format = explicit.format as ColumnFormat;
+  if (VALID_CLICK_ACTIONS.includes(explicit.clickAction as ClickAction)) column.clickAction = explicit.clickAction as ClickAction;
+  if (typeof explicit.durationColumn === 'string') column.durationColumn = explicit.durationColumn;
+  if (VALID_COLUMN_UNITS.includes(explicit.unit as any)) column.unit = explicit.unit;
+  if (typeof explicit.hidden === 'boolean') column.hidden = explicit.hidden;
+  if (typeof explicit.sortable === 'boolean') column.sortable = explicit.sortable;
+  if (explicit.defaultSort === 'asc' || explicit.defaultSort === 'desc') column.defaultSort = explicit.defaultSort;
+  if (
+    (typeof explicit.width === 'number' && Number.isFinite(explicit.width)) ||
+    VALID_COLUMN_WIDTHS.includes(explicit.width as any)
+  ) {
+    column.width = explicit.width;
+  }
+  if (typeof explicit.tooltip === 'string') column.tooltip = explicit.tooltip;
+  if (Array.isArray(explicit.enumValues) && explicit.enumValues.every((value) => typeof value === 'string')) {
+    column.enumValues = explicit.enumValues;
+  }
+  if (typeof explicit.cssClass === 'string') column.cssClass = explicit.cssClass;
+
+  return column;
+}
+
+function sanitizeColumnDefinitions(columns: unknown): ColumnDefinition[] | undefined {
+  if (!Array.isArray(columns)) return undefined;
+
+  const sanitized = columns
+    .filter((column): column is Partial<ColumnDefinition> & { name: string } =>
+      !!column && typeof column === 'object' && !Array.isArray(column) &&
+      typeof (column as any).name === 'string' && (column as any).name.length > 0
+    )
+    .map((column) => sanitizeColumnDefinition(column.name, column));
+
+  return sanitized.length > 0 ? sanitized : undefined;
+}
+
+function sanitizeMetadataFields(fields: unknown): string[] | undefined {
+  if (!Array.isArray(fields)) return undefined;
+  const sanitized = fields.filter((field): field is string => typeof field === 'string' && field.length > 0);
+  return sanitized.length > 0 ? sanitized : undefined;
+}
+
 // =============================================================================
 // DataEnvelope - The Core Data Container (Phase 0)
 // =============================================================================
@@ -232,7 +300,7 @@ export interface DataEnvelopeMeta {
  * DataEnvelope Display Config - How to render this data
  */
 export interface DataEnvelopeDisplay {
-  /** Display layer (overview, list, session, deep) */
+  /** Display layer (overview, list, session, deep, diagnosis) */
   layer: DisplayLayer;
 
   /** Display format (table, chart, text, etc.) */
@@ -318,6 +386,9 @@ export function createDataEnvelope<T = DataPayload>(
     defaultCollapsed?: boolean;
   }
 ): DataEnvelope<T> {
+  const columns = sanitizeColumnDefinitions(options.columns);
+  const metadataFields = sanitizeMetadataFields(options.metadataFields);
+
   return {
     meta: {
       type: options.type,
@@ -329,13 +400,13 @@ export function createDataEnvelope<T = DataPayload>(
     },
     data,
     display: {
-      layer: options.layer || 'list',
-      format: options.format || 'table',
+      layer: normalizeDisplayLayer(options.layer),
+      format: normalizeDisplayFormat(options.format),
       title: options.title,
-      columns: options.columns,
-      metadataFields: options.metadataFields,
+      columns,
+      metadataFields,
       highlights: options.highlights,
-      level: options.level || 'detail',
+      level: normalizeDisplayLevel(options.level),
       ...(options.collapsible !== undefined && { collapsible: options.collapsible }),
       ...(options.defaultCollapsed !== undefined && { defaultCollapsed: options.defaultCollapsed }),
     },
@@ -361,12 +432,7 @@ export function buildColumnDefinitions(
 
   return columnNames.map(name => {
     const explicit = explicitMap.get(name);
-    const inferred = inferColumnDefinition(name);
-    return {
-      ...inferred,
-      ...explicit,
-      name, // Ensure name is always correct
-    };
+    return sanitizeColumnDefinition(name, explicit);
   });
 }
 
@@ -381,6 +447,7 @@ export function buildColumnDefinitions(
  * - list: L2 - Main data tables with rows
  * - session: Session-level grouping (e.g., scroll sessions)
  * - deep: L4 - Detailed analysis (expandable rows in L2)
+ * - diagnosis: Diagnostic findings and root-cause evidence
  *
  * This is an EXHAUSTIVE list. To add a new layer:
  * 1. Add to this array
@@ -406,6 +473,7 @@ export function isValidDisplayLayer(layer: string | undefined): layer is Display
  * - detail: Show full details
  * - summary: Show summarized version
  * - key: Key metric, always prominent
+ * - hidden: Keep in envelope but hide by default
  */
 export const VALID_DISPLAY_LEVELS = ['none', 'debug', 'detail', 'summary', 'key', 'hidden'] as const;
 export type DisplayLevel = typeof VALID_DISPLAY_LEVELS[number];
@@ -1134,6 +1202,28 @@ export function validateColumnDefinition(column: any): ValidationError[] {
     });
   }
 
+  if (column.unit && !VALID_COLUMN_UNITS.includes(column.unit)) {
+    errors.push({
+      path: 'unit',
+      message: `Invalid unit: ${column.unit}. Valid values: ${VALID_COLUMN_UNITS.join(', ')}`,
+      value: column.unit,
+    });
+  }
+
+  if (
+    column.width !== undefined &&
+    !(
+      (typeof column.width === 'number' && Number.isFinite(column.width)) ||
+      VALID_COLUMN_WIDTHS.includes(column.width)
+    )
+  ) {
+    errors.push({
+      path: 'width',
+      message: `Invalid width: ${column.width}. Must be a finite number or one of: ${VALID_COLUMN_WIDTHS.join(', ')}`,
+      value: column.width,
+    });
+  }
+
   return errors;
 }
 
@@ -1181,12 +1271,25 @@ export function validateDataEnvelope(envelope: any): ValidationError[] {
         value: envelope.display.format,
       });
     }
+    if (envelope.display.level && !VALID_DISPLAY_LEVELS.includes(envelope.display.level)) {
+      errors.push({
+        path: 'display.level',
+        message: `Invalid display level: ${envelope.display.level}. Valid values: ${VALID_DISPLAY_LEVELS.join(', ')}`,
+        value: envelope.display.level,
+      });
+    }
     if (!envelope.display.title) {
       errors.push({ path: 'display.title', message: 'display.title is required' });
     }
 
     // Validate columns if present
-    if (envelope.display.columns && Array.isArray(envelope.display.columns)) {
+    if (envelope.display.columns !== undefined && !Array.isArray(envelope.display.columns)) {
+      errors.push({
+        path: 'display.columns',
+        message: 'display.columns must be an array',
+        value: envelope.display.columns,
+      });
+    } else if (Array.isArray(envelope.display.columns)) {
       for (let i = 0; i < envelope.display.columns.length; i++) {
         const columnErrors = validateColumnDefinition(envelope.display.columns[i]);
         for (const err of columnErrors) {
@@ -1197,6 +1300,24 @@ export function validateDataEnvelope(envelope: any): ValidationError[] {
           });
         }
       }
+    }
+
+    if (envelope.display.metadataFields !== undefined && !Array.isArray(envelope.display.metadataFields)) {
+      errors.push({
+        path: 'display.metadataFields',
+        message: 'display.metadataFields must be an array of strings',
+        value: envelope.display.metadataFields,
+      });
+    } else if (Array.isArray(envelope.display.metadataFields)) {
+      envelope.display.metadataFields.forEach((field: unknown, index: number) => {
+        if (typeof field !== 'string') {
+          errors.push({
+            path: `display.metadataFields[${index}]`,
+            message: 'metadataFields entries must be strings',
+            value: field,
+          });
+        }
+      });
     }
   }
 

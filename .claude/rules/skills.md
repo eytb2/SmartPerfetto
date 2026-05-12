@@ -31,8 +31,8 @@ Common skill types:
 
 Layered results:
 
-- L1 overview: aggregated metrics, `display.level: overview` or `summary`.
-- L2 list/detail: tables and expandable rows.
+- L1 overview: aggregated metrics, `display.layer: overview` with `display.level: summary` or `key`.
+- L2 list/detail: tables and expandable rows, usually `display.layer: list` with `display.level: detail`.
 - L3 diagnosis: per-frame or per-event diagnosis, often iterator output.
 - L4 deep: detailed frame/slice/callstack evidence.
 
@@ -47,6 +47,10 @@ ${param|default}
 ```
 
 DataEnvelope columns should use typed column metadata where possible:
+
+`display.layer` controls where the result appears: `overview`, `list`,
+`session`, `deep`, or `diagnosis`. `display.level` controls visibility/detail:
+`none`, `debug`, `detail`, `summary`, `key`, or `hidden`.
 
 - `timestamp`
 - `duration`

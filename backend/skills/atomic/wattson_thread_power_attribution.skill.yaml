@@ -44,8 +44,8 @@ steps:
     type: atomic
     name: "线程级 CPU 功耗"
     display:
-      level: list
-      layer: number
+      level: detail
+      layer: list
       title: "Top 耗电线程（按 CPU mWs）"
       columns:
         - name: process_name

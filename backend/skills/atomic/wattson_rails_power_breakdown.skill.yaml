@@ -40,8 +40,8 @@ steps:
     type: atomic
     name: "Power Rails 能耗聚合"
     display:
-      level: list
-      layer: number
+      level: detail
+      layer: list
       title: "按 Rail 的能耗与峰值功率"
       columns:
         - name: name

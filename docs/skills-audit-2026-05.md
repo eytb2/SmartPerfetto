@@ -302,8 +302,8 @@ steps:
     type: atomic | iterator | composite
     name: "中文步骤名"
     display:
-      level: overview | summary | key | list | detail | deep | frame
-      layer: number | percent | duration | bytes
+      layer: overview | list | session | deep | diagnosis
+      level: summary | key | detail | debug | hidden | none
       title: "中文标题"
       columns:                        # 必须有完整 column 定义
         - name: <col_name>
@@ -346,7 +346,8 @@ steps:
   - id: ...
     type: atomic
     display:
-      level: list | detail
+      layer: list
+      level: detail
       columns: [...]                  # DataEnvelope 列必填
     sql: |
       SELECT ...
@@ -377,7 +378,8 @@ steps:
   - id: query
     type: atomic
     display:
-      level: list | detail
+      layer: list
+      level: detail
       columns: [...]
     sql: |
       SELECT ...

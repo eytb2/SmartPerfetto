@@ -43,8 +43,8 @@ steps:
     type: atomic
     name: "OOM Score 区间"
     display:
-      level: list
-      layer: duration
+      level: detail
+      layer: list
       title: "进程 OOM Score 变化"
       columns:
         - name: ts

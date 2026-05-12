@@ -36,8 +36,8 @@ steps:
     type: atomic
     name: "启动期能耗列表"
     display:
-      level: list
-      layer: duration
+      level: detail
+      layer: list
       title: "应用启动能耗"
       columns:
         - name: package

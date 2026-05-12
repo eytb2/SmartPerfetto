@@ -442,7 +442,8 @@ steps:
       SELECT frame_id, duration_ms, jank_type, severity
       FROM ...
     display:
-      level: list
+      layer: list
+      level: detail
       columns:
         - { name: duration_ms, type: duration, click: navigate_timeline }
 
@@ -452,13 +453,14 @@ steps:
       -- 卡顿严重度分布
       SELECT severity, count, percentage FROM ...
     display:
-      level: overview
+      layer: overview
+      level: summary
 
 outputs:
   - stepId: consumer_jank_frames
-    layer: L2
+    layer: list
   - stepId: jank_severity_distribution
-    layer: L1
+    layer: overview
 ```
 
 ### 5.4 分层结果 (L1-L4)

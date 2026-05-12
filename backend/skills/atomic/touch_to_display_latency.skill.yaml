@@ -52,7 +52,7 @@ inputs:
 
 display:
   level: detail
-  layer: detail
+  layer: list
   title: "触摸到显示延迟"
   columns:
     - name: input_ts

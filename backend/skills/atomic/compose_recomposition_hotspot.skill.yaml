@@ -73,7 +73,7 @@ steps:
     type: atomic
     name: "重组概览"
     display:
-      level: overview
+      level: summary
       layer: overview
       title: "Compose 重组概览"
       columns:

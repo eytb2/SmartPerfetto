@@ -707,12 +707,9 @@ export class ModuleExpertInvoker extends EventEmitter {
     executionTimeMs: number = 0
   ): LayeredSkillResult {
     // Initialize layers with proper structure (keyed by stepId, not arrays)
-    const layers: LayeredSkillResult['layers'] = {
-      overview: {},
-      list: {},
-      session: {},
-      deep: {},
-    };
+    const layers = Object.fromEntries(
+      VALID_DISPLAY_LAYERS.map((layer) => [layer, {}])
+    ) as LayeredSkillResult['layers'];
 
     // Organize results by layer
     for (const result of displayResults) {
@@ -764,11 +761,9 @@ export class ModuleExpertInvoker extends EventEmitter {
   private organizeResultsIntoLayers(
     displayResults: DisplayResult[]
   ): Record<string, any> {
-    const layers: Record<string, any[]> = {
-      overview: [],
-      list: [],
-      deep: [],
-    };
+    const layers: Record<string, any[]> = Object.fromEntries(
+      VALID_DISPLAY_LAYERS.map((layer) => [layer, []])
+    );
 
     for (const result of displayResults) {
       const rawLayer = result.layer || 'list';

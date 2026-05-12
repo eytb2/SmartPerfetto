@@ -50,4 +50,89 @@ describe('custom skill loading', () => {
       },
     });
   });
+
+  it('records display contract issues from vendor override additional steps', async () => {
+    const vendorDir = path.join(tmpDir, 'vendors', 'xiaomi');
+    await fs.mkdir(vendorDir, { recursive: true });
+    await fs.writeFile(
+      path.join(vendorDir, 'startup.override.yaml'),
+      [
+        'extends: composite/startup_analysis',
+        'version: "1"',
+        'meta:',
+        '  vendor: xiaomi',
+        '  display_name: Xiaomi Startup Override',
+        '  description: Vendor-specific startup checks',
+        'vendor_detection:',
+        '  signatures:',
+        '    - pattern: Xiaomi',
+        '      confidence: high',
+        'additional_steps:',
+        '  - id: vendor_rows',
+        '    name: Vendor Rows',
+        '    type: atomic',
+        '    sql: SELECT 1 AS value',
+        '    display:',
+        '      layer: duration',
+        '      level: list',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const registry = new SkillRegistry();
+    await registry.loadSkills(tmpDir);
+
+    const issues = registry.getDisplayContractIssues();
+    expect(issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          skillName: 'startup_analysis@xiaomi:startup.override',
+          stepId: 'vendor_rows',
+          path: 'steps[0].display.layer',
+          value: 'duration',
+        }),
+        expect.objectContaining({
+          skillName: 'startup_analysis@xiaomi:startup.override',
+          stepId: 'vendor_rows',
+          path: 'steps[0].display.level',
+          value: 'list',
+        }),
+      ]),
+    );
+  });
+
+  it('validates programmatically upserted skills and deduplicates repeated issues', () => {
+    const registry = new SkillRegistry();
+    const generatedSkill = {
+      name: 'generated_display_bad',
+      version: '1',
+      meta: {
+        display_name: 'Generated Display Bad',
+        description: 'Generated runtime skill',
+      },
+      steps: [
+        {
+          id: 'rows',
+          type: 'atomic',
+          sql: 'SELECT 1 AS value',
+          display: {
+            layer: 'bytes',
+          },
+        },
+      ],
+    } as any;
+
+    registry.upsertSkill(generatedSkill);
+    registry.upsertSkill(generatedSkill);
+
+    const issues = registry.getDisplayContractIssues();
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      skillName: 'generated_display_bad',
+      stepId: 'rows',
+      path: 'steps[0].display.layer',
+      value: 'bytes',
+    });
+  });
 });

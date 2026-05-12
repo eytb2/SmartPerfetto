@@ -66,6 +66,10 @@ import {
   displayResultToEnvelope,
   layeredResultToEnvelopes,
 } from '../../types/dataContract';
+import {
+  formatDisplayContractIssue,
+  sanitizeDisplayConfigForRuntime,
+} from './displayContractValidator';
 
 // =============================================================================
 // Layered Result Types
@@ -102,6 +106,7 @@ export interface SynthesizeData {
  * - list: 列表数据（会话/事件列表）
  * - session: 会话详情（单个会话的详情）
  * - deep: 深度分析（帧级/调用级分析）
+ * - diagnosis: 诊断结论与根因证据
  */
 export interface LayeredResult {
   layers: {
@@ -113,6 +118,8 @@ export interface LayeredResult {
     session?: Record<string, Record<string, StepResult>>;
     /** 深度层 - 帧级/调用级分析 */
     deep?: Record<string, Record<string, StepResult>>;
+    /** 诊断层 - 根因/结论证据 */
+    diagnosis?: Record<string, StepResult>;
   };
   defaultExpanded: DisplayLayer[];
   metadata: {
@@ -130,7 +137,7 @@ export interface LayeredResult {
 export function normalizeLayer(layer: string | undefined): DisplayLayer | undefined {
   if (!layer) return undefined;
   // 只接受语义名称
-  if (['overview', 'list', 'session', 'deep'].includes(layer)) {
+  if (['overview', 'list', 'session', 'deep', 'diagnosis'].includes(layer)) {
     return layer as DisplayLayer;
   }
   return undefined;
@@ -849,6 +856,7 @@ function organizeByLayer(steps: StepResult[]): LayeredResult['layers'] {
     list: {},
     session: {},
     deep: {},
+    diagnosis: {},
   };
 
   for (const step of steps) {
@@ -857,7 +865,7 @@ function organizeByLayer(steps: StepResult[]): LayeredResult['layers'] {
       continue;
     }
 
-    // 规范化 layer 名称为语义名称（overview/list/session/deep）
+    // 规范化 layer 名称为语义名称（overview/list/session/deep/diagnosis）
     const layer = normalizeLayer(rawLayer) || rawLayer as DisplayLayer;
 
     // Ensure failed steps have empty array data for consistent handling
@@ -870,6 +878,7 @@ function organizeByLayer(steps: StepResult[]): LayeredResult['layers'] {
     switch (layer) {
       case 'overview':
       case 'list':
+      case 'diagnosis':
         const targetLayer = layers[layer];
         if (targetLayer) {
           targetLayer[normalizedStep.stepId] = normalizedStep;
@@ -1952,7 +1961,7 @@ export class SkillExecutor {
     if (!skill.steps || skill.steps.length === 0) {
       return {
         layers: {
-          overview: {}, list: {}, session: {}, deep: {},
+          overview: {}, list: {}, session: {}, deep: {}, diagnosis: {},
         },
         defaultExpanded: ['overview', 'list'],
         metadata: {
@@ -3320,7 +3329,17 @@ export class SkillExecutor {
     displayConfig?: DisplayConfig,
     sql?: string
   ): DisplayResult {
-    const config = displayConfig || { level: 'summary', format: 'table' };
+    const rawConfig = displayConfig || { level: 'summary', format: 'table' };
+    const { config, issues } = sanitizeDisplayConfigForRuntime(rawConfig, {
+      stepId,
+      defaultLevel: 'detail',
+      defaultLayer: 'list',
+      defaultFormat: 'table',
+    });
+    for (const issue of issues) {
+      logger.warn('SkillExecutor', `Sanitized invalid runtime display config: ${formatDisplayContractIssue(issue)}`);
+    }
+
     // Skill 引用步骤返回的是嵌套 SkillExecutionResult，展示时需要先解包到真实数据。
     const data = stepResult.stepType === 'skill'
       ? this.extractSaveAsValue(stepResult)

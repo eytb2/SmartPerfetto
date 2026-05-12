@@ -16,19 +16,15 @@
 import fs from 'fs';
 import path from 'path';
 import yaml from 'js-yaml';
-import { SkillDefinition, ModuleLayer, DialogueCapability, SkillStep } from './types';
+import { SkillDefinition, ModuleLayer, DialogueCapability } from './types';
 import { generateRenderingPipelineDetectionSkill } from '../renderingPipelineDetectionSkillGenerator';
 import logger from '../../utils/logger';
 import { validateSkillConditions, validateFragmentReferences } from './skillValidator';
 import {
-  VALID_DISPLAY_LAYERS,
-  VALID_DISPLAY_LEVELS,
-  VALID_DISPLAY_FORMATS,
-  VALID_COLUMN_TYPES,
-  VALID_COLUMN_FORMATS,
-  VALID_CLICK_ACTIONS,
-  isValidDisplayLayer,
-} from '../../types/dataContract';
+  DisplayContractIssue,
+  formatDisplayContractIssue,
+  validateSkillDisplayContract,
+} from './displayContractValidator';
 
 // =============================================================================
 // Skill Normalization (Backward Compatibility)
@@ -289,239 +285,6 @@ function normalizeSkillDefinition(raw: any, filePath: string): SkillDefinition |
 }
 
 // =============================================================================
-// Skill Validation
-// =============================================================================
-
-interface ValidationWarning {
-  skillName: string;
-  stepId?: string;
-  field: string;
-  message: string;
-  value?: any;
-}
-
-/**
- * Validate a skill definition's display configurations
- * Returns warnings for invalid values (does not throw)
- */
-function validateSkillDisplayConfig(skill: SkillDefinition): ValidationWarning[] {
-  const warnings: ValidationWarning[] = [];
-
-  // Validate output display config
-  if (skill.output?.display) {
-    const display = skill.output.display;
-    if (display.layer && !isValidDisplayLayer(display.layer)) {
-      warnings.push({
-        skillName: skill.name,
-        field: 'output.display.layer',
-        message: `Invalid layer value. Valid values: ${VALID_DISPLAY_LAYERS.join(', ')}`,
-        value: display.layer
-      });
-    }
-    if (display.level && !VALID_DISPLAY_LEVELS.includes(display.level as any)) {
-      warnings.push({
-        skillName: skill.name,
-        field: 'output.display.level',
-        message: `Invalid level value. Valid values: ${VALID_DISPLAY_LEVELS.join(', ')}`,
-        value: display.level
-      });
-    }
-  }
-
-  // Validate step display configs
-  if (skill.steps) {
-    for (const step of skill.steps) {
-      validateStepDisplay(skill.name, step, warnings);
-    }
-  }
-
-  return warnings;
-}
-
-/**
- * Validate a single column definition from YAML
- */
-function validateColumnDefinition(
-  skillName: string,
-  stepId: string,
-  column: any,
-  index: number,
-  warnings: ValidationWarning[]
-): void {
-  const prefix = `display.columns[${index}]`;
-
-  if (!column || typeof column !== 'object') {
-    warnings.push({
-      skillName,
-      stepId,
-      field: prefix,
-      message: 'Column definition must be an object',
-      value: column
-    });
-    return;
-  }
-
-  // Name is required
-  if (!column.name || typeof column.name !== 'string') {
-    warnings.push({
-      skillName,
-      stepId,
-      field: `${prefix}.name`,
-      message: 'Column name is required and must be a string',
-      value: column.name
-    });
-  }
-
-  // Validate type if specified
-  if (column.type && !VALID_COLUMN_TYPES.includes(column.type as any)) {
-    warnings.push({
-      skillName,
-      stepId,
-      field: `${prefix}.type`,
-      message: `Invalid column type. Valid values: ${VALID_COLUMN_TYPES.join(', ')}`,
-      value: column.type
-    });
-  }
-
-  // Validate format if specified
-  if (column.format && !VALID_COLUMN_FORMATS.includes(column.format as any)) {
-    warnings.push({
-      skillName,
-      stepId,
-      field: `${prefix}.format`,
-      message: `Invalid column format. Valid values: ${VALID_COLUMN_FORMATS.join(', ')}`,
-      value: column.format
-    });
-  }
-
-  // Validate clickAction if specified
-  if (column.clickAction && !VALID_CLICK_ACTIONS.includes(column.clickAction as any)) {
-    warnings.push({
-      skillName,
-      stepId,
-      field: `${prefix}.clickAction`,
-      message: `Invalid click action. Valid values: ${VALID_CLICK_ACTIONS.join(', ')}`,
-      value: column.clickAction
-    });
-  }
-
-  // Validate unit if specified
-  if (column.unit && !['ns', 'us', 'ms', 's'].includes(column.unit)) {
-    warnings.push({
-      skillName,
-      stepId,
-      field: `${prefix}.unit`,
-      message: `Invalid time unit. Valid values: ns, us, ms, s`,
-      value: column.unit
-    });
-  }
-
-  // Validate width if specified
-  if (column.width !== undefined) {
-    const validWidths = ['narrow', 'medium', 'wide', 'auto'];
-    if (typeof column.width !== 'number' && !validWidths.includes(column.width)) {
-      warnings.push({
-        skillName,
-        stepId,
-        field: `${prefix}.width`,
-        message: `Invalid width. Must be a number or one of: ${validWidths.join(', ')}`,
-        value: column.width
-      });
-    }
-  }
-}
-
-/**
- * Recursively validate step display configurations
- */
-function validateStepDisplay(
-  skillName: string,
-  step: SkillStep,
-  warnings: ValidationWarning[]
-): void {
-  // Check if step has display config (could be object or boolean)
-  const display = (step as any).display;
-  if (display && typeof display === 'object') {
-    if (display.layer && !isValidDisplayLayer(display.layer)) {
-      warnings.push({
-        skillName,
-        stepId: step.id,
-        field: 'display.layer',
-        message: `Invalid layer value. Valid values: ${VALID_DISPLAY_LAYERS.join(', ')}`,
-        value: display.layer
-      });
-    }
-    if (display.level && !VALID_DISPLAY_LEVELS.includes(display.level as any)) {
-      warnings.push({
-        skillName,
-        stepId: step.id,
-        field: 'display.level',
-        message: `Invalid level value. Valid values: ${VALID_DISPLAY_LEVELS.join(', ')}`,
-        value: display.level
-      });
-    }
-    if (display.format && !VALID_DISPLAY_FORMATS.includes(display.format as any)) {
-      warnings.push({
-        skillName,
-        stepId: step.id,
-        field: 'display.format',
-        message: `Invalid format value. Valid values: ${VALID_DISPLAY_FORMATS.join(', ')}`,
-        value: display.format
-      });
-    }
-
-    // Validate columns array if present (Phase 0 - DataEnvelope refactoring)
-    if (display.columns && Array.isArray(display.columns)) {
-      for (let i = 0; i < display.columns.length; i++) {
-        validateColumnDefinition(skillName, step.id, display.columns[i], i, warnings);
-      }
-    }
-
-    // Validate metadataFields if present
-    if (display.metadataFields) {
-      if (!Array.isArray(display.metadataFields)) {
-        warnings.push({
-          skillName,
-          stepId: step.id,
-          field: 'display.metadataFields',
-          message: 'metadataFields must be an array of strings',
-          value: display.metadataFields
-        });
-      } else {
-        for (let i = 0; i < display.metadataFields.length; i++) {
-          if (typeof display.metadataFields[i] !== 'string') {
-            warnings.push({
-              skillName,
-              stepId: step.id,
-              field: `display.metadataFields[${i}]`,
-              message: 'Each metadataField must be a string',
-              value: display.metadataFields[i]
-            });
-          }
-        }
-      }
-    }
-  }
-
-  // Recursively check nested steps (parallel, conditional)
-  if ((step as any).steps) {
-    for (const nestedStep of (step as any).steps) {
-      validateStepDisplay(skillName, nestedStep, warnings);
-    }
-  }
-  if ((step as any).conditions) {
-    for (const condition of (step as any).conditions) {
-      if (condition.then && typeof condition.then === 'object') {
-        validateStepDisplay(skillName, condition.then as SkillStep, warnings);
-      }
-    }
-    if ((step as any).else && typeof (step as any).else === 'object') {
-      validateStepDisplay(skillName, (step as any).else as SkillStep, warnings);
-    }
-  }
-}
-
-// =============================================================================
 // Vendor Override Types
 // =============================================================================
 
@@ -550,6 +313,8 @@ export class SkillRegistry {
   private fragmentCache: Map<string, string> = new Map();  // SQL fragment path → content
   /** Vendor overrides keyed by base skill ID (from `extends` field) */
   private vendorOverrides: Map<string, VendorOverride[]> = new Map();
+  private displayContractIssues: DisplayContractIssue[] = [];
+  private displayContractIssueKeys: Set<string> = new Set();
   private initialized = false;
 
   /**
@@ -615,6 +380,7 @@ export class SkillRegistry {
     }
 
     this.initialized = true;
+    this.logDisplayContractSummary();
     logger.info('SkillLoader', `Loaded ${this.skills.size} skills (${this.moduleSkills.size} module experts, ${this.vendorOverrides.size} vendor-overridden skills)`);
   }
 
@@ -660,14 +426,8 @@ export class SkillRegistry {
   /**
    * Run all load-time validations on a skill and log warnings.
    */
-  private validateAndLogWarnings(skill: SkillDefinition): void {
-    const displayWarnings = validateSkillDisplayConfig(skill);
-    for (const warn of displayWarnings) {
-      logger.warn(
-        'SkillLoader',
-        `Validation warning in ${skill.name}${warn.stepId ? `.${warn.stepId}` : ''}: ${warn.field} - ${warn.message} (value: ${warn.value})`
-      );
-    }
+  private validateAndLogWarnings(skill: SkillDefinition, filePath?: string): DisplayContractIssue[] {
+    const displayWarnings = this.validateAndLogDisplayWarnings(skill, filePath);
 
     const condWarnings = validateSkillConditions(skill);
     for (const w of condWarnings) {
@@ -678,6 +438,55 @@ export class SkillRegistry {
     for (const w of fragWarnings) {
       logger.warn('SkillLoader', `[${skill.name}.${w.stepId}] ${w.message}`);
     }
+
+    return displayWarnings;
+  }
+
+  /**
+   * Run only the display contract validator. Vendor overrides are fragments of a
+   * base skill, so condition/fragment validation would produce false positives.
+   */
+  private validateAndLogDisplayWarnings(skill: SkillDefinition | Record<string, unknown>, filePath?: string): DisplayContractIssue[] {
+    const displayWarnings = validateSkillDisplayContract(skill, { filePath });
+    const newlyRecorded = this.recordDisplayContractIssues(displayWarnings);
+    if (process.env.SMARTPERFETTO_VERBOSE_SKILL_WARNINGS === '1') {
+      for (const warn of newlyRecorded) {
+        logger.warn('SkillLoader', `Validation warning in ${formatDisplayContractIssue(warn)}`);
+      }
+    }
+    return newlyRecorded;
+  }
+
+  private recordDisplayContractIssues(issues: DisplayContractIssue[]): DisplayContractIssue[] {
+    const newlyRecorded: DisplayContractIssue[] = [];
+    for (const issue of issues) {
+      const key = [
+        issue.filePath || '',
+        issue.skillName,
+        issue.stepId || '',
+        issue.path,
+        String(issue.value),
+      ].join('\0');
+      if (this.displayContractIssueKeys.has(key)) continue;
+      this.displayContractIssueKeys.add(key);
+      this.displayContractIssues.push(issue);
+      newlyRecorded.push(issue);
+    }
+    return newlyRecorded;
+  }
+
+  private logDisplayContractSummary(): void {
+    if (this.displayContractIssues.length === 0) return;
+
+    const skills = new Set(this.displayContractIssues.map(issue => issue.skillName));
+    const files = new Set(this.displayContractIssues.map(issue => issue.filePath).filter(Boolean));
+    logger.warn(
+      'SkillLoader',
+      `Display contract warnings: ${this.displayContractIssues.length} issues across ${skills.size} skills` +
+        (files.size > 0 ? ` (${files.size} files)` : '') +
+        '. Run `cd backend && npm run validate:skills` for details. ' +
+        'Set SMARTPERFETTO_VERBOSE_SKILL_WARNINGS=1 to print every load-time issue.'
+    );
   }
 
   /**
@@ -703,7 +512,7 @@ export class SkillRegistry {
           const skill = normalizeSkillDefinition(loaded, fullPath);
 
           if (skill && skill.name) {
-            this.validateAndLogWarnings(skill);
+            this.validateAndLogWarnings(skill, fullPath);
             this.skills.set(skill.name, skill);
 
             // Track module skills separately for efficient lookup
@@ -739,6 +548,7 @@ export class SkillRegistry {
         const skill = yaml.load(content) as SkillDefinition;
 
         if (skill && skill.name && skill.type === 'pipeline_definition') {
+          this.validateAndLogDisplayWarnings(skill as any, filePath);
           // Register pipeline skills with a special prefix for discoverability
           this.skills.set(skill.name, skill);
           logger.debug('SkillLoader', `Loaded pipeline skill: ${skill.name}`);
@@ -797,6 +607,19 @@ export class SkillRegistry {
             additionalSteps: Array.isArray(raw.additional_steps) ? raw.additional_steps : [],
             overrideParams: raw.override_params,
           };
+
+          if (override.additionalSteps.length > 0 || raw.output?.display) {
+            this.validateAndLogDisplayWarnings({
+              name: `${baseSkillId}@${override.vendor}:${path.basename(file, path.extname(file))}`,
+              version: String(raw.version || '1'),
+              meta: {
+                display_name: raw.meta?.display_name || `${baseSkillId} ${override.vendor} override`,
+                description: raw.meta?.description || `Vendor override for ${baseSkillId}`,
+              },
+              output: raw.output,
+              steps: override.additionalSteps,
+            } as any, filePath);
+          }
 
           // Store keyed by base skill ID
           const existing = this.vendorOverrides.get(baseSkillId) || [];
@@ -868,7 +691,7 @@ export class SkillRegistry {
         const skill = normalizeSkillDefinition(loaded, filePath);
 
         if (skill && skill.name) {
-          this.validateAndLogWarnings(skill);
+          this.validateAndLogWarnings(skill, filePath);
           this.skills.set(skill.name, skill);
           logger.debug('SkillLoader', `Loaded skill: ${skill.name} (${skill.type})`);
         }
@@ -897,6 +720,7 @@ export class SkillRegistry {
    * Used for runtime-generated skills where YAML should be the single source of truth.
    */
   upsertSkill(skill: SkillDefinition): void {
+    const newDisplayIssues = this.validateAndLogWarnings(skill);
     this.skills.set(skill.name, skill);
 
     // Keep moduleSkills map consistent
@@ -904,6 +728,10 @@ export class SkillRegistry {
       this.moduleSkills.set(skill.name, skill);
     } else {
       this.moduleSkills.delete(skill.name);
+    }
+
+    if (this.initialized && newDisplayIssues.length > 0) {
+      this.logDisplayContractSummary();
     }
   }
 
@@ -1037,10 +865,18 @@ export class SkillRegistry {
    */
   async reload(): Promise<void> {
     this.skills.clear();
+    this.moduleSkills.clear();
+    this.fragmentCache.clear();
     this.vendorOverrides.clear();
+    this.displayContractIssues = [];
+    this.displayContractIssueKeys.clear();
     this.initialized = false;
     const skillsDir = path.resolve(__dirname, '../../../skills');
     await this.loadSkills(skillsDir);
+  }
+
+  getDisplayContractIssues(): DisplayContractIssue[] {
+    return [...this.displayContractIssues];
   }
 }
 

@@ -40,7 +40,7 @@ steps:
     type: atomic
     name: "Wake Lock 事件"
     display:
-      level: overview
+      level: summary
       layer: overview
       title: "Wake Lock 事件概览"
       columns:
