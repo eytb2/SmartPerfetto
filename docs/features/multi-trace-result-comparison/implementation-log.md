@@ -78,3 +78,25 @@
 - `agent_events` 的粒度足够生成 snapshot：可以按 `tenant_id/workspace_id/run_id` 读取所有 `event_type = 'data'` 事件，再从 `payload_json.envelope` 恢复完整 DataEnvelope 和 display/source metadata。
 - Snapshot normalizer 应优先读取 DB 中的 `agent_events`，只把内存 `session.dataEnvelopes` 当作当前 run 内的快速路径或 fallback。
 - 需要新增一个按 `runId` 读取完整 DataEnvelope 的 helper，避免直接依赖 SSE ring buffer 或前端消息。
+
+## M0.4 Report Artifact 与 Session/Run 反查
+
+状态：完成。
+
+验收证据：
+
+- `backend/src/services/enterpriseSchema.ts` 的 `report_artifacts` 表包含 `tenant_id`、`workspace_id`、`session_id`、`run_id`、`local_path`、`visibility`、`created_by`、`created_at`、`expires_at`。
+- `report_artifacts` 对 `(tenant_id, workspace_id, session_id)` 与 `(tenant_id, workspace_id, run_id)` 都有索引，并通过复合外键指向 `analysis_sessions` / `analysis_runs`。
+- `analysis_sessions` 持有 `trace_id`、`created_by`、`title`、`visibility`、`status`、`created_at`、`updated_at`，并有 `idx_analysis_sessions_trace(tenant_id, workspace_id, trace_id, created_at)`。
+- `analysis_runs` 持有 `session_id`、`mode`、`status`、`question`、`started_at`、`completed_at`、`heartbeat_at`、`updated_at`。
+- `backend/src/routes/reportRoutes.ts` 的 `persistReport()` 在企业持久化开启时会调用 `persistEnterpriseReport()`：
+  - `ensureEnterpriseReportGraph()` 会确保 tenant、workspace、trace、session、run 图存在。
+  - `report_artifacts` 写入 `session_id/run_id` 和 `local_path`。
+  - `report.json` sidecar 也记录 `reportId`、`sessionId`、`runId`、`traceId`、`tenantId`、`workspaceId`、`userId`、`visibility`。
+- `backend/src/routes/agentRoutes.ts` 的 agent report 生成路径会把 `sessionId`、`runId`、`traceId`、`tenantId`、`workspaceId`、`userId`、`visibility` 传给 `persistReport()`。
+
+结论：
+
+- Snapshot 可以稳定保存 `reportId/sessionId/runId/traceId`：agent run 完成时这些字段都已经在 session、run、report artifact 图中可反查。
+- `report_artifacts` 表本身不直接存 `trace_id`，需要通过 `report_artifacts.session_id -> analysis_sessions.trace_id` 反查；这是可接受的，但 snapshot repository 应在创建时把 `trace_id` 冗余存入 `analysis_result_snapshots`，避免列表查询频繁 join。
+- 从 snapshot 回到 report 的路径应使用 `reportId`，从 snapshot 回到结构化证据的路径应使用 `runId -> agent_events`。

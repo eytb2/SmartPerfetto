@@ -493,7 +493,7 @@ Result Picker -> POST /comparisons
 - [x] 初始化或同步 `perfetto/` submodule，确认插件源码与 `frontend/` prebuild 一致。
 - [x] 列出当前 `referenceTraceId` 相关前端源码、后端路由、runtime 工具与 docs。
 - [x] 确认 `agent_events` 中 DataEnvelope 的持久化粒度是否足够生成 snapshot。
-- [ ] 确认 report artifact 与 session/run metadata 是否能稳定反查。
+- [x] 确认 report artifact 与 session/run metadata 是否能稳定反查。
 - [ ] 补一份旧功能边界说明，避免后续误把旧 compare 当新功能复用。
 
 ### M1: Snapshot Contract 与持久化
