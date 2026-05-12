@@ -8,7 +8,7 @@
 [![TypeScript strict](https://img.shields.io/badge/TypeScript-strict-3178c6)](backend/tsconfig.json)
 [![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ed)](docker-compose.yml)
 [![Perfetto UI fork](https://img.shields.io/badge/Perfetto-UI%20fork-4285f4)](https://perfetto.dev/)
-[![Sponsor](https://img.shields.io/badge/Sponsor-WeChat%20553000664-f66f6f)](#赞助)
+[![Sponsor](https://img.shields.io/badge/Sponsor-WeChat%20553000664-f66f6f)](docs/sponsor.md)
 
 > 基于 [Perfetto](https://perfetto.dev/) 的 AI 驱动 Android 性能分析平台。
 
@@ -378,9 +378,12 @@ npm run test:core
 
 ## 赞助
 
-开源项目常见的赞助方式包括 GitHub Sponsors、OpenCollective、Buy Me a Coffee、爱发电、微信/支付宝收款码，以及企业商业支持或商业授权。
+SmartPerfetto 接受个人赞助、AI Credits / Token 厂商赞助、企业支持和商业授权咨询。
 
-SmartPerfetto 目前还没有公开支付页面。如果你想赞助、捐赠、试用企业支持或咨询商业授权，请通过微信联系维护者：`553000664`。
+- 赞助页面：[docs/sponsor.md](docs/sponsor.md)
+- 微信 / 支付宝二维码：[docs/sponsor.md#personal-donations](docs/sponsor.md#personal-donations)
+- AI Credits / Token 厂商赞助：[docs/sponsor.md#ai-credits-token-sponsorship](docs/sponsor.md#ai-credits-token-sponsorship)
+- 企业支持和商业授权：微信 `553000664`
 
 ## 许可证
 

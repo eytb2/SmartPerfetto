@@ -8,7 +8,7 @@
 [![TypeScript strict](https://img.shields.io/badge/TypeScript-strict-3178c6)](backend/tsconfig.json)
 [![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ed)](docker-compose.yml)
 [![Perfetto UI fork](https://img.shields.io/badge/Perfetto-UI%20fork-4285f4)](https://perfetto.dev/)
-[![Sponsor](https://img.shields.io/badge/Sponsor-WeChat%20553000664-f66f6f)](#sponsor)
+[![Sponsor](https://img.shields.io/badge/Sponsor-WeChat%20553000664-f66f6f)](docs/sponsor.en.md)
 
 > AI-powered Android performance analysis built on [Perfetto](https://perfetto.dev/).
 
@@ -380,9 +380,12 @@ Before opening a PR:
 
 ## Sponsor
 
-Common sponsorship channels for open-source projects include GitHub Sponsors, OpenCollective, Buy Me a Coffee, Afdian, WeChat/Alipay QR codes, and commercial support or licensing.
+SmartPerfetto accepts personal donations, AI credits / token sponsorship, commercial support, and commercial licensing inquiries.
 
-SmartPerfetto does not publish a public payment page yet. For sponsorship, donation, enterprise trial, or commercial licensing, contact the maintainer on WeChat: `553000664`.
+- Sponsor page: [docs/sponsor.en.md](docs/sponsor.en.md)
+- WeChat / Alipay QR codes: [docs/sponsor.en.md#personal-donations](docs/sponsor.en.md#personal-donations)
+- AI credits / token sponsorship: [docs/sponsor.en.md#ai-credits-token-sponsorship](docs/sponsor.en.md#ai-credits-token-sponsorship)
+- Commercial support and licensing: WeChat `553000664`
 
 ## License
 
