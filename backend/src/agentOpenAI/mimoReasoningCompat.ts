@@ -188,13 +188,24 @@ export function normalizeMimoChatCompletionPayload(payload: unknown): boolean {
   return changed;
 }
 
+function decodeRequestBody(body: unknown): string | undefined {
+  if (typeof body === 'string') return body;
+  if (body instanceof Uint8Array) return new TextDecoder().decode(body);
+  if (body instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(body));
+  if (ArrayBuffer.isView(body)) {
+    return new TextDecoder().decode(new Uint8Array(body.buffer, body.byteOffset, body.byteLength));
+  }
+  return undefined;
+}
+
 function normalizeRequestBody(body: unknown): { body: unknown; changed: boolean; summary?: RequestSummary } {
-  if (typeof body !== 'string') return { body, changed: false };
-  const trimmed = body.trim();
+  const text = decodeRequestBody(body);
+  if (text === undefined) return { body, changed: false };
+  const trimmed = text.trim();
   if (!trimmed.startsWith('{')) return { body, changed: false };
 
   try {
-    const payload = JSON.parse(body);
+    const payload = JSON.parse(text);
     const changed = normalizeMimoChatRequestPayload(payload);
     const summary = summarizeMimoChatRequestPayload(payload);
     return changed

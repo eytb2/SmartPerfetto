@@ -92,9 +92,43 @@ function parseToolArrayInput<T>(value: unknown): T[] | null {
   }
 }
 
-type PlanPhaseToolInput = Omit<PlanPhase, 'status'> & {
+function parseToolStringArrayInput(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+  }
+  if (typeof value !== 'string') return [];
+
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+  const parsed = parseToolArrayInput<unknown>(trimmed);
+  if (parsed) {
+    return parsed.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+  }
+  return trimmed
+    .split(',')
+    .map(entry => entry.trim())
+    .filter(Boolean);
+}
+
+type PlanPhaseToolInput = Omit<PlanPhase, 'status' | 'expectedTools' | 'expectedCalls'> & {
+  expectedTools?: unknown;
+  expectedCalls?: unknown;
   status?: PlanPhase['status'];
 };
+type NormalizedPlanPhaseToolInput = Omit<PlanPhase, 'status'> & {
+  status?: PlanPhase['status'];
+};
+
+function normalizePlanPhaseToolInput(input: PlanPhaseToolInput): Omit<PlanPhase, 'status'> {
+  const expectedCalls = parseToolArrayInput<NonNullable<PlanPhase['expectedCalls']>[number]>(input.expectedCalls);
+  return {
+    id: input.id,
+    name: input.name,
+    goal: input.goal,
+    expectedTools: parseToolStringArrayInput(input.expectedTools),
+    ...(expectedCalls ? { expectedCalls } : {}),
+  };
+}
 
 /** Process-wide ProjectMemory singleton (Plan 44). Independent of the
  * existing `analysisPatternMemory.ts` session-scope store. */
@@ -1741,10 +1775,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         };
       }
 
-      const normalizedPhases = phaseInputs.map((p): Omit<PlanPhase, 'status'> => ({
-        ...p,
-        expectedTools: Array.isArray(p.expectedTools) ? p.expectedTools : [],
-      }));
+      const normalizedPhases = phaseInputs.map(normalizePlanPhaseToolInput);
 
       // P1-G11: Validate against the scene template, honouring agent waivers.
       const validation = validatePlanAgainstSceneTemplate(normalizedPhases, options.sceneType, waiverInputs);
@@ -2014,9 +2045,9 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         };
       }
 
-      const normalizedUpdatedPhases = updatedPhaseInputs.map((p): PlanPhaseToolInput => ({
-        ...p,
-        expectedTools: Array.isArray(p.expectedTools) ? p.expectedTools : [],
+      const normalizedUpdatedPhases = updatedPhaseInputs.map((p): NormalizedPlanPhaseToolInput => ({
+        ...normalizePlanPhaseToolInput(p),
+        status: p.status,
       }));
 
       // Reset submit attempts so a revised plan can trigger hard-gate validation again
@@ -2066,7 +2097,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       plan.revisionHistory.push(revision);
 
       // Apply revision: merge completed phase data (summary, completedAt) with updated structure
-      plan.phases = normalizedUpdatedPhases.map(up => {
+      plan.phases = normalizedUpdatedPhases.map((up): PlanPhase => {
         const original = plan.phases.find(p => p.id === up.id);
         if (original && (original.status === 'completed' || original.status === 'skipped')) {
           // Preserve completed phase data

@@ -271,7 +271,7 @@ describe('createClaudeMcpServer', () => {
       const { tools, analysisPlan } = createTestServer();
       const result = await callTool(tools, 'submit_plan', {
         phases: JSON.stringify([
-          { id: 'p1', name: 'Collect', goal: 'Get startup data', expectedTools: ['invoke_skill'] },
+          { id: 'p1', name: 'Collect', goal: 'Get startup data', expectedTools: '["invoke_skill","fetch_artifact"]' },
         ]),
         successCriteria: 'Identify startup root cause',
         waivers: '[]',
@@ -279,7 +279,7 @@ describe('createClaudeMcpServer', () => {
 
       expect(result.success).toBe(true);
       expect(analysisPlan.current?.phases).toHaveLength(1);
-      expect(analysisPlan.current?.phases[0].expectedTools).toEqual(['invoke_skill']);
+      expect(analysisPlan.current?.phases[0].expectedTools).toEqual(['invoke_skill', 'fetch_artifact']);
     });
   });
 
@@ -478,6 +478,26 @@ describe('createClaudeMcpServer', () => {
       expect(result.success).toBe(true);
       expect(analysisPlan.current?.phases).toHaveLength(2);
       expect(analysisPlan.current?.revisionHistory).toHaveLength(1);
+    });
+
+    it('accepts JSON-string updated phases and string expectedTools', async () => {
+      const { tools, analysisPlan } = createTestServer();
+      await callTool(tools, 'submit_plan', {
+        phases: [
+          { id: 'p1', name: 'Phase 1', goal: 'G1', expectedTools: ['execute_sql'] },
+        ],
+        successCriteria: 'Done',
+      });
+
+      const result = await callTool(tools, 'revise_plan', {
+        updatedPhases: JSON.stringify([
+          { id: 'p1', name: 'Phase 1', goal: 'G1', expectedTools: 'execute_sql, fetch_artifact' },
+        ]),
+        reason: 'Provider encoded arrays as strings',
+      });
+
+      expect(result.success).toBe(true);
+      expect(analysisPlan.current?.phases[0].expectedTools).toEqual(['execute_sql', 'fetch_artifact']);
     });
   });
 });

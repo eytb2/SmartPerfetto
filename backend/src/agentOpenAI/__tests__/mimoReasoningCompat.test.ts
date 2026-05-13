@@ -169,4 +169,37 @@ describe('MiMo reasoning_content compatibility', () => {
     expect(captured.messages[0].reasoning_content).toBe('Need SQL evidence before answering.');
     expect(captured.messages[0]).not.toHaveProperty('reasoning');
   });
+
+  it('converts reasoning history when fetch init body is binary encoded JSON', async () => {
+    let captured: any;
+    const baseFetch = jest.fn(async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      captured = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [] }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const fetch = createMimoReasoningContentFetch(baseFetch as any);
+
+    await fetch('https://token-plan-sgp.xiaomimimo.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': '1',
+      },
+      body: new TextEncoder().encode(JSON.stringify({
+        model: 'mimo-v2.5-pro',
+        messages: [
+          {
+            role: 'assistant',
+            content: null,
+            reasoning: 'Need SQL evidence before answering.',
+            tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'execute_sql', arguments: '{}' } }],
+          },
+        ],
+      })),
+    });
+
+    expect(captured.messages[0].reasoning_content).toBe('Need SQL evidence before answering.');
+    expect(captured.messages[0]).not.toHaveProperty('reasoning');
+  });
 });
