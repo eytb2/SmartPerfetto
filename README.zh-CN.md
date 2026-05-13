@@ -71,9 +71,14 @@ SMARTPERFETTO_OUTPUT_LANGUAGE=en
 
 - 分析 Android Perfetto trace 中的滑动卡顿、启动、ANR、交互延迟、内存、游戏和渲染管线问题。
 - 保留 Perfetto 的时间线和 SQL 能力，并在 Perfetto UI 里增加 AI Assistant 面板。
+- 支持跨多个 Trace、多个窗口或同一 workspace 用户的已完成分析结果对比，不要求另一个 Perfetto UI 窗口持续打开。
 - 通过 TypeScript 后端编排 Agent 流程、查询 `trace_processor_shell`、调用 YAML Skill，并把结果实时流式传给浏览器。
 - 支持 Anthropic 直连、Claude/Anthropic-compatible provider，也支持通过 OpenAI Agents SDK 接入 OpenAI/OpenAI-compatible provider。
 - 内置 160+ 个 YAML Skill/配置文件和多场景分析策略，用于 Android 性能排查。
+
+## 功能总览
+
+- [功能总览](docs/getting-started/features.md)：AI Assistant 工作流、常见性能场景、选区分析、报告、Trace 实时对比、多 Trace 分析结果对比、Provider 管理、API/CLI 自动化和运行方式。
 
 ## 技术栈
 

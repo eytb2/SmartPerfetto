@@ -8,12 +8,15 @@ SmartPerfetto is an Android performance analysis platform built on Perfetto. Thi
 
 | Reader | Start here | Continue with |
 |---|---|---|
-| First-time user | [Quick Start](getting-started/quick-start.en.md) | [Configuration Guide](getting-started/configuration.en.md), [Basic Usage](getting-started/usage.en.md), [Portable Packaging](reference/portable-packaging.en.md) |
+| First-time user | [Quick Start](getting-started/quick-start.en.md) | [Configuration Guide](getting-started/configuration.en.md), [Feature Overview](getting-started/features.en.md), [Basic Usage](getting-started/usage.en.md), [Portable Packaging](reference/portable-packaging.en.md) |
+| User evaluating SmartPerfetto features | [Feature Overview](getting-started/features.en.md) | [Basic Usage](getting-started/usage.en.md), [Configuration Guide](getting-started/configuration.en.md) |
+| Multi-trace result comparison user | [Multi-Trace Analysis Result Comparison](getting-started/multi-trace-result-comparison.en.md) | [Basic Usage](getting-started/usage.en.md), [API Reference](reference/api.en.md) |
 | Backend API integrator | [API Reference](reference/api.en.md) | [MCP Tools Reference](reference/mcp-tools.en.md) |
 | CLI or automation user | [CLI Reference](reference/cli.en.md) | [API Reference](reference/api.en.md) |
 | Contributor | [Local Development](development/local-development.en.md) | [Testing and Verification](development/testing.en.md), [Contributing Guide](../CONTRIBUTING.md) |
 | Skill author | [Skill System Guide](reference/skill-system.en.md) | [MCP Tools Reference](reference/mcp-tools.en.md), [Testing and Verification](development/testing.en.md) |
 | Architecture reader | [Architecture Overview](architecture/overview.en.md) | [Data Contract](../backend/docs/DATA_CONTRACT_DESIGN.en.md) |
+| Feature plan reader | [Multi-trace comparison development plan](features/multi-trace-result-comparison/README.md) | [Enterprise multi-tenant plan](features/enterprise-multi-tenant/README.md) |
 | Deployment troubleshooter | [Troubleshooting](operations/troubleshooting.en.md) | [Configuration Guide](getting-started/configuration.en.md) |
 
 ## Documentation Structure

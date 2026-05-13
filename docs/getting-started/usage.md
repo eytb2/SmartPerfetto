@@ -2,6 +2,8 @@
 
 [English](usage.en.md) | [中文](usage.md)
 
+如果你想先了解 SmartPerfetto 的完整功能边界、入口和输出效果，见 [功能总览](features.md)。
+
 ## 推荐 trace 内容
 
 SmartPerfetto 最适合 Android 12+ trace，尤其是包含 FrameTimeline 数据的 trace。常用 atrace category：
@@ -32,6 +34,12 @@ SmartPerfetto 最适合 Android 12+ trace，尤其是包含 FrameTimeline 数据
 这段选区里主线程为什么卡住？
 对比当前 trace 和参考 trace 的滑动差异
 ```
+
+## 多 Trace 分析结果对比
+
+如果你已经在两个或更多 Trace 上完成 AI 分析，可以用 AI Assistant 顶部的 `fact_check` 入口打开“分析结果对比”。选择一个 `基线` 和一个或多个 `候选` 后，SmartPerfetto 会生成标准指标 delta、显著变化摘要和 HTML 对比报告。
+
+这个功能对比的是已完成分析结果，不要求另一个 Perfetto UI 窗口继续打开。完整操作说明见 [多 Trace 分析结果对比](multi-trace-result-comparison.md)。
 
 ## 分析模式选择
 

@@ -2,6 +2,8 @@
 
 [English](usage.en.md) | [中文](usage.md)
 
+For the full feature map, entry points, and expected outputs, see [Feature Overview](features.en.md).
+
 ## Recommended Trace Content
 
 SmartPerfetto works best with Android 12+ traces, especially traces that include FrameTimeline data. Common atrace categories:
@@ -32,6 +34,12 @@ What is the app package name and main process in this trace?
 Why is the main thread blocked in my selected range?
 Compare scrolling behavior between this trace and the reference trace
 ```
+
+## Multi-Trace Analysis Result Comparison
+
+After AI analysis has completed on two or more traces, use the AI Assistant toolbar's `fact_check` entry to open analysis result comparison. Select one `Baseline` and one or more `Candidate` results; SmartPerfetto returns standard metric deltas, significant-change summary, and an HTML comparison report.
+
+This compares completed analysis results and does not require the other Perfetto UI window to stay open. See [Multi-Trace Analysis Result Comparison](multi-trace-result-comparison.en.md) for the full workflow.
 
 ## Analysis Mode Selection
 
