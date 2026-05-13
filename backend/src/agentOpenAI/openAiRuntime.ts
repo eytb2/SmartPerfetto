@@ -12,6 +12,7 @@ import {
   type AgentInputItem,
   type RunStreamEvent,
 } from '@openai/agents';
+import OpenAI from 'openai';
 
 import type { TraceProcessorService } from '../services/traceProcessorService';
 import { createSkillExecutor } from '../services/skillEngine/skillExecutor';
@@ -68,6 +69,10 @@ import {
 } from '../agent/core/entityCapture';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from '../agentv3/outputLanguage';
 import { loadOpenAIConfig, type OpenAIAgentConfig } from './openAiConfig';
+import {
+  createMimoReasoningContentFetch,
+  shouldUseMimoReasoningContentCompat,
+} from './mimoReasoningCompat';
 import { createOpenAIToolsFromMcpDefinitions } from './openAiToolAdapter';
 import type { ProviderScope } from '../services/providerManager';
 import type { KnowledgeScope } from '../services/scopedKnowledgeStore';
@@ -336,11 +341,20 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         : effectivePrompt;
 
       setTracingDisabled(true);
-      const provider = new OpenAIProvider({
-        apiKey: config.apiKey,
-        baseURL: config.baseURL,
-        useResponses: config.protocol === 'responses',
-      });
+      const provider = shouldUseMimoReasoningContentCompat(config)
+        ? new OpenAIProvider({
+            openAIClient: new OpenAI({
+              apiKey: config.apiKey,
+              baseURL: config.baseURL,
+              fetch: createMimoReasoningContentFetch() as any,
+            }),
+            useResponses: false,
+          })
+        : new OpenAIProvider({
+            apiKey: config.apiKey,
+            baseURL: config.baseURL,
+            useResponses: config.protocol === 'responses',
+          });
       const runner = new Runner({
         modelProvider: provider,
         tracingDisabled: true,
