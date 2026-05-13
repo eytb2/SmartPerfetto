@@ -421,7 +421,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           };
           const schedulePlanCompleteIdleAbort = () => {
             clearPlanCompleteIdleTimer();
-            if (!this.shouldFinalizeAfterPlanComplete(sessionId, quickMode, runAnswer)) {
+            if (!this.shouldFinalizeAfterPlanComplete(sessionId, quickMode, runAnswer, accumulatedAnswer)) {
               return;
             }
             planCompleteIdleTimer = setTimeout(() => {
@@ -477,7 +477,11 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           const finalOutput = typeof stream.finalOutput === 'string'
             ? stream.finalOutput
             : (stream.finalOutput ? JSON.stringify(stream.finalOutput) : runAnswer);
-          conclusion = finalOutput || runAnswer || accumulatedAnswer;
+          conclusion = finalOutput ||
+            runAnswer ||
+            accumulatedAnswer ||
+            this.buildCompletedPlanFallbackConclusion(sessionId, quickMode, config.outputLanguage) ||
+            '';
           finalHistory = stream.history;
           finalLastResponseId = stream.lastResponseId;
           finalRunState = this.safeSerializeRunState(stream.state);
@@ -1141,11 +1145,43 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     sessionId: string,
     quickMode: boolean,
     answer: string,
+    fallbackAnswer = '',
   ): boolean {
-    if (quickMode || answer.trim().length === 0) {
+    if (quickMode) {
       return false;
     }
-    return this.getPlanCompletionStatus(sessionId, quickMode).complete;
+    const status = this.getPlanCompletionStatus(sessionId, quickMode);
+    if (!status.complete) {
+      return false;
+    }
+    return answer.trim().length > 0 ||
+      fallbackAnswer.trim().length > 0 ||
+      this.buildCompletedPlanFallbackConclusion(sessionId, quickMode, DEFAULT_OUTPUT_LANGUAGE) !== undefined;
+  }
+
+  private buildCompletedPlanFallbackConclusion(
+    sessionId: string,
+    quickMode: boolean,
+    outputLanguage: OutputLanguage,
+  ): string | undefined {
+    if (quickMode) return undefined;
+    const plan = this.sessionPlans.get(sessionId)?.current ?? null;
+    if (!plan || plan.phases.length === 0) return undefined;
+    if (!this.getPlanCompletionStatus(sessionId, quickMode).complete) return undefined;
+
+    const summaries = plan.phases
+      .filter(hasAdequateClosedPhaseSummary)
+      .map(phase => {
+        const name = phase.name || phase.id;
+        return `- ${name}: ${phase.summary?.trim()}`;
+      });
+    if (summaries.length === 0) return undefined;
+
+    return localize(
+      outputLanguage,
+      `分析计划已完成，但模型未生成独立最终段落。基于已完成阶段摘要：\n\n${summaries.join('\n')}`,
+      `The analysis plan completed, but the model did not produce a standalone final paragraph. Summary from completed phases:\n\n${summaries.join('\n')}`,
+    );
   }
 
   private formatPlanContinuationMessage(

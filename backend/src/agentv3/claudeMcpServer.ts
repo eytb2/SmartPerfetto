@@ -15,7 +15,7 @@ import { createArchitectureDetector } from '../agent/detectors/architectureDetec
 import { displayResultToEnvelope } from '../types/dataContract';
 import type { DisplayResult as SkillDisplayResult } from '../services/skillEngine/types';
 import type { StreamingUpdate } from '../agent/types';
-import type { SqlSchemaIndex, AnalysisNote, AnalysisPlanV3, PlanRevision, Hypothesis, UncertaintyFlag } from './types';
+import type { SqlSchemaIndex, AnalysisNote, AnalysisPlanV3, PlanAspectWaiver, PlanPhase, PlanRevision, Hypothesis, UncertaintyFlag } from './types';
 import type { SceneType } from './sceneClassifier';
 import { summarizeSqlResult } from './sqlSummarizer';
 import { matchPatterns, matchNegativePatterns, extractTraceFeatures } from './analysisPatternMemory';
@@ -79,6 +79,22 @@ function getBaselineStore(): BaselineStore {
     cachedBaselineStore = new BaselineStore(BASELINE_STORE_PATH);
   return cachedBaselineStore;
 }
+
+function parseToolArrayInput<T>(value: unknown): T[] | null {
+  if (Array.isArray(value)) return value as T[];
+  if (typeof value !== 'string') return null;
+
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed as T[] : null;
+  } catch {
+    return null;
+  }
+}
+
+type PlanPhaseToolInput = Omit<PlanPhase, 'status'> & {
+  status?: PlanPhase['status'];
+};
 
 /** Process-wide ProjectMemory singleton (Plan 44). Independent of the
  * existing `analysisPatternMemory.ts` session-scope store. */
@@ -1695,16 +1711,51 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       })).optional().describe('Optional opt-outs for scene-template aspects when the trace genuinely cannot support them.'),
     },
     async ({ phases, successCriteria, waivers }) => {
+      const phaseInputs = parseToolArrayInput<PlanPhaseToolInput>(phases);
+      if (!phaseInputs) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: localize(outputLanguage, 'submit_plan 参数 phases 必须是数组或 JSON 数组字符串。', 'submit_plan argument phases must be an array or JSON array string.'),
+            }),
+          }],
+          isError: true,
+        };
+      }
+
+      const waiverInputs = waivers === undefined
+        ? []
+        : parseToolArrayInput<PlanAspectWaiver>(waivers);
+      if (!waiverInputs) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: localize(outputLanguage, 'submit_plan 参数 waivers 必须是数组或 JSON 数组字符串。', 'submit_plan argument waivers must be an array or JSON array string.'),
+            }),
+          }],
+          isError: true,
+        };
+      }
+
+      const normalizedPhases = phaseInputs.map((p): Omit<PlanPhase, 'status'> => ({
+        ...p,
+        expectedTools: Array.isArray(p.expectedTools) ? p.expectedTools : [],
+      }));
+
       // P1-G11: Validate against the scene template, honouring agent waivers.
-      const validation = validatePlanAgainstSceneTemplate(phases, options.sceneType, waivers);
+      const validation = validatePlanAgainstSceneTemplate(normalizedPhases, options.sceneType, waiverInputs);
       const { warnings: planWarnings, missingAspectIds } = validation;
 
       // Track only waivers whose reason met the minimum threshold; the rest
       // are reported back so the agent knows they didn't count.
-      const acceptedWaivers = (waivers ?? []).filter(
+      const acceptedWaivers = waiverInputs.filter(
         w => typeof w.reason === 'string' && w.reason.trim().length >= MIN_WAIVER_REASON_CHARS,
       );
-      const tooShortWaivers = (waivers ?? []).filter(
+      const tooShortWaivers = waiverInputs.filter(
         w => !acceptedWaivers.some(a => a.aspectId === w.aspectId),
       );
 
@@ -1745,7 +1796,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
 
       const forcedAccept = planWarnings.length > 0; // hit the attempt cap
       const plan: AnalysisPlanV3 = {
-        phases: phases.map(p => ({
+        phases: normalizedPhases.map((p): PlanPhase => ({
           ...p,
           status: 'pending' as const,
         })),
@@ -1949,6 +2000,25 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       updatedSuccessCriteria: z.string().optional().describe('Updated success criteria (only if the goal changed)'),
     },
     async ({ reason, updatedPhases, updatedSuccessCriteria }) => {
+      const updatedPhaseInputs = parseToolArrayInput<PlanPhaseToolInput>(updatedPhases);
+      if (!updatedPhaseInputs) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: localize(outputLanguage, 'revise_plan 参数 updatedPhases 必须是数组或 JSON 数组字符串。', 'revise_plan argument updatedPhases must be an array or JSON array string.'),
+            }),
+          }],
+          isError: true,
+        };
+      }
+
+      const normalizedUpdatedPhases = updatedPhaseInputs.map((p): PlanPhaseToolInput => ({
+        ...p,
+        expectedTools: Array.isArray(p.expectedTools) ? p.expectedTools : [],
+      }));
+
       // Reset submit attempts so a revised plan can trigger hard-gate validation again
       planSubmitAttempts = 0;
       const plan = analysisPlanRef.current;
@@ -1967,7 +2037,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
 
       // Validate: completed phases from original plan must be preserved
       const originalCompleted = plan.phases.filter(p => p.status === 'completed' || p.status === 'skipped');
-      const preservedIds = new Set(updatedPhases.map(p => p.id));
+      const preservedIds = new Set(normalizedUpdatedPhases.map(p => p.id));
       const missingCompleted = originalCompleted.filter(p => !preservedIds.has(p.id));
       if (missingCompleted.length > 0) {
         return {
@@ -1996,7 +2066,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       plan.revisionHistory.push(revision);
 
       // Apply revision: merge completed phase data (summary, completedAt) with updated structure
-      plan.phases = updatedPhases.map(up => {
+      plan.phases = normalizedUpdatedPhases.map(up => {
         const original = plan.phases.find(p => p.id === up.id);
         if (original && (original.status === 'completed' || original.status === 'skipped')) {
           // Preserve completed phase data

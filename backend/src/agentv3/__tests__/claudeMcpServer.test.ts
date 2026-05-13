@@ -266,6 +266,21 @@ describe('createClaudeMcpServer', () => {
       expect(analysisPlan.current?.phases).toHaveLength(2);
       expect(analysisPlan.current?.successCriteria).toBe('Identify jank root cause');
     });
+
+    it('accepts JSON-string phases from OpenAI-compatible tool callers', async () => {
+      const { tools, analysisPlan } = createTestServer();
+      const result = await callTool(tools, 'submit_plan', {
+        phases: JSON.stringify([
+          { id: 'p1', name: 'Collect', goal: 'Get startup data', expectedTools: ['invoke_skill'] },
+        ]),
+        successCriteria: 'Identify startup root cause',
+        waivers: '[]',
+      });
+
+      expect(result.success).toBe(true);
+      expect(analysisPlan.current?.phases).toHaveLength(1);
+      expect(analysisPlan.current?.phases[0].expectedTools).toEqual(['invoke_skill']);
+    });
   });
 
   describe('update_plan_phase', () => {

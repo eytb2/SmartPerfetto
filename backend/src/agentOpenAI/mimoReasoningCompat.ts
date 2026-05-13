@@ -10,6 +10,12 @@ type FetchLike = typeof fetch;
 type FetchInput = Parameters<FetchLike>[0];
 type FetchInit = Parameters<FetchLike>[1];
 type FetchResult = Awaited<ReturnType<FetchLike>>;
+type RequestSummary = {
+  model?: unknown;
+  stream?: unknown;
+  messages?: Array<Record<string, unknown>>;
+  toolCount?: number;
+};
 
 const CHAT_COMPLETIONS_PATH = /\/chat\/completions(?:[?#]|$)/;
 const MIMO_BASE_URL_PATTERN = /xiaomimimo\.com/i;
@@ -21,6 +27,70 @@ function isRecord(value: unknown): value is JsonRecord {
 
 function hasNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
+}
+
+function hasToolCalls(message: JsonRecord): boolean {
+  return Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+}
+
+function hasContent(message: JsonRecord): boolean {
+  const content = message.content;
+  return Array.isArray(content)
+    ? content.length > 0
+    : content !== undefined && content !== null && content !== '';
+}
+
+function mergePreviousAssistantMessage(previous: JsonRecord, message: JsonRecord): boolean {
+  let merged = false;
+
+  if (!hasNonEmptyString(message.reasoning_content) && hasNonEmptyString(previous.reasoning_content)) {
+    message.reasoning_content = previous.reasoning_content;
+    merged = true;
+  }
+
+  if (!hasContent(message) && hasContent(previous)) {
+    message.content = previous.content;
+    merged = true;
+  } else if (typeof previous.content === 'string' && typeof message.content === 'string') {
+    message.content = `${previous.content}\n${message.content}`;
+    merged = true;
+  }
+
+  return merged || !hasContent(previous);
+}
+
+function summarizeContent(content: unknown): Record<string, unknown> {
+  if (typeof content === 'string') return { contentType: 'string', contentLength: content.length };
+  if (Array.isArray(content)) return { contentType: 'array', contentParts: content.length };
+  if (content === null) return { contentType: 'null' };
+  return { contentType: typeof content };
+}
+
+function summarizeMimoChatRequestPayload(payload: unknown): RequestSummary | undefined {
+  if (!isRecord(payload)) return undefined;
+  return {
+    model: payload.model,
+    stream: payload.stream,
+    toolCount: Array.isArray(payload.tools) ? payload.tools.length : 0,
+    messages: Array.isArray(payload.messages)
+      ? payload.messages.map((message, index) => {
+          if (!isRecord(message)) return { index, type: typeof message };
+          return {
+            index,
+            role: message.role,
+            ...summarizeContent(message.content),
+            toolCallCount: Array.isArray(message.tool_calls) ? message.tool_calls.length : 0,
+            hasReasoning: hasNonEmptyString(message.reasoning),
+            reasoningLength: hasNonEmptyString(message.reasoning) ? message.reasoning.length : 0,
+            hasReasoningContent: hasNonEmptyString(message.reasoning_content),
+            reasoningContentLength: hasNonEmptyString(message.reasoning_content)
+              ? message.reasoning_content.length
+              : 0,
+            toolCallId: typeof message.tool_call_id === 'string' ? message.tool_call_id : undefined,
+          };
+        })
+      : undefined,
+  };
 }
 
 function getRequestUrl(input: FetchInput): string {
@@ -39,6 +109,11 @@ function headersWithoutContentLength(headers: unknown): unknown {
   return copied;
 }
 
+function isRequestInput(input: FetchInput): input is Request {
+  const RequestCtor = (globalThis as any).Request;
+  return !!RequestCtor && input instanceof RequestCtor;
+}
+
 export function shouldUseMimoReasoningContentCompat(
   config: Pick<OpenAIAgentConfig, 'protocol' | 'baseURL' | 'model' | 'lightModel'>,
 ): boolean {
@@ -51,24 +126,44 @@ export function shouldUseMimoReasoningContentCompat(
 export function normalizeMimoChatRequestPayload(payload: unknown): boolean {
   if (!isRecord(payload) || !Array.isArray(payload.messages)) return false;
   let changed = false;
+  const normalizedMessages: unknown[] = [];
 
   for (const message of payload.messages) {
-    if (!isRecord(message) || message.role !== 'assistant') continue;
+    if (!isRecord(message) || message.role !== 'assistant') {
+      normalizedMessages.push(message);
+      continue;
+    }
+
     const reasoning = hasNonEmptyString(message.reasoning)
       ? message.reasoning
       : hasNonEmptyString(message.reasoning_content)
         ? message.reasoning_content
         : undefined;
-    if (!reasoning) continue;
-
     if (message.reasoning_content !== reasoning) {
-      message.reasoning_content = reasoning;
-      changed = true;
+      if (reasoning) {
+        message.reasoning_content = reasoning;
+        changed = true;
+      }
     }
     if ('reasoning' in message) {
       delete message.reasoning;
       changed = true;
     }
+
+    const previous = normalizedMessages[normalizedMessages.length - 1];
+    if (isRecord(previous) && previous.role === 'assistant' && !hasToolCalls(previous)) {
+      if (mergePreviousAssistantMessage(previous, message)) {
+        normalizedMessages.pop();
+        changed = true;
+      }
+    }
+
+    normalizedMessages.push(message);
+  }
+
+  if (normalizedMessages.length !== payload.messages.length) {
+    payload.messages = normalizedMessages;
+    changed = true;
   }
 
   return changed;
@@ -93,7 +188,7 @@ export function normalizeMimoChatCompletionPayload(payload: unknown): boolean {
   return changed;
 }
 
-function normalizeRequestBody(body: unknown): { body: unknown; changed: boolean } {
+function normalizeRequestBody(body: unknown): { body: unknown; changed: boolean; summary?: RequestSummary } {
   if (typeof body !== 'string') return { body, changed: false };
   const trimmed = body.trim();
   if (!trimmed.startsWith('{')) return { body, changed: false };
@@ -101,21 +196,66 @@ function normalizeRequestBody(body: unknown): { body: unknown; changed: boolean 
   try {
     const payload = JSON.parse(body);
     const changed = normalizeMimoChatRequestPayload(payload);
-    return changed ? { body: JSON.stringify(payload), changed } : { body, changed: false };
+    const summary = summarizeMimoChatRequestPayload(payload);
+    return changed
+      ? { body: JSON.stringify(payload), changed, summary }
+      : { body, changed: false, summary };
   } catch {
     return { body, changed: false };
+  }
+}
+
+async function normalizeRequestInputBody(
+  input: Request,
+): Promise<{ input: FetchInput; changed: boolean; summary?: RequestSummary }> {
+  if (input.bodyUsed) return { input, changed: false };
+
+  try {
+    const body = await input.clone().text();
+    const normalized = normalizeRequestBody(body);
+    if (!normalized.changed) return { input, changed: false, summary: normalized.summary };
+
+    const RequestCtor = (globalThis as any).Request;
+    return {
+      input: new RequestCtor(input, {
+        body: normalized.body as any,
+        headers: headersWithoutContentLength(input.headers) as any,
+      }),
+      changed: true,
+      summary: normalized.summary,
+    };
+  } catch {
+    return { input, changed: false };
   }
 }
 
 async function normalizeFetchRequest(
   input: FetchInput,
   init: FetchInit,
-): Promise<{ input: FetchInput; init: FetchInit; isChatCompletions: boolean }> {
+): Promise<{ input: FetchInput; init: FetchInit; isChatCompletions: boolean; summary?: RequestSummary }> {
   const isChatCompletions = CHAT_COMPLETIONS_PATH.test(getRequestUrl(input));
   if (!isChatCompletions) return { input, init, isChatCompletions };
 
   const normalized = normalizeRequestBody(init?.body);
-  if (!normalized.changed) return { input, init, isChatCompletions };
+  if (!normalized.changed) {
+    if (isRequestInput(input) && !init?.body) {
+      const normalizedInput = await normalizeRequestInputBody(input);
+      if (normalizedInput.changed) {
+        return {
+          input: normalizedInput.input,
+          init: init
+            ? {
+                ...init,
+                headers: headersWithoutContentLength(init.headers) as any,
+              }
+            : init,
+          isChatCompletions,
+          summary: normalizedInput.summary,
+        };
+      }
+    }
+    return { input, init, isChatCompletions, summary: normalized.summary };
+  }
 
   return {
     input,
@@ -125,6 +265,7 @@ async function normalizeFetchRequest(
       headers: headersWithoutContentLength(init?.headers) as any,
     },
     isChatCompletions,
+    summary: normalized.summary,
   };
 }
 
@@ -219,6 +360,20 @@ export function createMimoReasoningContentFetch(baseFetch: FetchLike = fetch): F
   return (async (input: FetchInput, init?: FetchInit): Promise<FetchResult> => {
     const normalizedRequest = await normalizeFetchRequest(input, init);
     const response = await baseFetch(normalizedRequest.input, normalizedRequest.init);
+    if (normalizedRequest.isChatCompletions && response.status >= 400) {
+      let responsePreview: string | undefined;
+      try {
+        responsePreview = (await response.clone().text()).slice(0, 500);
+      } catch {
+        responsePreview = undefined;
+      }
+      console.warn('[MiMoCompat] Chat completions request failed', {
+        status: response.status,
+        statusText: response.statusText,
+        request: normalizedRequest.summary,
+        responsePreview,
+      });
+    }
     return normalizedRequest.isChatCompletions
       ? normalizeFetchResponse(response)
       : response;

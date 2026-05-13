@@ -176,7 +176,7 @@ export const MIN_WAIVER_REASON_CHARS = 50;
  * revise endpoint.
  */
 export function validatePlanAgainstSceneTemplate(
-  phases: ReadonlyArray<{ name: string; goal: string; expectedTools: string[] }>,
+  phases: ReadonlyArray<{ name: string; goal: string; expectedTools?: string[] }>,
   scene: SceneType | undefined,
   waivers?: ReadonlyArray<{ aspectId: string; reason: string }>,
 ): PlanValidationResult {
@@ -184,7 +184,7 @@ export function validatePlanAgainstSceneTemplate(
   if (!template) return { warnings: [], missingAspectIds: [] };
 
   const planText = phases
-    .map(p => `${p.name} ${p.goal} ${p.expectedTools.join(' ')}`)
+    .map(p => `${p.name} ${p.goal} ${(p.expectedTools ?? []).join(' ')}`)
     .join(' ')
     .toLowerCase();
 

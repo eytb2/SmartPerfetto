@@ -92,7 +92,7 @@ describe('OpenAIRuntime plan completion guard', () => {
     });
   });
 
-  it('only allows deterministic stream finalization after full-mode plan completion with an answer', () => {
+  it('allows deterministic stream finalization after full-mode plan completion', () => {
     const runtime = new OpenAIRuntime({} as any) as any;
 
     runtime.sessionPlans.set('s1', {
@@ -105,8 +105,9 @@ describe('OpenAIRuntime plan completion guard', () => {
       current: plan([phase('p1', 'completed'), phase('p2', 'skipped')]),
       history: [],
     });
-    expect(runtime.shouldFinalizeAfterPlanComplete('s1', false, '')).toBe(false);
+    expect(runtime.shouldFinalizeAfterPlanComplete('s1', false, '')).toBe(true);
     expect(runtime.shouldFinalizeAfterPlanComplete('s1', false, 'final text')).toBe(true);
+    expect(runtime.shouldFinalizeAfterPlanComplete('s1', false, '', 'previous answer')).toBe(true);
     expect(runtime.shouldFinalizeAfterPlanComplete('s1', true, 'final text')).toBe(false);
   });
 });
