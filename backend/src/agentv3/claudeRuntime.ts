@@ -12,7 +12,7 @@ import { ensureSkillRegistryInitialized, skillRegistry } from '../services/skill
 import { getSkillAnalysisAdapter } from '../services/skillEngine/skillAnalysisAdapter';
 import { createArchitectureDetector } from '../agent/detectors/architectureDetector';
 import { sessionContextManager } from '../agent/context/enhancedSessionContext';
-import type { StreamingUpdate, Finding } from '../agent/types';
+import type { StreamingUpdate, Finding, ConversationTurn } from '../agent/types';
 import type { Hypothesis as ProtocolHypothesis } from '../agent/types/agentProtocol';
 import type { AnalysisResult, AnalysisOptions, IOrchestrator } from '../agent/core/orchestratorTypes';
 import type { ArchitectureInfo } from '../agent/detectors/types';
@@ -109,6 +109,7 @@ const SDK_SESSION_FRESHNESS_MS = 4 * 60 * 60 * 1000;
 interface SessionMapEntry {
   sdkSessionId: string;
   updatedAt: number;
+  mode?: 'full';
 }
 
 function enterpriseSessionMapDbWritesEnabled(): boolean {
@@ -129,7 +130,13 @@ function loadPersistedSessionMap(): Map<string, SessionMapEntry> {
         if (typeof value === 'string') {
           map.set(key, { sdkSessionId: value, updatedAt: Date.now() });
         } else if (value && typeof value === 'object') {
-          map.set(key, value as SessionMapEntry);
+          const entry = value as Partial<SessionMapEntry>;
+          if (typeof entry.sdkSessionId !== 'string') continue;
+          const updatedAt = typeof entry.updatedAt === 'number' && Number.isFinite(entry.updatedAt)
+            ? entry.updatedAt
+            : Date.now();
+          const mode = entry.mode === 'full' ? entry.mode : undefined;
+          map.set(key, { sdkSessionId: entry.sdkSessionId, updatedAt, ...(mode ? { mode } : {}) });
         }
       }
       return map;
@@ -280,9 +287,59 @@ function isMissingSdkConversationError(message: string): boolean {
   return /No conversation found with session ID/i.test(message);
 }
 
+function isFreshFullSdkSessionEntry(entry: SessionMapEntry | undefined, now = Date.now()): entry is SessionMapEntry & { mode: 'full' } {
+  return !!entry
+    && entry.mode === 'full'
+    && now - (entry.updatedAt || 0) < SDK_SESSION_FRESHNESS_MS;
+}
+
+function compactForPrompt(value: unknown, maxChars: number): string {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, Math.max(0, maxChars - 1))}...`;
+}
+
+function buildQuickConversationContext(
+  previousTurns: ConversationTurn[],
+  outputLanguage = DEFAULT_OUTPUT_LANGUAGE,
+): string | undefined {
+  const turns = previousTurns.filter(turn => turn.completed).slice(-3);
+  if (turns.length === 0) return undefined;
+
+  const lines = [
+    localize(
+      outputLanguage,
+      '## 最近对话上下文\n\n以下是 SmartPerfetto 本地保存的最近问答，用于理解“继续/刚才/这个”等指代；不要把它当作当前问题的新证据。',
+      '## Recent Conversation Context\n\nThe following recent SmartPerfetto turns are local context for references like "continue", "earlier", or "this"; do not treat them as new evidence for the current question.',
+    ),
+  ];
+
+  for (const turn of turns) {
+    const query = compactForPrompt(turn.query, 220);
+    const answer = compactForPrompt(turn.result?.message || '', 700);
+    const findings = turn.findings
+      .slice(0, 3)
+      .map(f => `[${f.severity}] ${compactForPrompt(f.title, 160)}`)
+      .filter(Boolean);
+
+    lines.push(`### Turn ${turn.turnIndex + 1}`);
+    lines.push(`- ${localize(outputLanguage, '用户', 'User')}: ${query}`);
+    if (answer) {
+      lines.push(`- ${localize(outputLanguage, '上轮回答', 'Previous answer')}: ${answer}`);
+    }
+    if (findings.length > 0) {
+      lines.push(`- ${localize(outputLanguage, '上轮发现', 'Previous findings')}: ${findings.join('; ')}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 export const __testing = {
   getSdkResultErrorMessage,
   isMissingSdkConversationError,
+  isFreshFullSdkSessionEntry,
+  buildQuickConversationContext,
 };
 
 /** Sleep for the given milliseconds. */
@@ -431,7 +488,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
   /** Restore a previously persisted SDK session mapping (e.g., after server restart). */
   restoreSessionMapping(smartPerfettoSessionId: string, sdkSessionId: string): void {
-    this.sessionMap.set(smartPerfettoSessionId, { sdkSessionId, updatedAt: Date.now() });
+    this.sessionMap.set(smartPerfettoSessionId, { sdkSessionId, updatedAt: Date.now(), mode: 'full' });
   }
 
   /** Restore a cached architecture detection result (e.g., from session persistence). */
@@ -447,9 +504,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
   /** Get SDK session ID for persistence. */
   getSdkSessionId(smartPerfettoSessionId: string): string | undefined {
     const entry = this.sessionMap.get(smartPerfettoSessionId);
-    return entry && Date.now() - (entry.updatedAt || 0) < SDK_SESSION_FRESHNESS_MS
-      ? entry.sdkSessionId
-      : undefined;
+    return isFreshFullSdkSessionEntry(entry) ? entry.sdkSessionId : undefined;
   }
 
   private buildSessionMapKey(sessionId: string, referenceTraceId?: string): string {
@@ -488,14 +543,14 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     }
   }
 
-  private rememberSdkSessionMapping(
+  private rememberFullSdkSessionMapping(
     sessionId: string,
     traceId: string,
     sessionMapKey: string,
     sdkSessionId: string,
     options: AnalysisOptions,
   ): void {
-    const entry = { sdkSessionId, updatedAt: Date.now() };
+    const entry = { sdkSessionId, updatedAt: Date.now(), mode: 'full' as const };
     this.sessionMap.set(sessionMapKey, entry);
     this.persistSessionMapEntry(sessionId, traceId, sessionMapKey, entry, options);
   }
@@ -696,8 +751,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
       // Reuse composite key from prepareAnalysisContext for comparison mode session identity isolation
       const existingSessionMapEntry = this.sessionMap.get(ctx.sessionMapKey);
-      const existingSdkSessionId = existingSessionMapEntry
-        && (Date.now() - (existingSessionMapEntry.updatedAt || 0) < SDK_SESSION_FRESHNESS_MS)
+      const existingSdkSessionId = isFreshFullSdkSessionEntry(existingSessionMapEntry)
         ? existingSessionMapEntry.sdkSessionId
         : undefined;
       let missingSdkConversationError: string | undefined;
@@ -887,7 +941,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
           if (msg.session_id && !sdkSessionId) {
             sdkSessionId = msg.session_id;
-            this.rememberSdkSessionMapping(sessionId, traceId, ctx.sessionMapKey, sdkSessionId, options);
+            this.rememberFullSdkSessionMapping(sessionId, traceId, ctx.sessionMapKey, sdkSessionId, options);
           }
 
           const sdkResultError = getSdkResultErrorMessage(msg);
@@ -1846,23 +1900,21 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         timestamp: Date.now(),
       });
 
-      const sessionMapKey = this.buildSessionMapKey(sessionId, options.referenceTraceId);
-      const sessionMapEntry = this.sessionMap.get(sessionMapKey);
-      // Apply the same 4h freshness rule as the full path. A stale quick entry
-      // silently resumed here would cause context loss.
-      const existingSdkSessionId = sessionMapEntry
-        && (Date.now() - (sessionMapEntry.updatedAt || 0) < SDK_SESSION_FRESHNESS_MS)
-        ? sessionMapEntry.sdkSessionId
-        : undefined;
-      if (sessionMapEntry && existingSdkSessionId && enterpriseSessionMapDbWritesEnabled()) {
-        this.persistSessionMapEntry(sessionId, traceId, sessionMapKey, sessionMapEntry, options);
-      }
       const sdkEnv = createSdkEnv(options.providerId, providerScope);
 
-      // Prepend pre-queried trace data so the AI skips basic SQL turns in fast mode
+      // Quick calls intentionally do not resume or persist Claude SDK sessions.
+      // The SDK's maxTurns budget is tied to the resumed conversation, while
+      // SmartPerfetto's fast mode budget is a per-question latency guard. Keep
+      // cross-turn context local and compact so quick cannot exhaust or overwrite
+      // the full-mode SDK conversation.
       let quickPrompt = query;
+      const quickConversationContext = buildQuickConversationContext(previousTurns, this.config.outputLanguage);
+      if (quickConversationContext) {
+        quickPrompt = `${quickConversationContext}\n\n${quickPrompt}`;
+      }
+      // Prepend pre-queried trace data so the AI skips basic SQL turns in fast mode.
       if (options.traceContext && options.traceContext.length > 0) {
-        quickPrompt = `${formatTraceContext(options.traceContext, this.config.outputLanguage)}\n\n${query}`;
+        quickPrompt = `${formatTraceContext(options.traceContext, this.config.outputLanguage)}\n\n${quickPrompt}`;
       }
 
       const { stream, close: closeSdk } = sdkQueryWithRetry({
@@ -1882,7 +1934,6 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           stderr: (data: string) => {
             console.warn(`[ClaudeRuntime] Quick SDK stderr [${sessionId}]: ${data.trimEnd()}`);
           },
-          ...(existingSdkSessionId ? { resume: existingSdkSessionId } : {}),
         },
       }, {
         emitUpdate: (update) => this.emitUpdate(update),
@@ -1890,11 +1941,9 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       });
 
       let finalResult: string | undefined;
-      let quickSdkSessionId: string | undefined;
       let quickRounds = 0;
       let terminationReason: AnalysisResult['terminationReason'];
       let terminationMessage: string | undefined;
-      let missingSdkConversationError: string | undefined;
 
       // Quick path per-turn budget from env CLAUDE_QUICK_PER_TURN_MS (default 40s/turn).
       const timeoutMs = quickConfig.maxTurns * quickConfig.quickPathPerTurnMs;
@@ -1915,16 +1964,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         for await (const msg of stream) {
           if (timedOut) break;
 
-          if (msg.session_id && !quickSdkSessionId) {
-            quickSdkSessionId = msg.session_id;
-            this.rememberSdkSessionMapping(sessionId, traceId, sessionMapKey, quickSdkSessionId, options);
-          }
-
           const sdkResultError = getSdkResultErrorMessage(msg);
-          if (sdkResultError && existingSdkSessionId && isMissingSdkConversationError(sdkResultError)) {
-            missingSdkConversationError = sdkResultError;
-            continue;
-          }
+          if (sdkResultError) throw new Error(sdkResultError);
 
           try { bridge(msg); } catch { /* non-fatal */ }
 
@@ -1951,27 +1992,12 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       } catch (err) {
         if (timedOut) {
           console.warn('[ClaudeRuntime] Quick analysis timeout reached — SDK subprocess has been closed');
-        } else if (existingSdkSessionId && isMissingSdkConversationError((err as Error).message || '')) {
-          missingSdkConversationError = (err as Error).message || 'No conversation found with SDK session';
         } else {
           throw err;
         }
       } finally {
         if (safetyTimer) clearTimeout(safetyTimer);
         closeSdk();
-      }
-
-      if (missingSdkConversationError && existingSdkSessionId) {
-        delegatedRetry = true;
-        return await this.retryWithoutSdkResume({
-          query,
-          sessionId,
-          traceId,
-          options,
-          sessionMapKey,
-          errorMessage: missingSdkConversationError,
-          mode: 'fast',
-        });
       }
 
       let conclusionText = finalResult || getAccumulatedAnswer() || '';
@@ -2196,7 +2222,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     const artifactStore = this.artifactStores.get(sessionId);
     const architecture = this.architectureCache.get(traceId);
     const sessionMapEntry = this.sessionMap.get(sessionId);
-    const sdkSessionId = sessionMapEntry && Date.now() - (sessionMapEntry.updatedAt || 0) < SDK_SESSION_FRESHNESS_MS
+    const sdkSessionId = isFreshFullSdkSessionEntry(sessionMapEntry)
       ? sessionMapEntry.sdkSessionId
       : undefined;
 
@@ -2218,7 +2244,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
       // Cached detection
       architecture,
-      sdkSessionId,
+      ...(sdkSessionId ? { sdkSessionId, sdkSessionMode: 'full' as const } : {}),
       agentRuntimeKind: 'claude-agent-sdk',
       agentRuntimeProviderId: sessionFields.agentRuntimeProviderId,
       agentRuntimeProviderSnapshotHash: sessionFields.agentRuntimeProviderSnapshotHash,
@@ -2266,10 +2292,11 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       this.architectureCache.set(traceId, snapshot.architecture);
     }
 
-    if (snapshot.sdkSessionId) {
+    if (snapshot.sdkSessionId && snapshot.sdkSessionMode === 'full') {
       this.sessionMap.set(sessionId, {
         sdkSessionId: snapshot.sdkSessionId,
         updatedAt: snapshot.snapshotTimestamp || Date.now(),
+        mode: 'full',
       });
     }
   }
@@ -2577,13 +2604,14 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     // Composite key for comparison mode session identity isolation
     const sessionMapKey = this.buildSessionMapKey(sessionId, referenceTraceId);
     const sessionMapEntry = this.sessionMap.get(sessionMapKey);
-    const existingSdkSession = sessionMapEntry?.sdkSessionId;
+    const existingSdkSession = isFreshFullSdkSessionEntry(sessionMapEntry)
+      ? sessionMapEntry.sdkSessionId
+      : undefined;
     // P0-3: SDK sessions on Anthropic's side expire after ~4 hours.
     // If the local sessionMap entry is stale, treat it as expired and inject full manual context.
     // Without this check, `hasActiveResume` stays true for stale entries, causing the system
     // to skip both SDK context (expired) AND manual context injection → silent context loss.
-    const sdkSessionFresh = !!sessionMapEntry && (Date.now() - (sessionMapEntry.updatedAt || 0) < SDK_SESSION_FRESHNESS_MS);
-    const hasActiveResume = !!existingSdkSession && sdkSessionFresh;
+    const hasActiveResume = !!existingSdkSession;
     const previousFindings = hasActiveResume
       ? [] // SDK already has these in conversation history
       : this.collectPreviousFindings(sessionContext);

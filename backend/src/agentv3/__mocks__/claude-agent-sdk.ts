@@ -9,9 +9,37 @@
  * This mock provides the minimum surface needed for compilation and testing.
  */
 
-/** Mock query function — returns an empty async generator. */
-export async function* query(_options: any): AsyncGenerator<any, void> {
-  // No-op in tests
+type QueryImplementation = (params: any) => AsyncIterable<any>;
+
+const queryCalls: any[] = [];
+let queryImplementation: QueryImplementation | undefined;
+
+async function* emptyGenerator(): AsyncGenerator<any, void> {
+  // No-op in tests by default.
+}
+
+function withClose(iterable: AsyncIterable<any>): AsyncIterable<any> & { close: () => void } {
+  return Object.assign(iterable, { close: () => undefined });
+}
+
+/** Test helper for suites that need to inspect SDK query options. */
+export function __setQueryImplementation(impl: QueryImplementation): void {
+  queryImplementation = impl;
+}
+
+export function __getQueryCalls(): any[] {
+  return queryCalls;
+}
+
+export function __resetQueryMock(): void {
+  queryCalls.length = 0;
+  queryImplementation = undefined;
+}
+
+/** Mock query function — returns an empty async generator unless a test overrides it. */
+export function query(options: any): AsyncIterable<any> & { close: () => void } {
+  queryCalls.push(options);
+  return withClose(queryImplementation ? queryImplementation(options) : emptyGenerator());
 }
 
 /** Mock tool() builder — returns the tool definition as-is. */

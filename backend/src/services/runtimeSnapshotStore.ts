@@ -14,6 +14,7 @@ const SAFE_RUNTIME_ID_RE = /^[a-zA-Z0-9._:-]+$/;
 export interface ClaudeSessionMapRuntimeEntry {
   sdkSessionId: string;
   updatedAt: number;
+  mode?: 'full';
 }
 
 export interface RuntimeSnapshotScope {
@@ -40,6 +41,7 @@ interface ClaudeSessionMapSnapshotJson {
   sessionMapKey?: unknown;
   sdkSessionId?: unknown;
   updatedAt?: unknown;
+  mode?: unknown;
   traceId?: unknown;
 }
 
@@ -85,7 +87,8 @@ function parseSnapshotJson(row: RuntimeSnapshotRow): [string, ClaudeSessionMapRu
     const updatedAt = typeof parsed.updatedAt === 'number' && Number.isFinite(parsed.updatedAt)
       ? parsed.updatedAt
       : row.created_at;
-    return [parsed.sessionMapKey, { sdkSessionId: parsed.sdkSessionId, updatedAt }];
+    const mode = parsed.mode === 'full' ? parsed.mode : undefined;
+    return [parsed.sessionMapKey, { sdkSessionId: parsed.sdkSessionId, updatedAt, ...(mode ? { mode } : {}) }];
   } catch {
     return null;
   }
@@ -211,6 +214,7 @@ export function saveClaudeSessionMapToRuntimeSnapshots(
         sessionMapKey,
         sdkSessionId: entry.sdkSessionId,
         updatedAt: entry.updatedAt,
+        ...(entry.mode ? { mode: entry.mode } : {}),
         traceId: graph.traceId,
       });
 

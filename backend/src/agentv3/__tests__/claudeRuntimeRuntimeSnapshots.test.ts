@@ -6,9 +6,16 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../config';
+import { sessionContextManager } from '../../agent/context/enhancedSessionContext';
 import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../../services/enterpriseDb';
 import { saveClaudeSessionMapToRuntimeSnapshots } from '../../services/runtimeSnapshotStore';
 import { ClaudeRuntime, __testing } from '../claudeRuntime';
+
+const claudeSdkMock = require('@anthropic-ai/claude-agent-sdk') as {
+  __setQueryImplementation: (impl: (params: any) => AsyncIterable<any>) => void;
+  __getQueryCalls: () => any[];
+  __resetQueryMock: () => void;
+};
 
 const originalEnv = {
   enterprise: process.env[ENTERPRISE_FEATURE_FLAG_ENV],
@@ -46,6 +53,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  claudeSdkMock.__resetQueryMock();
+  sessionContextManager.remove('session-a');
+  sessionContextManager.remove('session-quick');
   restoreEnvValue(ENTERPRISE_FEATURE_FLAG_ENV, originalEnv.enterprise);
   restoreEnvValue(ENTERPRISE_DB_PATH_ENV, originalEnv.enterpriseDbPath);
   if (tmpDir) {
@@ -78,6 +88,7 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
     }, 'session-a', {
       sdkSessionId: 'sdk-session-a',
       updatedAt: now,
+      mode: 'full',
     });
 
     const runtime = new ClaudeRuntime({} as any, {
@@ -105,6 +116,7 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
     }, 'session-a', {
       sdkSessionId: 'sdk-session-a',
       updatedAt: now - (5 * 60 * 60 * 1000),
+      mode: 'full',
     });
 
     const runtime = new ClaudeRuntime({} as any, {
@@ -131,6 +143,7 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
     }, 'session-a', {
       sdkSessionId: 'sdk-session-a',
       updatedAt: Date.now(),
+      mode: 'full',
     });
     expect(runtimeSnapshotCount()).toBe(1);
 
@@ -154,6 +167,7 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
     }, 'session-a', {
       sdkSessionId: 'sdk-session-a',
       updatedAt: Date.now(),
+      mode: 'full',
     });
     saveClaudeSessionMapToRuntimeSnapshots({
       tenantId: 'tenant-a',
@@ -165,6 +179,7 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
     }, 'session-a:ref:trace-b', {
       sdkSessionId: 'sdk-session-b',
       updatedAt: Date.now(),
+      mode: 'full',
     });
     expect(runtimeSnapshotCount()).toBe(2);
 
@@ -188,7 +203,7 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
     expect(runtimeSnapshotCount()).toBe(1);
   });
 
-  it('restores snapshot SDK mappings with the snapshot timestamp', () => {
+  it('restores full-mode snapshot SDK mappings with the snapshot timestamp', () => {
     const runtime = new ClaudeRuntime({} as any, {
       enableVerification: false,
       enableSubAgents: false,
@@ -212,6 +227,7 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
       planHistory: [],
       uncertaintyFlags: [],
       sdkSessionId: 'sdk-session-a',
+      sdkSessionMode: 'full',
       runSequence: 0,
       conversationOrdinal: 0,
     });
@@ -219,7 +235,38 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
     expect((runtime as any).sessionMap.get('session-a')).toEqual(expect.objectContaining({
       sdkSessionId: 'sdk-session-a',
       updatedAt: snapshotTimestamp,
+      mode: 'full',
     }));
+  });
+
+  it('does not restore legacy unmarked SDK mappings from snapshots', () => {
+    const runtime = new ClaudeRuntime({} as any, {
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+
+    runtime.restoreFromSnapshot('session-a', 'trace-a', {
+      version: 1,
+      snapshotTimestamp: Date.now(),
+      sessionId: 'session-a',
+      traceId: 'trace-a',
+      conversationSteps: [],
+      queryHistory: [],
+      conclusionHistory: [],
+      agentDialogue: [],
+      agentResponses: [],
+      dataEnvelopes: [],
+      hypotheses: [],
+      analysisNotes: [],
+      analysisPlan: null,
+      planHistory: [],
+      uncertaintyFlags: [],
+      sdkSessionId: 'legacy-sdk-session',
+      runSequence: 0,
+      conversationOrdinal: 0,
+    });
+
+    expect((runtime as any).sessionMap.get('session-a')).toBeUndefined();
   });
 
   it('does not persist stale SDK session mappings into snapshots', () => {
@@ -231,6 +278,7 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
     (runtime as any).sessionMap.set('session-a', {
       sdkSessionId: 'sdk-session-stale',
       updatedAt: now - (5 * 60 * 60 * 1000),
+      mode: 'full',
     });
 
     const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(now);
@@ -262,6 +310,7 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
     (runtime as any).sessionMap.set('session-a', {
       sdkSessionId: 'sdk-session-fresh',
       updatedAt: now - (30 * 60 * 1000),
+      mode: 'full',
     });
 
     const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(now);
@@ -279,8 +328,101 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
       });
 
       expect(snapshot.sdkSessionId).toBe('sdk-session-fresh');
+      expect(snapshot.sdkSessionMode).toBe('full');
     } finally {
       nowSpy.mockRestore();
     }
+  });
+
+  it('does not expose fresh legacy session-map entries without full-mode ownership', () => {
+    const now = 1_700_000_000_000;
+    const runtime = new ClaudeRuntime({} as any, {
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+    (runtime as any).sessionMap.set('session-a', {
+      sdkSessionId: 'legacy-sdk-session',
+      updatedAt: now,
+    });
+
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      expect(runtime.getSdkSessionId('session-a')).toBeUndefined();
+      const snapshot = runtime.takeSnapshot('session-a', 'trace-a', {
+        conversationSteps: [],
+        queryHistory: [],
+        conclusionHistory: [],
+        agentDialogue: [],
+        agentResponses: [],
+        dataEnvelopes: [],
+        hypotheses: [],
+        runSequence: 0,
+        conversationOrdinal: 0,
+      });
+      expect(snapshot.sdkSessionId).toBeUndefined();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('runs quick mode without SDK resume or full-session map overwrite', async () => {
+    const runtime = new ClaudeRuntime({
+      query: async () => ({ columns: ['cnt'], rows: [[0]] }),
+    } as any, {
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+    const now = Date.now();
+    (runtime as any).sessionMap.set('session-quick', {
+      sdkSessionId: 'full-sdk-session',
+      updatedAt: now,
+      mode: 'full',
+    });
+    (runtime as any).architectureCache.set('trace-quick', {
+      type: 'STANDARD',
+      confidence: 0.9,
+      evidence: [],
+    });
+    sessionContextManager.getOrCreate('session-quick', 'trace-quick').addTurn(
+      '上一轮查到的包名是什么？',
+      {
+        primaryGoal: '上一轮查到的包名是什么？',
+        aspects: [],
+        expectedOutputType: 'summary',
+        complexity: 'simple',
+        followUpType: 'initial',
+      },
+      {
+        agentId: 'claude-agent',
+        success: true,
+        findings: [],
+        confidence: 0.8,
+        message: '上一轮回答：主要包名是 com.example.app。',
+      },
+      [],
+    );
+    claudeSdkMock.__setQueryImplementation(async function* () {
+      yield {
+        type: 'result',
+        subtype: 'success',
+        session_id: 'quick-sdk-session',
+        num_turns: 1,
+        result: '当前仍然是 com.example.app。',
+      };
+    });
+
+    await runtime.analyze('继续回答刚才的问题', 'session-quick', 'trace-quick', {
+      analysisMode: 'fast',
+      packageName: 'com.example.app',
+    });
+
+    const calls = claudeSdkMock.__getQueryCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].options.resume).toBeUndefined();
+    expect(calls[0].prompt).toContain('上一轮回答：主要包名是 com.example.app。');
+    expect((runtime as any).sessionMap.get('session-quick')).toEqual(expect.objectContaining({
+      sdkSessionId: 'full-sdk-session',
+      mode: 'full',
+    }));
   });
 });

@@ -125,6 +125,7 @@ export interface SessionStateSnapshot {
   // --- Cached Detection ---
   architecture?: ArchitectureInfo;
   sdkSessionId?: string;
+  sdkSessionMode?: 'full';
 
   // --- Backend Runtime State ---
   /** Runtime that produced the snapshot. Omitted for legacy Claude-only snapshots. */
