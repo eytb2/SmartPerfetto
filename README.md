@@ -71,9 +71,14 @@ Step 4: Start or restart services. For Docker, run `docker compose -f docker-com
 
 - Analyzes Android Perfetto traces for scrolling jank, startup, ANR, interaction latency, memory, game, and rendering-pipeline issues.
 - Keeps Perfetto's timeline and SQL power, then adds an AI assistant panel inside the Perfetto UI.
+- Compares completed analysis results across multiple traces, windows, or workspace users without requiring both Perfetto UI windows to stay open.
 - Uses a TypeScript backend to run agent workflows, query `trace_processor_shell`, invoke YAML analysis skills, and stream results to the browser.
 - Supports Anthropic directly, Claude/Anthropic-compatible providers, and OpenAI/OpenAI-compatible providers through the matching backend SDK runtime.
 - Ships with 160+ YAML skill/config files and scene strategies for Android performance investigation.
+
+## Feature Guides
+
+- [Multi-trace analysis result comparison](docs/getting-started/multi-trace-result-comparison.en.md): compare startup, FPS/Jank, and other standardized metrics from completed AI analysis results across 2 or more traces.
 
 ## Tech Stack
 

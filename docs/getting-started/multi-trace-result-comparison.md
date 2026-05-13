@@ -1,0 +1,100 @@
+# 多 Trace 分析结果对比
+
+[English](multi-trace-result-comparison.en.md) | [中文](multi-trace-result-comparison.md)
+
+多 Trace 分析结果对比用于比较已经完成的 AI 分析结果，而不是要求两个 Trace 同时在同一个 Perfetto UI 窗口里保持打开。它适合 A/B 测试、版本回归、启动耗时对比、滑动 FPS/Jank 对比，以及多人协作时复用同一 workspace 里的分析结论。
+
+## 它解决什么问题
+
+过去的双 Trace 对比偏向“当前窗口 + reference Trace”的实时分析：AI 在一次对话里同时查询两条 raw trace。新的分析结果对比偏向“结果复用”：每次 AI 分析完成后，SmartPerfetto 会把可对比的关键指标、证据引用、报告入口保存成 analysis result snapshot。之后你可以选择 2 个或更多 snapshot 做横向对比。
+
+这意味着：
+
+- 窗口 B 不需要一直打开。
+- 两个 trace processor 不需要同时 active。
+- 同一个 Trace 的多次分析结果也可以互相对比。
+- 同一 workspace 中可见的其他用户分析结果也可以参与对比。
+
+## 什么时候使用
+
+适合使用分析结果对比的场景：
+
+- 同一个 APK 两个版本的启动速度对比。
+- 同一个页面两次滑动录制的 FPS、Jank、卡顿原因对比。
+- A/B/C 三次测试结果横向比较。
+- 同一个 Trace 先后用不同问题分析，想比较输出的标准指标和证据。
+- 团队成员已经分析过一个 Trace，你想把当前结果和他的结果放在一起看。
+
+如果你只是想在当前 AI 对话里临时选择一条 reference Trace，让 AI 同时查两边 raw data，仍然可以使用工具栏里的 `compare_arrows` 旧入口。新的结果对比入口是 `fact_check` 图标。
+
+## 前置条件
+
+1. SmartPerfetto 后端已经启动，并且 AI provider 可以正常使用。
+2. 至少完成过两次 AI 分析，或者同一 workspace 中已经有其他可读的分析结果。
+3. 需要跨用户共享时，对方需要把结果设为 workspace 可见；默认结果是 private。
+
+AI 分析完成后，AI Assistant 顶部会显示 `Ready result` 或 `Partial result`。这表示当前窗口最近一次分析已经生成 snapshot，可以作为后续对比输入。
+
+## 操作流程
+
+1. 打开第一个 Trace，完成一次 AI 分析，例如“分析启动性能”。
+2. 打开第二个 Trace，完成另一次 AI 分析，例如“分析启动性能”或“分析滑动 FPS”。
+3. 回到任意一个窗口，打开 AI Assistant 顶部的 `fact_check` 图标，标题是“分析结果对比...”。
+4. 在右侧“选择分析结果”面板里选择一个 `基线`，再选择一个或多个 `候选`。
+5. 如果候选结果是 private 且你希望 workspace 内其他人也能用，点击该结果上的 `共享`。
+6. 可选：在 AI 输入框里先写关注点，例如“重点看启动速度和 FPS”，再点击 `开始对比`。
+7. 等待 SmartPerfetto 返回对比结果。
+
+结果选择器会展示每条结果的场景、原始问题、Trace 信息、创建时间、创建者、指标数量、证据引用数量和可见性。当前窗口最近的结果会标记为 `Current`，仍打开的窗口结果会标记为 `Open`。
+
+## 输出会包含什么
+
+对比完成后，AI Assistant 会追加一条“分析结果对比已完成”消息，通常包含：
+
+- Comparison ID。
+- baseline 和 candidates。
+- Significant changes 数量。
+- 启动、FPS、Jank 等标准指标的 baseline 值、candidate 值和 delta。
+- 指向完整 HTML 报告的导出链接。
+
+完整 HTML 报告会展开更多指标、输入 snapshot、显著变化和 AI 结论。聊天消息只展示前几行重点指标，完整内容以报告为准。
+
+## 支持的指标
+
+当前版本会优先对比已经标准化的指标，重点覆盖：
+
+- 启动相关指标，例如启动耗时。
+- 滑动/帧率相关指标，例如 average FPS、Jank、慢帧。
+- 其他可从分析结果中抽取或回填的标准 metric。
+
+如果某个 snapshot 缺少对比所需的标准指标，后端可以尝试从原 Trace 回填。回填失败时，对比仍会完成，但结果会标注缺失原因，不会把没有证据的数值当成确定结论。
+
+## 权限与共享
+
+分析结果默认是 private，只对创建者可见。点击结果上的 `共享` 后，该 snapshot 会变成 workspace 可见，具备权限的同 workspace 用户可以读取并用于对比。
+
+跨 workspace 的结果不会出现在结果选择器中。切换 workspace 后，当前窗口结果、候选结果和对比状态都会按 workspace 重新隔离。
+
+## 常见问题
+
+### 为什么结果选择器为空？
+
+通常是因为当前 workspace 还没有完成过 AI 分析，或者已有结果仍是其他用户的 private 结果。先完成一次 AI 分析，等顶部出现 `Ready result` 或 `Partial result` 后再打开结果选择器。
+
+### `Ready result` 和 `Partial result` 有什么区别？
+
+`Ready result` 表示 snapshot 中已经有可对比的标准指标。`Partial result` 表示分析结果已经保存，但标准指标覆盖不完整。Partial 结果仍可以参与对比，只是部分指标可能显示缺失或需要回填。
+
+### 它和旧的 Trace 对比有什么区别？
+
+旧入口 `compare_arrows` 是 Trace 实时对比，适合当前窗口临时选择 reference Trace，让 AI 在一次对话里同时查询两条 raw trace。
+
+新入口 `fact_check` 是分析结果对比，适合多个窗口、多用户、已经完成的分析结果。它依赖后端持久化 snapshot，不依赖另一个 Perfetto UI 窗口继续存活。
+
+### 能不能对比三个以上 Trace？
+
+可以。选择一个 baseline，再选择多个 candidates，就可以得到多结果横向矩阵。
+
+### 能不能只看显著变化？
+
+对比 API 支持 significant-only 视图。UI 默认消息会显示显著变化数量和前几行关键指标，完整筛选能力会继续在报告和后续 UI 中增强。

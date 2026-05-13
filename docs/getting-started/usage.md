@@ -33,6 +33,12 @@ SmartPerfetto 最适合 Android 12+ trace，尤其是包含 FrameTimeline 数据
 对比当前 trace 和参考 trace 的滑动差异
 ```
 
+## 多 Trace 分析结果对比
+
+如果你已经在两个或更多 Trace 上完成 AI 分析，可以用 AI Assistant 顶部的 `fact_check` 入口打开“分析结果对比”。选择一个 `基线` 和一个或多个 `候选` 后，SmartPerfetto 会生成标准指标 delta、显著变化摘要和 HTML 对比报告。
+
+这个功能对比的是已完成分析结果，不要求另一个 Perfetto UI 窗口继续打开。完整操作说明见 [多 Trace 分析结果对比](multi-trace-result-comparison.md)。
+
 ## 分析模式选择
 
 | 模式 | 推荐问题 | 不适合的问题 |
