@@ -4,8 +4,11 @@
 
 import express from 'express';
 import { requireRequestContext } from '../middleware/auth';
+import { resolveFeatureConfig } from '../config';
 import { openEnterpriseDb } from '../services/enterpriseDb';
+import { repositoryScopeFromRequestContext } from '../services/enterpriseRepository';
 import { createAnalysisResultWindowStateRepository } from '../services/analysisResultWindowStateStore';
+import { sendResourceNotFound } from '../services/resourceOwnership';
 import { hasRbacPermission, sendForbidden } from '../services/rbac';
 import type { AnalysisResultSceneType } from '../types/multiTraceComparison';
 
@@ -51,12 +54,14 @@ router.get('/active', (req, res) => {
   const db = openEnterpriseDb();
   try {
     const repository = createAnalysisResultWindowStateRepository(db);
+    const scope = repositoryScopeFromRequestContext(context);
+    if (resolveFeatureConfig().enterprise && !repository.scopeGraphExists(scope)) {
+      sendResourceNotFound(res, 'Workspace not found');
+      return;
+    }
+
     const activeWindows = repository.listActiveWindowStates(
-      {
-        tenantId: context.tenantId,
-        workspaceId: context.workspaceId,
-        userId: context.userId,
-      },
+      scope,
       {
         excludeWindowId: optionalString(req.query.excludeWindowId),
         limit: optionalNumber(req.query.limit),
@@ -106,12 +111,15 @@ router.post('/:windowId/heartbeat', (req, res) => {
   const db = openEnterpriseDb();
   try {
     const repository = createAnalysisResultWindowStateRepository(db);
+    const scope = repositoryScopeFromRequestContext(context);
+    const shouldEnsureScopeGraph = !resolveFeatureConfig().enterprise;
+    if (!shouldEnsureScopeGraph && !repository.scopeGraphExists(scope)) {
+      sendResourceNotFound(res, 'Workspace not found');
+      return;
+    }
+
     const windowState = repository.upsertWindowState(
-      {
-        tenantId: context.tenantId,
-        workspaceId: context.workspaceId,
-        userId: context.userId,
-      },
+      scope,
       {
         windowId,
         userId: context.userId,
@@ -124,13 +132,10 @@ router.post('/:windowId/heartbeat', (req, res) => {
         metadata: parseMetadata(req.body?.metadata),
         ttlMs: optionalNumber(req.body?.ttlMs),
       },
+      { ensureScopeGraph: shouldEnsureScopeGraph },
     );
     const activeWindows = repository.listActiveWindowStates(
-      {
-        tenantId: context.tenantId,
-        workspaceId: context.workspaceId,
-        userId: context.userId,
-      },
+      scope,
       {
         excludeWindowId: windowId,
         limit: 20,

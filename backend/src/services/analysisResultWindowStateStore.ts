@@ -48,6 +48,10 @@ export interface ListActiveWindowStateOptions {
   now?: number;
 }
 
+export interface UpsertWindowStateOptions {
+  ensureScopeGraph?: boolean;
+}
+
 function parseJson<T>(value: string | null, fallback: T): T {
   if (!value) return fallback;
   try {
@@ -81,8 +85,8 @@ function ttlFromInput(ttlMs: number | undefined): number {
 function ensureWindowStateScopeGraph(
   db: Database.Database,
   scope: EnterpriseRepositoryScope,
+  now: number,
 ): void {
-  const now = Date.now();
   db.prepare(`
     INSERT OR IGNORE INTO organizations (id, name, status, plan, created_at, updated_at)
     VALUES (?, ?, 'active', 'enterprise', ?, ?)
@@ -92,6 +96,24 @@ function ensureWindowStateScopeGraph(
     INSERT OR IGNORE INTO workspaces (id, tenant_id, name, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?)
   `).run(scope.workspaceId, scope.tenantId, scope.workspaceId, now, now);
+
+  if (!scope.userId) return;
+  db.prepare(`
+    INSERT INTO users (id, tenant_id, email, display_name, idp_subject, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      email = excluded.email,
+      display_name = excluded.display_name,
+      updated_at = excluded.updated_at
+  `).run(
+    scope.userId,
+    scope.tenantId,
+    `${scope.userId}@window-state.local`,
+    scope.userId,
+    `window-state:${scope.userId}`,
+    now,
+    now,
+  );
 }
 
 function mapWindowState(row: WindowStateRow): AnalysisResultWindowState {
@@ -115,57 +137,79 @@ function mapWindowState(row: WindowStateRow): AnalysisResultWindowState {
 export class AnalysisResultWindowStateRepository {
   constructor(private readonly db: Database.Database) {}
 
+  scopeGraphExists(scope: EnterpriseRepositoryScope): boolean {
+    const row = this.db.prepare(`
+      SELECT 1
+      FROM organizations o
+      JOIN workspaces w
+        ON w.tenant_id = o.id
+       AND w.id = @workspaceId
+      WHERE o.id = @tenantId
+      LIMIT 1
+    `).get({
+      tenantId: scope.tenantId,
+      workspaceId: scope.workspaceId,
+    });
+    return Boolean(row);
+  }
+
   upsertWindowState(
     scope: EnterpriseRepositoryScope,
     input: AnalysisResultWindowHeartbeatInput,
+    options: UpsertWindowStateOptions = {},
   ): AnalysisResultWindowState {
-    ensureWindowStateScopeGraph(this.db, scope);
+    const persist = this.db.transaction((): AnalysisResultWindowState => {
+      const now = Date.now();
+      if (options.ensureScopeGraph) {
+        ensureWindowStateScopeGraph(this.db, scope, now);
+      }
 
-    const now = Date.now();
-    const ttlMs = ttlFromInput(input.ttlMs);
-    const params = {
-      tenantId: scope.tenantId,
-      workspaceId: scope.workspaceId,
-      windowId: input.windowId,
-      userId: optionalText(input.userId ?? scope.userId),
-      traceId: optionalText(input.traceId),
-      backendTraceId: optionalText(input.backendTraceId),
-      activeSessionId: optionalText(input.activeSessionId),
-      latestSnapshotId: optionalText(input.latestSnapshotId),
-      traceTitle: optionalText(input.traceTitle),
-      sceneType: optionalText(input.sceneType),
-      metadataJson: JSON.stringify(input.metadata ?? {}),
-      updatedAt: now,
-      expiresAt: now + ttlMs,
-    };
+      const ttlMs = ttlFromInput(input.ttlMs);
+      const params = {
+        tenantId: scope.tenantId,
+        workspaceId: scope.workspaceId,
+        windowId: input.windowId,
+        userId: optionalText(input.userId ?? scope.userId),
+        traceId: optionalText(input.traceId),
+        backendTraceId: optionalText(input.backendTraceId),
+        activeSessionId: optionalText(input.activeSessionId),
+        latestSnapshotId: optionalText(input.latestSnapshotId),
+        traceTitle: optionalText(input.traceTitle),
+        sceneType: optionalText(input.sceneType),
+        metadataJson: JSON.stringify(input.metadata ?? {}),
+        updatedAt: now,
+        expiresAt: now + ttlMs,
+      };
 
-    this.db.prepare(`
-      INSERT INTO analysis_result_window_states
-        (tenant_id, workspace_id, window_id, user_id, trace_id, backend_trace_id,
-         active_session_id, latest_snapshot_id, trace_title, scene_type,
-         metadata_json, updated_at, expires_at)
-      VALUES
-        (@tenantId, @workspaceId, @windowId, @userId, @traceId, @backendTraceId,
-         @activeSessionId, @latestSnapshotId, @traceTitle, @sceneType,
-         @metadataJson, @updatedAt, @expiresAt)
-      ON CONFLICT(tenant_id, workspace_id, window_id) DO UPDATE SET
-        user_id = excluded.user_id,
-        trace_id = excluded.trace_id,
-        backend_trace_id = excluded.backend_trace_id,
-        active_session_id = excluded.active_session_id,
-        latest_snapshot_id = excluded.latest_snapshot_id,
-        trace_title = excluded.trace_title,
-        scene_type = excluded.scene_type,
-        metadata_json = excluded.metadata_json,
-        updated_at = excluded.updated_at,
-        expires_at = excluded.expires_at
-    `).run(params);
+      this.db.prepare(`
+        INSERT INTO analysis_result_window_states
+          (tenant_id, workspace_id, window_id, user_id, trace_id, backend_trace_id,
+           active_session_id, latest_snapshot_id, trace_title, scene_type,
+           metadata_json, updated_at, expires_at)
+        VALUES
+          (@tenantId, @workspaceId, @windowId, @userId, @traceId, @backendTraceId,
+           @activeSessionId, @latestSnapshotId, @traceTitle, @sceneType,
+           @metadataJson, @updatedAt, @expiresAt)
+        ON CONFLICT(tenant_id, workspace_id, window_id) DO UPDATE SET
+          user_id = excluded.user_id,
+          trace_id = excluded.trace_id,
+          backend_trace_id = excluded.backend_trace_id,
+          active_session_id = excluded.active_session_id,
+          latest_snapshot_id = excluded.latest_snapshot_id,
+          trace_title = excluded.trace_title,
+          scene_type = excluded.scene_type,
+          metadata_json = excluded.metadata_json,
+          updated_at = excluded.updated_at,
+          expires_at = excluded.expires_at
+      `).run(params);
 
-    const state = this.getWindowState(scope, input.windowId);
-    if (!state) {
-      throw new Error('Failed to persist analysis result window state');
-    }
-    return state;
+      const state = this.getWindowState(scope, input.windowId);
+      if (!state) {
+        throw new Error('Failed to persist analysis result window state');
+      }
+      return state;
+    });
+    return persist();
   }
 
   getWindowState(

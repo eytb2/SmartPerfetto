@@ -7,6 +7,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import request from 'supertest';
+import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../config';
 import {
   authenticate,
   DEFAULT_DEV_USER_ID,
@@ -19,10 +20,23 @@ import {
 import { openEnterpriseDb } from '../../services/enterpriseDb';
 import workspaceWindowRoutes from '../workspaceWindowRoutes';
 
-const originalDbPath = process.env.SMARTPERFETTO_ENTERPRISE_DB_PATH;
+const originalEnv = {
+  dbPath: process.env.SMARTPERFETTO_ENTERPRISE_DB_PATH,
+  enterprise: process.env[ENTERPRISE_FEATURE_FLAG_ENV],
+  trustedHeaders: process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS,
+  apiKey: process.env.SMARTPERFETTO_API_KEY,
+};
 
 let tempDir: string;
 let dbPath: string;
+
+function restoreEnvValue(key: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+}
 
 function app(): express.Express {
   const server = express();
@@ -37,21 +51,31 @@ function app(): express.Express {
   return server;
 }
 
-function seedGraph(): void {
+function seedGraph({
+  tenantId = DEFAULT_TENANT_ID,
+  workspaceId = 'workspace-a',
+  userId = DEFAULT_DEV_USER_ID,
+  email = 'dev@example.test',
+}: {
+  tenantId?: string;
+  workspaceId?: string;
+  userId?: string;
+  email?: string;
+} = {}): void {
   const db = openEnterpriseDb(dbPath);
   const now = 1_700_000_000_000;
   db.prepare(`
     INSERT OR IGNORE INTO organizations (id, name, status, plan, created_at, updated_at)
     VALUES (?, ?, 'active', 'enterprise', ?, ?)
-  `).run(DEFAULT_TENANT_ID, DEFAULT_TENANT_ID, now, now);
+  `).run(tenantId, tenantId, now, now);
   db.prepare(`
     INSERT OR IGNORE INTO workspaces (id, tenant_id, name, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?)
-  `).run('workspace-a', DEFAULT_TENANT_ID, 'workspace-a', now, now);
+  `).run(workspaceId, tenantId, workspaceId, now, now);
   db.prepare(`
     INSERT OR IGNORE INTO users (id, tenant_id, email, display_name, idp_subject, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(DEFAULT_DEV_USER_ID, DEFAULT_TENANT_ID, 'dev@example.test', 'Dev', 'dev', now, now);
+  `).run(userId, tenantId, email, userId, userId, now, now);
   db.close();
 }
 
@@ -61,15 +85,31 @@ function clearGraph(): void {
   db.close();
 }
 
+function trustedSsoHeaders(req: request.Test, workspaceId = 'workspace-a'): request.Test {
+  return req
+    .set('X-SmartPerfetto-SSO-User-Id', 'user-a')
+    .set('X-SmartPerfetto-SSO-Email', 'user-a@example.test')
+    .set('X-SmartPerfetto-SSO-Tenant-Id', 'tenant-a')
+    .set('X-SmartPerfetto-SSO-Workspace-Id', workspaceId)
+    .set('X-SmartPerfetto-SSO-Roles', 'analyst')
+    .set('X-SmartPerfetto-SSO-Scopes', 'analysis_result:read');
+}
+
 beforeEach(async () => {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-window-routes-'));
   dbPath = path.join(tempDir, 'enterprise.db');
   process.env.SMARTPERFETTO_ENTERPRISE_DB_PATH = dbPath;
+  delete process.env[ENTERPRISE_FEATURE_FLAG_ENV];
+  delete process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS;
+  delete process.env.SMARTPERFETTO_API_KEY;
   seedGraph();
 });
 
 afterEach(async () => {
-  process.env.SMARTPERFETTO_ENTERPRISE_DB_PATH = originalDbPath;
+  restoreEnvValue('SMARTPERFETTO_ENTERPRISE_DB_PATH', originalEnv.dbPath);
+  restoreEnvValue(ENTERPRISE_FEATURE_FLAG_ENV, originalEnv.enterprise);
+  restoreEnvValue('SMARTPERFETTO_SSO_TRUSTED_HEADERS', originalEnv.trustedHeaders);
+  restoreEnvValue('SMARTPERFETTO_API_KEY', originalEnv.apiKey);
   await fs.rm(tempDir, { recursive: true, force: true });
 });
 
@@ -126,7 +166,62 @@ describe('workspace window routes', () => {
     const db = openEnterpriseDb(dbPath);
     expect(db.prepare('SELECT COUNT(*) AS count FROM organizations').get()).toEqual({ count: 1 });
     expect(db.prepare('SELECT COUNT(*) AS count FROM workspaces').get()).toEqual({ count: 1 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM users').get()).toEqual({ count: 1 });
     db.close();
+  });
+
+  test('does not auto-create a missing workspace in enterprise mode', async () => {
+    process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+    clearGraph();
+
+    const response = await trustedSsoHeaders(
+      request(app()).post('/api/workspaces/workspace-missing/windows/window-a/heartbeat'),
+      'workspace-missing',
+    )
+      .send({
+        traceId: 'trace-a',
+        latestSnapshotId: 'snapshot-a',
+        sceneType: 'startup',
+      })
+      .expect(404);
+
+    expect(response.body).toMatchObject({
+      success: false,
+      error: 'Workspace not found',
+    });
+
+    const db = openEnterpriseDb(dbPath);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM organizations').get()).toEqual({ count: 0 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM workspaces').get()).toEqual({ count: 0 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM analysis_result_window_states').get()).toEqual({ count: 0 });
+    db.close();
+  });
+
+  test('persists heartbeat for an existing workspace in enterprise mode', async () => {
+    process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+    clearGraph();
+    seedGraph({
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'user-a',
+      email: 'user-a@example.test',
+    });
+
+    const response = await trustedSsoHeaders(
+      request(app()).post('/api/workspaces/workspace-a/windows/window-a/heartbeat'),
+    )
+      .send({
+        traceId: 'trace-a',
+        latestSnapshotId: 'snapshot-a',
+        sceneType: 'startup',
+      })
+      .expect(200);
+
+    expect(response.body.success).toBe(true);
+    expect(response.body.windowState.workspaceId).toBe('workspace-a');
+    expect(response.body.windowState.latestSnapshotId).toBe('snapshot-a');
   });
 
   test('lists active windows while excluding the requester', async () => {
