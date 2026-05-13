@@ -55,6 +55,12 @@ function seedGraph(): void {
   db.close();
 }
 
+function clearGraph(): void {
+  const db = openEnterpriseDb(dbPath);
+  db.prepare('DELETE FROM organizations').run();
+  db.close();
+}
+
 beforeEach(async () => {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smartperfetto-window-routes-'));
   dbPath = path.join(tempDir, 'enterprise.db');
@@ -98,6 +104,29 @@ describe('workspace window routes', () => {
     expect(response.body.windowState.latestSnapshotId).toBe('snapshot-b');
     expect(response.body.activeWindows.map((item: any) => item.windowId)).toEqual(['window-a']);
     expect(response.body.activeWindows[0].latestSnapshotId).toBe('snapshot-a');
+  });
+
+  test('persists heartbeat before any workspace rows exist locally', async () => {
+    clearGraph();
+
+    const response = await request(app())
+      .post('/api/workspaces/workspace-a/windows/window-a/heartbeat')
+      .set('x-tenant-id', DEFAULT_TENANT_ID)
+      .send({
+        traceId: 'trace-a',
+        latestSnapshotId: 'snapshot-a',
+        sceneType: 'startup',
+      })
+      .expect(200);
+
+    expect(response.body.success).toBe(true);
+    expect(response.body.windowState.windowId).toBe('window-a');
+    expect(response.body.windowState.latestSnapshotId).toBe('snapshot-a');
+
+    const db = openEnterpriseDb(dbPath);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM organizations').get()).toEqual({ count: 1 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM workspaces').get()).toEqual({ count: 1 });
+    db.close();
   });
 
   test('lists active windows while excluding the requester', async () => {

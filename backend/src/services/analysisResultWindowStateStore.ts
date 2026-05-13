@@ -78,6 +78,22 @@ function ttlFromInput(ttlMs: number | undefined): number {
   return Math.floor(ttlMs);
 }
 
+function ensureWindowStateScopeGraph(
+  db: Database.Database,
+  scope: EnterpriseRepositoryScope,
+): void {
+  const now = Date.now();
+  db.prepare(`
+    INSERT OR IGNORE INTO organizations (id, name, status, plan, created_at, updated_at)
+    VALUES (?, ?, 'active', 'enterprise', ?, ?)
+  `).run(scope.tenantId, scope.tenantId, now, now);
+
+  db.prepare(`
+    INSERT OR IGNORE INTO workspaces (id, tenant_id, name, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(scope.workspaceId, scope.tenantId, scope.workspaceId, now, now);
+}
+
 function mapWindowState(row: WindowStateRow): AnalysisResultWindowState {
   return {
     tenantId: row.tenant_id,
@@ -103,6 +119,8 @@ export class AnalysisResultWindowStateRepository {
     scope: EnterpriseRepositoryScope,
     input: AnalysisResultWindowHeartbeatInput,
   ): AnalysisResultWindowState {
+    ensureWindowStateScopeGraph(this.db, scope);
+
     const now = Date.now();
     const ttlMs = ttlFromInput(input.ttlMs);
     const params = {
