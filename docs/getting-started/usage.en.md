@@ -2,6 +2,8 @@
 
 [English](usage.en.md) | [中文](usage.md)
 
+For the full feature map, entry points, and expected outputs, see [Feature Overview](features.en.md).
+
 ## Recommended Trace Content
 
 SmartPerfetto works best with Android 12+ traces, especially traces that include FrameTimeline data. Common atrace categories:

@@ -2,6 +2,8 @@
 
 [English](usage.en.md) | [中文](usage.md)
 
+如果你想先了解 SmartPerfetto 的完整功能边界、入口和输出效果，见 [功能总览](features.md)。
+
 ## 推荐 trace 内容
 
 SmartPerfetto 最适合 Android 12+ trace，尤其是包含 FrameTimeline 数据的 trace。常用 atrace category：

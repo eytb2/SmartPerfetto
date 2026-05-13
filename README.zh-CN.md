@@ -76,9 +76,9 @@ SMARTPERFETTO_OUTPUT_LANGUAGE=en
 - 支持 Anthropic 直连、Claude/Anthropic-compatible provider，也支持通过 OpenAI Agents SDK 接入 OpenAI/OpenAI-compatible provider。
 - 内置 160+ 个 YAML Skill/配置文件和多场景分析策略，用于 Android 性能排查。
 
-## 功能指南
+## 功能总览
 
-- [多 Trace 分析结果对比](docs/getting-started/multi-trace-result-comparison.md)：对 2 个或更多已完成 AI 分析结果做启动速度、FPS/Jank 和其他标准指标对比。
+- [功能总览](docs/getting-started/features.md)：AI Assistant 工作流、常见性能场景、选区分析、报告、Trace 实时对比、多 Trace 分析结果对比、Provider 管理、API/CLI 自动化和运行方式。
 
 ## 技术栈
 

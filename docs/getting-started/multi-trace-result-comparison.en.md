@@ -2,6 +2,8 @@
 
 [English](multi-trace-result-comparison.en.md) | [中文](multi-trace-result-comparison.md)
 
+This is one SmartPerfetto feature guide. For the full feature map, see [Feature Overview](features.en.md).
+
 Multi-trace analysis result comparison compares completed AI analysis results. It does not require two traces to stay open in the same Perfetto UI window. Use it for A/B testing, release regression checks, startup comparison, FPS/Jank comparison, and team workflows where multiple users analyze traces in the same workspace.
 
 ## What It Solves

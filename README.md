@@ -76,9 +76,9 @@ Step 4: Start or restart services. For Docker, run `docker compose -f docker-com
 - Supports Anthropic directly, Claude/Anthropic-compatible providers, and OpenAI/OpenAI-compatible providers through the matching backend SDK runtime.
 - Ships with 160+ YAML skill/config files and scene strategies for Android performance investigation.
 
-## Feature Guides
+## Feature Overview
 
-- [Multi-trace analysis result comparison](docs/getting-started/multi-trace-result-comparison.en.md): compare startup, FPS/Jank, and other standardized metrics from completed AI analysis results across 2 or more traces.
+- [Feature Overview](docs/getting-started/features.en.md): AI Assistant workflows, performance scenarios, selection-aware analysis, reports, live trace comparison, multi-trace result comparison, provider management, API/CLI automation, and runtime options.
 
 ## Tech Stack
 

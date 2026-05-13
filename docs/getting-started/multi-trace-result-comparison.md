@@ -2,6 +2,8 @@
 
 [English](multi-trace-result-comparison.en.md) | [中文](multi-trace-result-comparison.md)
 
+这是 SmartPerfetto 的一个专项功能。完整功能地图见 [功能总览](features.md)。
+
 多 Trace 分析结果对比用于比较已经完成的 AI 分析结果，而不是要求两个 Trace 同时在同一个 Perfetto UI 窗口里保持打开。它适合 A/B 测试、版本回归、启动耗时对比、滑动 FPS/Jank 对比，以及多人协作时复用同一 workspace 里的分析结论。
 
 ## 它解决什么问题
