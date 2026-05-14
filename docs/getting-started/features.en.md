@@ -120,6 +120,7 @@ Multi-trace analysis result comparison compares completed AI analysis results. I
 Entry points:
 
 - Complete at least two AI analyses and wait for `Ready result` or `Partial result` in the AI Assistant header.
+- Shortcut: type `Compare with the other result`, or specify a result by the `Result ID` shown next to the result title, for example `Compare AR-1234abcd`.
 - Click the `fact_check` icon to open analysis result comparison.
 - Choose one `Baseline` and one or more `Candidate` results.
 - Optional: `Share` a private result to make it workspace-visible.
@@ -130,6 +131,7 @@ Output:
 - Standard metric matrix and deltas between baseline/candidates.
 - Standardized metrics such as startup duration and FPS/Jank when available.
 - 2 or more snapshots in one comparison.
+- When there is exactly one clear other candidate, the AI can start the comparison from a natural-language request; when the target is ambiguous, it asks you to choose.
 - Significant change count and an HTML comparison report.
 
 See [Multi-Trace Analysis Result Comparison](multi-trace-result-comparison.en.md) for the full workflow.

@@ -33,11 +33,17 @@ Analyze this ANR
 What is the app package name and main process in this trace?
 Why is the main thread blocked in my selected range?
 Compare scrolling behavior between this trace and the reference trace
+Compare with the other result
+Compare AR-1234abcd
 ```
 
 ## Multi-Trace Analysis Result Comparison
 
-After AI analysis has completed on two or more traces, use the AI Assistant toolbar's `fact_check` entry to open analysis result comparison. Select one `Baseline` and one or more `Candidate` results; SmartPerfetto returns standard metric deltas, significant-change summary, and an HTML comparison report.
+After AI analysis has completed on two or more traces, you can type `Compare with the other result` in the AI input. When the current window has a latest analysis result and there is exactly one clear other candidate in the same workspace, SmartPerfetto uses the current result as the baseline and starts the comparison automatically.
+
+Each completed AI analysis shows a `Result ID` next to the result title, such as `AR-1234abcd`. If more than one candidate exists, or you want to specify the target, say `Compare AR-1234abcd`. You can also say `Compare AR-11111111 and AR-22222222`; when multiple IDs are present, the first ID is the baseline and the later IDs are candidates.
+
+You can also use the AI Assistant toolbar's `fact_check` entry to open analysis result comparison. Select one `Baseline` and one or more `Candidate` results; SmartPerfetto returns standard metric deltas, significant-change summary, and an HTML comparison report.
 
 This compares completed analysis results and does not require the other Perfetto UI window to stay open. See [Multi-Trace Analysis Result Comparison](multi-trace-result-comparison.en.md) for the full workflow.
 

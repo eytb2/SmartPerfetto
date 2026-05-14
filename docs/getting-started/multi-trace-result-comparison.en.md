@@ -39,6 +39,29 @@ After an AI analysis finishes, the AI Assistant header shows `Ready result` or `
 
 ## How To Use It
 
+### Option 1: Type A Comparison Request
+
+Each completed AI analysis shows a `Result ID` next to the result title, such as `AR-1234abcd`. This ID is a short reference to the current analysis result snapshot. You can copy or type it in any AI Assistant window in the same workspace.
+
+Common prompts:
+
+```text
+Compare with the other result
+Compare AR-1234abcd
+Compare AR-11111111 and AR-22222222
+```
+
+Rules:
+
+- `Compare with the other result`: when the current window has a latest result and there is exactly one clear other candidate in the same workspace, SmartPerfetto uses the current result as the baseline and the other result as the candidate.
+- `Compare AR-1234abcd`: SmartPerfetto uses the current window's latest result as the baseline and the specified `Result ID` as the candidate.
+- `Compare AR-11111111 and AR-22222222`: the first `Result ID` is the baseline; later IDs are candidates.
+- If several results could match "the other result", or an ID cannot be matched uniquely, SmartPerfetto asks you to choose instead of guessing.
+
+This still compares persisted analysis result snapshots. The other Perfetto UI window does not need to stay open. If it is still open, SmartPerfetto only uses its latest result as a clearer candidate signal.
+
+### Option 2: Use The Result Picker
+
 1. Open the first trace and complete an AI analysis, for example "Analyze startup performance".
 2. Open the second trace and complete another AI analysis, for example "Analyze startup performance" or "Analyze scrolling FPS".
 3. Return to any window and click the AI Assistant toolbar's `fact_check` icon. Its title is "Analysis result comparison...".
@@ -96,6 +119,10 @@ The new `fact_check` entry is analysis result comparison. It is designed for mul
 ### Can it compare more than two traces?
 
 Yes. Choose one baseline and multiple candidates to produce a multi-result matrix.
+
+### What if a `Result ID` is missing or matches multiple results?
+
+Check that the ID belongs to the same workspace and that you have read access to the result. `AR-...` is a short reference and only needs to match uniquely. If it is ambiguous, use a longer `Result ID` or open the `fact_check` result picker and choose manually.
 
 ### Can it show only significant changes?
 

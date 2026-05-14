@@ -120,6 +120,7 @@ Trace 实时对比用于在同一个 AI 对话中选择一条 reference Trace，
 入口：
 
 - 完成至少两次 AI 分析，等 AI Assistant 顶部出现 `Ready result` 或 `Partial result`。
+- 快捷方式：直接在 AI 输入框里说 `对比一下另外一份`，或用结果标题旁的 `Result ID` 指定对象，例如 `对比 AR-1234abcd`。
 - 点击顶部 `fact_check` 图标打开“分析结果对比”。
 - 选择一个 `基线` 和一个或多个 `候选`。
 - 可选：把 private 结果 `共享` 为 workspace 可见。
@@ -130,6 +131,7 @@ Trace 实时对比用于在同一个 AI 对话中选择一条 reference Trace，
 - 输出 baseline/candidate 的标准指标矩阵和 delta。
 - 支持启动耗时、FPS/Jank 等可标准化指标。
 - 支持 2 个或更多 snapshot。
+- 当存在唯一的其他候选结果时，AI 可以直接从自然语言请求触发对比；对象不唯一时会要求选择。
 - 输出显著变化数量，并提供 HTML comparison report。
 
 完整说明见 [多 Trace 分析结果对比](multi-trace-result-comparison.md)。

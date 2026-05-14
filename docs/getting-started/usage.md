@@ -33,11 +33,17 @@ SmartPerfetto 最适合 Android 12+ trace，尤其是包含 FrameTimeline 数据
 这个 trace 的应用包名和主要进程是什么？
 这段选区里主线程为什么卡住？
 对比当前 trace 和参考 trace 的滑动差异
+对比一下另外一份
+对比 AR-1234abcd
 ```
 
 ## 多 Trace 分析结果对比
 
-如果你已经在两个或更多 Trace 上完成 AI 分析，可以用 AI Assistant 顶部的 `fact_check` 入口打开“分析结果对比”。选择一个 `基线` 和一个或多个 `候选` 后，SmartPerfetto 会生成标准指标 delta、显著变化摘要和 HTML 对比报告。
+如果你已经在两个或更多 Trace 上完成 AI 分析，可以直接在 AI 输入框里说 `对比一下另外一份`。当当前窗口有最新分析结果，并且同一 workspace 里只有一个明确的其他候选结果时，SmartPerfetto 会自动用当前结果作为基线并发起对比。
+
+每份 AI 分析完成后，结果标题旁会显示 `Result ID`，例如 `AR-1234abcd`。如果候选不止一份，或者你想指定对象，可以说 `对比 AR-1234abcd`，也可以说 `对比 AR-11111111 和 AR-22222222`。多个 ID 同时出现时，第一个 ID 会作为基线，后面的 ID 会作为候选。
+
+你也可以用 AI Assistant 顶部的 `fact_check` 入口打开“分析结果对比”。选择一个 `基线` 和一个或多个 `候选` 后，SmartPerfetto 会生成标准指标 delta、显著变化摘要和 HTML 对比报告。
 
 这个功能对比的是已完成分析结果，不要求另一个 Perfetto UI 窗口继续打开。完整操作说明见 [多 Trace 分析结果对比](multi-trace-result-comparison.md)。
 

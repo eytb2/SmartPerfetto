@@ -39,6 +39,29 @@ AI 分析完成后，AI Assistant 顶部会显示 `Ready result` 或 `Partial re
 
 ## 操作流程
 
+### 方式一：直接在 AI 输入框里说
+
+每份 AI 分析完成后，结果标题旁会显示一个 `Result ID`，例如 `AR-1234abcd`。这个 ID 是当前 analysis result snapshot 的短引用，后续可以直接复制或输入到任意同 workspace 的 AI Assistant 窗口里。
+
+常用说法：
+
+```text
+对比一下另外一份
+对比 AR-1234abcd
+对比 AR-11111111 和 AR-22222222
+```
+
+规则：
+
+- `对比一下另外一份`：当前窗口有最新结果，并且同一 workspace 中只有一个明确的其他候选结果时，SmartPerfetto 会用当前结果作为基线，另一个结果作为候选。
+- `对比 AR-1234abcd`：用当前窗口最新结果作为基线，指定的 `Result ID` 作为候选。
+- `对比 AR-11111111 和 AR-22222222`：第一个 `Result ID` 作为基线，后面的 `Result ID` 作为候选。
+- 如果有多个可能的“另外一份”，或者 ID 无法唯一匹配，SmartPerfetto 会要求你选择对比对象，而不是猜测。
+
+这个入口仍然对比持久化的分析结果 snapshot。另一个 Perfetto UI 窗口不需要继续打开；如果窗口仍打开，SmartPerfetto 只会把它的最新结果作为更明确的候选线索。
+
+### 方式二：用结果选择器
+
 1. 打开第一个 Trace，完成一次 AI 分析，例如“分析启动性能”。
 2. 打开第二个 Trace，完成另一次 AI 分析，例如“分析启动性能”或“分析滑动 FPS”。
 3. 回到任意一个窗口，打开 AI Assistant 顶部的 `fact_check` 图标，标题是“分析结果对比...”。
@@ -96,6 +119,10 @@ AI 分析完成后，AI Assistant 顶部会显示 `Ready result` 或 `Partial re
 ### 能不能对比三个以上 Trace？
 
 可以。选择一个 baseline，再选择多个 candidates，就可以得到多结果横向矩阵。
+
+### `Result ID` 找不到或匹配到多份怎么办？
+
+确认 ID 是否来自同一个 workspace，并且你对该结果有读取权限。`AR-...` 是短引用，只要能唯一匹配即可；如果短引用不唯一，使用更长的 `Result ID` 或打开 `fact_check` 结果选择器手动选择。
 
 ### 能不能只看显著变化？
 
