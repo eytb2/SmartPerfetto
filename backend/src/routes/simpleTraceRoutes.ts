@@ -10,7 +10,7 @@ import fs from 'fs/promises';
 import net from 'net';
 import { Readable, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
-import { v4 as uuidv4 } from 'uuid';
+import { uuidv4 } from '../utils/uuid';
 import { resolveFeatureConfig } from '../config';
 import { attachRequestContext, requireRequestContext, type RequestContext } from '../middleware/auth';
 import { getTraceProcessorService } from '../services/traceProcessorService';

@@ -19,7 +19,7 @@ import { describe, it, expect, beforeEach, afterEach, afterAll, jest } from '@je
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { v4 as uuidv4 } from 'uuid';
+import { uuidv4 } from '../../utils/uuid';
 import { TraceProcessorService, TraceInfo, QueryResult } from '../traceProcessorService';
 import { PortPool, getPortPool, resetPortPool } from '../portPool';
 import {

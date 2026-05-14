@@ -1,7 +1,7 @@
 // backend/src/services/providerManager/providerService.ts
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { v4 as uuidv4 } from 'uuid';
+import { uuidv4 } from '../../utils/uuid';
 import { ProviderStore } from './providerStore';
 import type {
   AgentRuntimeKind,

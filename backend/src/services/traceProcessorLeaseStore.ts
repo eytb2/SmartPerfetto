@@ -3,7 +3,7 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import type Database from 'better-sqlite3';
-import { v4 as uuidv4 } from 'uuid';
+import { uuidv4 } from '../utils/uuid';
 import { openEnterpriseDb, resolveEnterpriseDbPath } from './enterpriseDb';
 import type { EnterpriseRepositoryScope } from './enterpriseRepository';
 

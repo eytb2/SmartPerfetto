@@ -6,7 +6,7 @@ import { EventEmitter } from 'events';
 import { AsyncLocalStorage } from 'async_hooks';
 import fs from 'fs';
 import path from 'path';
-import { v4 as uuidv4 } from 'uuid';
+import { uuidv4 } from '../utils/uuid';
 import { WorkingTraceProcessor, TraceProcessorFactory } from './workingTraceProcessor';
 import type { TraceProcessorQueryOptions } from './traceProcessorSqlWorker';
 import {

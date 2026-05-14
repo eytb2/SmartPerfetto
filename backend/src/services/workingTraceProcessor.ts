@@ -8,7 +8,7 @@ import net from 'net';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { v4 as uuidv4 } from 'uuid';
+import { uuidv4 } from '../utils/uuid';
 import {
   decodeQueryArgsSql,
   encodeQueryResult,

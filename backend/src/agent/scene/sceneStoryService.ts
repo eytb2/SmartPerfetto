@@ -28,7 +28,7 @@
  *    terminal event so the SSE stream can close cleanly
  */
 
-import { v4 as uuidv4 } from 'uuid';
+import { uuidv4 } from '../../utils/uuid';
 import { SkillExecutor } from '../../services/skillEngine/skillExecutor';
 import { SkillExecutionResult } from '../../services/skillEngine/types';
 import { DataEnvelope } from '../../types/dataContract';

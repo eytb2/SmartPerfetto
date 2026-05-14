@@ -5,7 +5,7 @@
 import { Request, Response } from 'express';
 import { AdvancedAIService } from '../services/advancedAIService';
 import SQLValidator from '../services/sqlValidator';
-import { v4 as uuidv4 } from 'uuid';
+import { uuidv4 } from '../utils/uuid';
 import { toSingleString } from '../utils/httpValue';
 
 const sqlValidator = new SQLValidator();

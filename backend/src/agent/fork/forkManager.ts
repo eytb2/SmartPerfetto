@@ -9,7 +9,7 @@
  * 负责创建分叉、管理会话树、比较和合并分叉结果
  */
 
-import { v4 as uuidv4 } from 'uuid';
+import { uuidv4 } from '../../utils/uuid';
 import * as fs from 'fs';
 import * as path from 'path';
 import {

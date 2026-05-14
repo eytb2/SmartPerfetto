@@ -11,7 +11,7 @@
  * - Intelligent context summarization for LLM
  */
 
-import { v4 as uuidv4 } from 'uuid';
+import { uuidv4 } from '../../utils/uuid';
 import crypto from 'crypto';
 import {
   ConversationTurn,

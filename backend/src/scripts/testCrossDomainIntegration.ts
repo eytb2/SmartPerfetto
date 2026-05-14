@@ -10,7 +10,7 @@
  */
 
 import * as path from 'path';
-import { v4 as uuidv4 } from 'uuid';
+import { uuidv4 } from '../utils/uuid';
 import { ensureSkillRegistryInitialized } from '../services/skillEngine/skillLoader';
 import { TraceProcessorService } from '../services/traceProcessorService';
 import {
