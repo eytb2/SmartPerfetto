@@ -24,8 +24,14 @@
  */
 export interface TeachingPipelineResponse {
   success: boolean;
-  detection: PipelineDetectionResult;
-  teachingContent: TeachingContentResponse | null;
+  schemaVersion?: 'teaching.pipeline.v2';
+  detection: TeachingDetectionResponse;
+  observedFlow?: ObservedFlow;
+  teaching?: TeachingContentResponse | null;
+  teachingContent?: TeachingContentResponse | null;
+  pinPlan?: TeachingPinPlan;
+  overlayPlan?: TeachingOverlayPlan;
+  warnings?: TeachingWarning[];
   pinInstructions: PinInstructionResponse[];
   activeRenderingProcesses: ActiveProcess[];
   error?: string;
@@ -41,6 +47,34 @@ export interface PipelineDetectionResult {
   candidates: PipelineCandidate[];
   features: DetectedFeature[];
   traceRequirementsMissing: string[];
+}
+
+/**
+ * Backward-compatible API detection payload.
+ *
+ * The historical teaching endpoint returns snake_case fields. Keep those fields
+ * stable while exposing camelCase aliases for new frontend code.
+ */
+export interface TeachingDetectionResponse {
+  detected: boolean;
+  primaryPipelineId: string;
+  primaryConfidence: number;
+  primary_pipeline: {
+    id: string;
+    confidence: number;
+  };
+  candidates: PipelineCandidate[];
+  features: DetectedFeature[];
+  subvariants: RenderingPipelineSubvariants;
+  traceRequirementsMissing: string[];
+  trace_requirements_missing: string[];
+}
+
+export interface RenderingPipelineSubvariants {
+  buffer_mode: string;
+  flutter_engine: string;
+  webview_mode: string;
+  game_engine: string;
 }
 
 /**
@@ -104,6 +138,176 @@ export interface ActiveProcess {
   processName: string;
   frameCount: number;
   renderThreadTid: number;
+}
+
+export interface TeachingPipelineRequest {
+  traceId: string;
+  packageName?: string;
+  processName?: string;
+  selectionContext?: Record<string, unknown>;
+  visibleWindow?: Record<string, unknown>;
+  startTs?: number | string;
+  endTs?: number | string;
+}
+
+export type ObservedFlowLaneRole =
+  | 'app'
+  | 'render_thread'
+  | 'producer'
+  | 'buffer_queue'
+  | 'surfaceflinger'
+  | 'hwc_present'
+  | 'critical_task'
+  | 'unknown';
+
+export interface ObservedFlowTrackHint {
+  matchBy: 'thread' | 'process' | 'slice' | 'layer' | 'uri' | 'name';
+  pattern: string;
+  processName?: string;
+  threadName?: string;
+  layerName?: string;
+  mainThreadOnly?: boolean;
+}
+
+export interface ObservedFlowLane {
+  id: string;
+  role: ObservedFlowLaneRole;
+  title: string;
+  processName?: string;
+  threadName?: string;
+  layerName?: string;
+  trackHint?: ObservedFlowTrackHint;
+  pipelineIds: string[];
+  confidence: number;
+  evidenceSource: string;
+}
+
+export interface ObservedFlowEvent {
+  id: string;
+  stage: string;
+  name: string;
+  ts: number;
+  dur: number;
+  durMs: number;
+  processName?: string;
+  threadName?: string;
+  trackId?: number;
+  utid?: number;
+  upid?: number;
+  threadStateId?: number;
+  criticalTaskId?: string;
+  laneId?: string;
+  evidenceSource: string;
+  relatedFrame?: string;
+  relatedLayer?: string;
+  confidence: number;
+}
+
+export interface ObservedFlowDependency {
+  fromLaneId: string;
+  toLaneId: string;
+  relation:
+    | 'produces_to'
+    | 'composes_to'
+    | 'presents_to'
+    | 'overlaps_with'
+    | 'wakes_to'
+    | 'critical_path_to';
+  confidence: number;
+  evidenceSource: string;
+  fromEventId?: string;
+  toEventId?: string;
+  fromTaskId?: string;
+  toTaskId?: string;
+  detail?: string;
+}
+
+export interface ObservedFlowWakeupRef {
+  threadStateId?: number;
+  utid?: number;
+  processName?: string;
+  threadName?: string;
+  state?: string;
+  irqContext?: boolean;
+  kind?: 'irq' | 'swapper' | 'thread' | 'unknown';
+}
+
+export interface ObservedFlowCriticalTask {
+  id: string;
+  kind: 'direct_wakeup' | 'critical_path_segment';
+  rootEventId: string;
+  rootLaneId?: string;
+  laneId?: string;
+  name: string;
+  ts: number;
+  dur: number;
+  durMs: number;
+  processName?: string;
+  threadName?: string;
+  utid?: number;
+  threadStateId?: number;
+  state?: string;
+  tableName?: string;
+  stackDepth?: number;
+  waker?: ObservedFlowWakeupRef;
+  evidenceSource: string;
+  confidence: number;
+}
+
+export interface ObservedFlow {
+  schemaVersion: 'observed-flow.v1';
+  context: {
+    traceId: string;
+    packageName?: string;
+    processName?: string;
+    timeRange?: {
+      startTs: number;
+      endTs: number;
+      source: string;
+    };
+    selection?: Record<string, unknown>;
+    sourcePriority: string[];
+    fallbackUsed?: string;
+  };
+  lanes: ObservedFlowLane[];
+  events: ObservedFlowEvent[];
+  dependencies: ObservedFlowDependency[];
+  criticalTasks?: ObservedFlowCriticalTask[];
+  completeness: {
+    level: 'high' | 'medium' | 'low';
+    missingSignals: string[];
+    warnings: string[];
+  };
+}
+
+export interface TeachingWarning {
+  code: string;
+  severity: 'info' | 'warning' | 'error';
+  message: string;
+  source: 'detection' | 'observed_flow' | 'pin' | 'overlay' | 'teaching';
+}
+
+export interface TeachingPinPlan {
+  status: 'planned' | 'empty' | 'partial' | 'failed';
+  instructions: PinInstructionResponse[];
+  expectedLaneIds: string[];
+  expectedTrackHints: ObservedFlowTrackHint[];
+  summary: string;
+  warnings: string[];
+}
+
+export interface TeachingOverlayPlan {
+  status: 'ready' | 'empty' | 'partial' | 'failed';
+  skillId: 'pipeline_key_slices_overlay';
+  eventIds: string[];
+  keySliceNames: string[];
+  timeRange?: {
+    startTs: number;
+    endTs: number;
+    source: string;
+  };
+  summary: string;
+  warnings: string[];
 }
 
 // =============================================================================

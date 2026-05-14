@@ -27,12 +27,18 @@ inputs:
     type: string
     required: true
     description: "SQL IN 列表格式的 Slice 名称，如 'Choreographer#doFrame','DrawFrame','syncFrameState'"
+  - name: package
+    type: string
+    required: false
+    description: "可选包名/进程名前缀；为空时不过滤 App 进程，始终保留 SurfaceFlinger/system_server"
   - name: start_ts
     type: number
     required: false
+    description: "可选时间窗起点(ns)，用于把 overlay 限定在 selection 或 visible window"
   - name: end_ts
     type: number
     required: false
+    description: "可选时间窗终点(ns)，用于把 overlay 限定在 selection 或 visible window"
 
 steps:
   - id: pipeline_key_slices_overlay
@@ -57,6 +63,10 @@ steps:
           type: string
         - name: process_name
           type: string
+        - name: track_id
+          type: number
+        - name: utid
+          type: number
         - name: pipeline_stage
           type: string
         - name: description
@@ -69,10 +79,14 @@ steps:
         ROUND(CAST(s.dur AS REAL) / 1000000.0, 2) AS dur_ms,
         t.name AS thread_name,
         p.name AS process_name,
+        s.track_id,
+        t.utid,
         CASE
-          WHEN t.name = 'main' OR t.name LIKE '%.ui' THEN 'production'
-          WHEN t.name = 'RenderThread' OR t.name LIKE '%.raster' THEN 'transfer'
-          WHEN p.name LIKE '%surfaceflinger%' OR t.name LIKE '%HWC%' THEN 'consumption'
+          WHEN lower(s.name) LIKE '%choreographer%doframe%' OR lower(s.name) LIKE '%traversal%' THEN 'app_frame'
+          WHEN t.name = 'RenderThread' OR lower(s.name) LIKE '%drawframe%' OR lower(s.name) LIKE '%syncframestate%' THEN 'render_thread'
+          WHEN lower(s.name) LIKE '%queuebuffer%' OR lower(s.name) LIKE '%dequeuebuffer%' OR lower(s.name) LIKE '%blast%' OR lower(s.name) LIKE '%transaction%' THEN 'buffer_queue_transaction'
+          WHEN p.name LIKE '%surfaceflinger%' OR lower(s.name) LIKE '%latchbuffer%' THEN 'surfaceflinger_composition'
+          WHEN t.name LIKE '%HWC%' OR lower(s.name) LIKE '%present%' THEN 'present'
           ELSE 'other'
         END AS pipeline_stage,
         '' AS description
@@ -84,5 +98,11 @@ steps:
         AND s.dur > 0
         AND (${start_ts|NULL} IS NULL OR s.ts >= ${start_ts|NULL})
         AND (${end_ts|NULL} IS NULL OR s.ts < ${end_ts|NULL})
+        AND (
+          '${package}' = ''
+          OR p.name GLOB '${package}*'
+          OR p.name LIKE '%surfaceflinger%'
+          OR p.name = 'system_server'
+        )
       ORDER BY s.ts
       LIMIT 200

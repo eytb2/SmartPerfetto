@@ -59,16 +59,22 @@ plan_template:
 | 渲染架构/管线 | 用户提到"管线"、"pipeline"、"渲染架构" | 先检测架构 → 加载对应管线教学 |
 | 通用概念 | 用户提到"VSync"、"Choreographer"、"SurfaceFlinger" 等术语 | 概念解释 → 在管线中的位置 → 与 trace 的关联 |
 
-**Phase 2 — 架构检测与管线教学：**
+**Phase 2 — 架构检测与 observed-flow 教学：**
 ```
-detect_architecture()  → 确定渲染架构类型
-list_skills(type="pipeline") → 查看可用管线教学
-# 根据架构类型动态匹配 pipeline skill → 获取教学内容
+invoke_skill('rendering_pipeline_detection', { package: <package hint> })
+# 读取 pipeline_bundle: detection + teachingContent + pinInstructions + activeRenderingProcesses
+# 再基于 selection / visible window / package hint 查询 observedFlow.lanes/events
+# 对关键 rendering event 追加 bounded scheduler 事实：
+#   - thread_state.waker_id -> direct_wakeup / wakes_to
+#   - sched.thread_executing_span_with_slice._critical_path_stack -> critical_path_segment / critical_path_to
 ```
-- 展示 Mermaid 时序图，说明帧从生产到消费的完整流程
-- 解释关键线程角色（main thread、render thread、SurfaceFlinger 等）
-- 列出关键 Slice 及其含义
-- 如果用户有 selection context，自动关联到选中的轨道/Slice
+- 先展示当前 trace 中真实观测到的 lanes/events，再展示 Mermaid
+- `primary_pipeline_id` 只是入口，不是最终单选结论
+- 如果 candidates/features 暗示 WebView/Flutter/RN/GL/TextureView/SurfaceView 等混合出图，先分开展示 host HWUI 与 producer 链路
+- 如果 trace 具备 sched/thread_state 信号，展示 Critical task / Wakeup 关系；如果缺少 `sched_wakeup` 或官方 critical path 为空，明确标成采集缺口
+- 解释关键线程角色（main thread、RenderThread、producer、SurfaceFlinger、HWC/present）
+- 列出关键 Slice 及其含义，并标注哪些在当前 trace 中真实命中、哪些缺失
+- 如果用户有 selection context，优先关联选区；否则使用 visible window，再退回 package/process hint 或活跃渲染进程 fallback
 
 **Phase 3 — 上下文关联教学：**
 
@@ -135,8 +141,11 @@ lookup_sql_schema("<table_or_view_name>")
    - 源码文件路径 + 关键函数名
 
 6. **与当前 Trace 的关联**：
+   - 必须区分“trace 中实际观测到的事实”和“文档/YAML 中的机制解释”
    - 如果用户选中了特定内容，将教学与选区关联
+   - 没有 selection 时说明使用 visible window、package/process hint 还是 fallback
    - 如有异常，指出偏差并简要说明可能原因
+   - 如果缺少 SurfaceFlinger/HWC/present/fence 等采集信号，明确说明不能伪造这一段链路
 
 7. **常见问题**：
    - 该组件相关的常见性能问题（2-3 条）
@@ -144,11 +153,12 @@ lookup_sql_schema("<table_or_view_name>")
 
 **Phase 5 — 时间线可视化（可选）：**
 
-当你完成管线教学内容后，如果已检测到管线类型并获取了关键 Slice 列表，调用以下 skill 将关键 Slice 高亮为 Perfetto 时间线 overlay，帮助用户对照理论管线图与实际 trace：
+当你完成管线教学内容后，如果已检测到管线类型并获取了关键 Slice 列表，调用以下 skill 将关键 Slice 高亮为 Perfetto 时间线 overlay，帮助用户对照理论管线图与实际 trace。这个 overlay 结果应进入 observed-flow 语义：命中的 slice 是事实，未命中的 slice 是 warning，不是静态模板事实。
 
 ```
 invoke_skill('pipeline_key_slices_overlay', {
   slice_names: "'Choreographer#doFrame','DrawFrame','syncFrameState',...",
+  package: <package hint>,
   start_ts: <分析区间起始>,
   end_ts: <分析区间结束>
 })
@@ -158,6 +168,8 @@ invoke_skill('pipeline_key_slices_overlay', {
 
 **教学原则：**
 - **先教后诊**：先解释正常行为，再指出异常
+- **事实先于模板**：真实 slice/thread/process/layer/ts/dur/present 证据优先；Mermaid 和文档只解释已观测链路
+- **混合链路分开看**：HWUI host 与 WebView/Flutter/RN/GL/TextureView/SurfaceView producer 先分开展示，再在有 dependency/overlap 证据时合并
 - **分层教学**：第一轮给概览，用户追问再深入
 - **关联实践**：始终结合当前 trace 中的实际数据
 - **不假设知识**：首次使用技术术语时用中文解释含义

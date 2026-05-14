@@ -29,9 +29,16 @@ SmartPerfetto covers the core Android rendering paths used in performance invest
 | TextureView | SurfaceTexture | Dedicated thread | App RenderThread | Flexible but adds extra copy/synchronization | `scrolling-webview-texture` |
 | OpenGL ES | EGL/GLES | GL thread | SurfaceFlinger | High-frequency command stream, maps/games | `scrolling-gl-map` |
 | Jetpack Compose | Compose + HWUI | Main + RenderThread | SurfaceFlinger | Recomposition, layout, DisplayList driven | `pipeline_compose_standard` |
+| React Native | Paper/Fabric/Skia | JS/Fabric/Skia + host HWUI or independent Surface | SurfaceFlinger | Old/New Arch and RN Skia should split producer and host paths | `pipeline_rn_*` |
 | Chrome Browser Viz | Chromium Viz | Renderer + Viz/GPU | SurfaceFlinger | Independent Chrome multi-process composition | `pipeline_chrome_browser_viz` |
 | ImageReader | BufferQueue consumer | Camera/GPU/Codec | App ImageReader | Frame acquisition for ML, recording, post-processing | `pipeline_imagereader_pipeline` |
 | Software Compositing | SurfaceFlinger client composition | App producers | SurfaceFlinger CPU | Fallback when HWC/GPU path is unavailable | `pipeline_software_compositing` |
+
+## React Native Pipelines
+
+- [React Native Old Arch (Paper + Bridge)](rn_old_arch.md)
+- [React Native New Arch (Fabric + JSI)](rn_new_arch.md)
+- [React Native Skia](rn_skia.md)
 
 ## WebView Rendering Modes
 

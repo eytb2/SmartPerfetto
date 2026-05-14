@@ -41,6 +41,7 @@
 | **TextureView** | SurfaceTexture | Dedicated Thread | App RenderThread | 灵活性高，但有多余拷贝/同步 | `scrolling-webview-texture` |
 | **OpenGL ES** | EGL/GLES | GL Thread | SurfaceFlinger | 高频指令流，适合地图/游戏 | `scrolling-gl-map` |
 | **Jetpack Compose** | Compose + HWUI | Main + RenderThread | SurfaceFlinger | Recomposition / Layout / DisplayList 驱动 | `pipeline_compose_standard` |
+| **React Native** | Paper/Fabric/Skia | JS/Fabric/Skia + Host HWUI 或独立 Surface | SurfaceFlinger | Old/New Arch 与 RN Skia 需要分开看 producer 与宿主链路 | `pipeline_rn_*` |
 | **Chrome Browser Viz** | Chromium Viz | Renderer + Viz/GPU | SurfaceFlinger | 独立 Chrome 多进程合成 | `pipeline_chrome_browser_viz` |
 | **ImageReader** | BufferQueue consumer | Camera/GPU/Codec | App ImageReader | 帧获取、ML、录制、二次处理 | `pipeline_imagereader_pipeline` |
 | **Software Compositing** | SurfaceFlinger client composition | App producers | SurfaceFlinger CPU | HWC/GPU 不可用时的降级路径 | `pipeline_software_compositing` |
@@ -57,6 +58,10 @@
 - **[Flutter Architecture (Impeller / Merged Threads / Render Modes)](flutter_architecture.md)**: Flutter Android 上的线程模型、render mode 与 Platform Views 组合关系。
     *   [Flutter SurfaceView (Direct)](flutter_surfaceview.md)
     *   [Flutter TextureView (Copy)](flutter_textureview.md)
+- **React Native**
+    *   [React Native Old Arch (Paper + Bridge)](rn_old_arch.md)
+    *   [React Native New Arch (Fabric + JSI)](rn_new_arch.md)
+    *   [React Native Skia](rn_skia.md)
 - [OpenGL ES (GL Thread) Pipeline](opengl_es.md)
 - **[Vulkan Native Pipeline](vulkan_native.md)**: **[NEW]** 纯 Vulkan 渲染与 BLAST 交互。
 - **[SurfaceControl API Deep Dive](surface_control_api.md)**: NDK 级别的图层控制。
