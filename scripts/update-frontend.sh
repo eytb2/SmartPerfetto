@@ -14,7 +14,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DIST_DIR="$PROJECT_ROOT/perfetto/out/ui/ui/dist"
+DIST_DIR="${SMARTPERFETTO_FRONTEND_DIST_DIR:-$PROJECT_ROOT/perfetto/out/ui/ui/dist}"
 FRONTEND_DIR="$PROJECT_ROOT/frontend"
 
 inject_smartperfetto_static_assets() {
@@ -91,6 +91,13 @@ rsync -a --delete \
   --exclude="traceconv_bundle.js" \
   "$VERSION_DIR/" \
   "$FRONTEND_DIR/$VERSION/"
+
+# Rollup can emit indented blank lines for newly added modules. Keep checked-in
+# generated text artifacts compatible with git diff --check.
+TEXT_ARTIFACT="$FRONTEND_DIR/$VERSION/frontend_bundle.js"
+if [ -f "$TEXT_ARTIFACT" ]; then
+  perl -pi -e 's/[ \t]+$//' "$TEXT_ARTIFACT"
+fi
 
 # Restore JS engine bundles if they are missing (e.g. first-time copy of a new
 # version directory). The real bundles live in the previous versioned directory
