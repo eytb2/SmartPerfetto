@@ -108,6 +108,28 @@ for BUNDLE in engine_bundle.js traceconv_bundle.js; do
   fi
 done
 
+# The generated manifest hashes the files from the build output. When we
+# preserve real JS engine bundles from a previous build, refresh those hashes
+# so the checked-in prebuild is internally consistent.
+node - "$FRONTEND_DIR/$VERSION/manifest.json" "$FRONTEND_DIR/$VERSION" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const [manifestPath, versionDir] = process.argv.slice(2);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+for (const name of Object.keys(manifest.resources ?? {})) {
+  const filePath = path.join(versionDir, name);
+  if (!fs.existsSync(filePath)) continue;
+  const hash = crypto
+    .createHash('sha256')
+    .update(fs.readFileSync(filePath))
+    .digest('base64');
+  manifest.resources[name] = `sha256-${hash}`;
+}
+fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+NODE
+
 if [ -n "$STALE_DIRS" ]; then
   echo "Removing stale frontend version directories..."
   while IFS= read -r stale_dir; do
