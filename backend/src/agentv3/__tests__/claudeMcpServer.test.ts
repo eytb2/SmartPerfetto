@@ -228,7 +228,7 @@ describe('createClaudeMcpServer', () => {
     });
 
     it('execute_sql should work after plan is submitted', async () => {
-      const { tools, analysisPlan } = createTestServer();
+      const { tools, analysisPlan, emittedUpdates } = createTestServer();
       // Submit plan first
       await callTool(tools, 'submit_plan', {
         phases: [{ id: 'p1', name: 'Test', goal: 'Test', expectedTools: ['execute_sql'] }],
@@ -239,6 +239,8 @@ describe('createClaudeMcpServer', () => {
       // Now execute_sql should work
       const result = await callTool(tools, 'execute_sql', { sql: 'SELECT 1' });
       expect(result.error).toBeUndefined();
+      const dataUpdate = emittedUpdates.find((u: any) => u.type === 'data');
+      expect(dataUpdate?.content?.[0]?.sql).toBe('SELECT 1');
     });
 
     it('execute_sql should warn when raw SQL bypasses process identity gate', async () => {

@@ -52,15 +52,18 @@ include、是否调用了 stdlib macro/function、是否使用重复执行不安
    - `prerequisites.modules` 必须覆盖 table/function/macro 的 owning module。
    - CTE/local `CREATE PERFETTO VIEW/TABLE` 不误报。
 
-4. 扩展 guardrail。`NEXT`
+4. 扩展 guardrail。`TODO`
    - 保留默认低噪声规则。
    - strict/audit 模式下覆盖 upstream macro/function 迁移风险。
    - 只把确定性问题作为 error；可能误报的模式先作为 warning。
 
-5. 后续阶段接 syntaqlite。`LATER`
+5. 接 syntaqlite 到 AI SQL 展示/复制。`DONE`
    - 前端 QueryPage 已有 syntaqlite runtime。
-   - backend 先不引入新的 Node runtime dependency，避免 package/runtime 风险。
-   - 如果后续需要 backend formatting，优先封装成 optional service。
+   - AgentV3 `execute_sql` SSE DataEnvelope 携带最终可执行 SQL。
+   - AI Assistant 对 SQL 展示和复制使用 syntaqlite formatter；formatter 失败时
+     降级到原始最终 SQL，避免阻断分析。
+   - backend 先不引入新的 Node runtime dependency，避免 package/runtime 风险；
+     如果后续需要 backend formatting，优先封装成 optional service。
 
 ## 测试
 

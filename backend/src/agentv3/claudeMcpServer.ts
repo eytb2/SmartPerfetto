@@ -515,7 +515,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         timestamp: Date.now(),
       });
     }
-    return traceProcessorService.query(targetTraceId, finalSql);
+    const result = await traceProcessorService.query(targetTraceId, finalSql);
+    return { result, finalSql, injected };
   }
 
   const executeSql = tool(
@@ -545,7 +546,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       try {
         const sqlStart = Date.now();
         const processIdentityWarning = rawSqlProcessIdentityWarning(sql);
-        const result = await runRawSqlWithIncludeInjection(traceId, sql);
+        const { result, finalSql, injected } = await runRawSqlWithIncludeInjection(traceId, sql);
         const truncated = result.rows.length > 200;
         const rows = truncated ? result.rows.slice(0, 200) : result.rows;
         const success = !result.error;
@@ -567,7 +568,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         }
 
         if (emitUpdate && success && result.columns.length > 0 && rows.length > 0) {
-          emitSqlDataEnvelope(emitUpdate, result.columns, rows);
+          emitSqlDataEnvelope(emitUpdate, result.columns, rows, finalSql, injected);
         }
 
         if (emitUpdate && !success && result.error) {
@@ -634,6 +635,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
                 columnStats: summaryResult.columnStats,
                 sampleRows: summaryResult.sampleRows,
                 durationMs: result.durationMs,
+                executableSql: finalSql,
+                stdlibInjectedModules: injected,
                 ...(processIdentityWarning ? { processIdentityWarning } : {}),
               })) + getReasoningNudge(),
             }],
@@ -650,6 +653,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               totalRows: result.rows.length,
               truncated,
               durationMs: result.durationMs,
+              executableSql: finalSql,
+              stdlibInjectedModules: injected,
               ...(processIdentityWarning ? { processIdentityWarning } : {}),
               ...(result.error ? { error: result.error } : {}),
             })) + (success ? getReasoningNudge() : ''),
@@ -2431,7 +2436,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       try {
         const sqlStart = Date.now();
         const processIdentityWarning = rawSqlProcessIdentityWarning(sql);
-        const result = await runRawSqlWithIncludeInjection(targetTraceId, sql);
+        const { result, finalSql, injected } = await runRawSqlWithIncludeInjection(targetTraceId, sql);
         const truncated = result.rows.length > 200;
         const rows = truncated ? result.rows.slice(0, 200) : result.rows;
         const success = !result.error;
@@ -2445,6 +2450,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             summary: summaryResult,
             totalRows: result.rows.length,
             durationMs,
+            executableSql: finalSql,
+            stdlibInjectedModules: injected,
             ...(processIdentityWarning ? { processIdentityWarning } : {}),
           });
           return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(text + getReasoningNudge()) }] };
@@ -2459,6 +2466,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           totalRows: result.rows.length,
           truncated,
           durationMs,
+          executableSql: finalSql,
+          stdlibInjectedModules: injected,
           ...(processIdentityWarning ? { processIdentityWarning } : {}),
           error: result.error,
         });
@@ -2688,12 +2697,16 @@ function emitSqlDataEnvelope(
   emit: (update: StreamingUpdate) => void,
   columns: string[],
   rows: any[],
+  sql?: string,
+  stdlibInjectedModules?: string[],
 ): void {
   emit({
     type: 'data',
     content: [{
       meta: { type: 'sql_result', version: '2.0', source: 'execute_sql' },
       data: { columns, rows },
+      ...(sql ? { sql } : {}),
+      ...(stdlibInjectedModules?.length ? { stdlibInjectedModules } : {}),
       display: {
         layer: 'list',
         format: 'table',
