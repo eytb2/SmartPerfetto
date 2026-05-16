@@ -110,6 +110,7 @@ const FRONTEND_VERSIONED_REQUIRED_ASSETS = [
   'frontend_bundle.js',
   'engine_bundle.js',
   'traceconv_bundle.js',
+  'trace_processor.wasm',
   'trace_processor_memory64.wasm',
   'traceconv.wasm',
   'stdlib_docs.json',

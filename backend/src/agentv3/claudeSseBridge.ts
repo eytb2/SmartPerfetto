@@ -9,6 +9,7 @@ import {
   SDK_MAX_TURNS_SUBTYPE,
 } from './analysisTermination';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from './outputLanguage';
+import { formatToolCallNarration } from './toolNarration';
 
 export type UpdateEmitter = (update: StreamingUpdate) => void;
 
@@ -33,60 +34,6 @@ export function extractSdkToolResultBlocks(msg: any): SdkToolResultBlock[] {
 
 export function stringifySdkToolResult(result: unknown): string {
   return typeof result === 'string' ? result : JSON.stringify(result);
-}
-
-/** Map MCP tool names to user-friendly descriptions. */
-function getFriendlyToolMessage(toolName: string, args: any, language: OutputLanguage): string {
-  switch (toolName) {
-    case 'mcp__smartperfetto__execute_sql': {
-      const sql = String(args?.sql || '').toLowerCase();
-      const tableMatch = sql.match(/from\s+(\w+)/i);
-      const table = tableMatch?.[1] || '';
-      const tableHints: Record<string, { zh: string; en: string }> = {
-        actual_frame_timeline_event: { zh: '帧渲染数据', en: 'frame rendering data' },
-        expected_frame_timeline_event: { zh: '预期帧数据', en: 'expected frame data' },
-        frame_slice: { zh: '帧 Slice', en: 'frame slices' },
-        slice: { zh: 'Trace Slice', en: 'trace slices' },
-        thread_state: { zh: '线程状态', en: 'thread states' },
-        thread: { zh: '线程信息', en: 'thread metadata' },
-        process: { zh: '进程信息', en: 'process metadata' },
-        counter: { zh: '计数器', en: 'counters' },
-        sched_slice: { zh: 'CPU 调度', en: 'CPU scheduling' },
-        android_launches: { zh: '应用启动', en: 'app launches' },
-        android_app_process_starts: { zh: '进程启动', en: 'process starts' },
-        cpu_counter_track: { zh: 'CPU 频率', en: 'CPU frequency' },
-        gpu_counter_track: { zh: 'GPU 频率', en: 'GPU frequency' },
-        memory_counter: { zh: '内存计数', en: 'memory counters' },
-        android_binder_transaction: { zh: 'Binder 事务', en: 'Binder transactions' },
-      };
-      const hint = tableHints[table]
-        ? localize(language, tableHints[table].zh, tableHints[table].en)
-        : (table ? table : '');
-      return hint
-        ? localize(language, `执行 SQL 查询: ${hint}`, `Run SQL query: ${hint}`)
-        : localize(language, '执行 SQL 查询', 'Run SQL query');
-    }
-    case 'mcp__smartperfetto__invoke_skill': {
-      const skillId = args?.skillId;
-      return skillId
-        ? localize(language, `调用分析技能: ${skillId}`, `Run analysis skill: ${skillId}`)
-        : localize(language, '调用分析技能', 'Run analysis skill');
-    }
-    case 'mcp__smartperfetto__list_skills':
-      return localize(language, '查询可用技能列表', 'List available skills');
-    case 'mcp__smartperfetto__detect_architecture':
-      return localize(language, '检测渲染架构', 'Detect rendering architecture');
-    case 'mcp__smartperfetto__lookup_sql_schema':
-      return localize(language, `查询 SQL 表结构: ${args?.keyword || ''}`, `Look up SQL schema: ${args?.keyword || ''}`);
-    case 'mcp__smartperfetto__write_analysis_note':
-      return localize(language, `记录分析笔记: ${args?.section || ''}`, `Write analysis note: ${args?.section || ''}`);
-    case 'mcp__smartperfetto__fetch_artifact':
-      return localize(language, `获取数据详情: ${args?.artifactId || ''}`, `Fetch artifact details: ${args?.artifactId || ''}`);
-    case 'mcp__smartperfetto__query_perfetto_source':
-      return localize(language, `搜索 Perfetto 源码: ${args?.keyword || ''}`, `Search Perfetto source: ${args?.keyword || ''}`);
-    default:
-      return localize(language, `调用工具: ${toolName}`, `Call tool: ${toolName}`);
-  }
 }
 
 /** Return type for createSseBridge — message handler + accumulated answer accessor. */
@@ -263,7 +210,7 @@ export function createSseBridge(
       for (const block of content) {
         if (block.type === 'tool_use') {
           lastToolUseId = block.id;
-          const friendlyMsg = getFriendlyToolMessage(block.name, block.input, language);
+          const friendlyMsg = formatToolCallNarration(block.name, block.input, language);
           emit({
             type: 'agent_task_dispatched',
             content: { taskId: block.id, toolName: block.name, args: block.input, message: friendlyMsg },

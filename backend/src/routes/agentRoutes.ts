@@ -128,6 +128,10 @@ import {
   enrichFeedbackEntry,
   type SessionLookup as FeedbackSessionLookup,
 } from '../agentv3/selfImprove/feedbackEnricher';
+import {
+  formatToolCallNarration,
+  looksLikeGenericToolMessage,
+} from '../agentv3/toolNarration';
 import { applyFeedbackToPattern } from '../agentv3/analysisPatternMemory';
 import { backendLogPath } from '../runtimePaths';
 
@@ -3019,6 +3023,56 @@ function appendConversationStep(session: AnalysisSession, update: StreamingUpdat
   }
 }
 
+function summarizeTimelineToolCall(content: Record<string, any>): string {
+  const toolName = typeof content.toolName === 'string' ? content.toolName : '';
+  if (!toolName) return '';
+
+  const generated = formatToolCallNarration(toolName, content.args);
+  const message = sanitizeConversationText(content.message);
+  if (!message || looksLikeGenericToolMessage(message)) {
+    return generated;
+  }
+
+  return message;
+}
+
+function summarizeTimelineResult(content: Record<string, any>): string {
+  const candidates = [
+    content.summary,
+    content.message,
+    content.result,
+    content.output,
+  ];
+
+  for (const candidate of candidates) {
+    const text = sanitizeConversationText(candidate);
+    if (text) return text;
+  }
+  return '';
+}
+
+function summarizeDataEnvelopeForTimeline(update: StreamingUpdate): string {
+  const envelopes = (Array.isArray(update.content) ? update.content : [update.content])
+    .filter((entry) => entry && typeof entry === 'object') as Array<Record<string, any>>;
+  if (envelopes.length === 0) return '';
+
+  const titles = envelopes
+    .map((env) => sanitizeConversationText(env?.display?.title || env?.meta?.stepId || env?.meta?.source))
+    .filter(Boolean)
+    .slice(0, 2);
+  const rows = envelopes
+    .map((env) => {
+      const data = env?.data;
+      return Array.isArray(data?.rows) ? data.rows.length : undefined;
+    })
+    .filter((rowCount): rowCount is number => typeof rowCount === 'number');
+  const rowText = rows.length > 0
+    ? `，共 ${rows.reduce((sum, rowCount) => sum + rowCount, 0)} 行`
+    : '';
+  const titleText = titles.length > 0 ? `：${titles.join(' / ')}` : '';
+  return `收到 ${envelopes.length} 份数据表${titleText}${rowText}，用于支撑后续诊断`;
+}
+
 function buildConversationStepUpdate(
   session: AnalysisSession,
   update: StreamingUpdate
@@ -3068,6 +3122,7 @@ function buildConversationStepUpdate(
       phase = 'tool';
       role = 'agent';
       text =
+        summarizeTimelineToolCall(contentRecord) ||
         sanitizeConversationText(contentRecord.message) ||
         sanitizeConversationText(contentRecord.summary) ||
         sanitizeConversationText(contentRecord.taskTitle) ||
@@ -3087,25 +3142,14 @@ function buildConversationStepUpdate(
           : `新增发现 ${contentRecord.findings.length} 条`;
       } else {
         text =
-          sanitizeConversationText(contentRecord.summary) ||
-          sanitizeConversationText(contentRecord.message) ||
+          summarizeTimelineResult(contentRecord) ||
           (contentRecord.taskId ? `工具调用完成 (#${String(contentRecord.taskId).slice(-6)})` : '');
       }
       break;
     case 'data': {
       phase = 'result';
       role = 'system';
-      const envelopes = (Array.isArray(update.content) ? update.content : [update.content])
-        .filter((entry) => entry && typeof entry === 'object') as Array<Record<string, any>>;
-      if (envelopes.length > 0) {
-        const titles = envelopes
-          .map((env) => sanitizeConversationText(env?.display?.title || env?.meta?.stepId || env?.meta?.source))
-          .filter(Boolean)
-          .slice(0, 2);
-        text = titles.length > 0
-          ? `收到 ${envelopes.length} 份数据结果: ${titles.join(' / ')}`
-          : `收到 ${envelopes.length} 份数据结果`;
-      }
+      text = summarizeDataEnvelopeForTimeline(update);
       break;
     }
     case 'conclusion':

@@ -68,6 +68,7 @@ import {
   applyCapturedEntities,
 } from '../agent/core/entityCapture';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from '../agentv3/outputLanguage';
+import { formatToolCallNarration } from '../agentv3/toolNarration';
 import { loadOpenAIConfig, type OpenAIAgentConfig } from './openAiConfig';
 import {
   createMimoReasoningContentFetch,
@@ -1289,11 +1290,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           taskId: rawItem?.callId || rawItem?.id || 'unknown',
           toolName: rawItem?.name || 'unknown',
           args,
-          message: localize(
-            outputLanguage,
-            `调用工具: ${rawItem?.name || 'unknown'}`,
-            `Call tool: ${rawItem?.name || 'unknown'}`,
-          ),
+          message: formatToolCallNarration(rawItem?.name || 'unknown', args, outputLanguage),
         },
         timestamp: now,
       });
