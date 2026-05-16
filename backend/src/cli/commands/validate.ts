@@ -31,6 +31,7 @@ import {
   DEFAULT_VALIDATE_SQL_GUARDRAIL_RULES,
   summarizeSqlGuardrailIssues,
 } from '../../services/sqlGuardrailAnalyzer';
+import { skillUsesProcessNameFilter } from '../../services/processIdentity/identityGate';
 
 // ANSI color codes (fallback for chalk ESM issues)
 const colors = {
@@ -192,6 +193,57 @@ function validateTierAndStdlib(skill: SkillDefinition): { errors: string[]; warn
   return { errors, warnings };
 }
 
+function validateIdentityContract(skill: SkillDefinition): { errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const identity = skill.identity as any;
+
+  if (identity !== undefined) {
+    const policies = new Set(['none', 'exempt', 'verify_if_present', 'required']);
+    if (!identity || typeof identity !== 'object' || Array.isArray(identity)) {
+      errors.push('identity must be an object when provided');
+      return { errors, warnings };
+    }
+    if (!policies.has(identity.policy)) {
+      errors.push(`identity.policy must be one of: ${Array.from(policies).join(', ')}`);
+    }
+    if (identity.scope !== undefined && identity.scope !== 'process') {
+      errors.push("identity.scope must be 'process' when provided");
+    }
+    if (identity.aliases !== undefined && (!Array.isArray(identity.aliases) || identity.aliases.length === 0 || identity.aliases.some((a: unknown) => typeof a !== 'string' || !a.trim()))) {
+      errors.push('identity.aliases must be a non-empty string array when provided');
+    }
+    if (identity.rewriteTo !== undefined && identity.rewriteTo !== 'recommended_process_name_param' && identity.rewriteTo !== 'upid') {
+      errors.push("identity.rewriteTo must be 'recommended_process_name_param' or 'upid'");
+    }
+    if (identity.minConfidence !== undefined && (typeof identity.minConfidence !== 'number' || identity.minConfidence < 0 || identity.minConfidence > 100)) {
+      errors.push('identity.minConfidence must be a number between 0 and 100');
+    }
+
+    if (identity.policy === 'required') {
+      const aliases = Array.isArray(identity.aliases) ? identity.aliases : ['package', 'process_name'];
+      const declaredInputs = new Set((skill.inputs || []).map(input => input.name));
+      const hasDeclaredAlias = aliases.some((alias: string) => declaredInputs.has(alias));
+      const acceptsUpid = declaredInputs.has('upid');
+      if (!hasDeclaredAlias && !acceptsUpid) {
+        errors.push(`identity.required skill must declare at least one identity alias input (${aliases.join(', ')}) or upid`);
+      }
+    }
+    if (identity.rewriteTo === 'upid') {
+      const declaredInputs = new Set((skill.inputs || []).map(input => input.name));
+      if (!declaredInputs.has('upid')) {
+        errors.push("identity.rewriteTo='upid' requires an upid input");
+      }
+    }
+  }
+
+  if (skillUsesProcessNameFilter(skill) && identity?.policy === 'none') {
+    errors.push('identity.policy cannot be none when SQL filters by process.name/process_name');
+  }
+
+  return { errors, warnings };
+}
+
 function validateSkillDefinition(skill: SkillDefinition, filePath: string): ValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -276,6 +328,10 @@ function validateSkillDefinition(skill: SkillDefinition, filePath: string): Vali
       warnings.push('No keywords/patterns defined in triggers');
     }
   }
+
+  const identityContract = validateIdentityContract(skill);
+  errors.push(...identityContract.errors);
+  warnings.push(...identityContract.warnings);
 
   // Execution shape validation:
   // - atomic: allow either root-level `sql` OR step-based `steps`
@@ -870,7 +926,9 @@ export const validateCommand = new Command('validate')
         path.join(SKILLS_DIR, 'custom', `${skillId}.skill.yaml`),
       ];
 
-      const foundPath = possiblePaths.find(p => fs.existsSync(p));
+      const foundPath = possiblePaths.find(p => fs.existsSync(p))
+        ?? findSkillFiles(path.join(SKILLS_DIR, 'modules'), /\.skill\.ya?ml$/)
+          .find(p => path.basename(p).replace(/\.skill\.ya?ml$/, '') === skillId);
       if (foundPath) {
         files.push(foundPath);
       } else {
@@ -885,6 +943,7 @@ export const validateCommand = new Command('validate')
       files.push(...findSkillFiles(path.join(SKILLS_DIR, 'comparison'), /\.skill\.ya?ml$/));
 
       if (options.all) {
+        files.push(...findSkillFiles(path.join(SKILLS_DIR, 'modules'), /\.skill\.ya?ml$/));
         files.push(...findSkillFiles(path.join(SKILLS_DIR, 'vendors'), /\.override\.ya?ml$/));
         files.push(...findSkillFiles(path.join(SKILLS_DIR, 'custom'), /\.skill\.ya?ml$/));
       }

@@ -66,6 +66,12 @@ inputs:
     default: 8
     description: "帧间高抖动阈值（ms）"
 
+identity:
+  policy: verify_if_present
+  scope: process
+  aliases: [package, process_name]
+  rewriteTo: recommended_process_name_param
+
 steps:
   # ==========================================================================
   # Step 0: 初始化共享 CPU 拓扑视图

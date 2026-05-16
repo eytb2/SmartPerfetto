@@ -35,6 +35,12 @@ successCriteria: "确定掉帧根因并提供可操作的优化建议"
 ### 参数说明
 - 调用 invoke_skill 时使用 `process_name` 参数（系统会自动映射为 YAML skill 中的 `package`）
 - 时间戳参数（`start_ts`, `end_ts`）使用纳秒级整数字符串，例如 `"123456789000000"`
+- 系统会在进程级 Skill 执行前自动做进程身份准入；当焦点进程来自自动检测、用户提到“进程名/包名不对”、或 trace 中 `process.name` 与线程名/layer/包名线索冲突时，必要时调用：
+  `invoke_skill("process_identity_resolver", { process_name: "<候选包名或进程名>", start_ts, end_ts })`
+  查看准入证据和候选进程。
+  - 报告里使用 `canonical_package_name` 表示用户可理解的包名/应用身份
+  - 调用仍按 `process.name` 过滤的旧 Skill 时，使用第一名候选的 `recommended_process_name_param` 作为 `process_name`
+  - 如果 `identity_warning` 提示未命中 `process.name` 但命中 metadata/cmdline/layer/thread，不要只凭 `process.name` 下结论；优先结合 `upid`、线程名、FrameTimeline layer、OOM adj、battery_stats.top 的证据链
 
 ### 分析流程
 1. 如果架构未知，先调用 detect_architecture

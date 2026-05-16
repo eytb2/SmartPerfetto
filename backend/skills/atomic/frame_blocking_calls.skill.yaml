@@ -56,6 +56,12 @@ inputs:
     required: false
     description: "分析结束时间戳(ns，可选)"
 
+identity:
+  policy: required
+  scope: process
+  aliases: [process_name, package]
+  rewriteTo: recommended_process_name_param
+
 display:
   level: key
   layer: list

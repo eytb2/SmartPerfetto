@@ -359,6 +359,14 @@ export interface SkillTriggers {
   };
 }
 
+export interface SkillIdentityConfig {
+  policy: 'none' | 'exempt' | 'verify_if_present' | 'required';
+  scope?: 'process';
+  aliases?: string[];
+  rewriteTo?: 'recommended_process_name_param' | 'upid';
+  minConfidence?: number;
+}
+
 export interface SkillPrerequisites {
   required_tables?: string[];
   optional_tables?: string[];
@@ -394,6 +402,7 @@ export interface SkillDefinition {
   meta: SkillMeta;
   triggers?: SkillTriggers;
   prerequisites?: SkillPrerequisites;
+  identity?: SkillIdentityConfig;
 
   // 输入参数
   inputs?: SkillInput[];

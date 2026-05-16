@@ -85,6 +85,12 @@ inputs:
     required: false
     description: "是否执行逐个启动事件详情分析（默认 true）"
 
+identity:
+  policy: verify_if_present
+  scope: process
+  aliases: [package, process_name]
+  rewriteTo: recommended_process_name_param
+
 steps:
   # ========== 获取启动事件概览 ==========
   - id: get_startups

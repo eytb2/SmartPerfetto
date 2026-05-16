@@ -26,6 +26,7 @@ import {
   TraceProcessorFactory,
   WorkingTraceProcessor,
   isFatalTraceProcessorListenFailure,
+  isTraceProcessorReadyMessage,
   killOrphanProcessors,
   supportsTraceProcessorCorsOriginsFlag,
 } from '../workingTraceProcessor';
@@ -90,6 +91,11 @@ function cleanupTempFile(filePath: string): void {
 // =============================================================================
 
 describe('trace_processor startup stderr parsing', () => {
+  it('does not treat trace loading as HTTP readiness', () => {
+    expect(isTraceProcessorReadyMessage('[501.806] processor_shell.cc:2151 Trace loaded: 19.23 MB')).toBe(false);
+    expect(isTraceProcessorReadyMessage('[501.806] http_server.cc:67 [HTTP] Starting HTTP server on 127.0.0.1:9100')).toBe(true);
+  });
+
   it('does not treat Docker IPv6 loopback listen failure as a port conflict', () => {
     const stderr = '[567.342]       http_server.cc:83 Failed to listen on IPv6 socket: "[::1]:9187" (errno: 99, Cannot assign requested address)';
 
@@ -110,6 +116,15 @@ describe('trace_processor startup stderr parsing', () => {
 
   it('treats non-IPv6 listen failures as a port conflict', () => {
     const stderr = '[567.342]       http_server.cc:83 Failed to listen on 127.0.0.1:9187 (errno: 98, Address already in use)';
+
+    expect(isFatalTraceProcessorListenFailure(stderr)).toBe(true);
+  });
+
+  it('treats mixed IPv4 and IPv6 listen failures as a port conflict', () => {
+    const stderr = [
+      '[501.807]       http_server.cc:72 Failed to listen on IPv4 socket: "127.0.0.1:9100" (errno: 48, Address already in use)',
+      '[501.807]       http_server.cc:83 Failed to listen on IPv6 socket: "[::1]:9100" (errno: 48, Address already in use)',
+    ].join('\n');
 
     expect(isFatalTraceProcessorListenFailure(stderr)).toBe(true);
   });

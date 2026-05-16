@@ -24,6 +24,7 @@ import {
   getPerfettoStdlibModules,
   getPerfettoStdlibPath,
 } from '../services/perfettoStdlibScanner';
+import { sqlUsesProcessNameFilter } from '../services/processIdentity/identityGate';
 import { injectStdlibIncludes } from './sqlIncludeInjector';
 import { loadPromptTemplate, getPhaseHints } from './strategyLoader';
 import { matchPhaseHintForNextPhase } from './phaseHintMatcher';
@@ -452,6 +453,15 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     return resultText;
   }
 
+  function rawSqlProcessIdentityWarning(sql: string): string | undefined {
+    if (!sqlUsesProcessNameFilter(sql)) return undefined;
+    return localize(
+      outputLanguage,
+      'Raw SQL 使用了进程/包名过滤；Process Identity Gate 只会自动保护 invoke_skill。信任这个 SQL 结论前，先用 process_identity_resolver 确认 canonical_package_name 与 recommended_process_name_param，或优先改用对应 Skill。',
+      'Raw SQL uses process/package-name filters; Process Identity Gate only protects invoke_skill automatically. Before trusting this SQL result, verify canonical_package_name and recommended_process_name_param with process_identity_resolver, or prefer the matching skill.',
+    );
+  }
+
   /**
    * P0-G10: Enforce planning before analysis.
    * Returns error JSON if plan is required but not yet submitted, null if OK.
@@ -534,6 +544,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       }
       try {
         const sqlStart = Date.now();
+        const processIdentityWarning = rawSqlProcessIdentityWarning(sql);
         const result = await runRawSqlWithIncludeInjection(traceId, sql);
         const truncated = result.rows.length > 200;
         const rows = truncated ? result.rows.slice(0, 200) : result.rows;
@@ -623,6 +634,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
                 columnStats: summaryResult.columnStats,
                 sampleRows: summaryResult.sampleRows,
                 durationMs: result.durationMs,
+                ...(processIdentityWarning ? { processIdentityWarning } : {}),
               })) + getReasoningNudge(),
             }],
           };
@@ -638,6 +650,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               totalRows: result.rows.length,
               truncated,
               durationMs: result.durationMs,
+              ...(processIdentityWarning ? { processIdentityWarning } : {}),
               ...(result.error ? { error: result.error } : {}),
             })) + (success ? getReasoningNudge() : ''),
           }],
@@ -2417,6 +2430,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         : localize(outputLanguage, '[当前 Trace]', '[current trace]');
       try {
         const sqlStart = Date.now();
+        const processIdentityWarning = rawSqlProcessIdentityWarning(sql);
         const result = await runRawSqlWithIncludeInjection(targetTraceId, sql);
         const truncated = result.rows.length > 200;
         const rows = truncated ? result.rows.slice(0, 200) : result.rows;
@@ -2431,6 +2445,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             summary: summaryResult,
             totalRows: result.rows.length,
             durationMs,
+            ...(processIdentityWarning ? { processIdentityWarning } : {}),
           });
           return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(text + getReasoningNudge()) }] };
         }
@@ -2444,6 +2459,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           totalRows: result.rows.length,
           truncated,
           durationMs,
+          ...(processIdentityWarning ? { processIdentityWarning } : {}),
           error: result.error,
         });
         return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(success ? text + getReasoningNudge() : text) }] };

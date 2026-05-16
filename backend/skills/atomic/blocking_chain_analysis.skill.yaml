@@ -46,6 +46,12 @@ inputs:
     required: true
     description: "分析结束时间戳(ns)"
 
+identity:
+  policy: required
+  scope: process
+  aliases: [process_name, package]
+  rewriteTo: recommended_process_name_param
+
 steps:
   # ==========================================================================
   # Step 1: 主线程状态分布

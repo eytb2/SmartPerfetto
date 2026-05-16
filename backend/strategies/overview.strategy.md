@@ -89,6 +89,8 @@ fetch_artifact(artifactId, detail="rows", offset=0, limit=50)
 
 对每个问题场景，调用对应的 Skill 进行深钻：
 
+如果深钻需要 `process_name`，系统会在进程级 Skill 执行前自动做身份准入和参数重写。若准入返回 ambiguous/blocked，调用 `process_identity_resolver` 查看候选进程；后续 Skill 的 `process_name` 使用 `recommended_process_name_param`，报告中的应用身份使用 `canonical_package_name`。
+
 | 场景类型 | 调用的 Skill | 关键参数 |
 |---------|------------|---------|
 | cold_start / warm_start / hot_start | `startup_analysis` | （自动检测启动事件） |

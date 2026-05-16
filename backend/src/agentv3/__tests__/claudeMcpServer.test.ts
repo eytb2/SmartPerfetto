@@ -241,6 +241,22 @@ describe('createClaudeMcpServer', () => {
       expect(result.error).toBeUndefined();
     });
 
+    it('execute_sql should warn when raw SQL bypasses process identity gate', async () => {
+      const { tools } = createTestServer();
+      await callTool(tools, 'submit_plan', {
+        phases: [{ id: 'p1', name: 'Test', goal: 'Test', expectedTools: ['execute_sql'] }],
+        successCriteria: 'Test done',
+      });
+
+      const raw = await tools.get('execute_sql')?.handler({
+        sql: "SELECT * FROM process p WHERE p.name GLOB 'com.example*'",
+      });
+      const text = raw?.content?.find((c: any) => c.type === 'text')?.text || '';
+
+      expect(text).toContain('processIdentityWarning');
+      expect(text).toContain('Process Identity Gate');
+    });
+
     it('planning-exempt tools should work without plan', async () => {
       const { tools } = createTestServer();
       // These should NOT require a plan

@@ -77,10 +77,9 @@ export function supportsTraceProcessorCorsOriginsFlag(binaryPath = getTraceProce
   return supported;
 }
 
-function isTraceProcessorReadyMessage(text: string): boolean {
+export function isTraceProcessorReadyMessage(text: string): boolean {
   return text.includes('Starting HTTP server') ||
-    text.includes('Starting RPC server') ||
-    text.includes('Trace loaded');
+    text.includes('Starting RPC server');
 }
 
 // Tier 0: absolute minimum stdlib modules needed for any analysis to start.
@@ -98,17 +97,22 @@ export function isFatalTraceProcessorListenFailure(text: string): boolean {
     return false;
   }
 
-  // Docker/Linux containers commonly have IPv6 loopback disabled. Perfetto can
-  // still serve backend queries on 127.0.0.1, so this warning is not fatal.
-  if (text.includes('IPv6 socket') || text.includes('[::')) {
-    return false;
-  }
+  return text
+    .split(/\r?\n/)
+    .filter(line => line.includes('Failed to listen') || line.includes('Address already in use'))
+    .some(line => {
+      // Docker/Linux containers commonly have IPv6 loopback disabled. Perfetto can
+      // still serve backend queries on 127.0.0.1, so this warning is not fatal.
+      if (line.includes('IPv6 socket') || line.includes('[::')) {
+        return false;
+      }
 
-  if (text.includes('errno: 0, No error')) {
-    return false;
-  }
+      if (line.includes('errno: 0, No error')) {
+        return false;
+      }
 
-  return true;
+      return true;
+    });
 }
 
 /**

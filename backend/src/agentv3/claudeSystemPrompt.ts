@@ -86,7 +86,7 @@ function buildFocusAppSection(
       : `切换 ${app.switchCount} 次`;
     return `- \`${app.packageName}\`${marker}— 前台时长 ${formatDurationNs(app.totalDurationNs)}，${countLabel}`;
   });
-  return `## 焦点应用\n\n以下应用在 trace 期间处于前台：\n${appLines.join('\n')}\n\n默认分析第一个（主焦点）应用。调用 Skill 时，使用 process_name="${focusApps[0].packageName}" 作为参数。`;
+  return `## 焦点应用\n\n以下应用在 trace 期间处于前台：\n${appLines.join('\n')}\n\n默认分析第一个（主焦点）应用。调用 Skill 时，使用 process_name="${focusApps[0].packageName}" 作为参数；系统会在进程级 Skill 执行前自动做身份准入和参数重写。如果准入返回 ambiguous/blocked，先查看候选进程或澄清目标，不要继续基于未验证包名下结论。`;
 }
 
 /**

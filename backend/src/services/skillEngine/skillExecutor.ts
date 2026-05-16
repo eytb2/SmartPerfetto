@@ -70,6 +70,12 @@ import {
   formatDisplayContractIssue,
   sanitizeDisplayConfigForRuntime,
 } from './displayContractValidator';
+import { IdentityGate, type IdentityGateResult } from '../processIdentity/identityGate';
+import type {
+  ProcessIdentityCandidate,
+  ProcessIdentityResolution,
+  ProcessIdentityTarget,
+} from '../processIdentity/types';
 
 // =============================================================================
 // Layered Result Types
@@ -1041,6 +1047,8 @@ export class SkillExecutor {
   private skillRegistry: Map<string, SkillDefinition>;
   private eventEmitter?: (event: SkillEvent) => void;
   private fragmentRegistry: Map<string, string> = new Map();
+  private identityGate = new IdentityGate();
+  private processIdentityCache: Map<string, ProcessIdentityResolution> = new Map();
 
   constructor(
     traceProcessor: any,
@@ -1135,6 +1143,196 @@ export class SkillExecutor {
         timestamp: Date.now(),
       } as SkillEvent);
     }
+  }
+
+  private buildIdentityCacheKey(traceId: string, target: ProcessIdentityTarget): string {
+    return JSON.stringify({
+      traceId,
+      requestedName: target.requestedName || '',
+      threadName: target.threadName || '',
+      upid: target.upid ?? null,
+      pid: target.pid ?? null,
+      startTs: target.startTs ?? null,
+      endTs: target.endTs ?? null,
+    });
+  }
+
+  private toNumber(value: any): number | undefined {
+    if (value === undefined || value === null || value === '') return undefined;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+  }
+
+  private splitSources(...values: Array<any>): string[] {
+    const sources = new Set<string>();
+    for (const value of values) {
+      if (typeof value !== 'string') continue;
+      for (const part of value.split(',')) {
+        const s = part.trim();
+        if (s) sources.add(s);
+      }
+    }
+    return Array.from(sources);
+  }
+
+  private rowToIdentityCandidate(row: Record<string, any>): ProcessIdentityCandidate {
+    return {
+      rank: this.toNumber(row.rank) ?? 0,
+      confidenceScore: this.toNumber(row.confidence_score) ?? 0,
+      rawStatus: row.identity_status ? String(row.identity_status) : undefined,
+      canonicalPackageName: row.canonical_package_name ? String(row.canonical_package_name) : undefined,
+      recommendedProcessNameParam: row.recommended_process_name_param ? String(row.recommended_process_name_param) : undefined,
+      upid: this.toNumber(row.upid),
+      pid: this.toNumber(row.pid),
+      processName: row.process_name ? String(row.process_name) : undefined,
+      metadataProcessName: row.metadata_process_name ? String(row.metadata_process_name) : undefined,
+      packageName: row.package_name ? String(row.package_name) : undefined,
+      cmdline: row.cmdline ? String(row.cmdline) : undefined,
+      targetMatchSources: row.target_match_sources ? String(row.target_match_sources) : undefined,
+      supportingSources: row.supporting_sources ? String(row.supporting_sources) : undefined,
+      identityWarning: row.identity_warning ? String(row.identity_warning) : undefined,
+    };
+  }
+
+  private normalizeIdentityStatus(candidate: ProcessIdentityCandidate | undefined): ProcessIdentityResolution['status'] {
+    if (!candidate) return 'not_found';
+    if (
+      (candidate.rawStatus === 'confirmed' || candidate.rawStatus === 'probable') &&
+      candidate.confidenceScore >= 50
+    ) {
+      return 'verified';
+    }
+    if (candidate.confidenceScore <= 0) return 'not_found';
+    return 'ambiguous';
+  }
+
+  private async resolveProcessIdentityForGate(
+    traceId: string,
+    target: ProcessIdentityTarget,
+    inherited: Record<string, any>,
+  ): Promise<ProcessIdentityResolution> {
+    const cacheKey = this.buildIdentityCacheKey(traceId, target);
+    const cached = this.processIdentityCache.get(cacheKey);
+    if (cached) return cached;
+
+    const params: Record<string, any> = {
+      max_rows: 10,
+    };
+    if (target.requestedName) {
+      params.package = target.requestedName;
+      params.process_name = target.requestedName;
+    }
+    if (target.threadName) params.thread_name = target.threadName;
+    if (target.upid !== undefined) params.upid = target.upid;
+    if (target.pid !== undefined) params.pid = target.pid;
+    if (target.startTs !== undefined) params.start_ts = target.startTs;
+    if (target.endTs !== undefined) params.end_ts = target.endTs;
+
+    let resolution: ProcessIdentityResolution;
+    try {
+      const result = await this.execute(
+        'process_identity_resolver',
+        traceId,
+        params,
+        { ...inherited, __skipIdentityGate: true },
+      );
+
+      if (!result.success) {
+        resolution = {
+          status: 'unresolved',
+          requestedName: target.requestedName,
+          upids: [],
+          confidenceScore: 0,
+          evidenceSources: [],
+          warnings: [],
+          candidates: [],
+          resolverError: result.error || 'process_identity_resolver failed',
+        };
+      } else {
+        const rows = Array.isArray(result.rawResults?.root?.data)
+          ? result.rawResults.root.data as Record<string, any>[]
+          : [];
+        const candidates = rows.map(row => this.rowToIdentityCandidate(row));
+        const top = candidates[0];
+        const warning = top?.identityWarning && top.identityWarning !== 'ok' ? top.identityWarning : undefined;
+        resolution = {
+          status: this.normalizeIdentityStatus(top),
+          requestedName: target.requestedName,
+          canonicalPackageName: top?.canonicalPackageName,
+          recommendedProcessNameParam: top?.recommendedProcessNameParam,
+          upids: candidates.map(c => c.upid).filter((upid): upid is number => upid !== undefined),
+          confidenceScore: top?.confidenceScore ?? 0,
+          rawStatus: top?.rawStatus,
+          evidenceSources: this.splitSources(top?.targetMatchSources, top?.supportingSources),
+          warnings: warning ? [warning] : [],
+          candidates,
+        };
+      }
+    } catch (error: any) {
+      resolution = {
+        status: 'unresolved',
+        requestedName: target.requestedName,
+        upids: [],
+        confidenceScore: 0,
+        evidenceSources: [],
+        warnings: [],
+        candidates: [],
+        resolverError: error?.message || 'process_identity_resolver threw',
+      };
+    }
+
+    if (!resolution.resolverError) {
+      this.processIdentityCache.set(cacheKey, resolution);
+    }
+    return resolution;
+  }
+
+  private async applyIdentityGate(
+    skill: SkillDefinition,
+    traceId: string,
+    params: Record<string, any>,
+    inherited: Record<string, any>,
+  ): Promise<IdentityGateResult> {
+    return this.identityGate.apply({
+      traceId,
+      skill,
+      params,
+      inherited,
+      resolve: (target) => this.resolveProcessIdentityForGate(traceId, target, inherited),
+    });
+  }
+
+  private buildIdentityBlockedResult(
+    skillId: string,
+    skill: SkillDefinition,
+    startTime: number,
+    gate: IdentityGateResult,
+  ): SkillExecutionResult {
+    const error = gate.error || `Process identity gate blocked skill: ${skillId}`;
+    return {
+      skillId,
+      skillName: skill.meta.display_name,
+      success: false,
+      displayResults: [],
+      diagnostics: [{
+        id: 'process_identity_gate_blocked',
+        diagnosis: error,
+        confidence: 1,
+        severity: 'critical',
+        evidence: {
+          target: gate.target,
+          resolution: gate.resolution,
+          policy: gate.config.policy,
+        },
+        suggestions: [
+          '先确认目标应用身份；如果候选进程不唯一，请使用用户明确包名、线程名或 UPID 重新运行。',
+          '报告中使用 canonicalPackageName，旧 Skill 参数使用 recommendedProcessNameParam。',
+        ],
+        source: 'rule',
+      }],
+      executionTimeMs: Date.now() - startTime,
+      error,
+    };
   }
 
   /**
@@ -1232,8 +1430,18 @@ export class SkillExecutor {
       data: { skillName: skill.meta.display_name },
     });
 
+    const gate = await this.applyIdentityGate(skill, traceId, params, inherited);
+    if (!gate.allowed) {
+      this.emit({
+        type: 'skill_error',
+        skillId,
+        data: { error: gate.error },
+      });
+      return this.buildIdentityBlockedResult(skillId, skill, startTime, gate);
+    }
+
     // Validate and coerce input parameters against skill.inputs declarations
-    const validated = validateSkillInputs(skillId, skill.inputs, params);
+    const validated = validateSkillInputs(skillId, skill.inputs, gate.params);
     for (const w of validated.warnings) {
       logger.warn('SkillExecutor', `[${skillId}] ${w.paramName}: ${w.message}`);
     }
@@ -1263,7 +1471,7 @@ export class SkillExecutor {
     const context: SkillExecutionContext = {
       traceId,
       params: validated.params,
-      inherited,
+      inherited: gate.inherited,
       results: {},
       variables: {},
       moduleIncludes,
@@ -1976,8 +2184,14 @@ export class SkillExecutor {
       };
     }
 
+    const traceId = context.traceId || '';
+    const gate = await this.applyIdentityGate(skill, traceId, inputs, context.inherited || {});
+    if (!gate.allowed) {
+      throw new Error(gate.error || `Process identity gate blocked skill: ${skill.name}`);
+    }
+
     const prerequisiteModules = this.resolvePrerequisiteModules(skill.prerequisites?.modules);
-    const validated = validateSkillInputs(skill.name, skill.inputs, inputs);
+    const validated = validateSkillInputs(skill.name, skill.inputs, gate.params);
     for (const w of validated.warnings) {
       logger.warn('SkillExecutor', `[${skill.name}] ${w.paramName}: ${w.message}`);
     }
@@ -1989,9 +2203,9 @@ export class SkillExecutor {
 
     // Create execution context
     const execContext: SkillExecutionContext = {
-      traceId: context.traceId || '',
+      traceId,
       params: validated.params,
-      inherited: context.inherited || {},
+      inherited: gate.inherited,
       results: {},
       variables: {},
       moduleIncludes: prerequisiteModules,

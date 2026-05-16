@@ -114,6 +114,12 @@ inputs:
     required: false
     description: "掉帧原因说明，由 scrolling_analysis 生成的中文诊断"
 
+identity:
+  policy: required
+  scope: process
+  aliases: [package, process_name]
+  rewriteTo: recommended_process_name_param
+
 steps:
   - id: init_cpu_topology
     type: skill

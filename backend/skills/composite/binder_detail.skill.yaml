@@ -62,6 +62,12 @@ inputs:
     required: false
     description: "Perfetto 跳转结束时间"
 
+identity:
+  policy: required
+  scope: process
+  aliases: [process_name, package]
+  rewriteTo: recommended_process_name_param
+
 steps:
   # ========== 初始化 CPU 拓扑 ==========
   - id: init_cpu_topology

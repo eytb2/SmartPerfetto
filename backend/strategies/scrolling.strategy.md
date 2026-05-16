@@ -118,8 +118,11 @@ plan_template:
    - `BUFFER_STUFFING`：Buffer Stuffing
 
 **Phase 1 — 概览 + 掉帧列表 + 批量根因分类（1 次调用）：**
+
+如果 `process_name` 来自自动焦点检测、或用户/trace 证据提示进程名与包名/线程名/layer 不一致，先执行 **Phase 1.6 进程身份交叉确认**，再调用本阶段的 `scrolling_analysis`。
+
 ```
-invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_end>", process_name: "<包名>" })
+invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_end>", process_name: "<resolver.recommended_process_name_param 或用户明确指定的包名>" })
 ```
 - 建议传入 start_ts 和 end_ts 以获得更精确的结果
 - 如果不知道 trace 时间范围，先用 SQL 查询：
@@ -173,6 +176,18 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
 | **GLSurfaceView / NativeActivity / OpenGL ES** | 先用 `scrolling_analysis` 看宿主/SF 消费端；再调用 `invoke_skill("gl_standalone_swap_jank", {process_name, start_ts, end_ts})` 检查应用自管 swap/present 间隔 |
 | **标准 HWUI** | 使用标准 `scrolling_analysis` |
 | **Compose** | 使用标准 `scrolling_analysis`。如果检测到 Compose 架构，注意 Recomposition* slices 可能是卡顿主因。LazyColumn/LazyRow 的 prefetch 和 compose 阶段如果超时会导致掉帧。可调用 `compose_recomposition_hotspot` 检测过度重组；新版会在 FrameTimeline 可用时输出 recomposition→frame 重叠证据 |
+
+**Phase 1.6 — 进程身份交叉确认（当 process_name 可能不可靠时）：**
+
+系统会在进程级 Skill 执行前自动做身份准入。满足任一条件时，若准入返回 ambiguous/blocked，调用 `invoke_skill("process_identity_resolver", { process_name, start_ts, end_ts })` 查看候选进程，再继续深钻：
+- `process_name` 来自自动焦点检测，而不是用户明确指定
+- 用户反馈 Perfetto UI 里进程名不对、线程名/layer 看起来对
+- `scrolling_analysis`、架构专属 Skill 或自定义 SQL 返回空结果，但 FrameTimeline/layer/线程名明显有目标应用信号
+
+处理规则：
+- 使用 resolver 第一名候选的 `recommended_process_name_param` 作为后续 `scrolling_analysis` / `jank_frame_detail` / `frame_blocking_calls` 的 `process_name`
+- 在结论中把 `canonical_package_name` 当作用户可读的目标应用身份；不要把它和旧 Skill 的 `process_name` 参数混为一谈
+- 如果 resolver 只有 `weak_match` 或提示 shared UID，多抓取候选行并说明身份不确定性；必要时先不传 `process_name` 跑全量概览，再按 `upid`/线程/layer 过滤
 
 **Phase 1.7 — 根因分支深钻（基于 batch_frame_root_cause 的 reason_code 和 jank_responsibility）：**
 
