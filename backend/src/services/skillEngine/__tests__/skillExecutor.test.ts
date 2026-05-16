@@ -2296,6 +2296,65 @@ describe('executeCompositeSkill', () => {
     expect(result.layers).toBeDefined();
     expect(result.defaultExpanded).toContain('overview');
     expect(result.metadata.skillName).toBe('layered_skill');
+    expect(result.stepResults?.map(step => step.stepId)).toEqual(['summary']);
+  });
+
+  it('应该在 executeCompositeSkill 中校验并拒绝非法输入', async () => {
+    const skill: SkillDefinition = {
+      name: 'input_validated_layered_skill',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Input Validated Layered Skill'),
+      inputs: [
+        { name: 'max_rows', type: 'integer', required: false },
+      ],
+      steps: [
+        {
+          id: 'summary',
+          type: 'atomic',
+          sql: 'SELECT ${max_rows} AS max_rows',
+          display: { title: 'Summary', level: 'summary', layer: 'overview' },
+        },
+      ],
+    };
+
+    await expect(executor.executeCompositeSkill(
+      skill,
+      { max_rows: 'abc' },
+      { traceId: 'trace-1' },
+    )).rejects.toThrow('Input validation failed');
+    expect(mockTraceProcessor.query).not.toHaveBeenCalled();
+  });
+
+  it('应该在 raw stepResults 中保留无 layer 的失败 step', async () => {
+    mockTraceProcessor.query.mockResolvedValue({
+      error: 'no such table: missing_table',
+    });
+
+    const skill: SkillDefinition = {
+      name: 'hidden_failure_layered_skill',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Hidden Failure Layered Skill'),
+      steps: [
+        {
+          id: 'hidden_probe',
+          type: 'atomic',
+          sql: 'SELECT * FROM missing_table',
+          display: { title: 'Hidden Probe', level: 'none' },
+        },
+      ],
+    };
+
+    const result = await executor.executeCompositeSkill(skill, {}, { traceId: 'trace-1' });
+
+    expect(result.layers.overview).toEqual({});
+    expect(result.stepResults).toHaveLength(1);
+    expect(result.stepResults?.[0]).toEqual(expect.objectContaining({
+      stepId: 'hidden_probe',
+      success: false,
+      error: 'no such table: missing_table',
+    }));
   });
 
   it('应该正确组织 overview 层数据', async () => {

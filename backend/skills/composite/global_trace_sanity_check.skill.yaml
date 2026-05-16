@@ -1,0 +1,716 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+name: global_trace_sanity_check
+version: "1.0"
+type: composite
+category: system
+tier: S
+
+meta:
+  display_name: "全局 Trace Sanity 检查"
+  description: "在目标时间窗内快速枚举最长 slice、D 状态、Runnable 等待、Runqueue 压力和 CPU 热点进程"
+  icon: "fact_check"
+  tags: [system, sanity, trace, scheduler, cpu, global]
+
+triggers:
+  keywords:
+    zh: [全局检查, trace sanity, 系统级瓶颈, 全局瓶颈, 最长slice, D状态, runnable等待]
+    en: [global sanity, trace sanity, system stall, longest slices, d-state, runnable wait]
+  patterns:
+    - ".*(global|trace).*sanity.*"
+    - ".*(全局|系统).*瓶颈.*"
+    - ".*最长.*slice.*"
+    - ".*D.*状态.*"
+
+prerequisites:
+  required_tables:
+    - slice
+    - thread_state
+    - sched_slice
+  modules:
+    - sched
+    - sched.thread_level_parallelism
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳(ns)，默认 trace_start()"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳(ns)，默认 trace_end()"
+  - name: max_rows
+    type: integer
+    required: false
+    default: 20
+    description: "每个明细表最大返回行数"
+
+steps:
+  - id: trace_window
+    type: atomic
+    name: "Trace 时间窗"
+    synthesize:
+      role: overview
+      fields:
+        - key: start_ts
+          label: 起点
+        - key: end_ts
+          label: 终点
+        - key: duration_ms
+          label: 时长
+          format: duration_ms
+    display:
+      level: summary
+      layer: overview
+      title: "全局检查时间窗"
+      columns:
+        - name: start_ts
+          label: "起点"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: end_ts
+          label: "终点"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: duration_ms
+          label: "时长"
+          type: duration
+          unit: ms
+          format: duration_ms
+        - name: max_rows
+          label: "明细上限"
+          type: number
+    sql: |
+      WITH raw_input AS (
+        SELECT
+          COALESCE(${start_ts}, trace_start()) AS raw_start_ts,
+          COALESCE(${end_ts}, trace_end()) AS raw_end_ts,
+          MIN(MAX(COALESCE(${max_rows|20}, 20), 1), 100) AS max_rows
+      ),
+      input AS (
+        SELECT
+          MIN(raw_start_ts, raw_end_ts) AS start_ts,
+          MAX(raw_start_ts, raw_end_ts) AS end_ts,
+          max_rows
+        FROM raw_input
+      )
+      SELECT
+        printf('%d', start_ts) AS start_ts,
+        printf('%d', end_ts) AS end_ts,
+        ROUND((end_ts - start_ts) / 1e6, 2) AS duration_ms,
+        max_rows
+      FROM input
+    save_as: trace_window
+
+  - id: top_long_slices
+    type: atomic
+    name: "最长 Slice"
+    synthesize:
+      role: list
+      fields:
+        - key: slice_name
+          label: Slice
+        - key: duration_ms
+          label: 时长
+          format: duration_ms
+        - key: process_name
+          label: 进程
+        - key: thread_name
+          label: 线程
+    display:
+      level: detail
+      layer: list
+      title: "时间窗内最长 Slice"
+      columns:
+        - name: ts
+          label: "开始"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_range
+          durationColumn: dur_ns
+        - name: duration_ms
+          label: "时长"
+          type: duration
+          unit: ms
+          format: duration_ms
+        - name: slice_name
+          label: "Slice"
+          type: string
+          format: truncate
+        - name: process_name
+          label: "进程"
+          type: string
+          format: truncate
+        - name: thread_name
+          label: "线程"
+          type: string
+          format: truncate
+        - name: dur_ns
+          label: "时长(ns)"
+          type: duration
+          unit: ns
+          hidden: true
+        - name: slice_start_ts
+          label: "原始Slice开始"
+          type: timestamp
+          unit: ns
+          hidden: true
+        - name: slice_dur_ns
+          label: "原始Slice时长"
+          type: duration
+          unit: ns
+          hidden: true
+    sql: |
+      WITH
+      raw_input AS (
+        SELECT
+          COALESCE(${start_ts}, trace_start()) AS raw_start_ts,
+          COALESCE(${end_ts}, trace_end()) AS raw_end_ts,
+          MIN(MAX(COALESCE(${max_rows|20}, 20), 1), 100) AS max_rows
+      ),
+      input AS (
+        SELECT
+          MIN(raw_start_ts, raw_end_ts) AS start_ts,
+          MAX(raw_start_ts, raw_end_ts) AS end_ts,
+          max_rows
+        FROM raw_input
+      ),
+      normalized AS (
+        SELECT
+          s.ts,
+          IIF(s.dur = -1, trace_end() - s.ts, s.dur) AS effective_dur,
+          COALESCE(s.name, '<unnamed>') AS slice_name,
+          COALESCE(p.name, pp.name, tr.name, '<no process>') AS process_name,
+          COALESCE(t.name, pt.name, tr.name, '<no thread>') AS thread_name
+        FROM slice s
+        LEFT JOIN track tr ON s.track_id = tr.id
+        LEFT JOIN thread_track tt ON s.track_id = tt.id
+        LEFT JOIN thread t ON tt.utid = t.utid
+        LEFT JOIN process p ON t.upid = p.upid
+        LEFT JOIN process_track pt ON s.track_id = pt.id
+        LEFT JOIN process pp ON pt.upid = pp.upid
+      ),
+      overlapped AS (
+        SELECT
+          n.*,
+          MAX(n.ts, input.start_ts) AS overlap_start_ts,
+          MIN(n.ts + n.effective_dur, input.end_ts) - MAX(n.ts, input.start_ts) AS overlap_dur
+        FROM normalized n, input
+        WHERE n.effective_dur > 0
+          AND n.ts < input.end_ts
+          AND n.ts + n.effective_dur > input.start_ts
+      )
+      SELECT
+        printf('%d', overlap_start_ts) AS ts,
+        printf('%d', overlap_dur) AS dur_ns,
+        ROUND(overlap_dur / 1e6, 2) AS duration_ms,
+        ROUND(overlap_dur / 1e6, 2) AS overlap_ms,
+        ROUND(effective_dur / 1e6, 2) AS slice_total_ms,
+        printf('%d', ts) AS slice_start_ts,
+        printf('%d', effective_dur) AS slice_dur_ns,
+        slice_name,
+        process_name,
+        thread_name
+      FROM overlapped
+      ORDER BY overlap_dur DESC, effective_dur DESC
+      LIMIT (SELECT max_rows FROM input)
+    save_as: top_long_slices
+
+  - id: top_d_state_threads
+    type: atomic
+    name: "D 状态线程"
+    synthesize:
+      role: list
+      fields:
+        - key: process_name
+          label: 进程
+        - key: thread_name
+          label: 线程
+        - key: total_blocked_ms
+          label: D状态总时长
+          format: duration_ms
+        - key: blocked_function
+          label: 阻塞函数
+    display:
+      level: detail
+      layer: list
+      title: "D 状态线程 Top"
+      columns:
+        - name: total_blocked_ms
+          label: "总阻塞"
+          type: duration
+          unit: ms
+          format: duration_ms
+        - name: max_blocked_ms
+          label: "最长单次"
+          type: duration
+          unit: ms
+          format: duration_ms
+        - name: events
+          label: "次数"
+          type: number
+        - name: process_name
+          label: "进程"
+          type: string
+          format: truncate
+        - name: thread_name
+          label: "线程"
+          type: string
+          format: truncate
+        - name: upid
+          label: "upid"
+          type: number
+          hidden: true
+        - name: pid
+          label: "pid"
+          type: number
+          hidden: true
+        - name: utid
+          label: "utid"
+          type: number
+          hidden: true
+        - name: tid
+          label: "tid"
+          type: number
+          hidden: true
+        - name: blocked_function
+          label: "阻塞函数"
+          type: string
+          format: truncate
+        - name: first_ts
+          label: "首次"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+    sql: |
+      WITH
+      raw_input AS (
+        SELECT
+          COALESCE(${start_ts}, trace_start()) AS raw_start_ts,
+          COALESCE(${end_ts}, trace_end()) AS raw_end_ts,
+          MIN(MAX(COALESCE(${max_rows|20}, 20), 1), 100) AS max_rows
+      ),
+      input AS (
+        SELECT
+          MIN(raw_start_ts, raw_end_ts) AS start_ts,
+          MAX(raw_start_ts, raw_end_ts) AS end_ts,
+          max_rows
+        FROM raw_input
+      ),
+      normalized AS (
+        SELECT
+          ts.ts,
+          IIF(ts.dur = -1, trace_end() - ts.ts, ts.dur) AS effective_dur,
+          p.upid,
+          p.pid,
+          t.utid,
+          t.tid,
+          COALESCE(p.name, '<kernel>') AS process_name,
+          COALESCE(t.name, '<unknown thread>') AS thread_name,
+          COALESCE(NULLIF(ts.blocked_function, ''), '<unknown>') AS blocked_function
+        FROM thread_state ts
+        LEFT JOIN thread t ON ts.utid = t.utid
+        LEFT JOIN process p ON t.upid = p.upid
+        WHERE ts.state IN ('D', 'DK')
+      ),
+      overlapped AS (
+        SELECT
+          n.*,
+          MAX(n.ts, input.start_ts) AS overlap_start_ts,
+          MIN(n.ts + n.effective_dur, input.end_ts) - MAX(n.ts, input.start_ts) AS overlap_dur
+        FROM normalized n, input
+        WHERE n.effective_dur > 0
+          AND n.ts < input.end_ts
+          AND n.ts + n.effective_dur > input.start_ts
+      )
+      SELECT
+        ROUND(SUM(overlap_dur) / 1e6, 2) AS total_blocked_ms,
+        ROUND(MAX(overlap_dur) / 1e6, 2) AS max_blocked_ms,
+        COUNT(*) AS events,
+        process_name,
+        thread_name,
+        upid,
+        pid,
+        utid,
+        tid,
+        blocked_function,
+        printf('%d', MIN(overlap_start_ts)) AS first_ts
+      FROM overlapped
+      GROUP BY upid, pid, utid, tid, process_name, thread_name, blocked_function
+      ORDER BY SUM(overlap_dur) DESC, MAX(overlap_dur) DESC
+      LIMIT (SELECT max_rows FROM input)
+    save_as: top_d_state_threads
+
+  - id: top_runnable_waits
+    type: atomic
+    name: "Runnable 等待线程"
+    synthesize:
+      role: list
+      fields:
+        - key: process_name
+          label: 进程
+        - key: thread_name
+          label: 线程
+        - key: total_runnable_wait_ms
+          label: Runnable总等待
+          format: duration_ms
+        - key: max_runnable_wait_ms
+          label: 最长单次等待
+          format: duration_ms
+    display:
+      level: detail
+      layer: list
+      title: "Runnable 等待 Top"
+      columns:
+        - name: total_runnable_wait_ms
+          label: "总等待"
+          type: duration
+          unit: ms
+          format: duration_ms
+        - name: max_runnable_wait_ms
+          label: "最长单次"
+          type: duration
+          unit: ms
+          format: duration_ms
+        - name: events
+          label: "次数"
+          type: number
+        - name: process_name
+          label: "进程"
+          type: string
+          format: truncate
+        - name: thread_name
+          label: "线程"
+          type: string
+          format: truncate
+        - name: upid
+          label: "upid"
+          type: number
+          hidden: true
+        - name: pid
+          label: "pid"
+          type: number
+          hidden: true
+        - name: utid
+          label: "utid"
+          type: number
+          hidden: true
+        - name: tid
+          label: "tid"
+          type: number
+          hidden: true
+        - name: first_ts
+          label: "首次"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+    sql: |
+      WITH
+      raw_input AS (
+        SELECT
+          COALESCE(${start_ts}, trace_start()) AS raw_start_ts,
+          COALESCE(${end_ts}, trace_end()) AS raw_end_ts,
+          MIN(MAX(COALESCE(${max_rows|20}, 20), 1), 100) AS max_rows
+      ),
+      input AS (
+        SELECT
+          MIN(raw_start_ts, raw_end_ts) AS start_ts,
+          MAX(raw_start_ts, raw_end_ts) AS end_ts,
+          max_rows
+        FROM raw_input
+      ),
+      normalized AS (
+        SELECT
+          ts.ts,
+          IIF(ts.dur = -1, trace_end() - ts.ts, ts.dur) AS effective_dur,
+          p.upid,
+          p.pid,
+          t.utid,
+          t.tid,
+          COALESCE(p.name, '<kernel>') AS process_name,
+          COALESCE(t.name, '<unknown thread>') AS thread_name
+        FROM thread_state ts
+        LEFT JOIN thread t ON ts.utid = t.utid
+        LEFT JOIN process p ON t.upid = p.upid
+        WHERE ts.state IN ('R', 'R+')
+      ),
+      overlapped AS (
+        SELECT
+          n.*,
+          MAX(n.ts, input.start_ts) AS overlap_start_ts,
+          MIN(n.ts + n.effective_dur, input.end_ts) - MAX(n.ts, input.start_ts) AS overlap_dur
+        FROM normalized n, input
+        WHERE n.effective_dur > 0
+          AND n.ts < input.end_ts
+          AND n.ts + n.effective_dur > input.start_ts
+      )
+      SELECT
+        ROUND(SUM(overlap_dur) / 1e6, 2) AS total_runnable_wait_ms,
+        ROUND(MAX(overlap_dur) / 1e6, 2) AS max_runnable_wait_ms,
+        COUNT(*) AS events,
+        process_name,
+        thread_name,
+        upid,
+        pid,
+        utid,
+        tid,
+        printf('%d', MIN(overlap_start_ts)) AS first_ts
+      FROM overlapped
+      GROUP BY upid, pid, utid, tid, process_name, thread_name
+      ORDER BY SUM(overlap_dur) DESC, MAX(overlap_dur) DESC
+      LIMIT (SELECT max_rows FROM input)
+    save_as: top_runnable_waits
+
+  - id: runqueue_pressure
+    type: atomic
+    name: "Runqueue 压力"
+    synthesize:
+      role: overview
+      fields:
+        - key: max_runnable_threads
+          label: 最大Runnable线程数
+        - key: avg_runnable_threads
+          label: 平均Runnable线程数
+        - key: p95_runnable_threads
+          label: P95Runnable线程数
+    display:
+      level: summary
+      layer: overview
+      title: "Runqueue 压力"
+      columns:
+        - name: samples
+          label: "样本数"
+          type: number
+        - name: avg_runnable_threads
+          label: "平均Runnable"
+          type: number
+        - name: p95_runnable_threads
+          label: "P95Runnable"
+          type: number
+        - name: max_runnable_threads
+          label: "最大Runnable"
+          type: number
+        - name: cpu_count
+          label: "CPU数"
+          type: number
+        - name: runnable_wait_ge4_ms
+          label: "Runnable>=4时长"
+          type: duration
+          unit: ms
+          format: duration_ms
+        - name: over_cpu_capacity_ms
+          label: "超过CPU容量时长"
+          type: duration
+          unit: ms
+          format: duration_ms
+        - name: pressure_weighted_ms
+          label: "超过CPU容量时长"
+          type: duration
+          unit: ms
+          format: duration_ms
+          hidden: true
+    sql: |
+      WITH
+      raw_input AS (
+        SELECT
+          COALESCE(${start_ts}, trace_start()) AS raw_start_ts,
+          COALESCE(${end_ts}, trace_end()) AS raw_end_ts
+      ),
+      input AS (
+        SELECT
+          MIN(raw_start_ts, raw_end_ts) AS start_ts,
+          MAX(raw_start_ts, raw_end_ts) AS end_ts
+        FROM raw_input
+      ),
+      cpu_capacity AS (
+        SELECT MAX(cpu_count, 1) AS cpu_count
+        FROM (
+          SELECT COUNT(DISTINCT cpu) AS cpu_count
+          FROM sched_slice
+        )
+      ),
+      runnable AS (
+        SELECT
+          MAX(ts.ts, input.start_ts) AS start_ts,
+          MIN(ts.ts + IIF(ts.dur = -1, trace_end() - ts.ts, ts.dur), input.end_ts) AS end_ts
+        FROM thread_state ts, input
+        WHERE ts.state IN ('R', 'R+')
+          AND IIF(ts.dur = -1, trace_end() - ts.ts, ts.dur) > 0
+          AND ts.ts < input.end_ts
+          AND ts.ts + IIF(ts.dur = -1, trace_end() - ts.ts, ts.dur) > input.start_ts
+      ),
+      events AS (
+        SELECT start_ts AS ts, 1 AS delta
+        FROM runnable
+        WHERE end_ts > start_ts
+        UNION ALL
+        SELECT end_ts AS ts, -1 AS delta
+        FROM runnable
+        WHERE end_ts > start_ts
+        UNION ALL
+        SELECT start_ts AS ts, 0 AS delta
+        FROM input
+        UNION ALL
+        SELECT end_ts AS ts, 0 AS delta
+        FROM input
+      ),
+      points AS (
+        SELECT ts, SUM(delta) AS delta
+        FROM events
+        GROUP BY ts
+      ),
+      timeline AS (
+        SELECT
+          ts,
+          SUM(delta) OVER (
+            ORDER BY ts
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+          ) AS runnable_thread_count,
+          LEAD(ts) OVER (ORDER BY ts) AS next_ts
+        FROM points
+      ),
+      overlapped AS (
+        SELECT
+          runnable_thread_count,
+          next_ts - ts AS overlap_dur
+        FROM timeline
+        WHERE next_ts > ts
+      ),
+      ranked AS (
+        SELECT
+          runnable_thread_count,
+          overlap_dur,
+          SUM(overlap_dur) OVER () AS total_dur,
+          SUM(overlap_dur) OVER (
+            ORDER BY runnable_thread_count
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+          ) AS cumulative_dur
+        FROM overlapped
+      )
+      SELECT
+        COUNT(*) AS samples,
+        COALESCE(ROUND(SUM(runnable_thread_count * overlap_dur) / NULLIF(SUM(overlap_dur), 0), 2), 0) AS avg_runnable_threads,
+        COALESCE((
+          SELECT MIN(runnable_thread_count)
+          FROM ranked
+          WHERE cumulative_dur >= total_dur * 0.95
+        ), 0) AS p95_runnable_threads,
+        COALESCE(MAX(runnable_thread_count), 0) AS max_runnable_threads,
+        cpu_capacity.cpu_count,
+        COALESCE(ROUND(SUM(CASE WHEN runnable_thread_count >= 4 THEN overlap_dur ELSE 0 END) / 1e6, 2), 0) AS runnable_wait_ge4_ms,
+        COALESCE(ROUND(SUM(CASE WHEN runnable_thread_count > cpu_capacity.cpu_count THEN overlap_dur ELSE 0 END) / 1e6, 2), 0) AS over_cpu_capacity_ms,
+        COALESCE(ROUND(SUM(CASE WHEN runnable_thread_count > cpu_capacity.cpu_count THEN overlap_dur ELSE 0 END) / 1e6, 2), 0) AS pressure_weighted_ms
+      FROM overlapped, cpu_capacity
+    save_as: runqueue_pressure
+
+  - id: top_cpu_processes
+    type: atomic
+    name: "CPU 热点进程"
+    synthesize:
+      role: list
+      fields:
+        - key: process_name
+          label: 进程
+        - key: cpu_time_ms
+          label: CPU时间
+          format: duration_ms
+        - key: sched_slices
+          label: 调度片数
+    display:
+      level: detail
+      layer: list
+      title: "时间窗内 CPU 热点进程"
+      columns:
+        - name: cpu_time_ms
+          label: "CPU时间"
+          type: duration
+          unit: ms
+          format: duration_ms
+        - name: sched_slices
+          label: "调度片数"
+          type: number
+        - name: process_name
+          label: "进程"
+          type: string
+          format: truncate
+        - name: process_key
+          label: "process_key"
+          type: number
+          hidden: true
+        - name: upid
+          label: "upid"
+          type: number
+          hidden: true
+        - name: pid
+          label: "pid"
+          type: number
+          hidden: true
+        - name: thread_count
+          label: "线程数"
+          type: number
+        - name: first_ts
+          label: "首次"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+    sql: |
+      WITH
+      raw_input AS (
+        SELECT
+          COALESCE(${start_ts}, trace_start()) AS raw_start_ts,
+          COALESCE(${end_ts}, trace_end()) AS raw_end_ts,
+          MIN(MAX(COALESCE(${max_rows|20}, 20), 1), 100) AS max_rows
+      ),
+      input AS (
+        SELECT
+          MIN(raw_start_ts, raw_end_ts) AS start_ts,
+          MAX(raw_start_ts, raw_end_ts) AS end_ts,
+          max_rows
+        FROM raw_input
+      ),
+      normalized AS (
+        SELECT
+          ss.ts,
+          IIF(ss.dur = -1, trace_end() - ss.ts, ss.dur) AS effective_dur,
+          ss.utid,
+          COALESCE(p.upid, -ss.utid) AS process_key,
+          p.upid,
+          COALESCE(p.pid, t.tid) AS pid,
+          COALESCE(p.name, t.name, '<kernel thread>') AS process_name
+        FROM sched_slice ss
+        LEFT JOIN thread t ON ss.utid = t.utid
+        LEFT JOIN process p ON t.upid = p.upid
+        WHERE COALESCE(t.is_idle, 0) = 0
+      ),
+      overlapped AS (
+        SELECT
+          n.*,
+          MAX(n.ts, input.start_ts) AS overlap_start_ts,
+          MIN(n.ts + n.effective_dur, input.end_ts) - MAX(n.ts, input.start_ts) AS overlap_dur
+        FROM normalized n, input
+        WHERE n.effective_dur > 0
+          AND n.ts < input.end_ts
+          AND n.ts + n.effective_dur > input.start_ts
+      )
+      SELECT
+        ROUND(SUM(overlap_dur) / 1e6, 2) AS cpu_time_ms,
+        COUNT(*) AS sched_slices,
+        process_name,
+        process_key,
+        upid,
+        pid,
+        COUNT(DISTINCT utid) AS thread_count,
+        printf('%d', MIN(overlap_start_ts)) AS first_ts
+      FROM overlapped
+      GROUP BY process_key, upid, pid, process_name
+      ORDER BY SUM(overlap_dur) DESC
+      LIMIT (SELECT max_rows FROM input)
+    save_as: top_cpu_processes
+
+output:
+  format: structured

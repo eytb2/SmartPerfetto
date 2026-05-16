@@ -12,7 +12,7 @@
 import { TraceProcessorService } from '../traceProcessorService';
 import { SkillExecutor, createSkillExecutor, LayeredResult } from './skillExecutor';
 import { skillRegistry, ensureSkillRegistryInitialized, getSkillsDir } from './skillLoader';
-import { SkillDefinition, SkillEvent, DisplayLevel, DisplayLayer } from './types';
+import { SkillDefinition, SkillEvent, DisplayLevel, DisplayLayer, StepResult } from './types';
 import { smartSummaryGenerator } from './smartSummaryGenerator';
 import { answerGenerator, GeneratedAnswer } from './answerGenerator';
 import { SkillEventCollector, createEventCollector, EventSummary, ProgressInfo } from './eventCollector';
@@ -240,6 +240,27 @@ export class SkillAnalysisAdapter {
     );
   }
 
+  private collectLayeredSteps(layeredResult: LayeredResult): StepResult[] {
+    const byId = new Map<string, StepResult>();
+    for (const step of layeredResult.stepResults || []) {
+      byId.set(step.stepId, step);
+    }
+    for (const step of Object.values(layeredResult.layers.overview || {})) byId.set(step.stepId, step);
+    for (const step of Object.values(layeredResult.layers.list || {})) byId.set(step.stepId, step);
+    for (const step of Object.values(layeredResult.layers.diagnosis || {})) byId.set(step.stepId, step);
+    for (const sessionData of Object.values(layeredResult.layers.session || {})) {
+      for (const step of Object.values(sessionData)) byId.set(step.stepId, step);
+    }
+    for (const sessionData of Object.values(layeredResult.layers.deep || {})) {
+      for (const step of Object.values(sessionData)) byId.set(step.stepId, step);
+    }
+    return [...byId.values()];
+  }
+
+  private collectLayeredFailures(layeredResult: LayeredResult): StepResult[] {
+    return this.collectLayeredSteps(layeredResult).filter(step => !step.success);
+  }
+
   /**
    * 执行 skill 分析
    * 这是主要的入口点
@@ -348,16 +369,36 @@ export class SkillAnalysisAdapter {
         console.log('[SkillAnalysisAdapter] Calling convertLayeredResultToDisplayResults...');
         const displayResults = this.convertLayeredResultToDisplayResults(layeredResult!);
         console.log('[SkillAnalysisAdapter] convertLayeredResultToDisplayResults completed with', displayResults.length, 'items');
+        const failedSteps = this.collectLayeredFailures(layeredResult!);
 
         result = {
-          success: true,
+          success: failedSteps.length === 0,
           displayResults,
-          diagnostics: [],
+          diagnostics: failedSteps.map(step => ({
+            id: `step_failed_${step.stepId}`,
+            severity: 'critical',
+            diagnosis: `Step ${step.stepId} failed: ${step.error || 'unknown error'}`,
+            suggestions: ['检查输入参数、SQL 语义和 trace schema 兼容性'],
+          })),
           executionTimeMs: 0,
+          error: failedSteps.length > 0
+            ? `Failed step(s): ${failedSteps.map(step => `${step.stepId}${step.error ? ` (${step.error})` : ''}`).join(', ')}`
+            : undefined,
         };
-      } catch (error) {
+      } catch (error: any) {
         console.error('[SkillAnalysisAdapter] executeCompositeSkill failed:', error);
-        throw error;
+        result = {
+          success: false,
+          displayResults: [],
+          diagnostics: [{
+            id: 'skill_execution_failed',
+            severity: 'critical',
+            diagnosis: error?.message || 'Skill execution failed',
+            suggestions: ['检查输入参数、SQL 语义和 trace schema 兼容性'],
+          }],
+          executionTimeMs: 0,
+          error: error?.message || 'Skill execution failed',
+        };
       }
     } else {
       // 使用传统输出模式（execute）

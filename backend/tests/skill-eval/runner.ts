@@ -36,6 +36,10 @@ export interface EvalSkillResult {
   error?: string;
 }
 
+export interface EvalSkillOptions {
+  allowFailedSteps?: readonly string[];
+}
+
 export interface NormalizedResult {
   layers: {
     overview: Record<string, { stepId: string; rowCount: number; hasData: boolean }>;
@@ -267,7 +271,9 @@ export class SkillEvaluator {
     );
 
     // 从分层结果中提取指定步骤
-    const stepResult = this.findStepInLayers(result.layers, stepId);
+    const stepResult = this.findStepInLayers(result.layers, stepId)
+      || result.stepResults?.find(step => step.stepId === stepId)
+      || null;
 
     if (!stepResult) {
       return {
@@ -328,6 +334,9 @@ export class SkillEvaluator {
     // 检查 list
     if (layers.list?.[stepId]) return layers.list[stepId];
 
+    // 检查 diagnosis
+    if (layers.diagnosis?.[stepId]) return layers.diagnosis[stepId];
+
     // 检查 session
     for (const sessionData of Object.values(layers.session || {})) {
       if (sessionData[stepId]) {
@@ -345,10 +354,35 @@ export class SkillEvaluator {
     return null;
   }
 
+  private collectResultSteps(result: LayeredResult): StepResult[] {
+    const byId = new Map<string, StepResult>();
+    for (const step of result.stepResults || []) {
+      byId.set(step.stepId, step);
+    }
+
+    const steps: StepResult[] = [];
+    for (const step of Object.values(result.layers.overview || {})) steps.push(step);
+    for (const step of Object.values(result.layers.list || {})) steps.push(step);
+    for (const step of Object.values(result.layers.diagnosis || {})) steps.push(step);
+    for (const sessionData of Object.values(result.layers.session || {})) {
+      for (const step of Object.values(sessionData)) steps.push(step);
+    }
+    for (const sessionData of Object.values(result.layers.deep || {})) {
+      for (const step of Object.values(sessionData)) steps.push(step);
+    }
+    for (const step of steps) {
+      byId.set(step.stepId, step);
+    }
+    return [...byId.values()];
+  }
+
   /**
    * 执行完整 skill
    */
-  async executeSkill(params: Record<string, any> = {}): Promise<EvalSkillResult> {
+  async executeSkill(
+    params: Record<string, any> = {},
+    options: EvalSkillOptions = {},
+  ): Promise<EvalSkillResult> {
     if (!this.executor || !this.traceId || !this.skill) {
       throw new Error('SkillEvaluator not initialized. Call loadTrace() first.');
     }
@@ -361,19 +395,25 @@ export class SkillEvaluator {
         params,
         { traceId: this.traceId }
       );
+      const allowedFailures = new Set(options.allowFailedSteps || []);
+      const failedSteps = this.collectResultSteps(result)
+        .filter(step => !step.success && !allowedFailures.has(step.stepId));
 
       return {
-        success: true,
+        success: failedSteps.length === 0,
         skillId: this.skillId,
         layers: result.layers,
         displayResults: [],
         executionTimeMs: Date.now() - startTime,
+        error: failedSteps.length > 0
+          ? `Failed step(s): ${failedSteps.map(step => `${step.stepId}${step.error ? ` (${step.error})` : ''}`).join(', ')}`
+          : undefined,
       };
     } catch (error: any) {
       return {
         success: false,
         skillId: this.skillId,
-        layers: { overview: {}, list: {}, session: {}, deep: {} },
+        layers: { overview: {}, list: {}, diagnosis: {}, session: {}, deep: {} },
         displayResults: [],
         executionTimeMs: Date.now() - startTime,
         error: error.message,

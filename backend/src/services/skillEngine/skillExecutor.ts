@@ -127,6 +127,8 @@ export interface LayeredResult {
     version: string;
     executedAt: string;
   };
+  /** Raw step results, including hidden/no-layer steps. */
+  stepResults?: StepResult[];
   /** YAML 中标记为 synthesize: true 的步骤数据，用于最终总结 */
   synthesizeData?: SynthesizeData[];
 }
@@ -1965,6 +1967,7 @@ export class SkillExecutor {
           overview: {}, list: {}, session: {}, deep: {}, diagnosis: {},
         },
         defaultExpanded: ['overview', 'list'],
+        stepResults: [],
         metadata: {
           skillName: skill.name,
           version: skill.version || '1.0.0',
@@ -1974,11 +1977,20 @@ export class SkillExecutor {
     }
 
     const prerequisiteModules = this.resolvePrerequisiteModules(skill.prerequisites?.modules);
+    const validated = validateSkillInputs(skill.name, skill.inputs, inputs);
+    for (const w of validated.warnings) {
+      logger.warn('SkillExecutor', `[${skill.name}] ${w.paramName}: ${w.message}`);
+    }
+    if (validated.errors.length > 0) {
+      const msg = validated.errors.map(e => `${e.paramName}: ${e.message}`).join('; ');
+      logger.error('SkillExecutor', `[${skill.name}] Input validation failed: ${msg}`);
+      throw new Error(`Input validation failed: ${msg}`);
+    }
 
     // Create execution context
     const execContext: SkillExecutionContext = {
       traceId: context.traceId || '',
-      params: inputs,
+      params: validated.params,
       inherited: context.inherited || {},
       results: {},
       variables: {},
@@ -2109,6 +2121,7 @@ export class SkillExecutor {
           version: skill.version || '1.0.0',
           executedAt: new Date().toISOString()
         },
+        stepResults,
         // 添加收集的 synthesize 数据
         synthesizeData: synthesizeData.length > 0 ? synthesizeData : undefined,
       };

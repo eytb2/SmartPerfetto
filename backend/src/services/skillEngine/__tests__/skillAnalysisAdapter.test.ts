@@ -202,6 +202,41 @@ describe('SkillAnalysisAdapter layered conversion', () => {
     expect(section.data[0].internal_metric).toBeUndefined();
   });
 
+  it('collects failed raw stepResults that are not present in display layers', () => {
+    const adapter = createAdapter();
+    const layeredResult: LayeredResult = {
+      layers: {
+        overview: {},
+        list: {},
+        session: {},
+        deep: {},
+      },
+      stepResults: [
+        {
+          stepId: 'hidden_probe',
+          stepType: 'atomic',
+          success: false,
+          error: 'no such table: missing_table',
+          executionTimeMs: 3,
+        },
+      ],
+      defaultExpanded: ['overview'],
+      metadata: {
+        skillName: 'hidden_probe_skill',
+        version: '1.0',
+        executedAt: new Date().toISOString(),
+      },
+    };
+
+    const failures = (adapter as any).collectLayeredFailures(layeredResult);
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toEqual(expect.objectContaining({
+      stepId: 'hidden_probe',
+      success: false,
+    }));
+  });
+
   it('maps detected vendor ids consistently with available vendor profiles', async () => {
     const queryMock = jest.fn() as any;
     queryMock.mockResolvedValue({

@@ -26,6 +26,11 @@ import {
   formatDisplayContractIssue,
   validateSkillDisplayContract,
 } from '../../services/skillEngine/displayContractValidator';
+import {
+  analyzeSqlGuardrails,
+  DEFAULT_VALIDATE_SQL_GUARDRAIL_RULES,
+  summarizeSqlGuardrailIssues,
+} from '../../services/sqlGuardrailAnalyzer';
 
 // ANSI color codes (fallback for chalk ESM issues)
 const colors = {
@@ -594,6 +599,20 @@ function validateSql(sql: string): { errors: string[]; warnings: string[] } {
   // Heuristic warnings (keep validator usable; avoid false positives)
   if (sql.toUpperCase().includes('GROUP_CONCAT') && !sql.toLowerCase().includes('group by')) {
     warnings.push('GROUP_CONCAT used without GROUP BY (may be OK if query returns a single aggregated row)');
+  }
+
+  const guardrailMode = process.env.SMARTPERFETTO_SQL_GUARDRAILS;
+  const expandedGuardrails = guardrailMode === 'strict' || guardrailMode === 'audit' || guardrailMode === 'fail';
+  const failGuardrails = guardrailMode === 'fail';
+  const guardrailRules = expandedGuardrails ? undefined : DEFAULT_VALIDATE_SQL_GUARDRAIL_RULES;
+  const guardrailIssues = summarizeSqlGuardrailIssues(
+    analyzeSqlGuardrails(sql, { includeRules: guardrailRules }),
+    { includeRules: guardrailRules },
+  );
+  if (failGuardrails) {
+    errors.push(...guardrailIssues);
+  } else {
+    warnings.push(...guardrailIssues);
   }
 
   // Check for unbalanced parentheses (ignore parentheses inside string literals)
