@@ -3,8 +3,8 @@
 
 # Upstream Perfetto 2026-05 TODO
 
-当前结论：M0-M5 已按顺序落地。M4/M5 代码、文档和最终 `verify:pr`
-已通过，等待提交并 push。
+当前结论：M0-M6 已按顺序落地。M4/M5 代码、文档、提交后 confidence loop
+和最终 `verify:pr` 均已通过，并已 push 到 `origin/main`。
 
 | 顺序 | 任务 | 状态 | 验收 |
 |---|---|---|---|
@@ -14,6 +14,7 @@
 | M3 | Trace Processor Connection/Database split 映射到 trace lease/pool | Done | `traceProcessorConnectionModel` 显式输出 database/connection/query provenance；`execute_sql_on`、`compare_skill` 和 data SSE envelope 均携带 `traceSide`/`traceId`；focused tests、lease routing tests、built-dist contract e2e 已通过 |
 | M4 | 产品化 upstream Android 性能能力 | Done | `android_heap_graph_summary`、`android_bitmap_memory_per_process` heap fallback、`frame_blocking_calls` thread-role provenance、`lock_contention_*` owner-thread provenance、`chrome_scroll_jank_frame_timeline` 已落入 Skill/strategy 并有 focused eval |
 | M5 | upstream AI skills 转译 | Done | 只抽取查询方法和判断标准；新增 translation SOP，heap-dump/querying/ChromeScrollJank 知识已落到 YAML Skills/strategies/SQL docs，不引入第二套 Skill 体系 |
+| M6 | 提交后 confidence loop 与 prebuild asset 守卫 | Done | 发现并修复 committed frontend 缺少 top-level `assets/syntaqlite-*` 的漏洞；新增 `scripts/check-frontend-prebuild.cjs` 并接入 root `verify:pr` |
 
 ## 执行规则
 

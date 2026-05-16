@@ -10,7 +10,7 @@
 - 识别 SQL 中引用的 Perfetto stdlib 表、函数、macro。
 - 自动补齐 raw SQL 所需 `INCLUDE PERFETTO MODULE ...`。
 - 在 Skill validation 阶段发现缺失 stdlib 声明。
-- 为 AI 输出 SQL 提供结构化警告，后续再接 syntaqlite 格式化/parse error span。
+- 为 AI 输出 SQL 提供结构化警告，并把展示/复制路径接到 syntaqlite 格式化。
 
 ## Upstream 变化
 
@@ -52,10 +52,12 @@ include、是否调用了 stdlib macro/function、是否使用重复执行不安
    - `prerequisites.modules` 必须覆盖 table/function/macro 的 owning module。
    - CTE/local `CREATE PERFETTO VIEW/TABLE` 不误报。
 
-4. 扩展 guardrail。`TODO`
+4. 扩展 guardrail。`DONE`
    - 保留默认低噪声规则。
    - strict/audit 模式下覆盖 upstream macro/function 迁移风险。
    - 只把确定性问题作为 error；可能误报的模式先作为 warning。
+   - `SMARTPERFETTO_SQL_GUARDRAILS=strict|audit|fail` 已接入 Skill validator：
+     默认只启用低噪声规则，`fail` 模式把 guardrail issue 提升为 error。
 
 5. 接 syntaqlite 到 AI SQL 展示/复制。`DONE`
    - 前端 QueryPage 已有 syntaqlite runtime。
@@ -89,3 +91,5 @@ E2E:
 - Skill 中使用 stdlib function/macro 但未声明 module 时，validator 能报错。
 - 已声明 include 或本地 CTE/local view 不误报。
 - 不引入新的前端 prebuild churn。
+- 完整 Perfetto SQL 语法覆盖不在本轮 claim 内；需要引入真正的
+  SQL/Perfetto AST parser 才能作为形式化语法覆盖验收。

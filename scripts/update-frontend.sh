@@ -80,6 +80,14 @@ cp "$DIST_DIR/index.html"          "$FRONTEND_DIR/index.html"
 inject_smartperfetto_static_assets "$FRONTEND_DIR/index.html"
 cp "$DIST_DIR/service_worker.js"   "$FRONTEND_DIR/service_worker.js" 2>/dev/null || true
 
+# Upstream Vite emits shared runtime assets at dist/assets/. Some bundled
+# plugins load them with relative "assets/..." URLs, so the committed prebuild
+# must ship these top-level assets alongside the versioned directory.
+if [ -d "$DIST_DIR/assets" ]; then
+  mkdir -p "$FRONTEND_DIR/assets"
+  rsync -a --delete "$DIST_DIR/assets/" "$FRONTEND_DIR/assets/"
+fi
+
 # Sync versioned directory.
 # Exclude source maps (repo size). JS engine bundles are copied from the build
 # output by default; the fallback below only restores previous real bundles when
@@ -94,7 +102,8 @@ rsync -a --delete \
 # checked-in generated text artifacts compatible with git diff --check.
 for TEXT_ARTIFACT in \
   "$FRONTEND_DIR/$VERSION/frontend_bundle.js" \
-  "$FRONTEND_DIR/$VERSION/syntaqlite-runtime.js"; do
+  "$FRONTEND_DIR/$VERSION/syntaqlite-runtime.js" \
+  "$FRONTEND_DIR/assets/syntaqlite-runtime.js"; do
   if [ -f "$TEXT_ARTIFACT" ]; then
     perl -pi -e 's/[ \t]+$//' "$TEXT_ARTIFACT"
   fi
@@ -145,6 +154,8 @@ if [ -n "$STALE_DIRS" ]; then
     printf '  Removed %s\n' "$stale_dir"
   done <<< "$STALE_DIRS"
 fi
+
+node "$PROJECT_ROOT/scripts/check-frontend-prebuild.cjs"
 
 echo "✅ frontend/ updated to $VERSION"
 echo ""

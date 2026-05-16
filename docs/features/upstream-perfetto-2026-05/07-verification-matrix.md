@@ -18,6 +18,12 @@ git diff --check
 npm run verify:pr
 ```
 
+`verify:pr` 必须包含 committed frontend prebuild 守卫：
+
+```bash
+npm run check:frontend-prebuild
+```
+
 ## 功能包验证矩阵
 
 | 功能包 | Focused test | 集成验证 | E2E |
@@ -26,7 +32,7 @@ npm run verify:pr
 | stdlib lineage | `npm --prefix backend run test -- src/services/__tests__/stdlibSkillCoverage.test.ts --runInBand` | generate stdlib asset + validate | lookup schema + execute SQL SSE |
 | Android Skill upgrades | affected `tests/skill-eval/*.eval.ts` | `npm --prefix backend run test:scene-trace-regression` | startup/scrolling SSE |
 | TP connection model | lease/routing/worker tests | enterprise isolation tests | multi-trace comparison flow |
-| Frontend prebuild | prebuild checker | Perfetto UI typecheck/build | `./start.sh` browser smoke |
+| Frontend prebuild | `npm run check:frontend-prebuild` | Perfetto UI typecheck/build | `./start.sh` browser smoke |
 | upstream AI skills | skill validator | scene regression | Agent SSE with target scene |
 
 ## Agent SSE 命令

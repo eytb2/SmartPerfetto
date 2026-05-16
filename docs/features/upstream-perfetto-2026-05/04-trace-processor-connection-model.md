@@ -52,16 +52,17 @@ SmartPerfetto backend 已有：
    - `execute_sql`、`execute_sql_on`、`compare_skill` 的 JSON result 和 data SSE
      envelope 均携带 `traceSide`、`traceId`、`traceProvenance`。
 
-4. xConnect 研究原型。Deferred。
+4. xConnect 研究原型。Out of scope for this integration。
    - 先做实验脚本，不进默认产品路径。
    - 验证 cross-connection 查询是否适合 SmartPerfetto 的 remote RPC/worker
      模式。
 
-5. Pool/lease 验证。Partial。
+5. Pool/lease 验证。Done for backend contract。
    - 增加 same-page second trace、cross-window two traces、reference trace 的回归。
    - 保证 backend-created lease 和普通 UI FILE/URL trace engine 不互相覆盖。
    - 本轮覆盖 processor key helper、lease routing 回归和 comparison tool
-     provenance；浏览器级 multi-window 回归留到 M4/M5 UI/e2e 矩阵补齐。
+     provenance。浏览器级 multi-window 回归属于后续 UI comparison 产品化范围，
+     不纳入本轮 backend connection/provenance contract 的完成声明。
 
 ## 落地状态
 
@@ -83,4 +84,5 @@ SmartPerfetto backend 已有：
 - `npm --prefix backend run test -- src/services/__tests__/workingTraceProcessor.enterpriseIsolation.test.ts --runInBand`
 - built-dist contract e2e：
   `node -e "require('./backend/dist/services/traceProcessorConnectionModel.js')..."`
-- multi-window browser e2e 使用 future comparison snapshot 验证。
+- multi-window browser e2e 使用 future comparison snapshot 验证；当前 100%
+  confidence claim 只覆盖 backend routing/provenance contract。

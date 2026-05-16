@@ -19,7 +19,12 @@
 
 - `scripts/update-frontend.sh` 已能同步 versioned prebuild、保留 SmartPerfetto
   静态 assets、修正 manifest hash。
-- 本轮同步后 committed prebuild 已对齐到 `frontend/v55.2-b73a563fa`。
+- 本轮同步后 committed prebuild 已对齐到 `frontend/v55.2-acd9f04a5`。
+- 提交后 confidence loop 发现 formatter runtime 漏洞：upstream bundle 通过
+  `assets/syntaqlite-*` 加载 formatter runtime，但之前 committed prebuild 只包含
+  versioned root 下的 syntaqlite assets。现在 `scripts/update-frontend.sh` 会同步
+  top-level `frontend/assets/syntaqlite-*`，并由 `scripts/check-frontend-prebuild.cjs`
+  校验。
 
 ## 实施计划
 
@@ -28,11 +33,13 @@
    - 检查 manifest resources 都存在。
    - 检查 syntaqlite runtime assets 存在。
    - 检查 engine/traceconv bundle 不是 stub。
+   - 状态：Done。
 
 2. 脚本接入。
    - 将 checker 接入 `scripts/update-frontend.sh` 末尾。
    - 将 checker 接入 root quality 或 backend/package check，避免未来 stale bundle
      被提交。
+   - 状态：Done，root `verify:pr` 已执行 `npm run check:frontend-prebuild`。
 
 3. AI Assistant UI 接入。
    - SQL block 显示 formatted SQL。
@@ -49,5 +56,6 @@
 
 - `./scripts/update-frontend.sh`
 - `node scripts/check-frontend-prebuild.cjs`
+- `npm run check:frontend-prebuild`
 - Perfetto UI typecheck/build。
 - Browser smoke: `./start.sh` 默认路径能加载 committed frontend。
