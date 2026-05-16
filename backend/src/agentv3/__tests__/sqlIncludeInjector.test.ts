@@ -75,6 +75,13 @@ describe('sqlIncludeInjector - quoted identifiers', () => {
     );
     expect(injected).toEqual(['slices.self_dur']);
   });
+
+  it('does not inject when a function-like stdlib name is only double-quoted text', () => {
+    const { injected } = injectStdlibIncludes(
+      'SELECT "cpu_thread_utilization_in_interval(0, 1)" AS literalish FROM slice',
+    );
+    expect(injected).toEqual([]);
+  });
 });
 
 describe('sqlIncludeInjector - macros', () => {
@@ -116,6 +123,14 @@ describe('sqlIncludeInjector - function calls', () => {
       'SELECT COUNT(*), SUM(dur), AVG(dur), MAX(dur), MIN(dur) FROM slice'
     );
     expect(injected).toEqual([]);
+  });
+
+  it('continues scanning comma joins after a table-valued function', () => {
+    const { injected } = injectStdlibIncludes(
+      'SELECT * FROM cpu_thread_utilization_in_interval(0, 1000000000) util, slice_self_dur s',
+    );
+    expect(injected).toEqual(expect.arrayContaining(['slices.self_dur']));
+    expect(injected.some(module => module.startsWith('linux.cpu.utilization.'))).toBe(true);
   });
 });
 

@@ -37,7 +37,7 @@ import {
 
 /**
  * Match an explicit `INCLUDE PERFETTO MODULE <name>;` statement in raw SQL.
- * Mirrors `ALREADY_INCLUDED_REGEX` from `sqlIncludeInjector` so we count
+ * Mirrors the include syntax recognized by `sqlStdlibDependencyAnalyzer` so we count
  * modules the skill author already wrote into their SQL — without those
  * being treated as drift just because the auto-injector did not need to
  * add them.

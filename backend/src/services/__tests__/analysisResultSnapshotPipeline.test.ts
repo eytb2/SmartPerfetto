@@ -2,8 +2,37 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import type { DataEnvelope } from '../../types/dataContract';
-import { buildCompletedAnalysisResultSnapshot } from '../analysisResultSnapshotPipeline';
+import {
+  buildCompletedAnalysisResultSnapshot,
+  persistCompletedAnalysisResultSnapshot,
+} from '../analysisResultSnapshotPipeline';
+import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../enterpriseDb';
+
+const originalDbPath = process.env[ENTERPRISE_DB_PATH_ENV];
+const tmpDirs: string[] = [];
+
+function useTempEnterpriseDb(): string {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smartperfetto-snapshot-pipeline-'));
+  tmpDirs.push(tmpDir);
+  const dbPath = path.join(tmpDir, 'enterprise.sqlite');
+  process.env[ENTERPRISE_DB_PATH_ENV] = dbPath;
+  return dbPath;
+}
+
+afterEach(() => {
+  if (originalDbPath === undefined) {
+    delete process.env[ENTERPRISE_DB_PATH_ENV];
+  } else {
+    process.env[ENTERPRISE_DB_PATH_ENV] = originalDbPath;
+  }
+  while (tmpDirs.length > 0) {
+    fs.rmSync(tmpDirs.pop()!, { recursive: true, force: true });
+  }
+});
 
 function envelope(): DataEnvelope {
   return {
@@ -147,5 +176,68 @@ describe('analysis result snapshot pipeline', () => {
       expect.objectContaining({ key: 'scrolling.jank_rate_pct', value: 5, unit: '%' }),
       expect.objectContaining({ key: 'scrolling.p95_frame_ms', value: 28, unit: 'ms' }),
     ]));
+  });
+
+  test('persists snapshot when the parent run graph does not exist yet', () => {
+    useTempEnterpriseDb();
+
+    const snapshot = persistCompletedAnalysisResultSnapshot({
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'user-a',
+      traceId: 'trace-a',
+      sessionId: 'session-a',
+      runId: 'run-a',
+      query: '分析滑动性能',
+      conclusion: '滑动整体稳定。',
+      dataEnvelopes: [{
+        ...envelope(),
+        meta: {
+          ...envelope().meta,
+          source: 'scrolling_analysis',
+          skillId: 'scrolling_analysis',
+        },
+        data: {
+          rows: [{
+            avg_fps: 60,
+            jank_count: 0,
+          }],
+        } as any,
+      }],
+      createdAt: 1778937300000,
+    });
+
+    expect(snapshot).toEqual(expect.objectContaining({
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      traceId: 'trace-a',
+      sessionId: 'session-a',
+      runId: 'run-a',
+      status: 'ready',
+    }));
+
+    const db = openEnterpriseDb();
+    try {
+      const row = db.prepare(`
+        SELECT s.id AS snapshot_id, r.id AS run_id, t.id AS trace_id
+        FROM analysis_result_snapshots s
+        JOIN analysis_runs r
+          ON r.tenant_id = s.tenant_id
+          AND r.workspace_id = s.workspace_id
+          AND r.id = s.run_id
+        JOIN trace_assets t
+          ON t.tenant_id = s.tenant_id
+          AND t.workspace_id = s.workspace_id
+          AND t.id = s.trace_id
+        WHERE s.id = ?
+      `).get(snapshot!.id) as { snapshot_id: string; run_id: string; trace_id: string } | undefined;
+      expect(row).toEqual({
+        snapshot_id: snapshot!.id,
+        run_id: 'run-a',
+        trace_id: 'trace-a',
+      });
+    } finally {
+      db.close();
+    }
   });
 });

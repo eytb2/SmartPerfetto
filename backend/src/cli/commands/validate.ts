@@ -21,7 +21,6 @@ import path from 'path';
 import yaml from 'js-yaml';
 import { SkillDefinition } from '../../services/skillEngine/types';
 import { validateSkillConditions } from '../../services/skillEngine/skillValidator';
-import { getPerfettoStdlibSymbolIndex } from '../../services/perfettoStdlibScanner';
 import {
   formatDisplayContractIssue,
   validateSkillDisplayContract,
@@ -32,6 +31,10 @@ import {
   summarizeSqlGuardrailIssues,
 } from '../../services/sqlGuardrailAnalyzer';
 import { skillUsesProcessNameFilter } from '../../services/processIdentity/identityGate';
+import {
+  analyzeSqlStdlibDependencySequence,
+  moduleCoveredByStdlibDeclaration,
+} from '../../services/sqlStdlibDependencyAnalyzer';
 
 // ANSI color codes (fallback for chalk ESM issues)
 const colors = {
@@ -144,48 +147,33 @@ function validateTierAndStdlib(skill: SkillDefinition): { errors: string[]; warn
   }
 
   // ---- Rule 2: stdlib-detected-vs-declared ----
-  // Reuses the same lazily-cached symbol index as sqlIncludeInjector / claudeMcpServer
-  // so validate sees identical stdlib coverage at runtime. Keys/values are pre-lowercased.
-  const idx = getPerfettoStdlibSymbolIndex();
-  if (idx.tableToModule.size > 0) {
-    const allSql: string[] = [];
-    if (typeof (skill as any).sql === 'string') allSql.push((skill as any).sql);
-    if (Array.isArray(skill.steps)) {
-      for (const step of skill.steps) {
-        if (typeof (step as any).sql === 'string') allSql.push((step as any).sql);
-      }
+  // Reuses the same dependency analyzer as raw execute_sql auto-INCLUDE, so
+  // validation covers stdlib tables, functions, and macro invocations.
+  const allSql: string[] = [];
+  if (typeof (skill as any).sql === 'string') allSql.push((skill as any).sql);
+  if (Array.isArray(skill.steps)) {
+    for (const step of skill.steps) {
+      if (typeof (step as any).sql === 'string') allSql.push((step as any).sql);
     }
+  }
 
-    if (allSql.length > 0) {
-      // Tables defined locally (CREATE TABLE/VIEW, WITH X AS, comma-chain Y AS) shadow stdlib names.
-      const localTables = new Set<string>();
-      for (const sql of allSql) {
-        const createMatches = sql.matchAll(/(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:PERFETTO\s+)?(?:VIEW|TABLE)\s+(?:IF\s+NOT\s+EXISTS\s+)?)([\w.]+)/gi);
-        for (const m of createMatches) localTables.add(m[1].toLowerCase());
-        const withMatches = sql.matchAll(/\bWITH\s+([\w]+)\s+AS\b/gi);
-        for (const m of withMatches) localTables.add(m[1].toLowerCase());
-        const withChainMatches = sql.matchAll(/,\s*([\w]+)\s+AS\s*\(/gi);
-        for (const m of withChainMatches) localTables.add(m[1].toLowerCase());
-      }
+  if (allSql.length > 0) {
+    const reported = new Set<string>();
+    for (const analysis of analyzeSqlStdlibDependencySequence(allSql)) {
+      if (analysis.source === 'empty') continue;
 
-      const declaredModules = new Set(prereqModules);
-      const reported = new Set<string>();
-      for (const sql of allSql) {
-        for (const m of sql.matchAll(/\b(?:FROM|JOIN)\s+([\w.]+)/gi)) {
-          const table = m[1].toLowerCase();
-          if (localTables.has(table) || idx.builtins.has(table)) continue;
-          const owningModule = idx.tableToModule.get(table);
-          if (!owningModule || reported.has(table)) continue;
-          // A declared module covers its descendants — `android.startup` covers `android.startup.startups`.
-          const declaredCovers = [...declaredModules].some(d => owningModule === d || owningModule.startsWith(d + '.'));
-          if (!declaredCovers) {
-            errors.push(
-              `SQL uses stdlib table '${table}' (owning module '${owningModule}') but ` +
-              `prerequisites.modules does not declare it (lint rule 2)`
-            );
-            reported.add(table);
-          }
+      for (const dependency of analysis.dependencies) {
+        if (moduleCoveredByStdlibDeclaration(dependency.module, prereqModules)) {
+          continue;
         }
+        const key = `${dependency.symbol}\n${dependency.usage}\n${dependency.module}`;
+        if (reported.has(key)) continue;
+        errors.push(
+          `SQL uses stdlib ${dependency.usage} '${dependency.symbol}' ` +
+          `(owning module '${dependency.module}') but prerequisites.modules ` +
+          `does not declare it (lint rule 2)`
+        );
+        reported.add(key);
       }
     }
   }

@@ -3,6 +3,7 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import crypto from 'crypto';
+import type Database from 'better-sqlite3';
 import type { DataEnvelope } from '../types/dataContract';
 import {
   ANALYSIS_RESULT_SNAPSHOT_SCHEMA_VERSION,
@@ -286,6 +287,91 @@ export function buildCompletedAnalysisResultSnapshot(
   };
 }
 
+function ensureSnapshotParentGraph(
+  db: Database.Database,
+  input: CompletedAnalysisSnapshotInput,
+  now: number,
+): void {
+  if (!input.tenantId || !input.workspaceId || !input.runId) return;
+
+  db.prepare(`
+    INSERT OR IGNORE INTO organizations (id, name, status, plan, created_at, updated_at)
+    VALUES (?, ?, 'active', 'enterprise', ?, ?)
+  `).run(input.tenantId, input.tenantId, now, now);
+
+  db.prepare(`
+    INSERT OR IGNORE INTO workspaces (id, tenant_id, name, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(input.workspaceId, input.tenantId, input.workspaceId, now, now);
+
+  if (input.userId) {
+    db.prepare(`
+      INSERT INTO users (id, tenant_id, email, display_name, idp_subject, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        email = excluded.email,
+        display_name = excluded.display_name,
+        updated_at = excluded.updated_at
+    `).run(
+      input.userId,
+      input.tenantId,
+      `${input.userId}@analysis-result.local`,
+      input.userId,
+      `analysis-result:${input.userId}`,
+      now,
+      now,
+    );
+  }
+
+  db.prepare(`
+    INSERT OR IGNORE INTO trace_assets
+      (id, tenant_id, workspace_id, owner_user_id, local_path, size_bytes, status, metadata_json, created_at)
+    VALUES
+      (?, ?, ?, ?, ?, 0, 'metadata_only', ?, ?)
+  `).run(
+    input.traceId,
+    input.tenantId,
+    input.workspaceId,
+    input.userId ?? null,
+    `metadata-only:${input.traceId}`,
+    JSON.stringify({ source: 'analysis_result_snapshot', sessionId: input.sessionId, runId: input.runId }),
+    now,
+  );
+
+  db.prepare(`
+    INSERT OR IGNORE INTO analysis_sessions
+      (id, tenant_id, workspace_id, trace_id, created_by, title, visibility, status, created_at, updated_at)
+    VALUES
+      (?, ?, ?, ?, ?, ?, 'private', 'completed', ?, ?)
+  `).run(
+    input.sessionId,
+    input.tenantId,
+    input.workspaceId,
+    input.traceId,
+    input.userId ?? null,
+    `Agent session ${input.sessionId}`,
+    now,
+    now,
+  );
+
+  db.prepare(`
+    INSERT OR IGNORE INTO analysis_runs
+      (id, tenant_id, workspace_id, session_id, mode, status, question, started_at, completed_at, heartbeat_at, updated_at)
+    VALUES
+      (?, ?, ?, ?, 'agent', 'completed', ?, ?, ?, ?, ?)
+  `).run(
+    input.runId,
+    input.tenantId,
+    input.workspaceId,
+    input.sessionId,
+    input.query,
+    now,
+    now,
+    now,
+    now,
+  );
+}
+
 export function persistCompletedAnalysisResultSnapshot(
   input: CompletedAnalysisSnapshotInput,
 ): AnalysisResultSnapshot | null {
@@ -294,6 +380,7 @@ export function persistCompletedAnalysisResultSnapshot(
 
   const db = openEnterpriseDb();
   try {
+    ensureSnapshotParentGraph(db, input, snapshot.createdAt);
     return createAnalysisResultSnapshotRepository(db).createSnapshot(snapshot);
   } finally {
     db.close();

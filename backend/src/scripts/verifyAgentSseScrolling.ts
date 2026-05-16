@@ -16,6 +16,12 @@ import traceProcessorRoutes from '../routes/traceProcessorRoutes';
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import { resolveAgentRuntimeSelection } from '../agentRuntime';
 import { getOpenAIRuntimeDiagnostics, hasOpenAICredentials } from '../agentOpenAI';
+import {
+  DEFAULT_DEV_USER_ID,
+  DEFAULT_TENANT_ID,
+  DEFAULT_WORKSPACE_ID,
+} from '../middleware/auth';
+import { writeTraceMetadata } from '../services/traceMetadataStore';
 
 interface VerifyOptions {
   tracePath: string;
@@ -436,6 +442,17 @@ async function main(): Promise<void> {
 
   try {
     traceId = await traceProcessorService.loadTraceFromFilePath(options.tracePath);
+    await writeTraceMetadata({
+      id: traceId,
+      filename: path.basename(options.tracePath),
+      size: fs.statSync(options.tracePath).size,
+      uploadedAt: new Date().toISOString(),
+      status: 'ready',
+      path: traceProcessorService.getTraceFilePath(traceId),
+      tenantId: DEFAULT_TENANT_ID,
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      userId: DEFAULT_DEV_USER_ID,
+    });
 
     const startResponse = await fetch(`${baseUrl}/api/agent/v1/analyze`, {
       method: 'POST',
@@ -459,12 +476,11 @@ async function main(): Promise<void> {
 
     const sse = await collectSseSummary(baseUrl, sessionId, options.timeoutMs);
 
-    // Quick-mode analyses skip plan submission and architecture detection
-    // (lightweight MCP does not register submit_plan / detect_architecture),
-    // so their absence is a semantic signature of the quick path.
+    // Quick-mode analyses skip plan submission. Architecture detection can still
+    // be emitted by the deterministic prepass before the lightweight agent path.
     // Don't use `agentResponseCount <= 3` — quick max_turns is 5, so a well-behaved
     // quick run can legitimately emit up to ~5 agent_response events.
-    const isQuickMode = sse.planSubmittedCount === 0 && sse.architectureDetectedCount === 0;
+    const isQuickMode = sse.planSubmittedCount === 0;
 
     const requiredChecks = {
       hasProgressEvents: sse.progressCount > 0,
