@@ -101,7 +101,7 @@ import { ArtifactStore } from '../artifactStore';
 
 type ToolDef = { name: string; handler: (...args: any[]) => any };
 
-function createTestServer() {
+function createTestServer(options: { referenceTraceId?: string } = {}) {
   const analysisNotes: AnalysisNote[] = [];
   const hypotheses: Hypothesis[] = [];
   const uncertaintyFlags: UncertaintyFlag[] = [];
@@ -110,12 +110,25 @@ function createTestServer() {
   const emittedUpdates: any[] = [];
 
   const mockTpService = {
-    query: jest.fn(async () => ({ columns: ['id'], rows: [[1]], rowCount: 1, durationMs: 5 })),
+    query: jest.fn(async (_traceId: string, _sql: string) => ({ columns: ['id'], rows: [[1]], rowCount: 1, durationMs: 5 })),
   };
   const mockSkillExecutor = {
+    execute: jest.fn(async (skillId: string, _traceId: string, _params?: Record<string, any>) => ({
+      skillId,
+      success: true,
+      displayResults: [{
+        stepId: 'result',
+        title: 'Result',
+        layer: 'list',
+        format: 'table',
+        data: { rows: [[1]], columns: ['a'] },
+      }],
+      diagnostics: [],
+      executionTimeMs: 5,
+    })),
     executeCompositeSkill: jest.fn(async () => ({
       success: true,
-      displayResults: [{ display: { title: 'Result' }, data: { rows: [[1]], columns: ['a'] } }],
+      displayResults: [{ stepId: 'result', title: 'Result', layer: 'list', format: 'table', data: { rows: [[1]], columns: ['a'] } }],
       layers: {},
     })),
     registerSkill: jest.fn(),
@@ -132,6 +145,13 @@ function createTestServer() {
     watchdogWarning,
     artifactStore: new ArtifactStore() as any,
     emitUpdate: (u: any) => emittedUpdates.push(u),
+    ...(options.referenceTraceId ? {
+      referenceTraceId: options.referenceTraceId,
+      comparisonContext: {
+        referenceTraceId: options.referenceTraceId,
+        commonCapabilities: ['slice'],
+      },
+    } : {}),
   });
 
   // Extract tool handlers from the mock SDK server
@@ -165,13 +185,49 @@ async function callTool(tools: Map<string, ToolDef>, name: string, params: Recor
   if (rawResult && typeof rawResult === 'object' && Array.isArray(rawResult.content)) {
     const textEntry = rawResult.content.find((c: any) => c.type === 'text');
     if (textEntry?.text) {
-      try { return JSON.parse(textEntry.text); } catch { return textEntry.text; }
+      try { return JSON.parse(textEntry.text); } catch {
+        const parsed = parseLeadingJsonObject(textEntry.text);
+        return parsed ?? textEntry.text;
+      }
     }
   }
   if (typeof rawResult === 'string') {
-    try { return JSON.parse(rawResult); } catch { return rawResult; }
+    try { return JSON.parse(rawResult); } catch {
+      const parsed = parseLeadingJsonObject(rawResult);
+      return parsed ?? rawResult;
+    }
   }
   return rawResult;
+}
+
+function parseLeadingJsonObject(text: string): unknown | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === '{') {
+      depth++;
+    } else if (char === '}') {
+      depth--;
+      if (depth === 0) {
+        try { return JSON.parse(text.slice(0, i + 1)); } catch { return null; }
+      }
+    }
+  }
+  return null;
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -239,8 +295,13 @@ describe('createClaudeMcpServer', () => {
       // Now execute_sql should work
       const result = await callTool(tools, 'execute_sql', { sql: 'SELECT 1' });
       expect(result.error).toBeUndefined();
+      expect(result.traceSide).toBe('current');
+      expect(result.traceId).toBe('test-trace-123');
+      expect(result.traceProvenance.databaseScope.processorKey).toBe('test-trace-123');
       const dataUpdate = emittedUpdates.find((u: any) => u.type === 'data');
       expect(dataUpdate?.content?.[0]?.sql).toBe('SELECT 1');
+      expect(dataUpdate?.content?.[0]?.traceSide).toBe('current');
+      expect(dataUpdate?.content?.[0]?.traceId).toBe('test-trace-123');
     });
 
     it('execute_sql should warn when raw SQL bypasses process identity gate', async () => {
@@ -278,6 +339,89 @@ describe('createClaudeMcpServer', () => {
       expect(frameEntry.module).toBe('android.frames.timeline');
       expect(frameEntry.include).toBe('INCLUDE PERFETTO MODULE android.frames.timeline;');
       expect(frameEntry.transitiveIncludes).toEqual(expect.arrayContaining(['slices.with_context']));
+    });
+  });
+
+  describe('comparison trace provenance (M3)', () => {
+    it('execute_sql_on routes reference SQL to the reference trace and returns provenance', async () => {
+      const { tools, mockTpService } = createTestServer({ referenceTraceId: 'ref-trace-456' });
+      await callTool(tools, 'submit_plan', {
+        phases: [{ id: 'p1', name: 'Compare', goal: 'Query reference trace', expectedTools: ['execute_sql_on'] }],
+        successCriteria: 'Reference query is provenanced',
+      });
+
+      const result = await callTool(tools, 'execute_sql_on', { trace: 'reference', sql: 'SELECT 1' });
+
+      expect(mockTpService.query).toHaveBeenCalledWith('ref-trace-456', 'SELECT 1');
+      expect(result.success).toBe(true);
+      expect(result.traceSide).toBe('reference');
+      expect(result.traceId).toBe('ref-trace-456');
+      expect(result.traceProvenance).toMatchObject({
+        traceSide: 'reference',
+        traceId: 'ref-trace-456',
+        databaseScope: {
+          traceSide: 'reference',
+          traceId: 'ref-trace-456',
+          processorKey: 'ref-trace-456',
+          isolation: 'shared',
+        },
+        connectionScope: {
+          connectionKey: 'ref-trace-456',
+        },
+      });
+    });
+
+    it('compare_skill executes both traces and emits side provenance envelopes', async () => {
+      const { tools, mockSkillExecutor, emittedUpdates } = createTestServer({ referenceTraceId: 'ref-trace-456' });
+      await callTool(tools, 'submit_plan', {
+        phases: [{ id: 'p1', name: 'Compare', goal: 'Run both traces', expectedTools: ['compare_skill'] }],
+        successCriteria: 'Both skill results are side-labeled',
+      });
+
+      const result = await callTool(tools, 'compare_skill', {
+        skillId: 'scrolling_analysis',
+        params: { process_name: 'com.example' },
+      });
+
+      expect(mockSkillExecutor.execute).toHaveBeenNthCalledWith(
+        1,
+        'scrolling_analysis',
+        'test-trace-123',
+        { process_name: 'com.example', package: 'com.example' },
+      );
+      expect(mockSkillExecutor.execute).toHaveBeenNthCalledWith(
+        2,
+        'scrolling_analysis',
+        'ref-trace-456',
+        { process_name: 'com.example', package: 'com.example' },
+      );
+      expect(result.success).toBe(true);
+      expect(result.current).toMatchObject({
+        traceSide: 'current',
+        traceId: 'test-trace-123',
+        traceProvenance: {
+          traceSide: 'current',
+          traceId: 'test-trace-123',
+          databaseScope: { processorKey: 'test-trace-123', isolation: 'shared' },
+        },
+      });
+      expect(result.reference).toMatchObject({
+        traceSide: 'reference',
+        traceId: 'ref-trace-456',
+        traceProvenance: {
+          traceSide: 'reference',
+          traceId: 'ref-trace-456',
+          databaseScope: { processorKey: 'ref-trace-456', isolation: 'shared' },
+        },
+      });
+
+      const envelopes = emittedUpdates
+        .filter((u: any) => u.type === 'data')
+        .flatMap((u: any) => u.content ?? []);
+      expect(envelopes).toEqual(expect.arrayContaining([
+        expect.objectContaining({ traceSide: 'current', traceId: 'test-trace-123' }),
+        expect.objectContaining({ traceSide: 'reference', traceId: 'ref-trace-456' }),
+      ]));
     });
   });
 

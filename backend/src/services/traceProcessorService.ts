@@ -14,6 +14,7 @@ import {
   type TraceProcessorLeaseMode,
   type TraceProcessorLeaseState,
 } from './traceProcessorLeaseStore';
+import { traceProcessorProcessorKey } from './traceProcessorConnectionModel';
 import type { EnterpriseRepositoryScope } from './enterpriseRepository';
 
 export interface TraceInfo {
@@ -110,7 +111,7 @@ export class TraceProcessorService extends EventEmitter {
     leaseId?: string,
     mode: TraceProcessorLeaseMode | string = 'shared',
   ): string {
-    return mode === 'isolated' && leaseId ? `${traceId}:lease:${leaseId}` : traceId;
+    return traceProcessorProcessorKey(traceId, leaseId, mode);
   }
 
   public runWithLease<T>(

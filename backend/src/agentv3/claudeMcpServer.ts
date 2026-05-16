@@ -29,6 +29,11 @@ import {
   searchPerfettoSqlDocs,
   type PerfettoSqlDocEntry,
 } from '../services/perfettoSqlDocs';
+import {
+  buildTraceProcessorQueryProvenance,
+  type TraceProcessorQueryProvenance,
+  type TraceProcessorTraceSide,
+} from '../services/traceProcessorConnectionModel';
 import { sqlUsesProcessNameFilter } from '../services/processIdentity/identityGate';
 import { injectStdlibIncludes } from './sqlIncludeInjector';
 import { loadPromptTemplate, getPhaseHints } from './strategyLoader';
@@ -540,8 +545,16 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
   // referenced in raw SQL. Shared between execute_sql and execute_sql_on
   // so comparison-mode queries get the same treatment. See
   // sqlIncludeInjector.ts for the full rationale.
-  async function runRawSqlWithIncludeInjection(targetTraceId: string, sql: string) {
+  async function runRawSqlWithIncludeInjection(
+    targetTraceId: string,
+    sql: string,
+    traceSide: TraceProcessorTraceSide = 'current',
+  ) {
     const { sql: finalSql, injected } = injectStdlibIncludes(sql);
+    const traceProvenance = buildTraceProcessorQueryProvenance({
+      traceId: targetTraceId,
+      traceSide,
+    });
     if (emitUpdate && injected.length > 0) {
       emitUpdate({
         type: 'progress',
@@ -557,7 +570,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       });
     }
     const result = await traceProcessorService.query(targetTraceId, finalSql);
-    return { result, finalSql, injected };
+    return { result, finalSql, injected, traceProvenance };
   }
 
   const executeSql = tool(
@@ -587,7 +600,11 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       try {
         const sqlStart = Date.now();
         const processIdentityWarning = rawSqlProcessIdentityWarning(sql);
-        const { result, finalSql, injected } = await runRawSqlWithIncludeInjection(traceId, sql);
+        const { result, finalSql, injected, traceProvenance } = await runRawSqlWithIncludeInjection(
+          traceId,
+          sql,
+          'current',
+        );
         const truncated = result.rows.length > 200;
         const rows = truncated ? result.rows.slice(0, 200) : result.rows;
         const success = !result.error;
@@ -609,7 +626,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         }
 
         if (emitUpdate && success && result.columns.length > 0 && rows.length > 0) {
-          emitSqlDataEnvelope(emitUpdate, result.columns, rows, finalSql, injected);
+          emitSqlDataEnvelope(emitUpdate, result.columns, rows, finalSql, injected, traceProvenance);
         }
 
         if (emitUpdate && !success && result.error) {
@@ -676,6 +693,9 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
                 columnStats: summaryResult.columnStats,
                 sampleRows: summaryResult.sampleRows,
                 durationMs: result.durationMs,
+                traceSide: traceProvenance.traceSide,
+                traceId: traceProvenance.traceId,
+                traceProvenance,
                 executableSql: finalSql,
                 stdlibInjectedModules: injected,
                 ...(processIdentityWarning ? { processIdentityWarning } : {}),
@@ -694,6 +714,9 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               totalRows: result.rows.length,
               truncated,
               durationMs: result.durationMs,
+              traceSide: traceProvenance.traceSide,
+              traceId: traceProvenance.traceId,
+              traceProvenance,
               executableSql: finalSql,
               stdlibInjectedModules: injected,
               ...(processIdentityWarning ? { processIdentityWarning } : {}),
@@ -2518,7 +2541,11 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       try {
         const sqlStart = Date.now();
         const processIdentityWarning = rawSqlProcessIdentityWarning(sql);
-        const { result, finalSql, injected } = await runRawSqlWithIncludeInjection(targetTraceId, sql);
+        const { result, finalSql, injected, traceProvenance } = await runRawSqlWithIncludeInjection(
+          targetTraceId,
+          sql,
+          trace,
+        );
         const truncated = result.rows.length > 200;
         const rows = truncated ? result.rows.slice(0, 200) : result.rows;
         const success = !result.error;
@@ -2529,6 +2556,9 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           const text = JSON.stringify({
             success: true,
             trace: traceLabel,
+            traceSide: trace,
+            traceId: targetTraceId,
+            traceProvenance,
             summary: summaryResult,
             totalRows: result.rows.length,
             durationMs,
@@ -2543,6 +2573,9 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         const text = JSON.stringify({
           success,
           trace: traceLabel,
+          traceSide: trace,
+          traceId: targetTraceId,
+          traceProvenance,
           columns: result.columns,
           rows,
           totalRows: result.rows.length,
@@ -2555,7 +2588,23 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         });
         return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(success ? text + getReasoningNudge() : text) }] };
       } catch (e: any) {
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, trace: traceLabel, error: e.message }) }] };
+        const traceProvenance = buildTraceProcessorQueryProvenance({
+          traceId: targetTraceId,
+          traceSide: trace,
+        });
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              trace: traceLabel,
+              traceSide: trace,
+              traceId: targetTraceId,
+              traceProvenance,
+              error: e.message,
+            }),
+          }],
+        };
       }
     },
     { annotations: { readOnlyHint: true } },
@@ -2602,6 +2651,14 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         });
 
         const compareStart = Date.now();
+        const currentTraceProvenance = buildTraceProcessorQueryProvenance({
+          traceId,
+          traceSide: 'current',
+        });
+        const referenceTraceProvenance = buildTraceProcessorQueryProvenance({
+          traceId: referenceTraceId,
+          traceSide: 'reference',
+        });
         const [currentResult, refResult] = await Promise.all([
           skillExecutor.execute(skillId, traceId, effectiveParams),
           skillExecutor.execute(skillId, referenceTraceId, refParams),
@@ -2627,6 +2684,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             currentResult.displayResults as SkillDisplayResult[],
             `${skillId}${localize(outputLanguage, '[当前]', '[current]')}`,
             emitUpdate,
+            currentTraceProvenance,
           );
         }
         if (emitUpdate && refResult.displayResults?.length) {
@@ -2634,6 +2692,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             refResult.displayResults as SkillDisplayResult[],
             `${skillId}${localize(outputLanguage, '[参考]', '[reference]')}`,
             emitUpdate,
+            referenceTraceProvenance,
           );
         }
 
@@ -2650,6 +2709,9 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           success: true,
           durationMs: compareDuration,
           current: {
+            traceSide: 'current',
+            traceId,
+            traceProvenance: currentTraceProvenance,
             success: currentResult.success,
             stepCount: currentResult.displayResults?.length || 0,
             steps: buildStepSummary(currentResult.displayResults || []),
@@ -2657,6 +2719,9 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             error: currentResult.error,
           },
           reference: {
+            traceSide: 'reference',
+            traceId: referenceTraceId,
+            traceProvenance: referenceTraceProvenance,
             success: refResult.success,
             stepCount: refResult.displayResults?.length || 0,
             steps: buildStepSummary(refResult.displayResults || []),
@@ -2781,6 +2846,7 @@ function emitSqlDataEnvelope(
   rows: any[],
   sql?: string,
   stdlibInjectedModules?: string[],
+  traceProvenance?: TraceProcessorQueryProvenance,
 ): void {
   emit({
     type: 'data',
@@ -2789,6 +2855,11 @@ function emitSqlDataEnvelope(
       data: { columns, rows },
       ...(sql ? { sql } : {}),
       ...(stdlibInjectedModules?.length ? { stdlibInjectedModules } : {}),
+      ...(traceProvenance ? {
+        traceSide: traceProvenance.traceSide,
+        traceId: traceProvenance.traceId,
+        traceProvenance,
+      } : {}),
       display: {
         layer: 'list',
         format: 'table',
@@ -2818,12 +2889,21 @@ function emitSkillDataEnvelopes(
   displayResults: SkillDisplayResult[],
   skillId: string,
   emit: (update: StreamingUpdate) => void,
+  traceProvenance?: TraceProcessorQueryProvenance,
 ): void {
   const envelopes = displayResults
     .filter(dr => dr.data?.rows?.length)
     .map(dr => {
       const explicitColumns = (dr as any).columnDefinitions;
-      return displayResultToEnvelope(dr as any, skillId, explicitColumns);
+      const envelope = displayResultToEnvelope(dr as any, skillId, explicitColumns);
+      return traceProvenance
+        ? {
+          ...envelope,
+          traceSide: traceProvenance.traceSide,
+          traceId: traceProvenance.traceId,
+          traceProvenance,
+        }
+        : envelope;
     });
 
   if (envelopes.length > 0) {
