@@ -99,6 +99,25 @@ const TARGETS = {
   },
 };
 
+const FRONTEND_TOP_LEVEL_SYNTAQLITE_ASSETS = [
+  'assets/syntaqlite-perfetto.wasm',
+  'assets/syntaqlite-runtime.js',
+  'assets/syntaqlite-runtime.wasm',
+  'assets/syntaqlite-sqlite.wasm',
+];
+
+const FRONTEND_VERSIONED_REQUIRED_ASSETS = [
+  'frontend_bundle.js',
+  'engine_bundle.js',
+  'traceconv_bundle.js',
+  'trace_processor_memory64.wasm',
+  'traceconv.wasm',
+  'stdlib_docs.json',
+  'syntaqlite-runtime.js',
+  'syntaqlite-runtime.wasm',
+  'syntaqlite-sqlite.wasm',
+];
+
 function usage() {
   console.error([
     'Usage:',
@@ -186,6 +205,33 @@ function assertBinaryKind(bytes, label, kind) {
   assert(ok, `${label} is not a ${kind} binary`);
 }
 
+function stableVersionFromIndex(indexHtml) {
+  const match = indexHtml.match(/data-perfetto_version='([^']+)'/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1]).stable;
+  } catch {
+    return null;
+  }
+}
+
+function frontendRootForTarget(target) {
+  return target.os === 'macos'
+    ? 'SmartPerfetto.app/Contents/Resources/frontend'
+    : 'frontend';
+}
+
+function assertEntryExists(entries, packageName, rel) {
+  const entry = `${packageName}/${rel}`;
+  assert(entries.includes(entry), `Missing package entry: ${entry}`);
+  return entry;
+}
+
+function assertEntryNonEmpty(assetPath, ext, entry) {
+  const bytes = readEntryBuffer(assetPath, ext, entry);
+  assert(bytes.length > 0, `Package entry is empty: ${entry}`);
+}
+
 function readJsonEntry(assetPath, ext, entry) {
   try {
     return JSON.parse(readEntry(assetPath, ext, entry));
@@ -255,9 +301,24 @@ function main() {
   );
 
   for (const rel of target.required) {
-    const entry = `${packageName}/${rel}`;
-    assert(entries.includes(entry), `Missing package entry: ${entry}`);
+    assertEntryExists(entries, packageName, rel);
   }
+
+  const frontendRoot = frontendRootForTarget(target);
+  const frontendIndexEntry = `${packageName}/${frontendRoot}/index.html`;
+  const frontendStableVersion = stableVersionFromIndex(readEntry(assetPath, target.ext, frontendIndexEntry));
+  assert(frontendStableVersion, `${frontendIndexEntry} does not declare data-perfetto_version.stable`);
+
+  for (const rel of FRONTEND_TOP_LEVEL_SYNTAQLITE_ASSETS) {
+    const entry = assertEntryExists(entries, packageName, `${frontendRoot}/${rel}`);
+    assertEntryNonEmpty(assetPath, target.ext, entry);
+  }
+
+  for (const rel of FRONTEND_VERSIONED_REQUIRED_ASSETS) {
+    const entry = assertEntryExists(entries, packageName, `${frontendRoot}/${frontendStableVersion}/${rel}`);
+    assertEntryNonEmpty(assetPath, target.ext, entry);
+  }
+
   for (const rel of target.binaryRequired) {
     const entry = `${packageName}/${rel}`;
     assertBinaryKind(readEntryBuffer(assetPath, target.ext, entry), entry, target.binaryKind);

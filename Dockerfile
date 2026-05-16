@@ -60,7 +60,17 @@ RUN . /tmp/pin.env && \
     /tmp/trace_processor_shell --version | head -n 1
 
 # ============================
-# Stage 4: Runtime
+# Stage 4: Verify pre-built frontend
+# ============================
+FROM node:24-bookworm-slim AS frontend-prebuild-check
+
+WORKDIR /app
+COPY scripts/check-frontend-prebuild.cjs ./scripts/check-frontend-prebuild.cjs
+COPY frontend ./frontend
+RUN node scripts/check-frontend-prebuild.cjs
+
+# ============================
+# Stage 5: Runtime
 # ============================
 FROM node:24-bookworm-slim
 
@@ -94,7 +104,7 @@ COPY backend/sql ./backend/sql
 
 # Copy pre-built Perfetto UI shipped in the repository.
 # Refresh this directory with scripts/update-frontend.sh before publishing UI changes.
-COPY frontend ./perfetto/out/ui/ui
+COPY --from=frontend-prebuild-check /app/frontend ./perfetto/out/ui/ui
 
 # Create required directories and fix ownership for non-root user
 RUN mkdir -p backend/uploads backend/logs/sessions backend/data backend/provider-data && \
