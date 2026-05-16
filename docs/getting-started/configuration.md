@@ -4,7 +4,18 @@
 
 SmartPerfetto 本地源码运行时可以直接使用 Claude Code 的本地认证/配置；如果这个终端里的 `claude` 已经能正常写代码，可以不创建 `.env`。这既包括 Claude Code 官方订阅，也包括 Claude Code 已经配置好的第三方 base URL + API key。需要显式配置 API key、代理或 Docker 运行时，再使用 env 文件。
 
-Perfetto UI 的 AI Assistant 设置面板分为两类配置：`Connection` 页配置 SmartPerfetto 后端连接，`Providers` 页配置模型 provider profile。`Connection` 页里的 API Key 只对应 `SMARTPERFETTO_API_KEY` 后端鉴权，不是第三方大模型 provider key。模型 provider 凭证可以来自 Claude Code 本地配置、下面的后端/Docker env 文件，也可以通过前端 `Providers` 页写入后端 Provider Manager。
+Perfetto UI 的 AI Assistant 设置面板分为两类配置：`Connection` 页配置 SmartPerfetto 后端地址，`Providers` 页配置模型 provider profile。`Connection` 页里的高级 backend auth token 是可选项，只在后端启动时设置了 `SMARTPERFETTO_API_KEY` 才需要填写；它不是第三方大模型 provider key。模型 provider 凭证可以来自 Claude Code 本地配置、下面的后端/Docker env 文件，也可以通过前端 `Providers` 页写入后端 Provider Manager。
+
+初学者优先走 UI，最不容易混淆：
+
+1. 启动 SmartPerfetto，打开 `http://localhost:10000`。
+2. 打开 **AI Assistant Settings → Providers → Add Provider**。
+3. 选择 provider 类型，填写 **Provider API Key**，核对预置 Base URL 和 SDK Runtime。
+4. 点击 **Create Provider**。这一步只是保存 profile。
+5. 回到 provider 列表，先点插头图标测试连接，再点击 provider 行或在输入框旁的 provider switcher 里选择它来激活。
+6. 用 `/health` 验证。`aiEngine.credentialSource=provider-manager` 表示 UI provider 已经生效；`env-or-default` 表示仍在使用 env 或本机 Claude Code fallback。
+
+active Provider Manager profile 会覆盖 `.env`。如果希望 `.env` 修改重新生效，在 provider switcher 里选择 `System Default`，或在设置里停用 active provider。
 
 预置的 Base URL 来自 provider 公开信息和公开文档，不保证对所有账号、套餐、地区长期正确。很多 provider 的入口会按地区、申请国家、套餐或专属控制台域名变化，例如新加坡区、国内区、国际区可能不同。如果连接、流式输出或 tool/function calling 出错，先到 provider 控制台核对 Base URL、模型 ID 和协议类型；确认是公开 preset 错误后，建议提交 issue 或 PR 修正。
 
@@ -17,7 +28,7 @@ cp backend/.env.example backend/.env
 Docker 运行统一读取仓库根目录 `.env`，包括 Docker Hub 镜像和本地 source Docker build：
 
 ```bash
-cp backend/.env.example .env
+cp .env.example .env
 ```
 
 ## LLM 配置
@@ -30,6 +41,8 @@ SmartPerfetto 后端支持两个一等 SDK runtime：
 运行时选择不会根据“哪个 key 存在”自动猜。优先级是：请求/会话里的 `providerId`、Provider Manager 当前 active provider、`SMARTPERFETTO_AGENT_RUNTIME`、最后默认 `claude-agent-sdk`。因此如果 `.env` 里同时写了 `ANTHROPIC_*` 和 `OPENAI_*`，但没有设置 `SMARTPERFETTO_AGENT_RUNTIME=openai-agents-sdk`，实际仍会走 Claude Agent SDK。active Provider Manager profile 会覆盖 `.env` fallback；当前来源可通过 `/health` 的 `aiEngine.credentialSource` 和 `aiEngine.providerOverridesEnv` 确认。
 
 Perfetto UI 的 Provider Management 支持把同一个 provider 的两组端点一起保存：`claudeBaseUrl` / `claudeApiKey` / `claudeAuthToken` 对应 Claude Code SDK，`openaiBaseUrl` / `openaiApiKey` / `openaiProtocol` 对应 OpenAI SDK。AI 输入框旁的 provider switcher 会显示当前 SDK runtime；对 DeepSeek、Qwen、Kimi、MiMo、TokenHub 或 custom 这类双端点 provider，可以在同一个下拉菜单里显式切换 Claude SDK / OpenAI SDK。切换 provider 或 SDK runtime 会开启新的 SDK session。
+
+DeepSeek、Qwen、Kimi、MiMo、TokenHub、MiniMax、StepFun、SiliconFlow 和 custom gateway 这类双端点 provider，在 UI 里会显示共享 Provider API Key 和可选的 runtime 专用 key override。如果同一个 key 两边都能用，只填共享 key。只有明确要在 Claude-compatible URL 和 OpenAI-compatible URL 之间切换时，才改 SDK Runtime。
 
 已创建的分析 session 会固定当时使用的 credential source。也就是说，一个用 Provider A 创建的 session 恢复后仍尝试使用 Provider A；一个用 `.env` fallback 创建的 session 恢复后不会因为后来设置了 active provider 就改用该 provider。
 
@@ -136,6 +149,15 @@ CLAUDE_LIGHT_MODEL=your-provider-light-model
 curl http://localhost:3000/health
 ```
 
+排查 provider 配置时先看这些 `/health` 字段：
+
+| 字段 | 如何判断 |
+|---|---|
+| `aiEngine.credentialSource` | `provider-manager` 表示 UI provider 正在生效；`env-or-default` 表示使用 `.env` 或 Claude Code fallback |
+| `aiEngine.providerOverridesEnv` | `true` 表示 `.env` 修改不会影响当前分析，除非停用 active provider |
+| `aiEngine.runtime` | 只能是 `claude-agent-sdk` 或 `openai-agents-sdk`，不是 provider 名称 |
+| `aiEngine.providerMode` | 显示实际连接族，例如 `anthropic_compatible_proxy` 或 `openai_chat_completions_compatible` |
+
 响应中的 `aiEngine.providerMode` 会显示：
 
 | providerMode | 含义 |
@@ -192,6 +214,7 @@ FRONTEND_URL=http://localhost:10000
 如果后端暴露给多人或外网，设置：
 
 ```bash
+# 本地单人使用可以不设置。
 SMARTPERFETTO_API_KEY=replace_with_a_strong_random_secret
 ```
 

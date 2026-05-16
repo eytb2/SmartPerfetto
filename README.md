@@ -22,7 +22,13 @@ The project is open source and in active development. The UI, backend runtime, a
 
 ## Configure Your AI Provider First
 
-SmartPerfetto ultimately stores and uses model-provider credentials on the backend, but you do not have to edit `.env` by hand. You can edit `backend/.env` / Docker `.env`, or open the AI Assistant settings panel in Perfetto UI and use the `Providers` tab to add, edit, and activate providers. The API Key field on the `Connection` tab is only for backend auth (`SMARTPERFETTO_API_KEY`), which protects the SmartPerfetto backend. It is not a model-provider key field. See [docs/getting-started/configuration.en.md](docs/getting-started/configuration.en.md) for the full provider guide.
+SmartPerfetto uses exactly one active model-provider source at runtime. Pick one path and avoid mixing them during first setup:
+
+- UI Provider Manager: easiest for portable packages, Docker, and new users. Start SmartPerfetto, open **AI Assistant Settings → Providers**, add a provider, paste the **Provider API Key**, verify the Base URL/runtime, save it, test it, then activate it. Saving a provider is not enough; the active provider is what takes effect.
+- Env file: best for scripted or server deployments. Local source runs read `backend/.env`; Docker reads the repository-root `.env`.
+- Local Claude Code config: best for source runs when `claude` already works in the same terminal. No SmartPerfetto `.env` is required.
+
+The `Connection` tab normally only needs the backend URL. Its advanced backend auth token is optional and is only used when the backend was started with `SMARTPERFETTO_API_KEY`; it is not a model-provider key field. An active Provider Manager profile overrides `.env`; choose `System Default` in the provider switcher or deactivate providers to return to `.env` / local Claude Code config. See [docs/getting-started/configuration.en.md](docs/getting-started/configuration.en.md) for the full provider guide.
 
 Step 1: Choose your run mode and credential file.
 
@@ -30,8 +36,9 @@ Step 1: Choose your run mode and credential file.
 |----------|-----------------|-------|
 | Local source checkout where Claude Code already works in the same terminal | No `.env` required | Verify with `claude`; then run `./start.sh`, which starts both backend and the pre-built frontend |
 | Local source checkout with explicit API key or compatible proxy | `backend/.env` | Create it with `cp backend/.env.example backend/.env` |
-| Docker Hub image | `.env` in the repository root | Create it with `cp backend/.env.example .env`; Docker cannot see the host Claude Code login |
+| Docker Hub image | `.env` in the repository root | Create it with `cp .env.example .env`; Docker cannot see the host Claude Code login |
 | Source Docker build | `.env` in the repository root | Read by `docker-compose.yml`; same credential file as the Docker Hub path |
+| Portable package | Provider Manager UI first | Use the package UI at `http://localhost:10000`; only use the package env file if you need scripted setup |
 
 Step 2: Choose the runtime and provider settings. Claude Agent SDK is for Claude Code / Anthropic-compatible providers; OpenAI Agents SDK is for OpenAI / OpenAI-compatible providers. If both credential families are present, `SMARTPERFETTO_AGENT_RUNTIME` or the active UI provider decides; otherwise the default is Claude Agent SDK.
 
@@ -50,7 +57,7 @@ CLAUDE_MODEL=deepseek-v4-pro
 CLAUDE_LIGHT_MODEL=deepseek-v4-flash
 ```
 
-OpenAI / OpenAI-compatible providers use the OpenAI Agents SDK runtime; Ollama and other OpenAI-compatible endpoints use `OPENAI_AGENTS_PROTOCOL=chat_completions`. The UI Provider Management flow can store both Claude-compatible and OpenAI-compatible Base URLs for dual-surface providers, then switch the active SDK runtime from the AI input provider switcher. Full provider-specific fields, known regional URL variants, model IDs, and troubleshooting notes are in [docs/getting-started/configuration.en.md](docs/getting-started/configuration.en.md) and the env templates.
+OpenAI / OpenAI-compatible providers use the OpenAI Agents SDK runtime; Ollama and other OpenAI-compatible endpoints use `OPENAI_AGENTS_PROTOCOL=chat_completions`. In Provider Manager, dual-surface providers such as DeepSeek, Qwen, Kimi, MiMo, and TokenHub show both Claude-compatible and OpenAI-compatible Base URLs. The selected SDK runtime decides which side is used. Full provider-specific fields, known regional URL variants, model IDs, and troubleshooting notes are in [docs/getting-started/configuration.en.md](docs/getting-started/configuration.en.md) and the env templates.
 
 Step 3 (optional): Set the output language. SmartPerfetto defaults to Simplified Chinese for AI answers, streamed progress, and generated reports. Set this if the primary users prefer English:
 
@@ -58,7 +65,7 @@ Step 3 (optional): Set the output language. SmartPerfetto defaults to Simplified
 SMARTPERFETTO_OUTPUT_LANGUAGE=en
 ```
 
-Step 4: Start or restart services. For Docker, run `docker compose -f docker-compose.hub.yml up -d` or `docker compose -f docker-compose.hub.yml restart`. For local source runs, use `./start.sh`; if you only changed `.env` while the backend is already running, use `./scripts/restart-backend.sh`. For explicit SmartPerfetto env/proxy credentials, verify the active provider with [http://localhost:3000/health](http://localhost:3000/health). For the local Claude Code path, verify by running a normal `claude` request in the same terminal; the first AI analysis call will use the SDK's Claude Code auth/config path.
+Step 4: Start or restart services. For Docker, run `docker compose -f docker-compose.hub.yml up -d` or `docker compose -f docker-compose.hub.yml restart`. For local source runs, use `./start.sh`; if you only changed `.env` while the backend is already running, use `./scripts/restart-backend.sh`. Verify the active source with [http://localhost:3000/health](http://localhost:3000/health): `aiEngine.credentialSource=provider-manager` means the UI provider overrides env, while `env-or-default` means SmartPerfetto is using `.env` or local Claude Code fallback. For the local Claude Code path, verify by running a normal `claude` request in the same terminal.
 
 ## Perfetto Resources
 
@@ -111,7 +118,7 @@ Windows users should use Docker Desktop with the WSL2 backend. The published ima
 
 Step 1: Download the source. Run `git clone https://github.com/Gracker/SmartPerfetto.git`, then run `cd SmartPerfetto`.
 
-Step 2 (optional): Create the Docker env file. Run `cp backend/.env.example .env`, edit `.env`, uncomment one provider block, and start by replacing the API key/token. If your provider console shows a different Base URL or model ID, use the console value. You can skip this for health/UI smoke checks; real AI analysis requires a provider.
+Step 2 (optional): Create the Docker env file. Run `cp .env.example .env`, edit `.env`, uncomment one provider block, and start by replacing the API key/token. If your provider console shows a different Base URL or model ID, use the console value. You can skip this for health/UI smoke checks; real AI analysis requires a provider.
 
 Step 3: Pull the Docker Hub image. Run `docker compose -f docker-compose.hub.yml pull`.
 
@@ -187,7 +194,7 @@ On Linux, if analysis fails with `Claude Code native binary not found at .../nod
 
 ### Source Docker Build
 
-Use this only when testing Docker changes or building an unreleased local checkout. Step 1: run `cp backend/.env.example .env` and edit the provider if needed. Step 2: run `docker compose up --build`.
+Use this only when testing Docker changes or building an unreleased local checkout. Step 1: run `cp .env.example .env` and edit the provider if needed. Step 2: run `docker compose up --build`.
 
 The source build uses the committed `frontend/` bundle and does not rebuild the `perfetto/` submodule.
 
@@ -201,7 +208,7 @@ After verifying your changes in the browser, Step 1: run `./scripts/update-front
 
 The quick setup above covers where credentials live. Detailed provider setup, model IDs, regional Base URL variants, OpenAI-compatible runtime fields, Anthropic-compatible presets, proxy guidance, and troubleshooting live in [docs/getting-started/configuration.en.md](docs/getting-started/configuration.en.md). Use `GET /health` to confirm `aiEngine.runtime`, `aiEngine.credentialSource`, `aiEngine.providerMode`, and `aiEngine.diagnostics` after changing provider settings.
 
-Claude Code local auth/config is only available to local source runs, not Docker. Separate tools such as Codex CLI, Gemini CLI, and OpenCode manage their own configuration files and login state; SmartPerfetto does not automatically read those credentials. The frontend settings dialog's `Connection` tab only stores the backend URL and optional `SMARTPERFETTO_API_KEY` for SmartPerfetto backend auth; the `Providers` tab can write model-provider profiles to the backend Provider Manager.
+Claude Code local auth/config is only available to local source runs, not Docker. Separate tools such as Codex CLI, Gemini CLI, and OpenCode manage their own configuration files and login state; SmartPerfetto does not automatically read those credentials. The frontend settings dialog's `Connection` tab stores the backend URL and an optional advanced `SMARTPERFETTO_API_KEY` access token only when the backend is protected; the `Providers` tab can write model-provider profiles to the backend Provider Manager.
 
 ### Output Language
 
@@ -279,7 +286,7 @@ The browser UI talks to the backend through REST and SSE. If you want to build y
 | `POST` | `/api/agent/v1/scene-reconstruct` | Start scene reconstruction |
 | `GET` | `/api/agent/v1/:sessionId/report` | Fetch the generated report |
 
-Set `SMARTPERFETTO_API_KEY` in `backend/.env` if you expose the backend beyond your local machine. Protected APIs then require `Authorization: Bearer <token>`.
+Leave `SMARTPERFETTO_API_KEY` unset for local single-user runs. Set it in `backend/.env` only if you expose the backend beyond your local machine. Protected APIs then require `Authorization: Bearer <token>`.
 
 ## Architecture
 

@@ -4,7 +4,18 @@
 
 For local source runs, SmartPerfetto can use Claude Code's local authentication and configuration directly. If `claude` already works in the same terminal, you do not need to create `.env`. Use env files when you need explicit API keys, compatible proxies, or Docker runtime credentials.
 
-The AI Assistant settings panel in Perfetto UI has two configuration areas: the `Connection` tab configures the SmartPerfetto backend connection, and the `Providers` tab configures model-provider profiles. The API Key field on the `Connection` tab maps only to backend auth (`SMARTPERFETTO_API_KEY`). It is not a model-provider key field. Model-provider credentials can come from Claude Code local config, from the backend/Docker env files below, or from Provider Manager profiles created in the frontend.
+The AI Assistant settings panel in Perfetto UI has two configuration areas: the `Connection` tab configures the SmartPerfetto backend URL, and the `Providers` tab configures model-provider profiles. The advanced backend auth token on the `Connection` tab is optional; fill it only when the backend was started with `SMARTPERFETTO_API_KEY`. It is not a model-provider key field. Model-provider credentials can come from Claude Code local config, from the backend/Docker env files below, or from Provider Manager profiles created in the frontend.
+
+For beginners, the UI path is the least ambiguous:
+
+1. Start SmartPerfetto and open `http://localhost:10000`.
+2. Open **AI Assistant Settings → Providers → Add Provider**.
+3. Choose the provider type, paste the **Provider API Key**, then check the preset Base URLs and SDK Runtime.
+4. Click **Create Provider**. This only saves the profile.
+5. Back in the provider list, click the plug icon to test the connection, then click the provider row or choose it in the provider switcher to activate it.
+6. Verify with `/health`. `aiEngine.credentialSource=provider-manager` means the UI provider is active; `env-or-default` means SmartPerfetto is using env or local Claude Code fallback.
+
+An active Provider Manager profile overrides `.env`. To make `.env` changes take effect again, choose `System Default` in the provider switcher or deactivate the active provider.
 
 The preset Base URLs come from public provider information and public documentation. They are not guaranteed to be correct for every account, plan, region, or future provider change. If connection, streaming, or tool/function calling fails, first verify the Base URL, model ID, and protocol in your provider console.
 
@@ -17,7 +28,7 @@ cp backend/.env.example backend/.env
 Docker runs always read the repository-root `.env`, including both Docker Hub images and local source Docker builds:
 
 ```bash
-cp backend/.env.example .env
+cp .env.example .env
 ```
 
 ## LLM Configuration
@@ -30,6 +41,8 @@ SmartPerfetto has two first-class SDK runtimes:
 Runtime selection priority is: request/session `providerId`, active Provider Manager profile, `SMARTPERFETTO_AGENT_RUNTIME`, then the default `claude-agent-sdk`. If `.env` contains both `ANTHROPIC_*` and `OPENAI_*` without `SMARTPERFETTO_AGENT_RUNTIME=openai-agents-sdk`, analysis still uses Claude Agent SDK. An active Provider Manager profile overrides `.env` fallback; confirm the current source with `aiEngine.credentialSource` and `aiEngine.providerOverridesEnv` from `/health`.
 
 Perfetto UI Provider Management can store both endpoint families for the same provider: `claudeBaseUrl` / `claudeApiKey` / `claudeAuthToken` for Claude Code SDK, and `openaiBaseUrl` / `openaiApiKey` / `openaiProtocol` for OpenAI SDK. The provider switcher beside the AI input shows the active SDK runtime.
+
+For dual-surface providers such as DeepSeek, Qwen, Kimi, MiMo, TokenHub, MiniMax, StepFun, SiliconFlow, and custom gateways, the UI shows a shared Provider API Key plus optional runtime-specific key overrides. If the provider uses one key for both endpoint families, fill only the shared key. Change the runtime selector only when you intentionally want to switch between the Claude-compatible URL and the OpenAI-compatible URL.
 
 Existing analysis sessions pin the credential source used at creation time. A session created with Provider A will try to resume with Provider A; a session created from `.env` fallback does not switch to a later active provider.
 
@@ -125,6 +138,15 @@ Restart the backend after changing `.env`. Verify explicit env/proxy credentials
 curl http://localhost:3000/health
 ```
 
+Read these `/health` fields before debugging provider complaints:
+
+| Field | What to check |
+|---|---|
+| `aiEngine.credentialSource` | `provider-manager` means UI profile is active; `env-or-default` means `.env` or Claude Code fallback |
+| `aiEngine.providerOverridesEnv` | `true` means `.env` changes will not affect analysis until the active provider is disabled |
+| `aiEngine.runtime` | Must be `claude-agent-sdk` or `openai-agents-sdk`, not a provider name |
+| `aiEngine.providerMode` | Shows the effective connection family, such as `anthropic_compatible_proxy` or `openai_chat_completions_compatible` |
+
 `aiEngine.providerMode` can be:
 
 | providerMode | Meaning |
@@ -179,6 +201,7 @@ Default local ports:
 If the backend is exposed to multiple users or a network, set:
 
 ```bash
+# Leave unset for local single-user runs.
 SMARTPERFETTO_API_KEY=replace_with_a_strong_random_secret
 ```
 
