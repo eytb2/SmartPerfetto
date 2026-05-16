@@ -18,6 +18,7 @@ optional_capabilities:
   - gpu_work_period
   - cpu_freq_idle
   - battery_counters
+  - chrome_scroll_jank
 keywords:
   - 滑动
   - 卡顿
@@ -67,6 +68,11 @@ phase_hints:
     constraints: '需要帧内 CPU/UI/GPU/阻塞调用细分时，优先用 frame_overrun_summary、cpu_time_per_frame、frame_ui_time_breakdown、frame_blocking_calls、android_gpu_work_period_track、mali_gpu_power_state 作为补充证据。缺 gpu_work_period 时必须标注数据不足。'
     critical_tools: ['frame_overrun_summary', 'cpu_time_per_frame', 'frame_ui_time_breakdown', 'frame_blocking_calls', 'android_gpu_work_period_track', 'mali_gpu_power_state']
     critical: false
+  - id: chrome_scroll_jank
+    keywords: ['Chrome', 'Chromium', 'WebView', 'scroll jank v4', 'preferred frame timeline', 'ChromeScrollJank']
+    constraints: '当 trace 明确来自 Chrome/Chromium/WebView 或用户提到 Chrome scroll jank 时，调用 chrome_scroll_jank_frame_timeline。若返回 no_chrome_scroll_data，只能说明缺少 Chrome scroll instrumentation，不要把 Android app FrameTimeline 当作 Chrome scroll jank 证据。'
+    critical_tools: ['chrome_scroll_jank_frame_timeline']
+    critical: false
   - id: architecture_specific_jank
     keywords: ['TextureView', 'SurfaceTexture', 'WebView', 'DrawFunctor', 'React Native', 'RN', 'Fabric', 'JSI', 'GLSurfaceView', 'NativeActivity', 'OpenGL', 'Compose', 'Flutter', 'mixed', '混合', '架构', '生产端']
     constraints: 'detect_architecture 命中 TextureView/WebView/RN/GL/Compose/Flutter 或 ANDROID_VIEW_MIXED 时，必须补充对应架构专属 skill。混合出图不能只按 primary pipeline 单路分析，必须分别看 HWUI host 链路和嵌入/独立 producer 链路，再按依赖关系合并。缺专属 trace 信号时标注“不支持该架构证据”，不能只用 FrameTimeline 断言无卡顿。'
@@ -89,6 +95,9 @@ plan_template:
     - id: architecture_specific_jank
       match_keywords: ['TextureView', 'SurfaceTexture', 'WebView', 'DrawFunctor', 'React Native', 'RN', 'Fabric', 'JSI', 'GLSurfaceView', 'NativeActivity', 'OpenGL', 'Compose', 'Flutter', 'mixed', '混合', '架构']
       suggestion: '非标准/混合渲染架构必须拆成 HWUI host 链路 + producer 链路 + SF 合成链路分别分析，再合并因果，避免只看 FrameTimeline'
+    - id: chrome_scroll_jank
+      match_keywords: ['Chrome', 'Chromium', 'WebView', 'scroll jank v4', 'preferred frame timeline', 'ChromeScrollJank']
+      suggestion: 'Chrome/WebView 滑动需要优先检查 chrome_scroll_jank_frame_timeline 的 v3/v4 scroll jank 与 preferred frame timeline availability'
 ---
 
 **Android 版本注意**：
@@ -97,6 +106,7 @@ plan_template:
 - monitor_contention 需要 Android 13+ (API 33)
 - input events 需要 Android 14+ (API 34)
 - Android 14+ token 不再严格连续递增，token_gap 检测可能需调整
+- Chrome/Chromium trace 与普通 Android app trace 不共用同一套 jank 语义；Chrome scroll jank 需要 `chrome_scroll_jank_frame_timeline` 中的 `chrome_scrolls`、`chrome_scroll_jank_v4_results` 或 preferred frame timeline 证据。
 
 #### 滑动/卡顿分析（用户提到 滑动、卡顿、掉帧、jank、scroll、fps）
 

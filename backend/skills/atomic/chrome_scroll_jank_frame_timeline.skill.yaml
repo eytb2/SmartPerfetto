@@ -1,0 +1,337 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# Chrome Scroll Jank / Frame Timeline（原子 Skill）
+# =============================================================================
+# 将 upstream org.chromium.ChromeScrollJank plugin 中的可验证 SQL 入口转成
+# SmartPerfetto Skill evidence。该 skill 面向 Chrome/WebView trace；在普通
+# Android app trace 中会返回 0-count availability，而不是把 Android app
+# FrameTimeline 误解释为 Chrome scroll jank。
+
+name: chrome_scroll_jank_frame_timeline
+version: "1.0"
+type: atomic
+category: scrolling
+tier: B
+
+meta:
+  display_name: "Chrome Scroll Jank / Frame Timeline"
+  description: "分析 Chrome scroll jank v3/v4、scroll frame stages 与 Chrome preferred frame timeline availability"
+  icon: "chrome"
+  tags: [chrome, scroll, jank, frame_timeline, upstream]
+
+triggers:
+  keywords:
+    zh: [Chrome 卡顿, Chrome 滑动, WebView Chrome, scroll jank v4, preferred frame timeline]
+    en: [chrome scroll jank, scroll jank v4, chrome frame timeline, preferred frame timeline]
+  patterns:
+    - ".*Chrome.*(scroll|jank|frame timeline).*"
+    - ".*(scroll jank v4|preferred frame timeline).*"
+
+prerequisites:
+  modules:
+    - chrome.chrome_scrolls
+    - chrome.chrome_scrolls_v4
+    - chrome.scroll_jank.scroll_jank_intervals
+    - chrome.scroll_jank_v4
+    - chrome.scroll_jank_tagging
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳(ns，可选)"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳(ns，可选)"
+  - name: min_janky_frames
+    type: integer
+    required: false
+    default: 1
+    description: "v3 scroll summary 至少包含的 janky frame 数"
+
+steps:
+  - id: chrome_trace_availability
+    type: atomic
+    name: "Chrome Scroll 数据可用性"
+    display:
+      level: key
+      layer: overview
+      title: "Chrome Scroll 数据可用性"
+      columns:
+        - name: chrome_scroll_count
+          label: "Scroll 数"
+          type: number
+        - name: chrome_scroll_stats_count
+          label: "v3 统计数"
+          type: number
+        - name: chrome_scroll_v4_frame_count
+          label: "v4 Frame 数"
+          type: number
+        - name: chrome_scroll_v4_jank_count
+          label: "v4 Jank 数"
+          type: number
+        - name: extend_vsync_count
+          label: "Extend_VSync 数"
+          type: number
+        - name: preferred_frame_timeline_count
+          label: "Preferred Timeline 数"
+          type: number
+        - name: status
+          label: "状态"
+          type: string
+    sql: |
+      WITH
+      scrolls AS (
+        SELECT COUNT(*) AS count
+        FROM chrome_scrolls
+        WHERE (${start_ts} IS NULL OR ts + dur > ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ),
+      scroll_stats AS (
+        SELECT COUNT(*) AS count
+        FROM chrome_scroll_stats
+      ),
+      v4_frames AS (
+        SELECT
+          COUNT(*) AS frame_count,
+          SUM(CASE WHEN is_janky THEN 1 ELSE 0 END) AS jank_count
+        FROM chrome_scroll_jank_v4_results
+        WHERE (${start_ts} IS NULL OR ts + dur > ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ),
+      extend_vsync AS (
+        SELECT
+          COUNT(*) AS extend_vsync_count,
+          SUM(CASE
+            WHEN extract_arg(arg_set_id, 'android_choreographer_frame_callback_data.preferred_frame_timeline_index') IS NOT NULL
+              OR extract_arg(arg_set_id, 'android_choreographer_frame_callback_data.chrome_preferred_frame_timeline.vsync_id') IS NOT NULL
+            THEN 1 ELSE 0
+          END) AS preferred_frame_timeline_count
+        FROM slice
+        WHERE name = 'Extend_VSync'
+          AND (${start_ts} IS NULL OR ts + dur > ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
+      )
+      SELECT
+        (SELECT count FROM scrolls) AS chrome_scroll_count,
+        (SELECT count FROM scroll_stats) AS chrome_scroll_stats_count,
+        (SELECT frame_count FROM v4_frames) AS chrome_scroll_v4_frame_count,
+        COALESCE((SELECT jank_count FROM v4_frames), 0) AS chrome_scroll_v4_jank_count,
+        (SELECT extend_vsync_count FROM extend_vsync) AS extend_vsync_count,
+        COALESCE((SELECT preferred_frame_timeline_count FROM extend_vsync), 0) AS preferred_frame_timeline_count,
+        CASE
+          WHEN (SELECT count FROM scrolls) > 0 OR (SELECT frame_count FROM v4_frames) > 0 THEN 'chrome_scroll_available'
+          WHEN (SELECT extend_vsync_count FROM extend_vsync) > 0 THEN 'frame_timeline_only'
+          ELSE 'no_chrome_scroll_data'
+        END AS status
+    save_as: chrome_trace_availability
+
+  - id: chrome_scroll_v3_summary
+    type: atomic
+    name: "Chrome Scroll Jank v3 汇总"
+    optional: true
+    display:
+      level: key
+      layer: list
+      title: "Chrome Scroll Jank v3 汇总"
+      columns:
+        - name: scroll_id
+          label: "Scroll ID"
+          type: number
+        - name: ts
+          label: "开始时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: dur_ms
+          label: "持续时间(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: frame_count
+          label: "帧数"
+          type: number
+        - name: presented_frame_count
+          label: "呈现帧数"
+          type: number
+        - name: janky_frame_count
+          label: "Janky 帧"
+          type: number
+        - name: missed_vsyncs
+          label: "Missed VSync"
+          type: number
+        - name: janky_frame_percent
+          label: "Jank 占比"
+          type: percentage
+          format: percentage
+    sql: |
+      SELECT
+        stats.scroll_id,
+        printf('%d', scroll.ts) AS ts,
+        ROUND(scroll.dur / 1e6, 2) AS dur_ms,
+        stats.frame_count,
+        stats.presented_frame_count,
+        stats.janky_frame_count,
+        stats.missed_vsyncs,
+        ROUND(stats.janky_frame_percent, 2) AS janky_frame_percent
+      FROM chrome_scroll_stats AS stats
+      JOIN chrome_scrolls AS scroll
+        ON scroll.id = stats.scroll_id
+      WHERE stats.janky_frame_count >= COALESCE(${min_janky_frames|1}, 1)
+        AND (${start_ts} IS NULL OR scroll.ts + scroll.dur > ${start_ts})
+        AND (${end_ts} IS NULL OR scroll.ts < ${end_ts})
+      ORDER BY stats.janky_frame_percent DESC, stats.janky_frame_count DESC
+      LIMIT 50
+    save_as: chrome_scroll_v3_summary
+
+  - id: chrome_scroll_v4_janky_frames
+    type: atomic
+    name: "Chrome Scroll Jank v4 帧明细"
+    optional: true
+    display:
+      level: detail
+      layer: list
+      title: "Chrome Scroll Jank v4 帧明细"
+      columns:
+        - name: frame_id
+          label: "Frame ID"
+          type: number
+        - name: scroll_id
+          label: "Scroll ID"
+          type: number
+        - name: ts
+          label: "开始时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: dur_ms
+          label: "耗时(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: vsyncs_since_previous_frame
+          label: "距上帧 VSync"
+          type: number
+        - name: first_scroll_update_type
+          label: "首个输入类型"
+          type: string
+        - name: damage_type
+          label: "Damage 类型"
+          type: string
+        - name: real_abs_total_raw_delta_pixels
+          label: "输入 Delta(px)"
+          type: number
+        - name: jank_tags
+          label: "Jank 标签"
+          type: string
+    sql: |
+      SELECT
+        results.id AS frame_id,
+        info.scroll_id,
+        printf('%d', results.ts) AS ts,
+        ROUND(results.dur / 1e6, 2) AS dur_ms,
+        results.vsyncs_since_previous_frame,
+        results.first_scroll_update_type,
+        results.damage_type,
+        ROUND(results.real_abs_total_raw_delta_pixels, 2) AS real_abs_total_raw_delta_pixels,
+        GROUP_CONCAT(DISTINCT tags.tag) AS jank_tags
+      FROM chrome_scroll_jank_v4_results AS results
+      LEFT JOIN chrome_scroll_frame_info_v4 AS info
+        ON info.id = results.id
+      LEFT JOIN chrome_scroll_jank_tags_v4 AS tags
+        ON tags.frame_id = results.id
+      WHERE results.is_janky
+        AND (${start_ts} IS NULL OR results.ts + results.dur > ${start_ts})
+        AND (${end_ts} IS NULL OR results.ts < ${end_ts})
+      GROUP BY results.id
+      ORDER BY results.vsyncs_since_previous_frame DESC, results.ts
+      LIMIT 100
+    save_as: chrome_scroll_v4_janky_frames
+
+  - id: chrome_preferred_frame_timeline
+    type: atomic
+    name: "Chrome Preferred FrameTimeline"
+    optional: true
+    display:
+      level: detail
+      layer: list
+      title: "Chrome Preferred FrameTimeline"
+      columns:
+        - name: extend_vsync_slice_id
+          label: "Extend_VSync Slice"
+          type: number
+        - name: ts
+          label: "开始时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: frame_ts
+          label: "Frame Time"
+          type: timestamp
+          unit: ns
+        - name: preferred_timeline_index
+          label: "Preferred Index"
+          type: number
+        - name: chrome_preferred_vsync_id
+          label: "Chrome Preferred VSync"
+          type: number
+        - name: preferred_source
+          label: "Preferred 来源"
+          type: string
+    sql: |
+      WITH extend_vsync_slices AS (
+        SELECT
+          id,
+          arg_set_id,
+          ts,
+          dur,
+          ts + extract_arg(
+            arg_set_id,
+            'android_choreographer_frame_callback_data.frame_time_us'
+          ) * 1000 - TO_MONOTONIC(ts) AS frame_ts,
+          extract_arg(
+            arg_set_id,
+            'android_choreographer_frame_callback_data.preferred_frame_timeline_index'
+          ) AS preferred_timeline_index,
+          extract_arg(
+            arg_set_id,
+            'android_choreographer_frame_callback_data.chrome_preferred_frame_timeline.vsync_id'
+          ) AS chrome_preferred_vsync_id
+        FROM slice
+        WHERE name = 'Extend_VSync'
+          AND (${start_ts} IS NULL OR ts + dur > ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
+      )
+      SELECT
+        ev.id AS extend_vsync_slice_id,
+        printf('%d', ev.ts) AS ts,
+        printf('%d', COALESCE(ev.frame_ts, ev.ts)) AS frame_ts,
+        ev.preferred_timeline_index,
+        ev.chrome_preferred_vsync_id,
+        CASE
+          WHEN ev.chrome_preferred_vsync_id IS NOT NULL THEN 'chrome_preferred_frame_timeline'
+          WHEN ev.preferred_timeline_index IS NOT NULL THEN 'preferred_frame_timeline_index'
+          ELSE 'unknown'
+        END AS preferred_source
+      FROM extend_vsync_slices AS ev
+      WHERE ev.preferred_timeline_index IS NOT NULL
+        OR ev.chrome_preferred_vsync_id IS NOT NULL
+      ORDER BY ev.ts
+      LIMIT 100
+    save_as: chrome_preferred_frame_timeline
+
+output:
+  format: structured
+  fields:
+    - name: chrome_trace_availability
+      description: "Chrome scroll/jank/frame timeline 数据可用性"
+    - name: chrome_scroll_v3_summary
+      description: "Chrome scroll jank v3 按 scroll 汇总"
+    - name: chrome_scroll_v4_janky_frames
+      description: "Chrome scroll jank v4 janky frame 明细"
+    - name: chrome_preferred_frame_timeline
+      description: "Chrome preferred frame timeline availability 与候选数"

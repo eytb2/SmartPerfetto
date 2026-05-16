@@ -20,7 +20,7 @@ keywords: []
 | 用户关注方向 | 推荐路径 | 说明 |
 |-------------|---------|------|
 | **CPU / 调度 / 线程** | `invoke_skill("cpu_analysis")` → 如果发现 throttling → `invoke_skill("thermal_throttling")` | 交叉检查热节流和 CPU 频率 |
-| **内存 / OOM / 泄漏** | `invoke_skill("memory_analysis")` → 如果有 LMK → `invoke_skill("lmk_analysis")` → 如果涉及 GPU 内存 → `invoke_skill("dmabuf_analysis")` | 层层深入内存问题 |
+| **内存 / OOM / 泄漏** | `invoke_skill("memory_analysis")` → 如果有 heap dump → `invoke_skill("android_heap_graph_summary")` → 如果有 LMK → `invoke_skill("lmk_analysis")` → 如果涉及 GPU 内存 → `invoke_skill("dmabuf_analysis")` | 层层深入内存问题；heap graph 用 retained/cumulative size 定位 retainer |
 | **IO / 磁盘 / 存储** | `invoke_skill("block_io_analysis")` 或 `invoke_skill("io_pressure")` | 磁盘 IO 和系统 IO 压力 |
 | **GPU / 渲染** | `invoke_skill("gpu_analysis")` | GPU 频率、利用率、Fence 等待 |
 | **Binder / IPC** | `invoke_skill("binder_analysis")` → 特定事务 → `invoke_skill("binder_detail")` | Binder 通信分析 |

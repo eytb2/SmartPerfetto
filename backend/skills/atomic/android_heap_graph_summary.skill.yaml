@@ -1,0 +1,232 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# Android Heap Graph Summary（原子 Skill）
+# =============================================================================
+# 转译 upstream perfetto-workflow-android-heap-dump runbook 的首批可执行 SQL：
+# 先确认 heap graph 是否存在，再输出 heap samples 与 class retained-size
+# 排名。深度引用链仍由后续 per-object drill-down/execute_sql 完成。
+
+name: android_heap_graph_summary
+version: "1.0"
+type: atomic
+category: memory
+tier: B
+
+meta:
+  display_name: "Android Heap Graph Summary"
+  description: "检查 Android Java heap graph 数据，并按 retained/cumulative size 找出主要 class retainer"
+  icon: "memory"
+  tags: [memory, heap_graph, leak, retained_size, upstream]
+
+triggers:
+  keywords:
+    zh: [Java heap dump, heap graph, 堆转储, Java 泄漏, retained size, dominator]
+    en: [java heap dump, heap graph, retained size, dominator, leak]
+  patterns:
+    - ".*(heap dump|heap graph|retained size|dominator).*"
+    - ".*(堆转储|Java.*泄漏|保留大小).*"
+
+prerequisites:
+  modules:
+    - android.memory.heap_graph.heap_graph_stats
+    - android.memory.heap_graph.class_summary_tree
+
+inputs:
+  - name: process_name
+    type: string
+    required: false
+    description: "目标进程名；留空分析全部 heap graph sample"
+  - name: graph_sample_ts
+    type: timestamp
+    required: false
+    description: "指定 heap graph sample 时间戳；留空使用全部 sample"
+  - name: max_rows
+    type: integer
+    required: false
+    default: 30
+    description: "top class retainer 返回行数"
+
+steps:
+  - id: heap_graph_availability
+    type: atomic
+    name: "Heap Graph 数据可用性"
+    display:
+      level: key
+      layer: overview
+      title: "Heap Graph 数据可用性"
+      columns:
+        - name: sample_count
+          label: "Sample 数"
+          type: number
+        - name: process_count
+          label: "进程数"
+          type: number
+        - name: reachable_heap_mb
+          label: "Reachable Heap(MB)"
+          type: number
+        - name: total_heap_mb
+          label: "Total Heap(MB)"
+          type: number
+        - name: status
+          label: "状态"
+          type: string
+    sql: |
+      SELECT
+        COUNT(*) AS sample_count,
+        COUNT(DISTINCT stats.upid) AS process_count,
+        ROUND(COALESCE(SUM(stats.reachable_heap_size), 0) / 1048576.0, 2) AS reachable_heap_mb,
+        ROUND(COALESCE(SUM(stats.total_heap_size), 0) / 1048576.0, 2) AS total_heap_mb,
+        CASE WHEN COUNT(*) > 0 THEN 'heap_graph_available' ELSE 'no_heap_graph_data' END AS status
+      FROM android_heap_graph_stats AS stats
+      LEFT JOIN process AS p
+        ON p.upid = stats.upid
+      WHERE ('${process_name}' = '' OR p.name GLOB '*${process_name}*')
+        AND (${graph_sample_ts} IS NULL OR stats.graph_sample_ts = ${graph_sample_ts})
+    save_as: heap_graph_availability
+
+  - id: heap_graph_samples
+    type: atomic
+    name: "Heap Graph Samples"
+    optional: true
+    display:
+      level: key
+      layer: list
+      title: "Heap Graph Samples"
+      columns:
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: graph_sample_ts
+          label: "Sample 时间"
+          type: timestamp
+          unit: ns
+        - name: reachable_heap_mb
+          label: "Reachable Heap(MB)"
+          type: number
+        - name: total_heap_mb
+          label: "Total Heap(MB)"
+          type: number
+        - name: reachable_obj_count
+          label: "Reachable 对象数"
+          type: number
+        - name: total_obj_count
+          label: "对象总数"
+          type: number
+        - name: anon_rss_and_swap_mb
+          label: "Anon RSS+Swap(MB)"
+          type: number
+        - name: oom_score_adj
+          label: "OOM adj"
+          type: number
+        - name: unreachable_heap_mb
+          label: "Unreachable Heap(MB)"
+          type: number
+    sql: |
+      SELECT
+        COALESCE(p.name, printf('upid:%d', stats.upid)) AS process_name,
+        printf('%d', stats.graph_sample_ts) AS graph_sample_ts,
+        ROUND(stats.reachable_heap_size / 1048576.0, 2) AS reachable_heap_mb,
+        ROUND(stats.total_heap_size / 1048576.0, 2) AS total_heap_mb,
+        stats.reachable_obj_count,
+        stats.total_obj_count,
+        ROUND(stats.anon_rss_and_swap_size / 1048576.0, 2) AS anon_rss_and_swap_mb,
+        stats.oom_score_adj,
+        ROUND(MAX(stats.total_heap_size - stats.reachable_heap_size, 0) / 1048576.0, 2) AS unreachable_heap_mb
+      FROM android_heap_graph_stats AS stats
+      LEFT JOIN process AS p
+        ON p.upid = stats.upid
+      WHERE ('${process_name}' = '' OR p.name GLOB '*${process_name}*')
+        AND (${graph_sample_ts} IS NULL OR stats.graph_sample_ts = ${graph_sample_ts})
+      ORDER BY stats.graph_sample_ts, stats.reachable_heap_size DESC
+    save_as: heap_graph_samples
+
+  - id: top_retained_classes
+    type: atomic
+    name: "Top Retained Classes"
+    optional: true
+    display:
+      level: detail
+      layer: list
+      title: "Top Retained Classes"
+      columns:
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: graph_sample_ts
+          label: "Sample 时间"
+          type: timestamp
+          unit: ns
+        - name: class_name
+          label: "Class"
+          type: string
+        - name: root_type
+          label: "Root Type"
+          type: string
+        - name: self_count
+          label: "Self Count"
+          type: number
+        - name: self_size_mb
+          label: "Self Size(MB)"
+          type: number
+        - name: cumulative_count
+          label: "Retained Count"
+          type: number
+        - name: cumulative_size_mb
+          label: "Retained Size(MB)"
+          type: number
+        - name: retained_pct_of_sample
+          label: "Sample 占比"
+          type: percentage
+          format: percentage
+        - name: leak_hint
+          label: "风险提示"
+          type: string
+    sql: |
+      WITH sample_totals AS (
+        SELECT
+          upid,
+          graph_sample_ts,
+          reachable_heap_size
+        FROM android_heap_graph_stats
+      )
+      SELECT
+        COALESCE(p.name, printf('upid:%d', classes.upid)) AS process_name,
+        printf('%d', classes.graph_sample_ts) AS graph_sample_ts,
+        classes.name AS class_name,
+        classes.root_type,
+        classes.self_count,
+        ROUND(classes.self_size / 1048576.0, 2) AS self_size_mb,
+        classes.cumulative_count,
+        ROUND(classes.cumulative_size / 1048576.0, 2) AS cumulative_size_mb,
+        ROUND(100.0 * classes.cumulative_size / NULLIF(sample_totals.reachable_heap_size, 0), 2) AS retained_pct_of_sample,
+        CASE
+          WHEN classes.root_type IN ('ROOT_JAVA_FRAME', 'ROOT_JNI_GLOBAL') AND classes.cumulative_size > 1048576 THEN 'root_retainer'
+          WHEN classes.name GLOB '*Activity*' AND classes.self_count > 1 THEN 'activity_instances'
+          WHEN classes.name GLOB '*Fragment*' AND classes.self_count > 5 THEN 'fragment_instances'
+          WHEN classes.cumulative_size > sample_totals.reachable_heap_size * 0.2 THEN 'dominant_retainer'
+          ELSE 'inspect_if_relevant'
+        END AS leak_hint
+      FROM android_heap_graph_class_summary_tree AS classes
+      JOIN sample_totals
+        ON sample_totals.upid = classes.upid
+        AND sample_totals.graph_sample_ts = classes.graph_sample_ts
+      LEFT JOIN process AS p
+        ON p.upid = classes.upid
+      WHERE ('${process_name}' = '' OR p.name GLOB '*${process_name}*')
+        AND (${graph_sample_ts} IS NULL OR classes.graph_sample_ts = ${graph_sample_ts})
+      ORDER BY classes.cumulative_size DESC
+      LIMIT COALESCE(${max_rows|30}, 30)
+    save_as: top_retained_classes
+
+output:
+  format: structured
+  fields:
+    - name: heap_graph_availability
+      description: "Heap graph sample/data availability"
+    - name: heap_graph_samples
+      description: "Heap graph sample-level heap/RSS/OOM orientation"
+    - name: top_retained_classes
+      description: "Class retained-size ranking from android_heap_graph_class_summary_tree"

@@ -83,6 +83,12 @@ display:
     - name: jank_type
       label: "Jank 类型"
       type: string
+    - name: thread_role
+      label: "线程角色"
+      type: string
+    - name: thread_name
+      label: "线程"
+      type: string
     - name: blocking_call
       label: "阻塞调用"
       type: string
@@ -125,8 +131,17 @@ sql: |
       bc.ts as call_ts,
       bc.dur as call_dur,
       bc.process_name as call_process,
-      bc.utid
+      bc.utid,
+      COALESCE(t.name, 'unknown') as thread_name,
+      CASE
+        WHEN t.tid = p.pid THEN 'MainThread'
+        WHEN t.name = 'RenderThread' OR t.name GLOB '*RenderThread*' THEN 'RenderThread'
+        WHEN t.name GLOB 'Binder:*' OR t.name GLOB '*Binder*' THEN 'BinderThread'
+        ELSE 'Other'
+      END as thread_role
     FROM _android_critical_blocking_calls bc
+    LEFT JOIN thread t ON t.utid = bc.utid
+    LEFT JOIN process p ON p.upid = bc.upid
     WHERE (bc.process_name GLOB '${process_name}*' OR '${process_name}' = '')
   )
   SELECT
@@ -134,6 +149,8 @@ sql: |
     printf('%d', jf.frame_ts) as frame_ts,
     ROUND(jf.frame_dur / 1e6, 2) as frame_dur_ms,
     jf.jank_type,
+    b.thread_role,
+    b.thread_name,
     b.blocking_call,
     ROUND(
       (MIN(b.call_ts + b.call_dur, jf.frame_end) - MAX(b.call_ts, jf.frame_ts)) / 1e6,
@@ -145,10 +162,54 @@ sql: |
   JOIN blocking b
     ON b.call_ts < jf.frame_end
     AND b.call_ts + b.call_dur > jf.frame_ts
-  GROUP BY jf.frame_id, b.blocking_call
+  GROUP BY jf.frame_id, b.thread_role, b.thread_name, b.blocking_call
   HAVING overlap_ms > 0.5
   ORDER BY jf.frame_ts, overlap_ms DESC
   LIMIT 100
 
 output:
   format: structured
+  display:
+    level: key
+    layer: list
+    title: "掉帧帧阻塞调用明细"
+    columns:
+      - name: frame_id
+        label: "帧 ID"
+        type: string
+      - name: frame_ts
+        label: "帧时间"
+        type: timestamp
+        unit: ns
+        clickAction: navigate_timeline
+      - name: frame_dur_ms
+        label: "帧耗时(ms)"
+        type: duration
+        format: duration_ms
+        unit: ms
+      - name: jank_type
+        label: "Jank 类型"
+        type: string
+      - name: thread_role
+        label: "线程角色"
+        type: string
+      - name: thread_name
+        label: "线程"
+        type: string
+      - name: blocking_call
+        label: "阻塞调用"
+        type: string
+      - name: overlap_ms
+        label: "重叠时间(ms)"
+        type: duration
+        format: duration_ms
+        unit: ms
+      - name: call_dur_ms
+        label: "调用耗时(ms)"
+        type: duration
+        format: duration_ms
+        unit: ms
+      - name: call_count
+        label: "调用次数"
+        type: number
+        format: compact

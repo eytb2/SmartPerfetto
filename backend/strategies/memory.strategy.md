@@ -72,7 +72,8 @@ invoke_skill("memory_rss_high_watermark")
 | 信号 | 工具 | 何时使用 |
 |------|------|---------|
 | GPU 内存 / DMA-BUF | `invoke_skill("dmabuf_analysis")` | 图形密集应用的 GPU 内存分析 |
-| Bitmap 内存 | `invoke_skill("android_bitmap_memory_per_process")` | 图片/纹理密集应用的 Bitmap footprint |
+| Java Heap Graph | `invoke_skill("android_heap_graph_summary")` | trace 含 Java heap dump 时，先确认 sample/process，再按 retained/cumulative size 找主要 class retainer |
+| Bitmap 内存 | `invoke_skill("android_bitmap_memory_per_process")` | 图片/纹理密集应用的 Bitmap footprint；有 heap graph 时同时看 width/height/density/storage/source attribution |
 | GC 压力 | `invoke_skill("gc_analysis")` | Java 堆内存问题、频繁 GC |
 | 页缺失 | `execute_sql` 查询 `page_fault` | 内存映射文件访问延迟 |
 | 系统内存压力 | `invoke_skill("memory_pressure_in_range", { start_ts, end_ts })` | 特定时间段的内存压力事件 |
@@ -80,6 +81,7 @@ invoke_skill("memory_rss_high_watermark")
 **Phase 4 — 交叉分析：**
 - 内存压力 + LMK → 检查是否有进程被反复杀死重启（thrashing）
 - GC 频繁 + 内存增长 → 可能存在 Java 对象泄漏
+- Heap graph 可用 + retained class 集中 → 按 `android_heap_graph_summary` 的 top retainer 继续查 dominator/reference path；不要只按 raw object id 下结论
 - DMA-BUF 增长 → GPU 内存泄漏（纹理/Buffer 未释放）
 - 内存压力 + ANR → 系统内存不足导致的 ANR（非 App 代码 Bug）
 

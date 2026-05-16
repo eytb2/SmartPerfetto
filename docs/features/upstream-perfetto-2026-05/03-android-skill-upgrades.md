@@ -22,9 +22,21 @@ Skill evidence layer。优先顺序按当前产品价值排序：
   - `android_bitmap_memory_per_process`
   - heap bitmap source/sender attribution。
   - bitmap width/height/density/storage type summary。
+- 新增 `android_heap_graph_summary`：
+  - heap graph availability。
+  - sample/process orientation。
+  - top retained classes by cumulative/retained size。
 - 升级 composite `memory_analysis`：
   - 如果存在 heap graph + bitmap table，增加 bitmap section。
   - 如果 stdlib 缺失，优雅降级到已有 RSS/native heap 分析。
+
+### 状态
+
+- 已完成 `android_bitmap_memory_per_process` 升级。
+- 已完成 `android_heap_graph_summary` 首批 upstream heap-dump workflow 转译。
+- 当前 bundled `perfetto/out/ui/trace_processor_shell` 支持 heap graph stats/class
+  summary，但不支持 `android.memory.heap_graph.bitmap`；bitmap heap metadata 路径
+  已做 optional fallback，TP 升级后自动产出。
 
 ### 测试
 
@@ -41,6 +53,13 @@ Skill evidence layer。优先顺序按当前产品价值排序：
 - 区分 MainThread、RenderThread、Binder thread 的 blocking attribution。
 - 把 deterministic evidence 与 AI inference 分开。
 
+### 状态
+
+- 已完成 `frame_blocking_calls` runtime 输出：`thread_role` / `thread_name` /
+  `blocking_call` / overlap duration。
+- Skill runtime eval 已覆盖 process identity gate + RenderThread/MainThread/Binder
+  provenance contract。
+
 ### 测试
 
 - `npm --prefix backend run test -- tests/skill-eval/jank_frame_detail.eval.ts --runInBand`
@@ -55,6 +74,13 @@ Skill evidence layer。优先顺序按当前产品价值排序：
 - 升级 `lock_contention_in_range` 和 `lock_contention_analysis`。
 - 输出 owner thread、blocked thread、duration、callsite/function。
 - 对没有 lock contention data 的 trace 返回明确 empty result。
+
+### 状态
+
+- 已完成 `lock_contention_in_range.owner_contentions`。
+- 已完成 `lock_contention_analysis.owner_contention_events`。
+- 输出 Monitor + ART Lock contention 的 source、blocked thread、owner thread、
+  owner TID、owner thread state、owner blocked function 与 overlap duration。
 
 ### 测试
 
@@ -71,6 +97,14 @@ Skill evidence layer。优先顺序按当前产品价值排序：
 - 对 Android app trace 与 Chrome trace 分别处理，避免把 Chrome plugin 假设硬塞给
   Android app 分析。
 
+### 状态
+
+- 已新增 `chrome_scroll_jank_frame_timeline`，覆盖 `chrome_scrolls` /
+  `chrome_scroll_stats` / `chrome_scroll_jank_v4_results` /
+  `chrome_scroll_jank_tags_v4` / preferred frame timeline availability。
+- `scrolling.strategy.md` 已要求 Chrome/WebView 场景先走 Chrome skill；普通
+  Android trace 返回 `no_chrome_scroll_data` 时不能误判为 Chrome scroll jank。
+
 ### 测试
 
 - `npm --prefix backend run test:scene-trace-regression`
@@ -83,6 +117,12 @@ Skill evidence layer。优先顺序按当前产品价值排序：
 - 短期不直接引入 live Memscope UI。
 - 先提取可复用的 process memory category、RSS/swap/page cache/pressure 视角。
 - 映射到 existing memory Skill 和 future enterprise live profiling 入口。
+
+### 状态
+
+- 本轮不引入 live Memscope UI。
+- 已把 heap graph / bitmap / RSS 路径放入 memory strategy；Memscope 仍作为 future
+  live profiling 产品线，不阻塞 M4。
 
 ### 测试
 

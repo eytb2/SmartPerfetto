@@ -150,6 +150,9 @@ export class SkillEvaluator {
     const skillsDir = path.join(process.cwd(), 'skills');
     const visited = new Set<string>([this.skill.name]);
     const queue = [...this.collectReferencedSkills(this.skill.steps || [])];
+    if (this.requiresProcessIdentityResolver(this.skill)) {
+      queue.push('process_identity_resolver');
+    }
 
     while (queue.length > 0) {
       const skillName = queue.shift();
@@ -171,6 +174,13 @@ export class SkillEvaluator {
         console.warn(`[SkillEvaluator] Dependent skill not found: ${skillName}`);
       }
     }
+  }
+
+  private requiresProcessIdentityResolver(skill: SkillDefinition): boolean {
+    const identityPolicy = skill.identity?.policy;
+    return identityPolicy !== undefined
+      && identityPolicy !== 'none'
+      && identityPolicy !== 'exempt';
   }
 
   private collectReferencedSkills(steps: any[]): string[] {
@@ -419,6 +429,14 @@ export class SkillEvaluator {
         error: error.message,
       };
     }
+  }
+
+  async executeRuntimeSkill(params: Record<string, any> = {}): Promise<SkillExecutionResult> {
+    if (!this.executor || !this.traceId) {
+      throw new Error('SkillEvaluator not initialized. Call loadTrace() first.');
+    }
+
+    return this.executor.execute(this.skillId, this.traceId, params);
   }
 
   /**

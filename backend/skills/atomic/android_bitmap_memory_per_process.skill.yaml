@@ -5,26 +5,36 @@
 # =============================================================================
 # Bitmap 内存占用（B 级 atomic）
 # =============================================================================
-# 使用 android.bitmaps 模块统计每进程 Bitmap 内存占用。Bitmap 是 Android
-# 应用最大的 Java 堆外内存来源之一，重 UI 应用尤其敏感。
+# 使用 android.bitmaps counter 模块统计每进程 Bitmap 内存占用；当 trace
+# 包含 ART heap graph 时，再使用 upstream android.memory.heap_graph.bitmap
+# 补充 Bitmap width/height/density/storage/source attribution。
 
 name: android_bitmap_memory_per_process
-version: "1.0"
+version: "1.1"
 type: atomic
 category: memory
 tier: B
 
 meta:
   display_name: "Bitmap 内存（按进程）"
-  description: "每进程 Bitmap 内存占用峰值"
+  description: "每进程 Bitmap counter、heap graph metadata 和跨进程来源归因"
   icon: "image"
-  tags: [memory, bitmap, image, atomic]
+  tags: [memory, bitmap, image, heap_graph, atomic]
 
 prerequisites:
   modules:
     - android.bitmaps
+    - android.memory.heap_graph.bitmap
 
-inputs: []
+inputs:
+  - name: process_name
+    type: string
+    required: false
+    description: "目标进程名（可选，前缀匹配）"
+  - name: package
+    type: string
+    required: false
+    description: "目标包名（可选，前缀匹配）"
 
 steps:
   - id: bitmap_memory
@@ -52,5 +62,142 @@ steps:
         bitmap_count,
         bitmap_memory AS total_bytes
       FROM android_bitmap_counters_per_process
+      WHERE (
+        ('${process_name}' = '' AND '${package}' = '')
+        OR process_name GLOB '${process_name}*'
+        OR process_name GLOB '${package}*'
+      )
       ORDER BY bitmap_memory DESC
       LIMIT 30
+
+  - id: heap_bitmap_metadata
+    type: atomic
+    name: "Heap Graph Bitmap 元数据"
+    optional: true
+    display:
+      level: detail
+      layer: list
+      title: "Heap Graph Bitmap 元数据"
+      columns:
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: bitmap_object_count
+          label: "Bitmap 对象"
+          type: number
+          format: compact
+        - name: reachable_count
+          label: "可达对象"
+          type: number
+          format: compact
+        - name: total_bytes
+          label: "总字节"
+          type: bytes
+          format: bytes_human
+        - name: native_bytes
+          label: "Native 字节"
+          type: bytes
+          format: bytes_human
+        - name: java_self_bytes
+          label: "Java 对象字节"
+          type: bytes
+          format: bytes_human
+        - name: known_dimension_count
+          label: "有尺寸对象"
+          type: number
+          format: compact
+        - name: max_width
+          label: "最大宽度"
+          type: number
+          format: compact
+        - name: max_height
+          label: "最大高度"
+          type: number
+          format: compact
+        - name: storage_types
+          label: "存储类型"
+          type: string
+    sql: |
+      WITH bitmap_rows AS (
+        SELECT
+          COALESCE(p.name, printf('upid:%d', b.upid)) AS process_name,
+          b.*
+        FROM heap_graph_bitmaps b
+        LEFT JOIN process p ON p.upid = b.upid
+        WHERE (
+          ('${process_name}' = '' AND '${package}' = '')
+          OR p.name GLOB '${process_name}*'
+          OR p.name GLOB '${package}*'
+        )
+      )
+      SELECT
+        process_name,
+        COUNT(*) AS bitmap_object_count,
+        SUM(CASE WHEN reachable THEN 1 ELSE 0 END) AS reachable_count,
+        SUM(COALESCE(native_size, 0) + COALESCE(self_size, 0)) AS total_bytes,
+        SUM(COALESCE(native_size, 0)) AS native_bytes,
+        SUM(COALESCE(self_size, 0)) AS java_self_bytes,
+        SUM(CASE WHEN width IS NOT NULL AND height IS NOT NULL THEN 1 ELSE 0 END) AS known_dimension_count,
+        MAX(width) AS max_width,
+        MAX(height) AS max_height,
+        GROUP_CONCAT(DISTINCT COALESCE(bitmap_storage_type, 'unknown')) AS storage_types
+      FROM bitmap_rows
+      GROUP BY process_name
+      ORDER BY total_bytes DESC
+      LIMIT 30
+
+  - id: heap_bitmap_sender_attribution
+    type: atomic
+    name: "跨进程 Bitmap 来源归因"
+    optional: true
+    display:
+      level: detail
+      layer: list
+      title: "跨进程 Bitmap 来源"
+      columns:
+        - name: receiver_process
+          label: "接收进程"
+          type: string
+        - name: source_process
+          label: "来源进程"
+          type: string
+        - name: bitmap_count
+          label: "Bitmap 数量"
+          type: number
+          format: compact
+        - name: total_bytes
+          label: "总字节"
+          type: bytes
+          format: bytes_human
+        - name: receiver_storage_types
+          label: "接收端存储"
+          type: string
+        - name: source_storage_types
+          label: "来源端存储"
+          type: string
+    sql: |
+      WITH bitmap_rows AS (
+        SELECT
+          COALESCE(receiver.name, printf('upid:%d', b.upid)) AS receiver_process,
+          COALESCE(b.source_process_name, printf('pid:%d', b.source_pid), 'unknown') AS source_process,
+          b.*
+        FROM heap_graph_bitmaps b
+        LEFT JOIN process receiver ON receiver.upid = b.upid
+        WHERE b.source_id IS NOT NULL
+          AND (
+            ('${process_name}' = '' AND '${package}' = '')
+            OR receiver.name GLOB '${process_name}*'
+            OR receiver.name GLOB '${package}*'
+          )
+      )
+      SELECT
+        receiver_process,
+        source_process,
+        COUNT(*) AS bitmap_count,
+        SUM(COALESCE(native_size, 0) + COALESCE(self_size, 0)) AS total_bytes,
+        GROUP_CONCAT(DISTINCT COALESCE(bitmap_storage_type, 'unknown')) AS receiver_storage_types,
+        GROUP_CONCAT(DISTINCT COALESCE(source_storage_type, 'unknown')) AS source_storage_types
+      FROM bitmap_rows
+      GROUP BY receiver_process, source_process
+      ORDER BY total_bytes DESC, bitmap_count DESC
+      LIMIT 50
