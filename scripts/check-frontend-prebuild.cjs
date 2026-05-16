@@ -108,12 +108,21 @@ if (!exists(indexPath)) {
       const bundlePath = path.join(versionDir, 'frontend_bundle.js');
       if (exists(bundlePath)) {
         const bundleText = readText(bundlePath);
+        const requiredTopLevelSyntaqliteAssets = [
+          'assets/syntaqlite-perfetto.wasm',
+          'assets/syntaqlite-runtime.js',
+          'assets/syntaqlite-runtime.wasm',
+          'assets/syntaqlite-sqlite.wasm',
+        ];
         const referencedAssets = [...bundleText.matchAll(/["'](assets\/syntaqlite-[^"']+)["']/g)]
           .map(match => match[1]);
-        for (const asset of [...new Set(referencedAssets)].sort()) {
+        for (const asset of [...new Set([...referencedAssets, ...requiredTopLevelSyntaqliteAssets])].sort()) {
           const assetPath = path.join(frontendDir, asset);
           if (!exists(assetPath)) {
             fail(`frontend bundle references missing asset: ${path.relative(root, assetPath)}`);
+          }
+          if (exists(assetPath) && fileSize(assetPath) === 0) {
+            fail(`frontend asset is empty: ${path.relative(root, assetPath)}`);
           }
         }
       }
