@@ -22,6 +22,7 @@
  */
 
 import { EventEmitter } from 'events';
+import { injectStdlibIncludes } from '../../../agentv3/sqlIncludeInjector';
 import {
   AgentConfig,
   AgentTask,
@@ -1701,16 +1702,19 @@ ${this.getToolDescriptionsForLLM()}
           continue;
         }
 
+        const { sql: executableSql, injected } = injectStdlibIncludes(sqlToExecute);
+
         // Log for debugging
         console.log(`[${this.config.id}] Executing dynamic SQL for: ${objective}`);
-        console.log(`[${this.config.id}] SQL: ${sqlToExecute.slice(0, 200)}...`);
+        console.log(`[${this.config.id}] SQL: ${executableSql.slice(0, 200)}...`);
 
         // Emit event for tracking
         this.emit('sql_generated', {
           agentId: this.config.id,
           objective,
-          sql: sqlToExecute,
+          sql: executableSql,
           riskLevel: currentGeneratedSQL.riskLevel,
+          stdlibInjectedModules: injected,
           repairAttempts,
         });
 
@@ -1718,7 +1722,7 @@ ${this.getToolDescriptionsForLLM()}
           // Execute SQL
           const queryResult = await context.traceProcessorService.query(
             context.traceId,
-            sqlToExecute
+            executableSql
           );
           const executionError =
             queryResult && typeof queryResult.error === 'string'

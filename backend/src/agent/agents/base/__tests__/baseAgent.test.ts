@@ -267,4 +267,50 @@ describe('BaseAgent - dynamic SQL error handling', () => {
     expect(result.success).toBe(false);
     expect(String(result.error || '')).toContain('cannot repair');
   });
+
+  test('auto-injects stdlib modules for generated dynamic SQL before execution', async () => {
+    const agent = new TestAgent(config, {} as any);
+    const query = jest.fn().mockResolvedValue({
+      columns: ['self_dur'],
+      rows: [[123]],
+    });
+
+    const ensureLimit = jest.fn((sql: string) => sql);
+    const validate = jest.fn().mockReturnValue({ valid: true, errors: [] });
+    const generateSQL = jest.fn().mockResolvedValue({
+      success: true,
+      sql: {
+        sql: 'SELECT self_dur FROM slice_self_dur LIMIT 1',
+        explanation: 'test',
+        expectedColumns: ['self_dur'],
+        riskLevel: 'safe',
+        riskFactors: [],
+      },
+    });
+    const repairSQL = jest.fn();
+
+    (agent as any).getSQLGenerator = jest.fn(async () => ({
+      generateSQL,
+      repairSQL,
+    }));
+    (agent as any).getSQLValidator = jest.fn(async () => ({
+      ensureLimit,
+      validate,
+    }));
+
+    const result = await (agent as any).generateAndExecuteSQL(
+      'measure self duration',
+      {
+        traceId: 'trace_1',
+        traceProcessorService: { query },
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(query).toHaveBeenCalledWith(
+      'trace_1',
+      expect.stringMatching(/^INCLUDE PERFETTO MODULE slices\.self_dur;\nSELECT self_dur FROM slice_self_dur LIMIT 1$/),
+    );
+    expect(repairSQL).not.toHaveBeenCalled();
+  });
 });
