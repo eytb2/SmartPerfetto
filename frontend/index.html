@@ -9,7 +9,7 @@
   <script defer src="/assistant-flamegraph.js"></script>
   <script defer src="/assistant-critical-path.js"></script>
 </head>
-<body data-perfetto_version='{"stable":"v54.0-3bce38996"}'>
+<body data-perfetto_version='{"stable":"v55.2-3bce38996"}'>
   <!--
     Don't add any content here. The whole <body> is replaced by
     frontend/index.ts when bootstrapping. This is only used for very early
@@ -125,7 +125,7 @@ Technical Information:
       // https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Attributes/rel/preload.
       const fontAttrs = {crossOrigin: '', as: 'font', type: 'font/woff2'}
       const assetsPreload = {
-        '/perfetto.css': {as: 'style'},
+        '/frontend.css': {as: 'style'},
         '/assets/MaterialSymbolsOutlined.woff2': fontAttrs,
         '/assets/Roboto.woff2': fontAttrs,
       };

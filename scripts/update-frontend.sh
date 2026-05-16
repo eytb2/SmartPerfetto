@@ -51,7 +51,7 @@ inject_smartperfetto_static_assets() {
 }
 
 # Find the versioned dist directory
-VERSION_DIR=$(find "$DIST_DIR" -maxdepth 1 -type d -name 'v54.0-*' -print -quit 2>/dev/null || true)
+VERSION_DIR=$(find "$DIST_DIR" -maxdepth 1 -type d -name 'v*' -print 2>/dev/null | sort -V | tail -n 1 || true)
 if [ -z "$VERSION_DIR" ]; then
   echo "ERROR: No compiled frontend found at $DIST_DIR"
   echo "       Run ./scripts/start-dev.sh first to build the frontend."
@@ -81,27 +81,28 @@ inject_smartperfetto_static_assets "$FRONTEND_DIR/index.html"
 cp "$DIST_DIR/service_worker.js"   "$FRONTEND_DIR/service_worker.js" 2>/dev/null || true
 
 # Sync versioned directory.
-# Exclude source maps (repo size) and JS engine bundles — the --only-wasm-memory64
-# build produces 38KB stubs for engine_bundle.js and traceconv_bundle.js instead
-# of the real 244KB bundles, so we preserve those from git.
-# WASM files ARE real products of the --only-wasm-memory64 build and must be copied.
+# Exclude source maps (repo size). JS engine bundles are copied from the build
+# output by default; the fallback below only restores previous real bundles when
+# a --only-wasm-memory64 build produced small stubs.
+# WASM files ARE real products of the build and must be copied.
 rsync -a --delete \
   --exclude="*.map" \
-  --exclude="engine_bundle.js" \
-  --exclude="traceconv_bundle.js" \
   "$VERSION_DIR/" \
   "$FRONTEND_DIR/$VERSION/"
 
-# Rollup can emit indented blank lines for newly added modules. Keep checked-in
-# generated text artifacts compatible with git diff --check.
-TEXT_ARTIFACT="$FRONTEND_DIR/$VERSION/frontend_bundle.js"
-if [ -f "$TEXT_ARTIFACT" ]; then
-  perl -pi -e 's/[ \t]+$//' "$TEXT_ARTIFACT"
-fi
+# Rollup and upstream runtime assets can emit indented blank lines. Keep
+# checked-in generated text artifacts compatible with git diff --check.
+for TEXT_ARTIFACT in \
+  "$FRONTEND_DIR/$VERSION/frontend_bundle.js" \
+  "$FRONTEND_DIR/$VERSION/syntaqlite-runtime.js"; do
+  if [ -f "$TEXT_ARTIFACT" ]; then
+    perl -pi -e 's/[ \t]+$//' "$TEXT_ARTIFACT"
+  fi
+done
 
-# Restore JS engine bundles if they are missing (e.g. first-time copy of a new
-# version directory). The real bundles live in the previous versioned directory
-# committed in git; stubs from --only-wasm-memory64 are ~38KB and must not be used.
+# Restore JS engine bundles if they are missing or are small stubs. The real
+# bundles live in the previous versioned directory committed in git; stubs from
+# --only-wasm-memory64 are ~38KB and must not be used.
 for BUNDLE in engine_bundle.js traceconv_bundle.js; do
   TARGET="$FRONTEND_DIR/$VERSION/$BUNDLE"
   if [ ! -f "$TARGET" ] || [ "$(wc -c < "$TARGET")" -lt 100000 ]; then
