@@ -268,6 +268,17 @@ describe('createClaudeMcpServer', () => {
       expect(Array.isArray(listResult)).toBe(true);
       expect(listResult.length).toBeGreaterThan(0);
     });
+
+    it('lookup_sql_schema returns stdlib_docs module metadata without a plan', async () => {
+      const { tools } = createTestServer();
+      const result = await callTool(tools, 'lookup_sql_schema', { keyword: 'android_frames' });
+      const frameEntry = result.entries.find((entry: any) => entry.name === 'android_frames');
+
+      expect(result.sources.stdlibDocs).toBeGreaterThan(0);
+      expect(frameEntry.module).toBe('android.frames.timeline');
+      expect(frameEntry.include).toBe('INCLUDE PERFETTO MODULE android.frames.timeline;');
+      expect(frameEntry.transitiveIncludes).toEqual(expect.arrayContaining(['slices.with_context']));
+    });
   });
 
   describe('submit_plan', () => {

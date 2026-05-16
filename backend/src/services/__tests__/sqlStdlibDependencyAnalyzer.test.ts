@@ -63,6 +63,19 @@ describe('sqlStdlibDependencyAnalyzer', () => {
     expect(analysis.requiredModules).toEqual([]);
   });
 
+  it('treats stdlib_docs transitive includes as covering dependencies', () => {
+    const analysis = analyzeSqlStdlibDependencies(`
+      INCLUDE PERFETTO MODULE android.frames.timeline;
+      SELECT id, thread_name
+      FROM thread_slice
+    `);
+
+    expect(analysis.dependencies).toEqual([
+      { symbol: 'thread_slice', module: 'slices.with_context', usage: 'table' },
+    ]);
+    expect(analysis.requiredModules).toEqual([]);
+  });
+
   it('keeps INCLUDE statements order-sensitive across SQL statements', () => {
     const includedFirst = analyzeSqlStdlibDependencies(`
       INCLUDE PERFETTO MODULE slices.self_dur;

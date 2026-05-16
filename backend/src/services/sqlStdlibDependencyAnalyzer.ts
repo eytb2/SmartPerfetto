@@ -3,6 +3,7 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import { getPerfettoStdlibSymbolIndex } from './perfettoStdlibScanner';
+import { moduleCoveredByPerfettoSqlLineage } from './perfettoSqlDocs';
 
 export type SqlStdlibUsageKind = 'table' | 'function' | 'macro';
 
@@ -416,7 +417,7 @@ export function moduleCoveredByStdlibDeclaration(
   for (const declaration of declarations) {
     const declared = declaration.trim().toLowerCase();
     if (!declared) continue;
-    if (normalized === declared || normalized.startsWith(`${declared}.`)) {
+    if (moduleCoveredByPerfettoSqlLineage(normalized, declared)) {
       return true;
     }
   }

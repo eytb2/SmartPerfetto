@@ -36,12 +36,25 @@ export interface SqlSchemaEntry {
   id: string;
   name: string;
   category: string;
-  type: 'function' | 'view' | 'table';
+  type: 'function' | 'view' | 'table' | 'table_function' | 'macro' | string;
   description: string;
+  /** Perfetto stdlib module that defines this symbol, when known. */
+  module?: string;
+  /** INCLUDE statement required to load the defining module. */
+  include?: string;
+  /** Direct module includes declared by the defining stdlib module. */
+  moduleIncludes?: string[];
+  /** Transitive module includes resolved from stdlib docs / pfsql lineage. */
+  transitiveIncludes?: string[];
+  /** Tags emitted by upstream stdlib_docs.json. */
+  tags?: string[];
+  /** Source SQL file path relative to the repo root, when known. */
+  sourcePath?: string;
   /** Column definitions for tables/views (when available in the schema index) */
   columns?: Array<{ name: string; type?: string; description?: string }>;
   /** Parameter definitions for functions (when available in the schema index) */
   params?: Array<{ name: string; type?: string; description?: string }>;
+  returnType?: string;
 }
 
 export interface SqlSchemaIndex {

@@ -15,7 +15,7 @@ import { createArchitectureDetector } from '../agent/detectors/architectureDetec
 import { displayResultToEnvelope } from '../types/dataContract';
 import type { DisplayResult as SkillDisplayResult } from '../services/skillEngine/types';
 import type { StreamingUpdate } from '../agent/types';
-import type { SqlSchemaIndex, AnalysisNote, AnalysisPlanV3, PlanAspectWaiver, PlanPhase, PlanRevision, Hypothesis, UncertaintyFlag } from './types';
+import type { SqlSchemaEntry, SqlSchemaIndex, AnalysisNote, AnalysisPlanV3, PlanAspectWaiver, PlanPhase, PlanRevision, Hypothesis, UncertaintyFlag } from './types';
 import type { SceneType } from './sceneClassifier';
 import { summarizeSqlResult } from './sqlSummarizer';
 import { matchPatterns, matchNegativePatterns, extractTraceFeatures } from './analysisPatternMemory';
@@ -24,6 +24,11 @@ import {
   getPerfettoStdlibModules,
   getPerfettoStdlibPath,
 } from '../services/perfettoStdlibScanner';
+import {
+  listPerfettoSqlModuleDocs,
+  searchPerfettoSqlDocs,
+  type PerfettoSqlDocEntry,
+} from '../services/perfettoSqlDocs';
 import { sqlUsesProcessNameFilter } from '../services/processIdentity/identityGate';
 import { injectStdlibIncludes } from './sqlIncludeInjector';
 import { loadPromptTemplate, getPhaseHints } from './strategyLoader';
@@ -294,6 +299,42 @@ function loadSqlSchema(): SqlSchemaIndex {
     sqlSchemaCache = { version: '0.0.0', generatedAt: '', templates: [] };
   }
   return sqlSchemaCache;
+}
+
+function compactSqlDocEntry(entry: PerfettoSqlDocEntry): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    name: entry.name,
+    type: entry.type,
+    category: entry.category,
+    module: entry.module,
+    description: entry.description,
+    include: entry.include,
+  };
+  if (entry.tags?.length) out.tags = entry.tags;
+  if (entry.columns?.length) out.columns = entry.columns;
+  if (entry.params?.length) out.params = entry.params;
+  if (entry.returnType) out.returnType = entry.returnType;
+  if (entry.moduleIncludes?.length) out.moduleIncludes = entry.moduleIncludes;
+  if (entry.transitiveIncludes?.length) out.transitiveIncludes = entry.transitiveIncludes;
+  if (entry.lineage) out.lineage = entry.lineage;
+  if (entry.dataCheckSql) out.dataCheckSql = entry.dataCheckSql;
+  if (entry.sourcePath) out.sourcePath = entry.sourcePath;
+  return out;
+}
+
+function compactLegacySqlSchemaEntry(entry: SqlSchemaEntry): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    name: entry.name,
+    type: entry.type,
+    category: entry.category,
+    description: entry.description,
+  };
+  if (entry.module) out.module = entry.module;
+  if (entry.include) out.include = entry.include;
+  if (entry.columns?.length) out.columns = entry.columns;
+  if (entry.params?.length) out.params = entry.params;
+  if (entry.returnType) out.returnType = entry.returnType;
+  return out;
 }
 
 /**
@@ -1032,6 +1073,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     async ({ keyword }) => {
       const schema = loadSqlSchema();
       const lower = keyword.toLowerCase();
+      const docResults = searchPerfettoSqlDocs(keyword, { limit: 30 });
 
       // P2-G8: Token-based fuzzy matching — split keyword into tokens and match independently
       const tokens = lower.split(/[\s_]+/).filter(t => t.length >= 2);
@@ -1060,21 +1102,43 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       const scored = schema.templates
         .map(t => ({ entry: t, score: scoreEntry(t) }))
         .filter(s => s.score > 0)
+        .sort((a, b) => b.score - a.score);
+
+      const merged = new Map<string, { score: number; source: 'stdlib_docs' | 'legacy_index'; entry: Record<string, unknown> }>();
+      for (const result of docResults) {
+        const key = `${result.entry.module}\n${result.entry.name}\n${result.entry.type}`;
+        merged.set(key, {
+          score: result.score + 1000,
+          source: 'stdlib_docs',
+          entry: compactSqlDocEntry(result.entry),
+        });
+      }
+      for (const legacy of scored) {
+        const module = legacy.entry.module || '';
+        const key = `${module}\n${legacy.entry.name}\n${legacy.entry.type}`;
+        if (merged.has(key)) continue;
+        merged.set(key, {
+          score: legacy.score,
+          source: 'legacy_index',
+          entry: compactLegacySqlSchemaEntry(legacy.entry),
+        });
+      }
+
+      const entries = Array.from(merged.values())
         .sort((a, b) => b.score - a.score)
-        .slice(0, 30);
+        .slice(0, 30)
+        .map(item => ({ ...item.entry, source: item.source }));
 
       return {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({
-            totalMatches: scored.length,
-            entries: scored.map(s => {
-              const m = s.entry;
-              const entry: Record<string, unknown> = { name: m.name, type: m.type, category: m.category, description: m.description };
-              if (m.columns?.length) entry.columns = m.columns;
-              if (m.params?.length) entry.params = m.params;
-              return entry;
-            }),
+            totalMatches: entries.length,
+            sources: {
+              stdlibDocs: docResults.length,
+              legacyIndex: scored.length,
+            },
+            entries,
           }),
         }],
       };
@@ -1202,6 +1266,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     },
     async ({ namespace }) => {
       const allModules = getPerfettoStdlibModules();
+      const docsModules = listPerfettoSqlModuleDocs(namespace);
       // Enforce dot-boundary matching to avoid "android" matching a hypothetical "androidos.*"
       const filtered = namespace
         ? allModules.filter(m => m === namespace || m.startsWith(namespace + '.'))
@@ -1226,6 +1291,19 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             modules: namespace
               ? filtered.sort()
               : Object.fromEntries(Object.entries(grouped).map(([ns, mods]) => [ns, mods.length])),
+            moduleDocs: namespace
+              ? docsModules.slice(0, 50).map(mod => ({
+                module: mod.module,
+                description: mod.moduleDoc,
+                tags: mod.tags,
+                includes: mod.includes,
+                transitiveIncludes: mod.transitiveIncludes,
+                symbols: mod.symbols.slice(0, 30),
+                missingIncludes: mod.missingIncludes,
+                errors: mod.errors,
+                sourcePath: mod.sourcePath,
+              }))
+              : undefined,
             hint: namespace
               ? 'Use lookup_sql_schema to find specific tables/views/functions within a module.'
               : 'Call again with a namespace (e.g., "android.frames") to see full module list. ' +
@@ -1620,6 +1698,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     async ({ keyword, max_results }) => {
       const maxFiles = max_results ?? 5;
       const stdlibDir = getPerfettoStdlibPath();
+      const docsMatches = searchPerfettoSqlDocs(keyword, { limit: maxFiles });
+      const compactDocs = docsMatches.map(result => compactSqlDocEntry(result.entry));
 
       if (!fs.existsSync(stdlibDir)) {
         const lowerKeyword = keyword.toLowerCase();
@@ -1649,6 +1729,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               success: true,
               keyword,
               source: 'bundled_schema_index',
+              docs: compactDocs,
               matchedFiles: results.length,
               results: results.map(r => ({
                 file: r.file,
@@ -1707,6 +1788,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               success: true,
               keyword,
               source: 'stdlib_source',
+              docs: compactDocs,
               matchedFiles: results.length,
               results: results.map(r => ({
                 file: r.file,
