@@ -49,6 +49,8 @@ function stableVersionFromIndex(indexHtml) {
 const indexPath = path.join(frontendDir, 'index.html');
 if (!exists(indexPath)) {
   fail('frontend/index.html is missing');
+} else if (!exists(path.join(frontendDir, 'server.js'))) {
+  fail('frontend/server.js is missing');
 } else {
   const version = stableVersionFromIndex(readText(indexPath));
   if (!version) {

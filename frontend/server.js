@@ -68,6 +68,12 @@ const server = http.createServer((req, res) => {
 
   fs.stat(filePath, (err, stat) => {
     if (err || !stat.isFile()) {
+      if (path.extname(urlPath)) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not found');
+        return;
+      }
+
       // Fallback to index.html for SPA routing
       filePath = path.join(DIST_DIR, 'index.html');
     }

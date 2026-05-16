@@ -319,6 +319,15 @@ function main() {
     assertEntryNonEmpty(assetPath, target.ext, entry);
   }
 
+  const frontendBundleEntry = `${packageName}/${frontendRoot}/${frontendStableVersion}/frontend_bundle.js`;
+  const frontendBundleText = readEntry(assetPath, target.ext, frontendBundleEntry);
+  const referencedSyntaqliteAssets = [...frontendBundleText.matchAll(/["'](assets\/syntaqlite-[^"']+)["']/g)]
+    .map(match => match[1]);
+  for (const rel of [...new Set(referencedSyntaqliteAssets)].sort()) {
+    const entry = assertEntryExists(entries, packageName, `${frontendRoot}/${rel}`);
+    assertEntryNonEmpty(assetPath, target.ext, entry);
+  }
+
   for (const rel of target.binaryRequired) {
     const entry = `${packageName}/${rel}`;
     assertBinaryKind(readEntryBuffer(assetPath, target.ext, entry), entry, target.binaryKind);
