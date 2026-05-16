@@ -51,4 +51,27 @@ describe('sqlExecutorTool', () => {
     expect(result.error || '').toContain('SQL validation failed');
     expect(query).toHaveBeenCalledTimes(1);
   });
+
+  it('auto-injects stdlib modules before executing legacy agent SQL', async () => {
+    const query = jest.fn(async (_traceId: string, sql: string) => {
+      if (sql.includes('sqlite_master')) {
+        return { columns: ['name'], rows: [['slice']] };
+      }
+      return { columns: ['self_dur'], rows: [[123]] };
+    });
+
+    const result = await sqlExecutorTool.execute(
+      { sql: 'SELECT self_dur FROM slice_self_dur' },
+      {
+        traceId: 'trace-3',
+        traceProcessorService: { query },
+      } as any
+    );
+
+    expect(result.success).toBe(true);
+    const executedSql = (query.mock.calls[1]?.[1] as string) || '';
+    expect(executedSql).toMatch(/^INCLUDE PERFETTO MODULE slices\.self_dur;/);
+    expect(executedSql).toContain('SELECT self_dur FROM slice_self_dur LIMIT 1000');
+    expect(result.metadata?.stdlibInjectedModules).toEqual(['slices.self_dur']);
+  });
 });

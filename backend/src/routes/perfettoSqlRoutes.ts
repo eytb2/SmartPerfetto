@@ -19,6 +19,7 @@ import { PerfettoSkillType } from '../types/perfettoSql';
 import type { PerfettoSqlRequest } from '../types/perfettoSql';
 import { SkillAnalysisAdapter, createSkillAnalysisAdapter } from '../services/skillEngine/skillAnalysisAdapter';
 import { normalizeTraceProcessorQueryPriority } from '../services/traceProcessorSqlWorker';
+import { injectStdlibIncludes } from '../agentv3/sqlIncludeInjector';
 
 const router = express.Router();
 
@@ -589,7 +590,8 @@ router.post('/sql', async (req, res) => {
       req.get('x-smartperfetto-query-priority') || priorityInput,
       'p0',
     );
-    const result = await traceProcessorService.query(traceId, sql, { priority });
+    const { sql: finalSql, injected } = injectStdlibIncludes(sql);
+    const result = await traceProcessorService.query(traceId, finalSql, { priority });
 
     if (result.error) {
       return res.status(400).json({
@@ -603,6 +605,7 @@ router.post('/sql', async (req, res) => {
       rows: result.rows,
       rowCount: result.rows.length,
       columns: result.columns,
+      stdlibInjectedModules: injected,
     });
   } catch (error: any) {
     console.error('[PerfettoSql] SQL execution error:', error);

@@ -3,6 +3,8 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import { Tool, ToolContext, ToolResult, ToolDefinition } from '../types';
+import { injectStdlibIncludes } from '../../agentv3/sqlIncludeInjector';
+import { analyzeSqlStdlibDependencies } from '../../services/sqlStdlibDependencyAnalyzer';
 import { SQLValidator } from './sqlValidator';
 
 interface SQLExecutorParams {
@@ -116,6 +118,13 @@ async function resolveAllowedTables(context: ToolContext): Promise<string[]> {
   return [];
 }
 
+function stdlibTableDependencies(sql: string): string[] {
+  return analyzeSqlStdlibDependencies(sql)
+    .dependencies
+    .filter(dependency => dependency.usage === 'table')
+    .map(dependency => dependency.symbol);
+}
+
 export const sqlExecutorTool: Tool<SQLExecutorParams, SQLExecutorResult> = {
   definition,
 
@@ -147,9 +156,13 @@ export const sqlExecutorTool: Tool<SQLExecutorParams, SQLExecutorResult> = {
       const validator = new SQLValidator({ maxRows });
       const sqlWithLimit = validator.ensureLimit(params.sql, maxRows);
       const allowedTables = await resolveAllowedTables(context);
+      const effectiveAllowedTables = [...new Set([
+        ...allowedTables,
+        ...stdlibTableDependencies(sqlWithLimit),
+      ])];
       const sqlValidation = validator.validate(
         sqlWithLimit,
-        allowedTables.length > 0 ? { maxRows, allowedTables } : { maxRows }
+        effectiveAllowedTables.length > 0 ? { maxRows, allowedTables: effectiveAllowedTables } : { maxRows }
       );
 
       if (!sqlValidation.valid) {
@@ -165,11 +178,12 @@ export const sqlExecutorTool: Tool<SQLExecutorParams, SQLExecutorResult> = {
       }
 
       let result;
+      const { sql: finalSql, injected } = injectStdlibIncludes(sqlWithLimit);
       
       if (context.traceProcessorService && context.traceId) {
-        result = await context.traceProcessorService.query(context.traceId, sqlWithLimit);
+        result = await context.traceProcessorService.query(context.traceId, finalSql);
       } else if (context.traceProcessor) {
-        result = await context.traceProcessor.query(sqlWithLimit);
+        result = await context.traceProcessor.query(finalSql);
       } else {
         return {
           success: false,
@@ -192,12 +206,13 @@ export const sqlExecutorTool: Tool<SQLExecutorParams, SQLExecutorResult> = {
         executionTimeMs: Date.now() - startTime,
         metadata: {
           sqlLength: params.sql.length,
-          executedSqlLength: sqlWithLimit.length,
+          executedSqlLength: finalSql.length,
           sqlAutoLimited: sqlWithLimit !== params.sql,
           maxRows,
           rowsClipped,
           rawRowCount: rawRows.length,
           allowedTableCount: allowedTables.length,
+          stdlibInjectedModules: injected,
           validationWarnings: sqlValidation.warnings.map(w => ({
             code: w.code,
             message: w.message,
